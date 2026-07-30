@@ -12,10 +12,13 @@
 // bg-violet-100 bg-violet-200 bg-violet-400 bg-violet-500 bg-violet-600 text-violet-700 text-violet-800 border-violet-500
 // bg-teal-100 bg-teal-200 bg-teal-400 bg-teal-500 bg-teal-600 text-teal-700 text-teal-800 border-teal-500
 // bg-fuchsia-100 bg-fuchsia-200 bg-fuchsia-400 bg-fuchsia-500 bg-fuchsia-600 text-fuchsia-700 text-fuchsia-800 border-fuchsia-500
+// bg-slate-100 bg-slate-200 bg-slate-400 bg-slate-500 bg-slate-600 bg-slate-900 text-slate-700 text-slate-800 text-slate-900 border-slate-500
 
 import { db } from "./firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
-import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } from "react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
@@ -140,6 +143,13 @@ const DEFAULT_CONFIG = {
       { id: "returned-appointment", label: "Returned from appointment", color: "sky" },
     ],
   },
+  homework: {
+    enabled: false,
+    frequency: "daily", // "daily" | "weekly"
+    missedThreshold: 3,
+    windowDays: 30,
+    missedTierMessages: { 1: "Mention it to the student", 2: "Send a note home about homework", 3: "Call the parent", 4: "Flag for admin" },
+  },
   incidents: {
     categories: [
       { id: "discipline", label: "Discipline", color: "rose" },
@@ -201,6 +211,51 @@ function withinWindow(dateStr, windowDays) {
 function tierFor(count, threshold) { return Math.max(1, Math.min(4, count - threshold + 1)); }
 
 function monthKey(year, monthIdx) { return `${year}-${String(monthIdx + 1).padStart(2, "0")}`; }
+
+const EVENT_CATEGORIES = [
+  { id: "school-event", label: "School Event", icon: "🏫", color: "slate" },
+  { id: "classroom-activity", label: "Classroom Activity", icon: "📚", color: "sky" },
+  { id: "assessment", label: "Assessment", icon: "📝", color: "indigo" },
+  { id: "field-trip", label: "Field Trip", icon: "🚌", color: "amber" },
+  { id: "birthday", label: "Birthday", icon: "🎉", color: "fuchsia" },
+  { id: "siyum", label: "Siyum", icon: "🎊", color: "violet" },
+  { id: "jewish-holiday", label: "Jewish Holiday", icon: "✡️", color: "rose" },
+  { id: "parent-event", label: "Parent Event", icon: "👨‍👩‍👧", color: "teal" },
+  { id: "meeting", label: "Meeting", icon: "📅", color: "stone" },
+  { id: "cleanup", label: "Cleanup", icon: "🧹", color: "emerald" },
+  { id: "custom", label: "Custom", icon: "📌", color: "stone" },
+];
+
+// Compact Hebrew date for a given Gregorian ISO date string (e.g. "16 Av 5786").
+function hebrewDateFor(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new HDate(new Date(y, m - 1, d)).toString();
+}
+
+// Automatic Jewish holidays for a Gregorian year, filtered down to exactly the categories
+// requested (Rosh Hashana/Yom Kippur/Sukkos/Chanukah/Purim/Pesach/Shavuos/Lag BaOmer/fast
+// days/Rosh Chodesh) — verified against real @hebcal/core output, not guessed from docs.
+// Deliberately excludes special-Shabbat names and modern Israeli holidays, neither of which
+// were requested.
+function getAutoHolidaysForYear(year) {
+  const events = HebrewCalendar.calendar({ year, isHebrewYear: false });
+  const byDate = {};
+  for (const ev of events) {
+    const categories = ev.getCategories();
+    const desc = ev.getDesc();
+    let include = false;
+    if (categories.includes("roshchodesh")) include = true;
+    else if (categories.includes("fast")) include = true;
+    else if (categories.includes("major")) include = true;
+    else if (categories.includes("minor")) include = desc.includes("Chanukah") || desc.includes("Purim") || desc.includes("Lag BaOmer");
+    if (!include) continue;
+    const g = ev.getDate().greg();
+    const dateStr = `${g.getFullYear()}-${String(g.getMonth() + 1).padStart(2, "0")}-${String(g.getDate()).padStart(2, "0")}`;
+    if (!byDate[dateStr]) byDate[dateStr] = [];
+    byDate[dateStr].push({ title: desc, category: "jewish-holiday" });
+  }
+  return byDate;
+}
 function monthLabel(year, monthIdx) {
   return new Date(year, monthIdx, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
@@ -250,7 +305,32 @@ function computeSkillStatus(history, config) {
   return { status: "practicing", streak };
 }
 
-function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], points: {}, communications: [] }; }
+// Growth over time for ONE category, for ONE student — never mixes subjects together.
+// Groups every item-grading in this category by the date it happened, and scores each date
+// as a plain percentage (positive=100, neutral=50, negative=0, averaged across whatever was
+// graded that day) — so two different administrations become two comparable points on a line.
+function computeSessionTimeline(data, category, config) {
+  const weightScore = (id) => {
+    const w = config.gradeOptions.find((o) => o.id === id)?.weight;
+    return w === "positive" ? 100 : w === "negative" ? 0 : 50;
+  };
+  const byDate = {};
+  category.items.forEach((item) => {
+    const key = skillKey(category.id, item.id);
+    const history = data.skills?.[key]?.history || [];
+    history.forEach((h) => {
+      if (!byDate[h.date]) byDate[h.date] = [];
+      byDate[h.date].push(weightScore(h.result));
+    });
+  });
+  return Object.keys(byDate).sort().map((date) => {
+    const scores = byDate[date];
+    const avg = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
+    return { date, score: avg, itemsGraded: scores.length };
+  });
+}
+
+function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [] }; }
 
 function buildSampleData() {
   const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
@@ -394,6 +474,13 @@ function getFlags(data, studentId, incidents, config) {
     const tier = tierFor(absentCount, config.attendance.absentRule.threshold);
     flags.push({ key: "attendance-absent", type: "absent", label: `Absences — ${absentCount} in last ${config.attendance.absentRule.windowDays} days`, tier, message: config.attendance.absentTierMessages[tier] });
   }
+  if (config.homework?.enabled) {
+    const missedCount = (data.homework || []).filter((h) => h.status === "missed" && withinWindow(h.date, config.homework.windowDays)).length;
+    if (missedCount >= config.homework.missedThreshold) {
+      const tier = tierFor(missedCount, config.homework.missedThreshold);
+      flags.push({ key: "homework-missed", type: "homework", label: `Missed homework — ${missedCount} in last ${config.homework.windowDays} days`, tier, message: config.homework.missedTierMessages[tier] });
+    }
+  }
   const myIncidents = (incidents || []).filter((i) => i.studentIds?.includes(studentId));
   const incCount = myIncidents.filter((i) => withinWindow(i.date, config.incidents.flagRule.windowDays)).length;
   if (incCount >= config.incidents.flagRule.threshold) {
@@ -416,6 +503,7 @@ export default function App() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [registry, setRegistry] = useState([]);
   const [globalStudents, setGlobalStudents] = useState([]);
+  const [schoolEvents, setSchoolEvents] = useState([]);
   const [classId, setClassId] = useState(null);
   const [className, setClassName] = useState("");
   const [isAdminSession, setIsAdminSession] = useState(false);
@@ -520,6 +608,34 @@ export default function App() {
     await saveJSON("globalStudents", next, true);
   };
 
+  const refreshSchoolEvents = async () => {
+    const ev = await loadJSON("schoolEvents", [], true);
+    setSchoolEvents(ev);
+  };
+
+  const addSchoolEvent = async (fields) => {
+    const ev = await loadJSON("schoolEvents", [], true);
+    const event = { id: uid(), title: "", date: todayISO(), time: "", notes: "", location: "", reminderLeadDays: 1, appliesTo: "all", category: "school-event", ...fields };
+    const next = [...ev, event];
+    setSchoolEvents(next);
+    await saveJSON("schoolEvents", next, true);
+    return event;
+  };
+
+  const updateSchoolEvent = async (id, fields) => {
+    const ev = await loadJSON("schoolEvents", [], true);
+    const next = ev.map((e) => (e.id === id ? { ...e, ...fields } : e));
+    setSchoolEvents(next);
+    await saveJSON("schoolEvents", next, true);
+  };
+
+  const removeSchoolEvent = async (id) => {
+    const ev = await loadJSON("schoolEvents", [], true);
+    const next = ev.filter((e) => e.id !== id);
+    setSchoolEvents(next);
+    await saveJSON("schoolEvents", next, true);
+  };
+
   const restoreGlobalStudent = async (id) => {
     const gs = await loadJSON("globalStudents", [], true);
     const next = gs.map((s) => (s.id === id ? { ...s, archived: false } : s));
@@ -568,7 +684,8 @@ export default function App() {
   if (!classId) {
     if (isAdminSession) {
       return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onChangePassword={changeAdminPassword}
-        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} />;
+        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent}
+        schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent} />;
     }
     return <ClassGateScreen registry={registry} onSelect={selectClass} onCreate={createClass} onRefresh={refreshRegistry} onLoginAdmin={loginAdmin} />;
   }
@@ -580,7 +697,81 @@ export default function App() {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent }) {
+function SchoolEventForm({ classes, existing, onSave, onCancel }) {
+  const [title, setTitle] = useState(existing?.title || "");
+  const [date, setDate] = useState(existing?.date || todayISO());
+  const [time, setTime] = useState(existing?.time || "");
+  const [notes, setNotes] = useState(existing?.notes || "");
+  const [location, setLocation] = useState(existing?.location || "");
+  const [reminderLeadDays, setReminderLeadDays] = useState(existing?.reminderLeadDays ?? 1);
+  const [category, setCategory] = useState(existing?.category || "school-event");
+  const [appliesMode, setAppliesMode] = useState(existing?.appliesTo === "all" || !existing ? "all" : "selected");
+  const [selectedClassIds, setSelectedClassIds] = useState(Array.isArray(existing?.appliesTo) ? existing.appliesTo : []);
+
+  const toggleClass = (id) => setSelectedClassIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const save = () => {
+    if (!title.trim() || !date) return;
+    onSave({
+      title: title.trim(), date, time, notes, location, category,
+      reminderLeadDays: Number(reminderLeadDays) || 0,
+      appliesTo: appliesMode === "all" ? "all" : selectedClassIds,
+    });
+  };
+
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Event title" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Date</label>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        </div>
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Time (optional)</label>
+          <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        </div>
+      </div>
+      <label className="block text-[10px] text-stone-400 mb-0.5">Category</label>
+      <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-2">
+        {EVENT_CATEGORIES.filter((c) => c.id !== "jewish-holiday").map((c) => <option key={c.id} value={c.id}>{c.icon} {c.label}</option>)}
+      </select>
+      <label className="block text-[10px] text-stone-400 mb-0.5">Location (optional)</label>
+      <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Where" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <label className="block text-[10px] text-stone-400 mb-0.5">Notes (optional)</label>
+      <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <label className="block text-[10px] text-stone-400 mb-0.5">Remind teachers this many days before</label>
+      <input type="number" min={0} value={reminderLeadDays} onChange={(e) => setReminderLeadDays(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+
+      <label className="block text-xs font-semibold text-stone-700 mb-1">Applies to</label>
+      <div className="flex gap-1.5 mb-2">
+        <button onClick={() => setAppliesMode("all")} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${appliesMode === "all" ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>All classes</button>
+        <button onClick={() => setAppliesMode("selected")} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${appliesMode === "selected" ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>Selected classes</button>
+      </div>
+      {appliesMode === "selected" && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {classes.length === 0 && <p className="text-xs text-stone-400">No classes yet.</p>}
+          {classes.map((c) => (
+            <button key={c.id} onClick={() => toggleClass(c.id)}
+              className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedClassIds.includes(c.id) ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <button onClick={save} disabled={!title.trim() || (appliesMode === "selected" && selectedClassIds.length === 0)}
+          className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
+          {existing ? "Save changes" : "Create event"}
+        </button>
+        <button onClick={onCancel} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -591,12 +782,14 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [studentSearch, setStudentSearch] = useState("");
   const [newStudentName, setNewStudentName] = useState("");
   const [expandedGlobalStudents, setExpandedGlobalStudents] = useState({});
+  const [showEventForm, setShowEventForm] = useState(false);
+  const [editingEventId, setEditingEventId] = useState(null);
   const activeClasses = registry.filter((c) => !c.archived);
   const archivedClasses = registry.filter((c) => c.archived);
   const activeStudents = (globalStudents || []).filter((s) => !s.archived && s.name.toLowerCase().includes(studentSearch.toLowerCase()));
   const archivedStudents = (globalStudents || []).filter((s) => s.archived);
 
-  useEffect(() => { onRefresh(); onRefreshStudents(); }, []); // eslint-disable-line
+  useEffect(() => { onRefresh(); onRefreshStudents(); onRefreshEvents(); }, []); // eslint-disable-line
 
   const submitCreate = async () => {
     if (!newName.trim() || !newPw.trim()) return;
@@ -718,6 +911,47 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               </ul>
             </div>
           )}
+        </div>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
+          <p className="text-sm font-semibold text-stone-800 mb-1">School calendar</p>
+          <p className="text-xs text-stone-400 mb-3">Create an event once — it shows up automatically on every calendar you choose, and editing it here updates everywhere at once.</p>
+
+          {!showEventForm && (
+            <button onClick={() => { setEditingEventId(null); setShowEventForm(true); }} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Add school event
+            </button>
+          )}
+
+          {showEventForm && (
+            <SchoolEventForm classes={activeClasses} existing={(schoolEvents || []).find((e) => e.id === editingEventId)}
+              onSave={async (fields) => {
+                if (editingEventId) await onUpdateEvent(editingEventId, fields);
+                else await onAddEvent(fields);
+                setShowEventForm(false); setEditingEventId(null);
+              }}
+              onCancel={() => { setShowEventForm(false); setEditingEventId(null); }} />
+          )}
+
+          {(schoolEvents || []).length === 0 && !showEventForm && <p className="text-xs text-stone-400">No school-wide events yet.</p>}
+          <ul className="space-y-2">
+            {(schoolEvents || []).sort((a, b) => (a.date < b.date ? -1 : 1)).map((ev) => {
+              const cat = EVENT_CATEGORIES.find((c) => c.id === ev.category) || EVENT_CATEGORIES[0];
+              const appliesLabel = ev.appliesTo === "all" ? "All classes" : `${(ev.appliesTo || []).length} class(es)`;
+              return (
+                <li key={ev.id} className="bg-white border border-stone-200 rounded-lg p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-stone-800">{cat.icon} {ev.title}</span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button onClick={() => { setEditingEventId(ev.id); setShowEventForm(true); }} className="text-xs font-semibold text-slate-700 hover:text-slate-900">Edit</button>
+                      <ConfirmDelete onConfirm={() => onRemoveEvent(ev.id)} size={13} />
+                    </div>
+                  </div>
+                  <p className="text-xs text-stone-400 mt-0.5">{ev.date}{ev.time ? ` · ${formatTime12h(ev.time)}` : ""} · {appliesLabel}{ev.location ? ` · ${ev.location}` : ""}</p>
+                </li>
+              );
+            })}
+          </ul>
         </div>
 
         <div className="mt-6 pt-6 border-t border-stone-200">
@@ -851,10 +1085,14 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [roster, setRoster] = useState([]);
   const [studentData, setStudentData] = useState({});
   const [globalStudents, setGlobalStudentsInClass] = useState([]);
+  const [schoolEvents, setSchoolEventsInClass] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
   const [classPoints, setClassPoints] = useState({});
   const [monthlyReportState, setMonthlyReportState] = useState({ dismissedMonth: null });
+  const [reflections, setReflections] = useState([]);
+  const [reflectionState, setReflectionState] = useState({ dismissedMonth: null });
+  const [birthdayDismissals, setBirthdayDismissals] = useState({});
   const [plannerDays, setPlannerDays] = useState({});
   const [plannerEvents, setPlannerEvents] = useState([]);
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
@@ -865,6 +1103,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [currentId, setCurrentId] = useState(null);
   const [sessionCat, setSessionCat] = useState(null);
   const [sessionIdx, setSessionIdx] = useState(0);
+  const [classSessionQueue, setClassSessionQueue] = useState(null); // null = not in a whole-class session
+  const [classSessionPos, setClassSessionPos] = useState(0);
+  const [classSessionDate, setClassSessionDate] = useState(null);
   const [incidentPreset, setIncidentPreset] = useState(null);
   const [incidentReturn, setIncidentReturn] = useState("home");
   const [periodAttPreset, setPeriodAttPreset] = useState(null);
@@ -875,6 +1116,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [selectedSkillCat, setSelectedSkillCat] = useState(null);
   const [selectedSkillReportCat, setSelectedSkillReportCat] = useState(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState(null);
+  const [selectedReflectionMonth, setSelectedReflectionMonth] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -884,6 +1126,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const ca = await loadC("classAssessments", []);
       const cp = await loadC("classPoints", {});
       const mrs = await loadC("monthlyReportState", { dismissedMonth: null });
+      const refl = await loadC("reflections", []);
+      const rs = await loadC("reflectionState", { dismissedMonth: null });
+      const bd = await loadC("birthdayDismissals", {});
       const pd = await loadC("plannerDays", {});
       const pe = await loadC("plannerEvents", []);
       const bs = await loadC("benchmarkSubjects", []);
@@ -892,6 +1137,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const initialized = await loadC("appInitialized", false);
       const gs = await loadJSON("globalStudents", [], true);
       setGlobalStudentsInClass(gs);
+      const se = await loadJSON("schoolEvents", [], true);
+      setSchoolEventsInClass(se);
 
       let finalRoster = r, finalConfig = c, finalIncidents = inc, finalCA = ca, finalCP = cp, finalPD = pd, finalPE = pe, finalBS = bs;
       let sampleStudentData = null;
@@ -933,6 +1180,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       setClassAssessments(finalCA);
       setClassPoints(finalCP);
       setMonthlyReportState(mrs);
+      setReflections(refl);
+      setReflectionState(rs);
+      setBirthdayDismissals(bd);
       setPlannerDays(finalPD);
       setPlannerEvents(finalPE);
       setBenchmarkSubjects(finalBS);
@@ -955,6 +1205,26 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const persistClassAssessments = (next) => { setClassAssessments(next); saveC("classAssessments", next); };
   const persistClassPoints = (next) => { setClassPoints(next); saveC("classPoints", next); };
   const persistMonthlyReportState = (next) => { setMonthlyReportState(next); saveC("monthlyReportState", next); };
+  const persistReflectionState = (next) => { setReflectionState(next); saveC("reflectionState", next); };
+
+  const dismissBirthday = (studentId, hebYear, action, snoozeUntil) => {
+    const key = `${studentId}-${hebYear}`;
+    const next = { ...birthdayDismissals, [key]: { action, snoozeUntil: snoozeUntil || null } };
+    setBirthdayDismissals(next);
+    saveC("birthdayDismissals", next);
+  };
+
+  const createBirthdayEvent = (studentId, studentName, date, hebYear) => {
+    addPlannerEvent({ date, title: `${studentName}'s Birthday`, category: "birthday", reminderLeadDays: 0 });
+    dismissBirthday(studentId, hebYear, "created");
+  };
+  const saveReflection = (entry) => {
+    const monthKey = entry.monthKey;
+    const without = reflections.filter((r) => r.monthKey !== monthKey); // one reflection per month — editing replaces, doesn't duplicate
+    const next = [...without, { id: uid(), ...entry }];
+    setReflections(next);
+    saveC("reflections", next);
+  };
   const persistPlannerDays = (next) => { setPlannerDays(next); saveC("plannerDays", next); };
   const persistPlannerEvents = (next) => { setPlannerEvents(next); saveC("plannerEvents", next); };
   const persistRoster = (next) => { setRoster(next); saveC("roster", next); };
@@ -1126,6 +1396,49 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     setStudentData((prev) => ({ ...prev, [globalStudent.id]: emptyStudentData() }));
   };
 
+  // Reads every class a student belongs to (including this one) and tags each entry with
+  // where it came from. Nothing about how classes save their own data changes — this only
+  // reads and labels, at view time, from the same shared storage every class already uses.
+  const fetchCrossClassHistory = async (studentId) => {
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const results = { classes: [], incidents: [], periodAttendance: [], points: [], assessments: [] };
+    for (const cls of allClasses) {
+      if (cls.archived) continue;
+      const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      const enrolled = clsRoster.find((s) => s.id === studentId);
+      if (!enrolled) continue;
+      results.classes.push({ classId: cls.id, className: cls.name, scope: enrolled.enrollmentScope || "full-time" });
+
+      const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
+      const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
+      const catMap = {};
+      (clsConfig.incidents?.categories || []).forEach((c) => (catMap[c.id] = c.label));
+      clsIncidents.filter((i) => i.studentIds?.includes(studentId)).forEach((i) => {
+        results.incidents.push({ ...i, sourceClassName: cls.name, categoryLabel: catMap[i.category] || i.category || "Uncategorized" });
+      });
+
+      const clsStudentData = await loadJSON(`class:${cls.id}:kriya:${studentId}`, emptyStudentData(), true);
+      (clsStudentData.periodAttendance || []).forEach((pa) => {
+        const typeLabel = (clsConfig.periodAttendance?.types || []).find((t) => t.id === pa.typeId)?.label || pa.typeId;
+        results.periodAttendance.push({ ...pa, sourceClassName: cls.name, typeLabel });
+      });
+
+      const individualPointCats = (clsConfig.points?.categories || []).filter((c) => c.scope === "individual");
+      individualPointCats.forEach((cat) => {
+        const value = clsStudentData.points?.[cat.id] || 0;
+        if (value > 0) results.points.push({ sourceClassName: cls.name, categoryLabel: cat.label, value, threshold: cat.threshold || null });
+      });
+
+      const clsClassAssessments = await loadJSON(`class:${cls.id}:classAssessments`, [], true);
+      const rows = buildUnifiedAssessmentRows({ id: studentId }, clsStudentData, clsClassAssessments, clsConfig);
+      rows.forEach((r) => results.assessments.push({ ...r, sourceClassName: cls.name }));
+    }
+    results.incidents.sort((a, b) => (a.date < b.date ? 1 : -1));
+    results.periodAttendance.sort((a, b) => (a.date < b.date ? 1 : -1));
+    results.assessments.sort((a, b) => (a.sortDate < b.sortDate ? 1 : -1));
+    return results;
+  };
+
   const removeStudent = (id) => {
     persistRoster(roster.filter((s) => s.id !== id));
     if (currentId === id) { setView("home"); setCurrentId(null); }
@@ -1148,12 +1461,12 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   };
   const dismissAlert = (alertId) => persistAlerts(alerts.map((a) => (a.id === alertId ? { ...a, dismissed: true } : a)));
 
-  const gradeItem = useCallback((catId, itemId, result) => {
+  const gradeItem = useCallback((catId, itemId, result, dateOverride) => {
     const id = currentId;
     const data = studentData[id] || emptyStudentData();
     const key = skillKey(catId, itemId);
     const existing = data.skills[key] || { history: [] };
-    const history = [...existing.history, { date: todayISO(), result }];
+    const history = [...existing.history, { date: dateOverride || todayISO(), result }];
     const { status, streak } = computeSkillStatus(history, config);
     const flagCount = status === "flagged" ? streak - config.flagThreshold + 1 : 0;
     const newSkills = { ...data.skills, [key]: { history, status, flagCount } };
@@ -1165,6 +1478,33 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       upsertAlert(id, `skill-${key}`, `${studentName} — struggling with ${item?.label || "a skill"} (${cat?.title || catId})`);
     }
   }, [currentId, config, studentData, roster, alerts]);
+
+  const startClassSession = (catId, date) => {
+    if (roster.length === 0) return;
+    setClassSessionQueue(roster.map((s) => s.id));
+    setClassSessionPos(0);
+    setClassSessionDate(date || todayISO());
+    setCurrentId(roster[0].id);
+    setSessionCat(catId);
+    setSessionIdx(0);
+    setView("session");
+  };
+
+  const advanceClassSession = () => {
+    const nextPos = classSessionPos + 1;
+    if (!classSessionQueue || nextPos >= classSessionQueue.length) {
+      // Whole class done — clear the queue and go see the results together.
+      setClassSessionQueue(null);
+      setClassSessionPos(0);
+      setSelectedSkillReportCat(sessionCat);
+      setView("skill-category-report");
+      return;
+    }
+    setClassSessionPos(nextPos);
+    setCurrentId(classSessionQueue[nextPos]);
+    setSessionIdx(0);
+    // stays on "session" view — just moves to the next student
+  };
 
   const acknowledgeFlag = (studentId, key) => {
     const data = studentData[studentId];
@@ -1232,6 +1572,27 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     persistStudent(studentId, { ...data, attendance });
   };
 
+  const setHomework = (studentId, date, status) => {
+    const data = studentData[studentId];
+    const without = (data.homework || []).filter((h) => h.date !== date);
+    const newData = { ...data, homework: [...without, { date, status }] };
+    persistStudent(studentId, newData);
+    const flags = getFlags(newData, studentId, incidents, config);
+    const hwFlag = flags.find((f) => f.type === "homework");
+    if (hwFlag) {
+      const studentName = roster.find((s) => s.id === studentId)?.name || "Student";
+      upsertAlert(studentId, "homework-missed", `${studentName} — ${hwFlag.label}`);
+    }
+  };
+
+  const markNoHomeworkToday = (date) => {
+    roster.forEach((s) => {
+      const data = studentData[s.id] || emptyStudentData();
+      const without = (data.homework || []).filter((h) => h.date !== date);
+      persistStudent(s.id, { ...data, homework: [...without, { date, status: "n/a" }] });
+    });
+  };
+
   const addPoints = (studentId, catId, amount) => {
     const data = studentData[studentId];
     const current = data.points?.[catId] || 0;
@@ -1269,6 +1630,14 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     return null;
   })();
   const openMessageDraft = (flag) => { setMessageFlag(flag); setView("message-draft"); };
+
+  // Admin-created school events aren't copied into this class's own data — they're merged in
+  // at read time, same pattern as the automatic Jewish holidays. That's what makes "edit once,
+  // updates everywhere" work: there's nothing per-class to keep in sync.
+  const applicableAdminEvents = (schoolEvents || [])
+    .filter((e) => e.appliesTo === "all" || (Array.isArray(e.appliesTo) && e.appliesTo.includes(classId)))
+    .map((e) => ({ ...e, source: "admin" }));
+  const effectivePlannerEvents = [...plannerEvents, ...applicableAdminEvents];
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-slate-700" size={28} /></div>;
@@ -1350,12 +1719,17 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
         <HomeView roster={roster} studentData={studentData} incidents={incidents} config={config}
           removeStudent={removeStudent}
           setAttendance={setAttendance} setAttendanceTime={setAttendanceTime}
+          setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
           openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={setView}
           monthlyReportState={monthlyReportState}
           onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
-          plannerDays={plannerDays} plannerEvents={plannerEvents}
+          reflectionState={reflectionState} reflections={reflections}
+          onDismissReflectionReminder={(key) => persistReflectionState({ ...reflectionState, dismissedMonth: key })}
+          onOpenReflection={() => { setSelectedReflectionMonth(monthKey(new Date().getFullYear(), new Date().getMonth())); setView("reflection-form"); }}
+          plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setPlannerDay={setPlannerDay} addPoints={addPoints} behaviorLogData={behaviorLogData}
+          birthdayDismissals={birthdayDismissals} onDismissBirthday={dismissBirthday} onCreateBirthdayEvent={createBirthdayEvent}
           alerts={alerts} dismissAlert={dismissAlert} />
       )}
 
@@ -1386,6 +1760,18 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
+      {view === "reflection-form" && (
+        <MonthlyReflectionForm monthKey={selectedReflectionMonth || monthKey(new Date().getFullYear(), new Date().getMonth())}
+          existing={reflections.find((r) => r.monthKey === (selectedReflectionMonth || monthKey(new Date().getFullYear(), new Date().getMonth())))}
+          allReflections={reflections} onSave={saveReflection} onBack={() => setView("reflection-history")} />
+      )}
+
+      {view === "reflection-history" && (
+        <ReflectionHistoryView reflections={reflections} navigate={setView}
+          onOpenMonth={(mk) => { setSelectedReflectionMonth(mk); setView("reflection-form"); }}
+          onBack={() => setView("home")} />
+      )}
+
       {view === "assessments" && (
         <AssessmentsListView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
           openStudent={(id) => { setCurrentId(id); setView("assessment-entry"); }}
@@ -1405,7 +1791,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       {view === "skill-category-report" && selectedSkillReportCat && (
         <SkillCategoryReportView category={config.categories.find((c) => c.id === selectedSkillReportCat)} roster={roster} studentData={studentData} config={config}
           onBack={() => setView("assessments")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
-          onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
+          onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)}
+          onStartClassSession={startClassSession} />
       )}
 
       {view === "points" && (
@@ -1416,7 +1803,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       )}
 
       {view === "planner" && (
-        <PlannerView config={config} plannerDays={plannerDays} plannerEvents={plannerEvents} navigate={setView}
+        <PlannerView config={config} plannerDays={plannerDays} plannerEvents={effectivePlannerEvents} navigate={setView}
           setPlannerDay={setPlannerDay} clearPlannerDayType={clearPlannerDayType}
           bulkSetByWeekday={bulkSetByWeekday} bulkSetByRange={bulkSetByRange}
           addPlannerEvent={addPlannerEvent} removePlannerEvent={removePlannerEvent}
@@ -1451,7 +1838,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
           onOpenFluencyDetail={(entry) => { setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
           onOpenSkillDetail={(catId) => { setSelectedSkillCat(catId); setView("skill-detail"); }}
-          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setView("incident-detail"); }} />
+          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setView("incident-detail"); }}
+          onFetchCrossClassHistory={fetchCrossClassHistory} currentClassName={className} />
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
@@ -1478,8 +1866,10 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       {view === "session" && currentId && sessionCat && (
         <SessionView category={config.categories.find((c) => c.id === sessionCat)} config={config}
           idx={sessionIdx} setIdx={setSessionIdx}
-          onGrade={(itemId, result) => gradeItem(sessionCat, itemId, result)}
-          onFinish={() => setView("assessment-entry")} />
+          onGrade={(itemId, result) => gradeItem(sessionCat, itemId, result, classSessionDate)}
+          onFinish={() => (classSessionQueue ? advanceClassSession() : setView("assessment-entry"))}
+          studentName={roster.find((s) => s.id === currentId)?.name}
+          classSessionProgress={classSessionQueue ? { pos: classSessionPos, total: classSessionQueue.length } : null} />
       )}
 
       {view === "fluency" && currentId && (
@@ -1565,7 +1955,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, alerts, dismissAlert }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, alerts, dismissAlert }) {
   const [date, setDate] = useState(todayISO());
   const [showPlan, setShowPlan] = useState(false);
   const [multiSelect, setMultiSelect] = useState(false);
@@ -1579,8 +1969,27 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
   const thisMonthKey = monthKey(now.getFullYear(), now.getMonth());
   const reminderDate = shabbosAwareReminderDate(now.getFullYear(), now.getMonth(), config.monthlyReports?.dayOfMonth || 25, config.monthlyReports?.avoidFriday);
   const reminderDue = now >= reminderDate && monthlyReportState?.dismissedMonth !== thisMonthKey;
+  const reflectionReminderDue = now >= reminderDate && reflectionState?.dismissedMonth !== thisMonthKey && !(reflections || []).some((r) => r.monthKey === thisMonthKey);
 
   const todayStr = todayISO();
+
+  const BIRTHDAY_REMINDER_DAYS = 7;
+  const upcomingBirthdays = roster
+    .filter((s) => s.hebrewBirthdayMonth && s.hebrewBirthdayDay)
+    .map((s) => {
+      const nextDate = nextHebrewOccurrence(s.hebrewBirthdayMonth, s.hebrewBirthdayDay, now);
+      if (!nextDate) return null;
+      const daysAway = Math.round((nextDate - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+      const hebYear = new HDate(nextDate).getFullYear();
+      const dismissKey = `${s.id}-${hebYear}`;
+      const dismissal = birthdayDismissals?.[dismissKey];
+      if (dismissal?.action === "created" || dismissal?.action === "ignored") return null;
+      if (dismissal?.action === "snoozed" && dismissal.snoozeUntil && todayStr < dismissal.snoozeUntil) return null;
+      return { student: s, date: nextDate, daysAway, hebYear };
+    })
+    .filter((b) => b && b.daysAway >= 0 && b.daysAway <= BIRTHDAY_REMINDER_DAYS)
+    .sort((a, b) => a.daysAway - b.daysAway);
+
   const dayTypeMap = {};
   (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
   const selectedDayType = plannerDays?.[date]?.dayType ? dayTypeMap[plannerDays[date].dayType] : null;
@@ -1631,6 +2040,38 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         </div>
       )}
 
+      {reflectionReminderDue && (
+        <div className="bg-violet-50 border border-violet-200 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="text-sm font-semibold text-violet-900">A few minutes for your monthly reflection?</p>
+            <p className="text-xs text-violet-700">For {monthLabel(now.getFullYear(), now.getMonth())} — private to you, just a moment to reflect.</p>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <button onClick={onOpenReflection} className="text-xs font-semibold bg-violet-700 text-white rounded-lg px-3 py-1.5 hover:bg-violet-800">Reflect now</button>
+            <button onClick={() => onDismissReflectionReminder(thisMonthKey)} className="text-xs font-semibold text-violet-700 border border-violet-300 rounded-lg px-3 py-1.5 hover:bg-violet-100">Dismiss</button>
+          </div>
+        </div>
+      )}
+
+      {upcomingBirthdays.map((b) => (
+        <div key={b.student.id} className="bg-fuchsia-50 border border-fuchsia-200 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="text-sm font-semibold text-fuchsia-900">
+              🎉 {b.student.name}'s Hebrew birthday is {b.daysAway === 0 ? "today" : b.daysAway === 1 ? "tomorrow" : `in ${b.daysAway} days`}
+            </p>
+            <p className="text-xs text-fuchsia-700">{`${b.date.getFullYear()}-${String(b.date.getMonth() + 1).padStart(2, "0")}-${String(b.date.getDate()).padStart(2, "0")}`} — {hebrewDateFor(`${b.date.getFullYear()}-${String(b.date.getMonth() + 1).padStart(2, "0")}-${String(b.date.getDate()).padStart(2, "0")}`)}</p>
+          </div>
+          <div className="flex gap-2 shrink-0 flex-wrap">
+            <button onClick={() => onCreateBirthdayEvent(b.student.id, b.student.name, `${b.date.getFullYear()}-${String(b.date.getMonth() + 1).padStart(2, "0")}-${String(b.date.getDate()).padStart(2, "0")}`, b.hebYear)}
+              className="text-xs font-semibold bg-fuchsia-700 text-white rounded-lg px-3 py-1.5 hover:bg-fuchsia-800">Create birthday event</button>
+            <button onClick={() => onDismissBirthday(b.student.id, b.hebYear, "snoozed", addDaysISO(todayStr, 3))}
+              className="text-xs font-semibold text-fuchsia-700 border border-fuchsia-300 rounded-lg px-3 py-1.5 hover:bg-fuchsia-100">Snooze 3 days</button>
+            <button onClick={() => onDismissBirthday(b.student.id, b.hebYear, "ignored")}
+              className="text-xs font-semibold text-fuchsia-700 border border-fuchsia-300 rounded-lg px-3 py-1.5 hover:bg-fuchsia-100">Ignore</button>
+          </div>
+        </div>
+      ))}
+
       {upcomingEvents.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-5">
           <p className="text-sm font-semibold text-amber-900 flex items-center gap-1.5 mb-1"><Bell size={14} /> Upcoming</p>
@@ -1672,6 +2113,11 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                   <button onClick={() => openPeriodAttendance(null)} className="text-xs font-semibold text-amber-700 flex items-center gap-1">
                     <Calendar size={12} /> Log period attendance
                   </button>
+                  {config.homework?.enabled && (
+                    <button onClick={() => markNoHomeworkToday(date)} className="text-xs font-semibold text-stone-500 flex items-center gap-1 hover:text-stone-700">
+                      No homework today
+                    </button>
+                  )}
                 </div>
                 {multiSelect && selectedIds.length > 0 && <span className="text-xs text-stone-400">{selectedIds.length} selected</span>}
               </div>
@@ -1684,9 +2130,11 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 const isSelected = selectedIds.includes(s.id);
                 const isExpanded = expandedAttendance.includes(s.id);
                 const showFullPicker = !entry || isExpanded;
+                const studentAttendanceApplies = morningAttendanceApplies(s, config);
+                const homeworkEntry = (studentData[s.id]?.homework || []).find((h) => h.date === date);
                 return (
-                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 ${isSelected ? "border-slate-400 ring-1 ring-slate-200" : "border-stone-200"}`}>
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 overflow-x-auto ${isSelected ? "border-slate-400 ring-1 ring-slate-200" : "border-stone-200"}`}>
+                    <div className="flex flex-nowrap items-center gap-x-2 w-max min-w-full">
                       {multiSelect && (
                         <input type="checkbox" checked={isSelected}
                           onChange={() => setSelectedIds((prev) => (isSelected ? prev.filter((id) => id !== s.id) : [...prev, s.id]))}
@@ -1702,7 +2150,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                       </button>
 
                       <div className="shrink-0 w-72">
-                        {!attendanceHidden && showFullPicker && (
+                        {!attendanceHidden && studentAttendanceApplies && showFullPicker && (
                           <div className="flex flex-wrap items-center gap-1.5">
                             {config.attendance.statuses.map((st) => {
                               const selected = entry?.status === st.id;
@@ -1721,16 +2169,39 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                             )}
                           </div>
                         )}
-                        {!attendanceHidden && !showFullPicker && (
+                        {!attendanceHidden && studentAttendanceApplies && !showFullPicker && (
                           <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
                             className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
-                            {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${entry.time}` : ""}
+                            {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${formatTime12h(entry.time)}` : ""}
                           </button>
                         )}
                         {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
+                        {!attendanceHidden && !studentAttendanceApplies && (
+                          <span className="text-xs text-stone-400 italic">
+                            {s.enrollmentScope === "part-time" ? "Part time — no morning attendance" : "Not scheduled first period"}
+                          </span>
+                        )}
                       </div>
 
-                      {individualPointCats.map((cat) => {
+                      {config.homework?.enabled && (
+                        <div className="shrink-0">
+                          {homeworkEntry?.status === "n/a" ? (
+                            <span className="text-xs text-stone-400 italic whitespace-nowrap">No homework</span>
+                          ) : homeworkEntry?.status ? (
+                            <button onClick={() => setHomework(s.id, date, homeworkEntry.status === "completed" ? "missed" : "completed")}
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${homeworkEntry.status === "completed" ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"}`}>
+                              {homeworkEntry.status === "completed" ? "✅ Done" : "❌ Missing"}
+                            </button>
+                          ) : (
+                            <div className="flex gap-1">
+                              <button onClick={() => setHomework(s.id, date, "completed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-emerald-300 text-emerald-700 hover:bg-emerald-50 whitespace-nowrap">✅</button>
+                              <button onClick={() => setHomework(s.id, date, "missed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-rose-300 text-rose-700 hover:bg-rose-50 whitespace-nowrap">❌</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {participatesInPoints(s) && individualPointCats.map((cat) => {
                         const pts = studentData[s.id]?.points?.[cat.id] || 0;
                         return (
                           <div key={cat.id} className="flex items-center gap-1 bg-stone-50 rounded-full pl-2 pr-1 py-0.5 shrink-0">
@@ -1757,7 +2228,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
               <div className="sticky bottom-3 mt-3 bg-white border border-slate-200 shadow-lg rounded-xl p-3 flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold text-stone-700">Award to {selectedIds.length} selected:</span>
                 {individualPointCats.map((cat) => (
-                  <button key={cat.id} onClick={() => selectedIds.forEach((id) => addPoints(id, cat.id, cat.increment || 1))}
+                  <button key={cat.id} onClick={() => selectedIds.filter((id) => participatesInPoints(roster.find((s) => s.id === id) || {})).forEach((id) => addPoints(id, cat.id, cat.increment || 1))}
                     className={`flex items-center gap-1 text-xs font-semibold text-white rounded-full px-3 py-1.5 bg-${cat.color}-500 hover:opacity-90`}>
                     <Plus size={11} /> {cat.label}
                   </button>
@@ -2107,7 +2578,7 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
                   {periodAttTypeMap[pa.typeId]?.label || pa.typeId}
                 </span>
                 <span className="text-stone-600">{pa.studentName}</span>
-                <span className="text-stone-400"> · {pa.time}{pa.minutesLate ? ` · ${pa.minutesLate} min late` : ""}</span>
+                <span className="text-stone-400"> · {formatTime12h(pa.time)}{pa.minutesLate ? ` · ${pa.minutesLate} min late` : ""}</span>
               </li>
             ))}
           </ul>
@@ -2232,7 +2703,7 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
             onReset={() => resetClassPoints(active.id)} />
         ) : (
           <div className="space-y-1.5">
-            {roster.map((s) => {
+            {roster.filter(participatesInPoints).map((s) => {
               const pts = studentData[s.id]?.points?.[active.id] || 0;
               const ready = pts >= active.threshold;
               return (
@@ -2869,60 +3340,31 @@ function AssessmentRowsList({ rows, onOpenSkillDetail, onOpenClassAssessmentRepo
 
 function ContactInfoSection({ student, onUpdateField, onUpdateParentEmail }) {
   return (
-    <div>
-      <p className="text-xs font-semibold text-stone-400 uppercase mb-1">Parent / Guardian 1</p>
-      <div className="grid grid-cols-2 gap-2 mb-2">
-        <div>
-          <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
-          <input defaultValue={student?.parent1Name || ""} onBlur={(e) => onUpdateField("parent1Name", e.target.value)}
-            placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-        </div>
-        <div>
-          <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
-          <input type="tel" defaultValue={student?.parentPhone || ""} onBlur={(e) => onUpdateField("parentPhone", e.target.value)}
-            placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-        </div>
-      </div>
-      <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
-      <input type="email" defaultValue={student?.parentEmail || ""} onBlur={(e) => onUpdateParentEmail(e.target.value)}
-        placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
-
-      <p className="text-xs font-semibold text-stone-400 uppercase mb-1 pt-3 border-t border-stone-100">Parent / Guardian 2</p>
-      <div className="grid grid-cols-2 gap-2 mb-2">
-        <div>
-          <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
-          <input defaultValue={student?.parent2Name || ""} onBlur={(e) => onUpdateField("parent2Name", e.target.value)}
-            placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-        </div>
-        <div>
-          <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
-          <input type="tel" defaultValue={student?.parent2Phone || ""} onBlur={(e) => onUpdateField("parent2Phone", e.target.value)}
-            placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-        </div>
-      </div>
-      <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
-      <input type="email" defaultValue={student?.parent2Email || ""} onBlur={(e) => onUpdateField("parent2Email", e.target.value)}
-        placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
-
-      <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
-      <input defaultValue={student?.homeAddress || ""} onBlur={(e) => onUpdateField("homeAddress", e.target.value)}
-        placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
-
-      <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
-      <textarea defaultValue={student?.notes || ""} onBlur={(e) => onUpdateField("notes", e.target.value)} rows={2}
-        placeholder="Anything worth remembering" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-    </div>
+    <StudentContactFields student={student}
+      onUpdateField={(id, field, value) => (field === "parentEmail" ? onUpdateParentEmail(value) : onUpdateField(field, value))} />
   );
 }
 
-function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onUpdateField, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail }) {
+function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onUpdateField, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail, onFetchCrossClassHistory, currentClassName }) {
   const [showContact, setShowContact] = useState(false);
+  const [showCrossClass, setShowCrossClass] = useState(false);
+  const [crossClassData, setCrossClassData] = useState(null);
+  const [crossClassLoading, setCrossClassLoading] = useState(false);
   const flags = getFlags(data, student.id, incidents, config);
   const catMap = {};
   config.incidents.categories.forEach((c) => (catMap[c.id] = c));
   const myIncidents = (incidents || []).filter((i) => i.studentIds?.includes(student.id)).sort((a, b) => (a.date < b.date ? 1 : -1));
   const attendanceHistory = [...(data.attendance || [])].sort((a, b) => (a.date < b.date ? 1 : -1));
   const individualPointCats = (config.points?.categories || []).filter((c) => c.scope === "individual");
+
+  const openCrossClass = async () => {
+    setShowCrossClass(true);
+    if (crossClassData) return; // already fetched this visit
+    setCrossClassLoading(true);
+    const result = await onFetchCrossClassHistory(student.id);
+    setCrossClassData(result);
+    setCrossClassLoading(false);
+  };
 
   return (
     <div className={PAGE}>
@@ -2974,6 +3416,74 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
           </button>
         </div>
 
+        <div className="mb-6 md:w-full bg-violet-50 border border-violet-200 rounded-xl p-3">
+          {!showCrossClass ? (
+            <button onClick={openCrossClass} className="text-sm font-semibold text-violet-800 flex items-center gap-2">
+              <BookOpen size={15} /> See this student's history from other classes
+            </button>
+          ) : (
+            <>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-sm font-semibold text-violet-900">History across classes</p>
+                <button onClick={() => setShowCrossClass(false)} className="text-xs text-violet-600 hover:text-violet-800">Hide</button>
+              </div>
+              {crossClassLoading && <p className="text-xs text-violet-700 flex items-center gap-2"><Loader2 size={13} className="animate-spin" /> Checking every class...</p>}
+              {crossClassData && (
+                <>
+                  <p className="text-xs text-violet-700 mb-2">
+                    Enrolled in: {crossClassData.classes.map((c) => `${c.className}${c.className === currentClassName ? " (this class)" : ""}`).join(", ") || "no classes found"}
+                  </p>
+                  <p className="text-xs font-semibold text-violet-800 uppercase mt-3 mb-1">Incidents, all classes</p>
+                  {crossClassData.incidents.length === 0 && <p className="text-xs text-violet-600">None logged anywhere.</p>}
+                  <ul className="space-y-1 mb-2">
+                    {crossClassData.incidents.map((inc) => (
+                      <li key={inc.id} className="text-xs bg-white border border-violet-100 rounded-lg px-2 py-1.5">
+                        <span className="font-semibold text-violet-900">{inc.sourceClassName}</span>
+                        <span className="text-stone-400"> · {inc.date} · {inc.categoryLabel}</span>
+                        {inc.description && <p className="text-stone-600 mt-0.5">{inc.description}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-xs font-semibold text-violet-800 uppercase mt-3 mb-1">Period attendance, all classes</p>
+                  {crossClassData.periodAttendance.length === 0 && <p className="text-xs text-violet-600">None logged anywhere.</p>}
+                  <ul className="space-y-1 mb-2">
+                    {crossClassData.periodAttendance.map((pa) => (
+                      <li key={pa.id} className="text-xs bg-white border border-violet-100 rounded-lg px-2 py-1.5">
+                        <span className="font-semibold text-violet-900">{pa.sourceClassName}</span>
+                        <span className="text-stone-400"> · {pa.date} {formatTime12h(pa.time)} · {pa.typeLabel}{pa.minutesLate ? ` · ${pa.minutesLate} min late` : ""}</span>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <p className="text-xs font-semibold text-violet-800 uppercase mt-3 mb-1">Points, all classes</p>
+                  {crossClassData.points.length === 0 && <p className="text-xs text-violet-600">None earned anywhere yet.</p>}
+                  <ul className="space-y-1 mb-2">
+                    {crossClassData.points.map((p, i) => (
+                      <li key={i} className="text-xs bg-white border border-violet-100 rounded-lg px-2 py-1.5">
+                        <span className="font-semibold text-violet-900">{p.sourceClassName}</span>
+                        <span className="text-stone-400"> · {p.categoryLabel}: </span>
+                        <span className="font-semibold text-stone-700">{p.value}{p.threshold ? ` / ${p.threshold}` : ""}</span>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <p className="text-xs font-semibold text-violet-800 uppercase mt-3 mb-1">Assessment activity, all classes</p>
+                  {crossClassData.assessments.length === 0 && <p className="text-xs text-violet-600">None logged anywhere yet.</p>}
+                  <ul className="space-y-1">
+                    {crossClassData.assessments.map((a) => (
+                      <li key={`${a.sourceClassName}-${a.key}`} className="text-xs bg-white border border-violet-100 rounded-lg px-2 py-1.5">
+                        <span className="font-semibold text-violet-900">{a.sourceClassName}</span>
+                        <span className="text-stone-400"> · {a.left}: </span>
+                        <span className="font-semibold text-stone-700">{a.right}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </>
+          )}
+        </div>
+
         <div className="md:flex md:gap-6 md:items-start">
           <div className="flex-1 space-y-4">
             <Section title="Attendance history">
@@ -2985,7 +3495,7 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
                     <li key={a.date} className="flex items-center justify-between text-xs">
                       <span className="text-stone-600">{a.date}</span>
                       <span className="flex items-center gap-2">
-                        {a.time && <span className="text-stone-400">{a.time}</span>}
+                        {a.time && <span className="text-stone-400">{formatTime12h(a.time)}</span>}
                         <span className={`px-2 py-0.5 rounded-full font-semibold bg-${st?.color || "stone"}-100 text-${st?.color || "stone"}-700`}>{st?.label || a.status}</span>
                       </span>
                     </li>
@@ -2993,6 +3503,22 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
                 })}
               </ul>
             </Section>
+
+            {config.homework?.enabled && (
+              <Section title="Homework history">
+                {(data.homework || []).length === 0 && <p className="text-xs text-stone-400">No homework logged yet.</p>}
+                <ul className="space-y-1.5 max-h-56 overflow-y-auto">
+                  {[...(data.homework || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).map((h) => (
+                    <li key={h.date} className="flex items-center justify-between text-xs">
+                      <span className="text-stone-600">{h.date}</span>
+                      <span className={`px-2 py-0.5 rounded-full font-semibold ${h.status === "completed" ? "bg-emerald-100 text-emerald-700" : h.status === "missed" ? "bg-rose-100 text-rose-700" : "bg-stone-100 text-stone-500"}`}>
+                        {h.status === "completed" ? "✅ Done" : h.status === "missed" ? "❌ Missing" : "No homework"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            )}
 
             <Section title="Period attendance">
               <p className="text-[10px] text-stone-400 mb-2">Separate from morning attendance — mid-day changes only.</p>
@@ -3006,7 +3532,7 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
                       <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${t?.color || "stone"}-100 text-${t?.color || "stone"}-700`}>
                         {t?.label || pa.typeId}
                       </span>
-                      <span className="text-stone-400">{pa.date} {pa.time}{periodLabel ? ` · ${periodLabel}` : ""}{pa.minutesLate ? ` · ${pa.minutesLate} min late` : ""}</span>
+                      <span className="text-stone-400">{pa.date} {formatTime12h(pa.time)}{periodLabel ? ` · ${periodLabel}` : ""}{pa.minutesLate ? ` · ${pa.minutesLate} min late` : ""}</span>
                       {pa.notes && <p className="text-stone-600 mt-0.5">{pa.notes}</p>}
                     </li>
                   );
@@ -3080,6 +3606,217 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
 
 // ---------- Parent communication log ----------
 
+// Looks at the last 3 reflections (including the one just saved) for any subject marked
+// "behind" in all three — a soft, recommendation-only nudge, never an alert or a grade.
+function detectReflectionPatterns(allReflections, currentEntry) {
+  const suggestions = [];
+  const merged = [...allReflections.filter((r) => r.monthKey !== currentEntry.monthKey), currentEntry];
+  const sorted = merged.sort((a, b) => (a.monthKey < b.monthKey ? -1 : 1));
+  const idx = sorted.findIndex((r) => r.monthKey === currentEntry.monthKey);
+  if (idx < 2) return suggestions;
+  const lastThree = sorted.slice(idx - 2, idx + 1);
+  (currentEntry.subjects || []).forEach((subj) => {
+    if (subj.pace !== "behind" || !subj.name.trim()) return;
+    const name = subj.name.trim().toLowerCase();
+    const allBehind = lastThree.every((r) => (r.subjects || []).some((s) => s.name.trim().toLowerCase() === name && s.pace === "behind"));
+    if (allBehind) suggestions.push(subj.name);
+  });
+  return suggestions;
+}
+
+const MOOD_OPTIONS = [
+  { id: "great", emoji: "😊", label: "Great" },
+  { id: "good", emoji: "🙂", label: "Good" },
+  { id: "okay", emoji: "😐", label: "Okay" },
+  { id: "challenging", emoji: "😕", label: "Challenging" },
+  { id: "very-challenging", emoji: "😫", label: "Very challenging" },
+];
+const BEHIND_REASONS = [
+  { id: "not-enough-time", label: "Not enough time" },
+  { id: "students-need-review", label: "Students need review" },
+  { id: "students-below-level", label: "Students below level" },
+  { id: "holidays", label: "Holidays" },
+  { id: "materials", label: "Materials" },
+  { id: "other", label: "Other" },
+];
+const BENCHMARK_ACTIONS = [
+  { id: "move-benchmark", label: "Move benchmark" },
+  { id: "adjust-benchmark", label: "Adjust benchmark" },
+  { id: "add-review", label: "Add review" },
+  { id: "other", label: "Other" },
+];
+
+function MonthlyReflectionForm({ monthKey, existing, allReflections, onSave, onBack }) {
+  const [subjects, setSubjects] = useState(existing?.subjects || [{ name: "", pace: "on-pace", behindReason: "" }]);
+  const [benchmarksCompleted, setBenchmarksCompleted] = useState(existing?.benchmarksCompleted || "yes");
+  const [benchmarksAction, setBenchmarksAction] = useState(existing?.benchmarksAction || "");
+  const [wentWell, setWentWell] = useState(existing?.wentWell || "");
+  const [shouldImprove, setShouldImprove] = useState(existing?.shouldImprove || "");
+  const [greatProgressStudents, setGreatProgressStudents] = useState(existing?.greatProgressStudents || "");
+  const [needsSupportStudents, setNeedsSupportStudents] = useState(existing?.needsSupportStudents || "");
+  const [mood, setMood] = useState(existing?.mood || "");
+  const [saved, setSaved] = useState(false);
+  const [suggestions, setSuggestions] = useState(null);
+
+  const updateSubject = (i, field, value) => setSubjects((prev) => prev.map((s, idx) => (idx === i ? { ...s, [field]: value } : s)));
+  const addSubject = () => setSubjects((prev) => [...prev, { name: "", pace: "on-pace", behindReason: "" }]);
+  const removeSubject = (i) => setSubjects((prev) => prev.filter((_, idx) => idx !== i));
+
+  const [monthName] = useState(() => new Date(`${monthKey}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" }));
+
+  const save = () => {
+    const entry = {
+      monthKey, date: todayISO(), subjects: subjects.filter((s) => s.name.trim()),
+      benchmarksCompleted, benchmarksAction: benchmarksCompleted !== "yes" ? benchmarksAction : "",
+      wentWell, shouldImprove, greatProgressStudents, needsSupportStudents, mood,
+    };
+    onSave(entry);
+    setSuggestions(detectReflectionPatterns(allReflections, entry));
+    setSaved(true);
+  };
+
+  if (saved) {
+    return (
+      <div className={PAGE}>
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+        <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Saved — {monthName}</h1>
+        <p className="text-stone-500 text-sm mb-5">This stays private to you, not shared with administration automatically.</p>
+        {suggestions && suggestions.length > 0 && (
+          <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 md:w-[28rem]">
+            <p className="text-sm font-semibold text-violet-900 mb-2">A pattern worth noticing</p>
+            {suggestions.map((subj) => (
+              <p key={subj} className="text-sm text-violet-800 mb-2">
+                <strong>{subj}</strong> has been marked behind for 3 reflections in a row. Worth considering: review pacing, review benchmarks, add instructional time, or bring it up at your next coaching meeting. Just a recommendation — you know your class best.
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Monthly reflection — {monthName}</h1>
+      <p className="text-stone-500 text-sm mb-5">A few minutes, just for you. This is about reflecting, not evaluating yourself.</p>
+
+      <div className="md:w-[30rem] space-y-5">
+        <div>
+          <label className="block text-sm font-semibold text-stone-700 mb-2">How's pacing, by subject?</label>
+          {subjects.map((s, i) => (
+            <div key={i} className="bg-white border border-stone-200 rounded-lg p-2.5 mb-2">
+              <div className="flex gap-2 mb-2">
+                <input value={s.name} onChange={(e) => updateSubject(i, "name", e.target.value)} placeholder="Subject (e.g. Chumash)" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                <ConfirmDelete onConfirm={() => removeSubject(i)} size={13} />
+              </div>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {[["on-pace", "On pace"], ["slightly-behind", "Slightly behind"], ["behind", "Behind"]].map(([id, label]) => (
+                  <button key={id} onClick={() => updateSubject(i, "pace", id)}
+                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${s.pace === id ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {s.pace !== "on-pace" && (
+                <select value={s.behindReason} onChange={(e) => updateSubject(i, "behindReason", e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs bg-white">
+                  <option value="">Why? (optional)</option>
+                  {BEHIND_REASONS.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+                </select>
+              )}
+            </div>
+          ))}
+          <button onClick={addSubject} className="text-xs font-semibold text-slate-700 flex items-center gap-1"><Plus size={12} /> Add subject</button>
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-stone-700 mb-2">Were benchmarks completed this month?</label>
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {[["yes", "Yes"], ["partially", "Partially"], ["no", "No"]].map(([id, label]) => (
+              <button key={id} onClick={() => setBenchmarksCompleted(id)}
+                className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${benchmarksCompleted === id ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {benchmarksCompleted !== "yes" && (
+            <select value={benchmarksAction} onChange={(e) => setBenchmarksAction(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+              <option value="">What's the plan? (optional)</option>
+              {BENCHMARK_ACTIONS.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+            </select>
+          )}
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-stone-500 mb-1">What went well?</label>
+          <textarea value={wentWell} onChange={(e) => setWentWell(e.target.value)} rows={2} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-stone-500 mb-1">What should improve?</label>
+          <textarea value={shouldImprove} onChange={(e) => setShouldImprove(e.target.value)} rows={2} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Who made great progress?</label>
+          <textarea value={greatProgressStudents} onChange={(e) => setGreatProgressStudents(e.target.value)} rows={2} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Who needs additional support?</label>
+          <textarea value={needsSupportStudents} onChange={(e) => setNeedsSupportStudents(e.target.value)} rows={2} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-stone-700 mb-2">Overall, how was this month?</label>
+          <div className="flex gap-2">
+            {MOOD_OPTIONS.map((m) => (
+              <button key={m.id} onClick={() => setMood(m.id)} title={m.label}
+                className={`text-2xl w-11 h-11 rounded-full flex items-center justify-center border-2 ${mood === m.id ? "border-slate-600 bg-slate-50" : "border-transparent"}`}>
+                {m.emoji}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <button onClick={save} className="w-full bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800">Save reflection</button>
+        <p className="text-[10px] text-stone-400 text-center">Private by default — not automatically shared with administration.</p>
+      </div>
+    </div>
+  );
+}
+
+function ReflectionHistoryView({ reflections, onOpenMonth, onBack, navigate }) {
+  const sorted = [...reflections].sort((a, b) => (a.monthKey < b.monthKey ? 1 : -1));
+  const now = new Date();
+  const thisMonthKey = monthKey(now.getFullYear(), now.getMonth());
+  const hasThisMonth = reflections.some((r) => r.monthKey === thisMonthKey);
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Your monthly reflections</h1>
+      <p className="text-stone-500 text-sm mb-4">Private to you — a place to look back, not a report card.</p>
+      <button onClick={() => onOpenMonth(thisMonthKey)} className="mb-5 flex items-center gap-2 bg-violet-700 text-white rounded-lg px-4 py-2.5 text-sm font-semibold hover:bg-violet-800">
+        <Plus size={15} /> {hasThisMonth ? "Edit this month's reflection" : "Start this month's reflection"}
+      </button>
+      {sorted.length === 0 && <p className="text-sm text-stone-400">No reflections saved yet.</p>}
+      <div className="space-y-2 md:w-96">
+        {sorted.map((r) => {
+          const mood = MOOD_OPTIONS.find((m) => m.id === r.mood);
+          const monthName = new Date(`${r.monthKey}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+          const behindSubjects = (r.subjects || []).filter((s) => s.pace !== "on-pace").map((s) => s.name);
+          return (
+            <button key={r.monthKey} onClick={() => onOpenMonth(r.monthKey)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-3 hover:border-slate-300">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-stone-800 text-sm">{monthName}</span>
+                {mood && <span className="text-xl">{mood.emoji}</span>}
+              </div>
+              {behindSubjects.length > 0 && <p className="text-xs text-stone-400 mt-1">Behind pace: {behindSubjects.join(", ")}</p>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CommunicationListView({ roster, studentData, navigate, openStudent }) {
   return (
     <div className={PAGE}>
@@ -3094,6 +3831,9 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
           <Calendar size={16} /> Custom date range report
         </button>
       </div>
+      <button onClick={() => navigate("reflection-history")} className="mb-5 flex items-center gap-2 text-sm font-semibold text-violet-700 hover:text-violet-900">
+        <BookOpen size={15} /> Your monthly reflections (private)
+      </button>
 
       {roster.length === 0 && <p className="text-stone-400 text-sm text-center py-10">Add students from Settings first.</p>}
       <ul className="space-y-2 md:grid md:grid-cols-2 md:gap-2 md:space-y-0">
@@ -3202,6 +3942,44 @@ function timeToMinutes(hhmm) {
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return h * 60 + m;
 }
+function formatTime12h(hhmm) {
+  if (!hhmm || !hhmm.includes(":")) return hhmm || "";
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+}
+
+// The single earliest-starting period across the class's schedule(s) — used to decide
+// whether a "specific periods" student's morning is actually covered by their assignment.
+function getFirstPeriodId(config) {
+  const all = [...(config.planner?.fullDaySchedule || []), ...(config.planner?.halfDaySchedule || [])];
+  if (all.length === 0) return null;
+  return all.reduce((earliest, p) => (!earliest || p.startTime < earliest.startTime ? p : earliest), null)?.id || null;
+}
+
+// Full-time (or a locally-created student with no scope set at all) always gets morning
+// attendance, matching how the app always worked. Part-time students never do, since there's
+// no period data to confirm they're even there first thing. Specific-periods students only
+// get it if one of their assigned periods is that actual first period of the day.
+function morningAttendanceApplies(student, config) {
+  const scope = student.enrollmentScope;
+  if (!scope || scope === "full-time") return true;
+  if (scope === "part-time") return false;
+  if (scope === "periods") {
+    const firstId = getFirstPeriodId(config);
+    return firstId ? (student.enrollmentPeriodIds || []).includes(firstId) : false;
+  }
+  return true;
+}
+
+// Points/rewards: full-time always participates by default. Non-full-time students default
+// to participating too, UNLESS the teacher has explicitly turned it off for that student —
+// this is a per-student teacher choice, not an automatic rule.
+function participatesInPoints(student) {
+  return student.participatesInPoints !== false;
+}
 
 // Builds ONLY the facts for the given month, split by section, so nothing outside
 // the selected month or unchecked sections ever reaches the prompt.
@@ -3221,7 +3999,7 @@ function buildRangeFacts(student, data, incidents, classAssessments, config, sta
       let line = `${st.label}: ${entries.length} day(s)`;
       if (st.flagType === "late" && entries.length > 0) {
         const times = entries.filter((e) => e.time).map((e) => e.time);
-        if (times.length) line += ` (arrived at ${times.join(", ")})`;
+        if (times.length) line += ` (arrived at ${times.map(formatTime12h).join(", ")})`;
         if (startMin != null) {
           const totalLateMin = entries.reduce((sum, e) => {
             const t = timeToMinutes(e.time);
@@ -3627,8 +4405,9 @@ function AssessmentReportView({ assessment, roster, onBack, onLogSent, onUpdateP
   );
 }
 
-function SkillCategoryReportView({ category, roster, studentData, config, onBack, onLogSent, onUpdateParentEmail }) {
+function SkillCategoryReportView({ category, roster, studentData, config, onBack, onLogSent, onUpdateParentEmail, onStartClassSession }) {
   const [reports, setReports] = useState({});
+  const [sessionDate, setSessionDate] = useState(todayISO());
   const gradeLabel = {};
   (config.gradeOptions || []).forEach((g) => (gradeLabel[g.id] = g.label));
 
@@ -3670,6 +4449,17 @@ function SkillCategoryReportView({ category, roster, studentData, config, onBack
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Assessments</button>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{category.title}</h1>
       <p className="text-xs text-stone-400 mb-4">Whole class — {category.items.length} items each. Reports use only what's actually been graded for that student.</p>
+
+      <div className="flex flex-wrap items-end gap-2 mb-5 bg-slate-50 border border-slate-200 rounded-xl p-3">
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Session date</label>
+          <input type="date" value={sessionDate} onChange={(e) => setSessionDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white" />
+        </div>
+        <button onClick={() => onStartClassSession(category.id, sessionDate)} className="flex items-center gap-2 bg-slate-700 text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-slate-800">
+          <BookOpen size={15} /> Start class session
+        </button>
+        <p className="text-[10px] text-stone-400 w-full">Goes through every student one after another for this date — you can still test one student at a time from their own page instead.</p>
+      </div>
 
       <div className="space-y-3">
         {roster.map((s) => {
@@ -3823,6 +4613,26 @@ Write 2-3 sentences, warm but factual. Sign off as "[Your name]". Output only th
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
 }
 
+function GrowthChart({ timeline, color }) {
+  if (timeline.length < 2) {
+    return <p className="text-xs text-stone-400 bg-stone-50 border border-stone-200 rounded-lg px-3 py-4 text-center mb-5">Needs at least 2 dated sessions to show a growth chart — only {timeline.length} so far.</p>;
+  }
+  const colorHex = { emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e", indigo: "#6366f1", sky: "#0ea5e9", stone: "#78716c", violet: "#8b5cf6", teal: "#14b8a6", fuchsia: "#d946ef", slate: "#334155" }[color] || "#334155";
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3 mb-5 md:w-[28rem]" style={{ height: 220 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={timeline} margin={{ top: 5, right: 15, left: -15, bottom: 5 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
+          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#78716c" }} />
+          <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#78716c" }} />
+          <Tooltip formatter={(value, name) => [`${value}%`, "Score"]} labelFormatter={(l) => `Session: ${l}`} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+          <Line type="monotone" dataKey="score" stroke={colorHex} strokeWidth={2.5} dot={{ r: 4, fill: colorHex }} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 function SkillDetailView({ student, data, category, config, onBack, onLogSent, onUpdateParentEmail }) {
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -3841,6 +4651,8 @@ function SkillDetailView({ student, data, category, config, onBack, onLogSent, o
     return `${r.item.label}: ${gradeLabel[last.result] || last.result}${r.skill.status === "mastered" ? " (mastered)" : r.skill.status === "flagged" ? " (struggling)" : ""}`;
   });
 
+  const timeline = computeSessionTimeline(data, category, config);
+
   const generate = async () => {
     setLoading(true);
     try { setDraft(await generateSkillReport(student, category, summaryLines)); }
@@ -3858,6 +4670,9 @@ function SkillDetailView({ student, data, category, config, onBack, onLogSent, o
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{category.title}</h1>
       <p className="text-stone-500 text-sm mb-5">{student?.name}</p>
+
+      <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Growth in {category.title} only</p>
+      <GrowthChart timeline={timeline} color={category.color || "slate"} />
 
       <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-96 max-h-64 overflow-y-auto">
         {summaryLines.length === 0 && <p className="text-xs text-stone-400">No results recorded yet.</p>}
@@ -4074,7 +4889,19 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
     setMonthIdx(m); setYear(y);
   };
 
-  const eventsForDate = (d) => (plannerEvents || []).filter((e) => e.date === d);
+  // Automatic holidays only need recomputing when the visible year actually changes —
+  // spans a Gregorian year plus a bit of the next, since a Hebrew year straddles two.
+  const autoHolidays = useMemo(() => {
+    const thisYear = getAutoHolidaysForYear(year);
+    const nextYear = getAutoHolidaysForYear(year + 1);
+    return { ...thisYear, ...nextYear };
+  }, [year]);
+
+  const eventsForDate = (d) => {
+    const teacherEvents = (plannerEvents || []).filter((e) => e.date === d).map((e) => ({ ...e, source: e.source || "teacher" }));
+    const holidayEvents = (autoHolidays[d] || []).map((e, i) => ({ ...e, id: `auto-${d}-${i}`, date: d, source: "auto" }));
+    return [...holidayEvents, ...teacherEvents];
+  };
 
   return (
     <div className={PAGE}>
@@ -4107,19 +4934,37 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
               if (!d) return <div key={i} />;
               const dayType = plannerDays?.[d]?.dayType ? dayTypeMap[plannerDays[d].dayType] : null;
               const hasNotes = !!plannerDays?.[d]?.notes;
-              const evCount = eventsForDate(d).length;
+              const dayEvents = eventsForDate(d);
               const isToday = d === todayISO();
               const dayNum = Number(d.slice(-2));
+              const hebDateShort = hebrewDateFor(d).replace(/ \d{4}$/, "");
               return (
                 <button key={d} onClick={() => setSelectedDate(d)}
-                  className={`relative aspect-square rounded-lg text-xs font-semibold flex flex-col items-center justify-center border ${
+                  className={`relative rounded-lg text-xs font-semibold flex flex-col items-start justify-start border p-1 aspect-square md:aspect-auto md:min-h-[4.5rem] overflow-hidden text-left ${
                     selectedDate === d ? "border-slate-600" : "border-transparent"
                   } ${dayType ? `bg-${dayType.color}-100 text-${dayType.color}-800` : "bg-stone-50 text-stone-600 hover:bg-stone-100"} ${isToday ? "ring-2 ring-slate-400" : ""}`}>
-                  {dayNum}
-                  <span className="flex gap-0.5 mt-0.5">
-                    {hasNotes && <span className="w-1 h-1 rounded-full bg-stone-400" />}
-                    {evCount > 0 && <span className="w-1 h-1 rounded-full bg-amber-500" />}
-                  </span>
+                  <div className="flex items-center justify-between w-full">
+                    <span>{dayNum}</span>
+                    {hasNotes && <span className="w-1 h-1 rounded-full bg-stone-400 shrink-0" />}
+                  </div>
+                  <span className="hidden md:block text-[8px] font-normal text-stone-400 leading-tight whitespace-nowrap">{hebDateShort}</span>
+                  <div className="hidden md:flex flex-col gap-0.5 mt-0.5 w-full overflow-hidden">
+                    {dayEvents.slice(0, 2).map((e) => {
+                      const cat = EVENT_CATEGORIES.find((c) => c.id === e.category) || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+                      return (
+                        <span key={e.id} className={`text-[8px] font-semibold truncate leading-tight bg-${cat.color}-100 text-${cat.color}-700 rounded px-0.5`}>
+                          {cat.icon} {e.title}
+                        </span>
+                      );
+                    })}
+                    {dayEvents.length > 2 && <span className="text-[8px] text-stone-400">+{dayEvents.length - 2} more</span>}
+                  </div>
+                  <div className="flex md:hidden gap-0.5 mt-auto flex-wrap">
+                    {dayEvents.slice(0, 4).map((e) => {
+                      const cat = EVENT_CATEGORIES.find((c) => c.id === e.category) || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+                      return <span key={e.id} className={`w-1 h-1 rounded-full bg-${cat.color}-500`} />;
+                    })}
+                  </div>
                 </button>
               );
             })}
@@ -4682,6 +5527,7 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
   const [showEventForm, setShowEventForm] = useState(false);
   const [evTitle, setEvTitle] = useState("");
   const [evLead, setEvLead] = useState(1);
+  const [evCategory, setEvCategory] = useState("school-event");
   const [slotDrafts, setSlotDrafts] = useState(entry.slotContent || {});
 
   useEffect(() => { setNotes(plannerDays?.[date]?.notes || ""); setSlotDrafts(plannerDays?.[date]?.slotContent || {}); }, [date, plannerDays]);
@@ -4690,8 +5536,8 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
   const saveSlot = (slotId, text) => setPlannerDay(date, { slotContent: { ...(plannerDays?.[date]?.slotContent || {}), [slotId]: text } });
   const saveEvent = () => {
     if (!evTitle.trim()) return;
-    addPlannerEvent({ date, title: evTitle.trim(), reminderLeadDays: Number(evLead) || 0 });
-    setEvTitle(""); setEvLead(1); setShowEventForm(false);
+    addPlannerEvent({ date, title: evTitle.trim(), reminderLeadDays: Number(evLead) || 0, category: evCategory });
+    setEvTitle(""); setEvLead(1); setEvCategory("school-event"); setShowEventForm(false);
   };
 
   const dayType = dayTypes.find((t) => t.id === entry.dayType);
@@ -4699,10 +5545,11 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
 
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-1">
         <p className="font-semibold text-stone-800 text-sm">{date}</p>
         <button onClick={onClose} className="text-stone-400 text-xs hover:text-stone-700">Close</button>
       </div>
+      <p className="text-xs text-stone-400 mb-3">{hebrewDateFor(date)}</p>
 
       <p className="text-[10px] font-semibold text-stone-400 uppercase mb-1">Day type</p>
       <div className="flex flex-wrap gap-1.5 mb-4">
@@ -4760,18 +5607,31 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
 
       <p className="text-[10px] font-semibold text-stone-400 uppercase mb-1">Events / reminders</p>
       <ul className="space-y-1.5 mb-2">
-        {plannerEvents.map((e) => (
-          <li key={e.id} className="flex items-center justify-between text-xs bg-stone-50 rounded-lg px-2 py-1.5">
-            <span className="text-stone-700">{e.title}{e.reminderLeadDays > 0 ? ` (remind ${e.reminderLeadDays}d before)` : ""}</span>
-            <ConfirmDelete onConfirm={() => removePlannerEvent(e.id)} size={12} />
-          </li>
-        ))}
+        {plannerEvents.map((e) => {
+          const cat = EVENT_CATEGORIES.find((c) => c.id === e.category) || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
+          return (
+            <li key={e.id} className={`flex items-center justify-between text-xs rounded-lg px-2 py-1.5 bg-${cat.color}-100`}>
+              <span className="text-stone-700">{cat.icon} {e.title}{e.reminderLeadDays > 0 ? ` (remind ${e.reminderLeadDays}d before)` : ""}</span>
+              {e.source === "auto" ? (
+                <span className="text-[9px] text-stone-400 italic shrink-0 ml-2">Automatic</span>
+              ) : e.source === "admin" ? (
+                <span className="text-[9px] text-stone-400 italic shrink-0 ml-2">From admin</span>
+              ) : (
+                <ConfirmDelete onConfirm={() => removePlannerEvent(e.id)} size={12} />
+              )}
+            </li>
+          );
+        })}
         {plannerEvents.length === 0 && <li className="text-xs text-stone-400">None yet.</li>}
       </ul>
 
       {showEventForm ? (
         <div className="border-t border-stone-100 pt-3">
           <input value={evTitle} onChange={(e) => setEvTitle(e.target.value)} placeholder="Event title" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          <label className="block text-[10px] text-stone-400 mb-0.5">Category</label>
+          <select value={evCategory} onChange={(e) => setEvCategory(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-2">
+            {EVENT_CATEGORIES.filter((c) => c.id !== "jewish-holiday").map((c) => <option key={c.id} value={c.id}>{c.icon} {c.label}</option>)}
+          </select>
           <label className="block text-[10px] text-stone-400 mb-0.5">Remind me this many days before</label>
           <input type="number" min={0} value={evLead} onChange={(e) => setEvLead(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
           <div className="flex gap-2">
@@ -4788,16 +5648,20 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
 
 // ---------- Session (flashcards) ----------
 
-function SessionView({ category, config, idx, setIdx, onGrade, onFinish }) {
+function SessionView({ category, config, idx, setIdx, onGrade, onFinish, studentName, classSessionProgress }) {
   const item = category.items[idx];
   const isLast = idx >= category.items.length - 1;
   const handleGrade = (resultId) => { onGrade(item.id, resultId); if (isLast) onFinish(); else setIdx(idx + 1); };
   return (
     <div className={`${PAGE} flex flex-col min-h-screen`}>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-2">
         <button onClick={onFinish} className="flex items-center text-stone-500 text-sm hover:text-stone-800"><ChevronLeft size={16} /> End session</button>
         <span className="text-xs text-stone-400 font-medium">{idx + 1} / {category.items.length}</span>
       </div>
+      {classSessionProgress && (
+        <p className="text-center text-xs font-semibold text-slate-600 mb-1">Student {classSessionProgress.pos + 1} of {classSessionProgress.total}</p>
+      )}
+      {studentName && <p className="text-center text-stone-800 font-semibold text-sm mb-1">{studentName}</p>}
       <p className="text-center text-stone-500 text-sm mb-6">{category.title}</p>
       <div className="flex-1 flex flex-col items-center justify-center">
         <div className="bg-white border border-stone-200 rounded-2xl shadow-sm w-full md:w-96 py-14 flex flex-col items-center justify-center mb-8">
@@ -4876,7 +5740,7 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
     <div className={PAGE}>
       <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Report incident</h1>
-      <p className="text-xs text-stone-400 mb-5">Logged at {time} — add details now, or come back and fill them in later.</p>
+      <p className="text-xs text-stone-400 mb-5">Logged at {formatTime12h(time)} — add details now, or come back and fill them in later.</p>
       <div className="md:w-96">
         <label className="block text-sm font-semibold text-stone-700 mb-1">Students involved</label>
         <div className="flex flex-wrap gap-1.5 mb-4">
@@ -4946,7 +5810,7 @@ function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCance
     <div className={PAGE}>
       <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Log period attendance</h1>
-      <p className="text-xs text-stone-400 mb-5">Logged at {time} — separate from morning attendance, for mid-day changes.</p>
+      <p className="text-xs text-stone-400 mb-5">Logged at {formatTime12h(time)} — separate from morning attendance, for mid-day changes.</p>
 
       <div className="md:w-96">
         <label className="block text-sm font-semibold text-stone-700 mb-1">Students</label>
@@ -5088,6 +5952,34 @@ function MessageDraftView({ student, flag, onBack, onSaveParentEmail, onLogSent 
 
 // ---------- Settings ----------
 
+const HEBREW_MONTHS = [
+  { id: "TISHREI", label: "Tishrei" }, { id: "CHESHVAN", label: "Cheshvan" }, { id: "KISLEV", label: "Kislev" },
+  { id: "TEVET", label: "Tevet" }, { id: "SHVAT", label: "Shvat" }, { id: "ADAR", label: "Adar" },
+  { id: "NISAN", label: "Nisan" }, { id: "IYYAR", label: "Iyyar" }, { id: "SIVAN", label: "Sivan" },
+  { id: "TAMUZ", label: "Tamuz" }, { id: "AV", label: "Av" }, { id: "ELUL", label: "Elul" },
+];
+
+// Finds the next upcoming Gregorian date for a recurring Hebrew month+day (e.g. a birthday),
+// starting from a given date. "Adar" always resolves to Adar II, which works correctly in both
+// leap and regular years — hebcal maps both Adar constants to the single Adar in a regular year.
+function nextHebrewOccurrence(monthId, day, fromDate) {
+  const hebMonthNum = monthId === "ADAR" ? months.ADAR_II : months[monthId];
+  if (!hebMonthNum || !day) return null;
+  const fromHDate = new HDate(fromDate);
+  let hebYear = fromHDate.getFullYear();
+  for (let i = 0; i < 3; i++) {
+    try {
+      const candidate = new HDate(day, hebMonthNum, hebYear);
+      const greg = candidate.greg();
+      greg.setHours(0, 0, 0, 0);
+      const fromMidnight = new Date(fromDate); fromMidnight.setHours(0, 0, 0, 0);
+      if (greg >= fromMidnight) return greg;
+    } catch { /* invalid day for this month/year combo — try the next year */ }
+    hebYear += 1;
+  }
+  return null;
+}
+
 function StudentContactFields({ student, onUpdateField }) {
   return (
     <div className="px-3 pb-3 border-t border-stone-100 pt-2 md:grid md:grid-cols-2 md:gap-2">
@@ -5123,6 +6015,28 @@ function StudentContactFields({ student, onUpdateField }) {
         <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
         <input value={student.homeAddress || ""} onChange={(e) => onUpdateField(student.id, "homeAddress", e.target.value)} placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       </div>
+
+      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Birthday</p>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Hebrew birthday — month</label>
+        <select value={student.hebrewBirthdayMonth || ""} onChange={(e) => onUpdateField(student.id, "hebrewBirthdayMonth", e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-2">
+          <option value="">Not set</option>
+          {HEBREW_MONTHS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Hebrew birthday — day</label>
+        <input type="number" min={1} max={30} value={student.hebrewBirthdayDay || ""} onChange={(e) => onUpdateField(student.id, "hebrewBirthdayDay", e.target.value ? Number(e.target.value) : "")} placeholder="1–30" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Gregorian birthday (optional)</label>
+        <input type="date" value={student.gregorianBirthday || ""} onChange={(e) => onUpdateField(student.id, "gregorianBirthday", e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Preferred celebration date (optional)</label>
+        <input type="date" value={student.preferredCelebrationDate || ""} onChange={(e) => onUpdateField(student.id, "preferredCelebrationDate", e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+
       <div className="md:col-span-2">
         <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
         <textarea value={student.notes || ""} onChange={(e) => onUpdateField(student.id, "notes", e.target.value)} rows={2} placeholder="Anything worth remembering about this student" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
@@ -5289,7 +6203,17 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                     <ConfirmDelete onConfirm={() => removeStudent(s.id)} size={14} />
                   </div>
                   {expandedStudents[s.id] && (
-                    <StudentContactFields student={s} onUpdateField={(id, field, value) => updateStudentField(id, field, value)} />
+                    <>
+                      {s.enrollmentScope && s.enrollmentScope !== "full-time" && (
+                        <div className="px-3 pb-2 pt-2 border-t border-stone-100">
+                          <label className="flex items-center gap-2 text-xs text-stone-600">
+                            <input type="checkbox" checked={s.participatesInPoints !== false} onChange={(e) => updateStudentField(s.id, "participatesInPoints", e.target.checked)} />
+                            Participates in this class's points/rewards
+                          </label>
+                        </div>
+                      )}
+                      <StudentContactFields student={s} onUpdateField={(id, field, value) => updateStudentField(id, field, value)} />
+                    </>
                   )}
                 </div>
               ))}
@@ -5493,6 +6417,34 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           ))}
         </Section>
 
+        <Section title="Homework tracking">
+          <label className="flex items-center gap-2 text-sm text-stone-700 mb-3">
+            <input type="checkbox" checked={config.homework?.enabled || false} onChange={(e) => update((c) => { c.homework.enabled = e.target.checked; return c; })} />
+            Enable homework tracking for this class
+          </label>
+          {config.homework?.enabled && (
+            <>
+              <label className="block text-xs font-medium text-stone-500 mb-1">Frequency</label>
+              <select value={config.homework.frequency} onChange={(e) => update((c) => { c.homework.frequency = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-3">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+
+              <label className="block text-xs font-medium text-stone-500 mb-1">Missed homeworks within window before flagging</label>
+              <div className="flex gap-2 mb-3">
+                <input type="number" min={1} value={config.homework.missedThreshold} onChange={(e) => update((c) => { c.homework.missedThreshold = Math.max(1, Number(e.target.value) || 1); return c; })} className="w-1/2 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" placeholder="Count" />
+                <input type="number" min={1} value={config.homework.windowDays} onChange={(e) => update((c) => { c.homework.windowDays = Math.max(1, Number(e.target.value) || 1); return c; })} className="w-1/2 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" placeholder="Days" />
+              </div>
+              {[1, 2, 3, 4].map((tier) => (
+                <div key={tier} className="mb-2">
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Tier {tier}{tier === 4 ? "+" : ""}</label>
+                  <input value={config.homework.missedTierMessages[tier]} onChange={(e) => update((c) => { c.homework.missedTierMessages[tier] = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                </div>
+              ))}
+            </>
+          )}
+        </Section>
+
         <Section title="Incident categories">
           {config.incidents.categories.map((cat, i) => (
             <div key={cat.id} className="flex items-center gap-2 mb-2">
@@ -5579,32 +6531,56 @@ function MicButton({ onResult, className }) {
   const [supported, setSupported] = useState(true);
   const [error, setError] = useState(false);
   const recogRef = useRef(null);
+  const finalTextRef = useRef("");
+  const silenceTimerRef = useRef(null);
+  const SILENCE_MS = 4000; // stop after ~4s of no new speech, within the requested 3-5s range
 
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) setSupported(false);
   }, []);
 
+  const clearSilenceTimer = () => { if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current); };
+  const armSilenceTimer = () => {
+    clearSilenceTimer();
+    silenceTimerRef.current = setTimeout(() => { recogRef.current?.stop(); }, SILENCE_MS);
+  };
+
   const toggle = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setSupported(false); return; }
     if (listening) {
-      recogRef.current?.stop();
+      clearSilenceTimer();
+      recogRef.current?.stop(); // user-initiated stop; onend still fires and delivers whatever was captured
       return;
     }
     setError(false);
+    finalTextRef.current = "";
     const recog = new SR();
-    recog.continuous = false;
-    recog.interimResults = false;
+    recog.continuous = true; // keep listening across natural pauses, not just one short utterance
+    recog.interimResults = true; // needed so we get frequent events to reset the silence timer against
     recog.lang = "en-US";
     recog.onresult = (e) => {
-      const text = Array.from(e.results).map((r) => r[0].transcript).join(" ").trim();
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalTextRef.current += (finalTextRef.current ? " " : "") + e.results[i][0].transcript.trim();
+      }
+      armSilenceTimer(); // any new speech (even interim) resets the "how long have they been quiet" clock
+    };
+    recog.onend = () => {
+      clearSilenceTimer();
+      setListening(false);
+      const text = finalTextRef.current.trim();
       if (text) onResult(text);
     };
-    recog.onend = () => setListening(false);
-    recog.onerror = () => { setListening(false); setError(true); setTimeout(() => setError(false), 4000); };
+    recog.onerror = (e) => {
+      clearSilenceTimer();
+      setListening(false);
+      if (e.error === "no-speech") return; // not a real error, just nothing said yet — no need to alarm the user
+      setError(true);
+      setTimeout(() => setError(false), 4000);
+    };
     recogRef.current = recog;
-    try { recog.start(); setListening(true); } catch { setListening(false); setError(true); setTimeout(() => setError(false), 4000); }
+    try { recog.start(); setListening(true); armSilenceTimer(); } catch { setListening(false); setError(true); setTimeout(() => setError(false), 4000); }
   };
 
   if (!supported) return null;
