@@ -1272,6 +1272,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onBack={() => setView("home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
           onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")} onGoToAssessments={() => setView("assessment-entry")}
           onDraftMessage={openMessageDraft} onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
+          onUpdateField={(field, value) => updateStudentField(currentId, field, value)}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
           onOpenFluencyDetail={(entry) => { setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
           onOpenSkillDetail={(catId) => { setSelectedSkillCat(catId); setView("skill-detail"); }}
@@ -1346,11 +1347,14 @@ function Header({ navigate }) {
   const { className, onSwitchClass, switchLabel } = useContext(ClassContext);
   return (
     <div className="flex items-center justify-between mb-2">
-      <div>
-        <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
-        {className && (
-          <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-indigo-700">{className} · {switchLabel || "Switch class"}</button>
-        )}
+      <div className="flex items-center gap-2">
+        <img src="/icon-192.png" alt="" className="w-8 h-8 rounded-lg shrink-0" />
+        <div>
+          <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
+          {className && (
+            <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-indigo-700">{className} · {switchLabel || "Switch class"}</button>
+          )}
+        </div>
       </div>
       <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-indigo-700 p-1.5 rounded-lg hover:bg-stone-100">
         <SettingsIcon size={18} />
@@ -1512,8 +1516,8 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                           onChange={() => setSelectedIds((prev) => (isSelected ? prev.filter((id) => id !== s.id) : [...prev, s.id]))}
                           className="w-4 h-4 shrink-0" />
                       )}
-                      <button onClick={() => openDetail(s.id)} className="font-medium text-stone-800 text-sm hover:text-indigo-700 flex items-center gap-1.5 shrink-0 text-left whitespace-nowrap">
-                        <span className="truncate max-w-[9rem]">{s.name}</span>
+                      <button onClick={() => openDetail(s.id)} className="font-medium text-stone-800 text-sm hover:text-indigo-700 flex items-center gap-1.5 shrink-0 text-left whitespace-nowrap w-36">
+                        <span className="truncate">{s.name}</span>
                         {flags.length > 0 && (
                           <span className="flex items-center gap-0.5 text-amber-700 bg-amber-50 text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0">
                             <AlertTriangle size={10} /> {flags.length}
@@ -1521,32 +1525,34 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                         )}
                       </button>
 
-                      {!attendanceHidden && showFullPicker && (
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {config.attendance.statuses.map((st) => {
-                            const selected = entry?.status === st.id;
-                            return (
-                              <button key={st.id} onClick={() => { setAttendance(s.id, date, st.id); setExpandedAttendance((prev) => prev.filter((id) => id !== s.id)); }}
-                                className={`text-xs font-semibold px-2.5 py-1 rounded-full border whitespace-nowrap ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : `text-stone-500 border-stone-200`}`}>
-                                {st.label}
-                              </button>
-                            );
-                          })}
-                          {isLateType && (
-                            <span className="flex items-center gap-1">
-                              <label className="text-xs text-stone-500">at</label>
-                              <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {!attendanceHidden && !showFullPicker && (
-                        <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
-                          className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
-                          {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${entry.time}` : ""}
-                        </button>
-                      )}
-                      {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
+                      <div className="shrink-0 w-72">
+                        {!attendanceHidden && showFullPicker && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {config.attendance.statuses.map((st) => {
+                              const selected = entry?.status === st.id;
+                              return (
+                                <button key={st.id} onClick={() => { setAttendance(s.id, date, st.id); setExpandedAttendance((prev) => prev.filter((id) => id !== s.id)); }}
+                                  className={`text-xs font-semibold px-2.5 py-1 rounded-full border whitespace-nowrap ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : `text-stone-500 border-stone-200`}`}>
+                                  {st.label}
+                                </button>
+                              );
+                            })}
+                            {isLateType && (
+                              <span className="flex items-center gap-1">
+                                <label className="text-xs text-stone-500">at</label>
+                                <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {!attendanceHidden && !showFullPicker && (
+                          <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
+                            className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
+                            {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${entry.time}` : ""}
+                          </button>
+                        )}
+                        {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
+                      </div>
 
                       {individualPointCats.map((cat) => {
                         const pts = studentData[s.id]?.points?.[cat.id] || 0;
@@ -2049,26 +2055,24 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
             onSubtract={() => addClassPoints(active.id, -(active.increment || 1))}
             onReset={() => resetClassPoints(active.id)} />
         ) : (
-          <div className="md:grid md:grid-cols-2 md:gap-3 space-y-2 md:space-y-0">
+          <div className="space-y-1.5">
             {roster.map((s) => {
               const pts = studentData[s.id]?.points?.[active.id] || 0;
               const ready = pts >= active.threshold;
               return (
-                <div key={s.id} className="bg-white rounded-xl border border-stone-200 p-3">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-medium text-stone-800 text-sm">{s.name}</span>
-                    <span className="text-sm font-bold text-stone-800">{pts}{active.threshold ? ` / ${active.threshold}` : ""}</span>
-                  </div>
+                <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
+                  <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
+                  <span className="text-sm font-bold text-stone-800 w-12 shrink-0">{pts}{active.threshold ? ` / ${active.threshold}` : ""}</span>
                   {active.displayMode === "bar" && active.threshold > 0 && (
-                    <FillMeter value={pts} max={active.threshold} color={active.color} size="sm" />
+                    <div className="w-24 shrink-0"><FillMeter value={pts} max={active.threshold} color={active.color} size="sm" /></div>
                   )}
-                  {ready && <p className="text-xs text-amber-700 font-semibold mt-1.5 mb-2">🎉 Ready for reward</p>}
-                  <div className="flex gap-2 mt-2">
-                    <button onClick={() => addPoints(s.id, active.id, active.increment || 1)} className={`flex-1 flex items-center justify-center gap-1 text-xs font-semibold text-white bg-${active.color}-500 rounded-lg py-1.5 hover:opacity-90`}>
-                      <Plus size={12} /> {active.increment || 1}
-                    </button>
-                    <button onClick={() => addPoints(s.id, active.id, -(active.increment || 1))} className="px-2.5 flex items-center justify-center text-stone-400 border border-stone-200 rounded-lg hover:bg-stone-50">
+                  {ready && <span className="text-xs text-amber-700 font-semibold">🎉 Ready</span>}
+                  <div className="flex items-center gap-1.5 ml-auto">
+                    <button onClick={() => addPoints(s.id, active.id, -(active.increment || 1))} className="w-7 h-7 flex items-center justify-center text-stone-400 border border-stone-200 rounded-full hover:bg-stone-50">
                       <Minus size={12} />
+                    </button>
+                    <button onClick={() => addPoints(s.id, active.id, active.increment || 1)} className={`w-7 h-7 flex items-center justify-center text-white bg-${active.color}-500 rounded-full hover:opacity-90`}>
+                      <Plus size={12} />
                     </button>
                   </div>
                 </div>
@@ -2687,7 +2691,73 @@ function AssessmentRowsList({ rows, onOpenSkillDetail, onOpenClassAssessmentRepo
   );
 }
 
-function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail }) {
+function ContactInfoSection({ student, onUpdateField, onUpdateParentEmail }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasParent2 = student?.parent2Name || student?.parent2Email || student?.parent2Phone;
+
+  return (
+    <div className="mb-5 md:w-96 bg-white border border-stone-200 rounded-xl p-3">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-stone-500 uppercase">Contact info</p>
+        <button onClick={() => setExpanded((v) => !v)} className="text-xs font-semibold text-indigo-700 flex items-center gap-1">
+          {expanded ? "Show less" : "Show all"} {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+        </button>
+      </div>
+
+      <p className="text-xs font-semibold text-stone-400 uppercase mb-1">Parent / Guardian 1</p>
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+          <input defaultValue={student?.parent1Name || ""} onBlur={(e) => onUpdateField("parent1Name", e.target.value)}
+            placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        </div>
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+          <input type="tel" defaultValue={student?.parentPhone || ""} onBlur={(e) => onUpdateField("parentPhone", e.target.value)}
+            placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        </div>
+      </div>
+      <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
+      <input type="email" defaultValue={student?.parentEmail || ""} onBlur={(e) => onUpdateParentEmail(e.target.value)}
+        placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+
+      {!expanded && !hasParent2 && (
+        <p className="text-xs text-stone-400">Tap "Show all" for Parent 2, home address, and notes.</p>
+      )}
+
+      {expanded && (
+        <>
+          <p className="text-xs font-semibold text-stone-400 uppercase mb-1 pt-2 border-t border-stone-100">Parent / Guardian 2</p>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <div>
+              <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+              <input defaultValue={student?.parent2Name || ""} onBlur={(e) => onUpdateField("parent2Name", e.target.value)}
+                placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            </div>
+            <div>
+              <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+              <input type="tel" defaultValue={student?.parent2Phone || ""} onBlur={(e) => onUpdateField("parent2Phone", e.target.value)}
+                placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            </div>
+          </div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
+          <input type="email" defaultValue={student?.parent2Email || ""} onBlur={(e) => onUpdateField("parent2Email", e.target.value)}
+            placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+
+          <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
+          <input defaultValue={student?.homeAddress || ""} onBlur={(e) => onUpdateField("homeAddress", e.target.value)}
+            placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+
+          <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
+          <textarea defaultValue={student?.notes || ""} onBlur={(e) => onUpdateField("notes", e.target.value)} rows={2}
+            placeholder="Anything worth remembering" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        </>
+      )}
+    </div>
+  );
+}
+
+function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onUpdateField, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail }) {
   const flags = getFlags(data, student.id, incidents, config);
   const catMap = {};
   config.incidents.categories.forEach((c) => (catMap[c.id] = c));
@@ -2700,11 +2770,7 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Home</button>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{student?.name}</h1>
 
-      <div className="mb-5 md:w-80">
-        <label className="block text-xs font-medium text-stone-500 mb-1">Parent email</label>
-        <input type="email" defaultValue={student?.parentEmail || ""} onBlur={(e) => onUpdateParentEmail(e.target.value)}
-          placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-      </div>
+      <ContactInfoSection student={student} onUpdateField={onUpdateField} onUpdateParentEmail={onUpdateParentEmail} />
 
       {flags.length > 0 && (
         <div className="mb-6 space-y-2">
