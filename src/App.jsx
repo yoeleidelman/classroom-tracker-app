@@ -415,6 +415,7 @@ function getFlags(data, studentId, incidents, config) {
 export default function App() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [registry, setRegistry] = useState([]);
+  const [globalStudents, setGlobalStudents] = useState([]);
   const [classId, setClassId] = useState(null);
   const [className, setClassName] = useState("");
   const [isAdminSession, setIsAdminSession] = useState(false);
@@ -485,6 +486,47 @@ export default function App() {
     setRegistry(reg);
   };
 
+  const refreshGlobalStudents = async () => {
+    const gs = await loadJSON("globalStudents", [], true);
+    setGlobalStudents(gs);
+  };
+
+  const addGlobalStudent = async (fields) => {
+    const gs = await loadJSON("globalStudents", [], true);
+    const student = {
+      id: uid(), name: fields.name || "",
+      parent1Name: "", parentEmail: "", parentPhone: "",
+      parent2Name: "", parent2Email: "", parent2Phone: "",
+      homeAddress: "", notes: "",
+      ...fields,
+    };
+    const next = [...gs, student];
+    setGlobalStudents(next);
+    await saveJSON("globalStudents", next, true);
+    return student;
+  };
+
+  const updateGlobalStudent = async (id, field, value) => {
+    const gs = await loadJSON("globalStudents", [], true);
+    const next = gs.map((s) => (s.id === id ? { ...s, [field]: value } : s));
+    setGlobalStudents(next);
+    await saveJSON("globalStudents", next, true);
+  };
+
+  const archiveGlobalStudent = async (id) => {
+    const gs = await loadJSON("globalStudents", [], true);
+    const next = gs.map((s) => (s.id === id ? { ...s, archived: true } : s));
+    setGlobalStudents(next);
+    await saveJSON("globalStudents", next, true);
+  };
+
+  const restoreGlobalStudent = async (id) => {
+    const gs = await loadJSON("globalStudents", [], true);
+    const next = gs.map((s) => (s.id === id ? { ...s, archived: false } : s));
+    setGlobalStudents(next);
+    await saveJSON("globalStudents", next, true);
+  };
+
   const loginAdmin = async (password) => {
     const settings = await loadJSON("adminSettings", null, true);
     if (!settings) {
@@ -505,6 +547,10 @@ export default function App() {
     switchClass();
   };
 
+  const changeAdminPassword = async (newPassword) => {
+    await saveJSON("adminSettings", { password: newPassword }, true);
+  };
+
   const enterClassAsAdmin = (cls) => {
     setClassId(cls.id);
     setClassName(cls.name);
@@ -521,7 +567,8 @@ export default function App() {
   }
   if (!classId) {
     if (isAdminSession) {
-      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} />;
+      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onChangePassword={changeAdminPassword}
+        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} />;
     }
     return <ClassGateScreen registry={registry} onSelect={selectClass} onCreate={createClass} onRefresh={refreshRegistry} onLoginAdmin={loginAdmin} />;
   }
@@ -533,20 +580,43 @@ export default function App() {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
+  const [showPwChange, setShowPwChange] = useState(false);
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [pwSaved, setPwSaved] = useState(false);
+  const [studentSearch, setStudentSearch] = useState("");
+  const [newStudentName, setNewStudentName] = useState("");
+  const [expandedGlobalStudents, setExpandedGlobalStudents] = useState({});
   const activeClasses = registry.filter((c) => !c.archived);
   const archivedClasses = registry.filter((c) => c.archived);
+  const activeStudents = (globalStudents || []).filter((s) => !s.archived && s.name.toLowerCase().includes(studentSearch.toLowerCase()));
+  const archivedStudents = (globalStudents || []).filter((s) => s.archived);
 
-  useEffect(() => { onRefresh(); }, []); // eslint-disable-line
+  useEffect(() => { onRefresh(); onRefreshStudents(); }, []); // eslint-disable-line
 
   const submitCreate = async () => {
     if (!newName.trim() || !newPw.trim()) return;
     await onCreate(newName.trim(), newPw.trim());
     setNewName(""); setNewPw(""); setShowCreate(false);
     onRefresh();
+  };
+
+  const savePassword = async () => {
+    if (!pw1.trim() || pw1 !== pw2) return;
+    await onChangePassword(pw1.trim());
+    setPw1(""); setPw2(""); setPwSaved(true);
+    setTimeout(() => setPwSaved(false), 2500);
+  };
+
+  const submitNewStudent = async () => {
+    if (!newStudentName.trim()) return;
+    await onAddStudent({ name: newStudentName.trim() });
+    setNewStudentName("");
+    onRefreshStudents();
   };
 
   return (
@@ -603,6 +673,72 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         <p className="text-[10px] text-stone-400 text-center mt-6 leading-relaxed">
           Entering a class here gives full access to that class's data, same as its teacher sees \u2014 this is a soft admin gate, not enforced security.
         </p>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
+          <p className="text-sm font-semibold text-stone-800 mb-1">School-wide students</p>
+          <p className="text-xs text-stone-400 mb-3">Create students once here — teachers will be able to pull existing students into their own class instead of re-creating them. (Assigning students to classes is coming next; for now, this is where the shared list itself lives.)</p>
+
+          <input value={studentSearch} onChange={(e) => setStudentSearch(e.target.value)} placeholder="Search students..."
+            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+
+          <div className="flex gap-2 mb-3">
+            <input value={newStudentName} onChange={(e) => setNewStudentName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitNewStudent()}
+              placeholder="Add a new student's name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            <button onClick={submitNewStudent} className="bg-slate-700 text-white rounded-lg px-3 py-1.5 flex items-center justify-center hover:bg-slate-800"><Plus size={16} /></button>
+          </div>
+
+          {activeStudents.length === 0 && <p className="text-xs text-stone-400 mb-2">{studentSearch ? "No students match." : "No students yet — add one above."}</p>}
+          <div className="space-y-2 mb-4">
+            {activeStudents.map((s) => (
+              <div key={s.id} className="bg-white border border-stone-200 rounded-lg">
+                <div className="flex items-center gap-2 px-3 py-2">
+                  <input value={s.name} onChange={(e) => onUpdateStudent(s.id, "name", e.target.value)} className="flex-1 text-sm font-semibold text-stone-800 border-none focus:outline-none bg-transparent" />
+                  <button onClick={() => setExpandedGlobalStudents((p) => ({ ...p, [s.id]: !p[s.id] }))} className="text-stone-400 p-1">
+                    {expandedGlobalStudents[s.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                  </button>
+                  <ConfirmDelete onConfirm={() => onArchiveStudent(s.id)} size={14} />
+                </div>
+                {expandedGlobalStudents[s.id] && (
+                  <StudentContactFields student={s} onUpdateField={(id, field, value) => onUpdateStudent(id, field, value)} />
+                )}
+              </div>
+            ))}
+          </div>
+
+          {archivedStudents.length > 0 && (
+            <div className="mb-2">
+              <p className="text-xs font-semibold text-stone-400 uppercase mb-2">Archived students</p>
+              <ul className="space-y-2">
+                {archivedStudents.map((s) => (
+                  <li key={s.id} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-2.5">
+                    <span className="text-sm text-stone-500">{s.name}</span>
+                    <button onClick={() => onRestoreStudent(s.id)} className="text-xs font-semibold text-slate-700 hover:text-slate-900">Restore</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
+          {!showPwChange ? (
+            <button onClick={() => setShowPwChange(true)} className="w-full text-xs font-semibold text-stone-500 hover:text-slate-700 text-center">
+              Change admin password
+            </button>
+          ) : (
+            <div className="bg-white border border-stone-200 rounded-xl p-4">
+              <p className="text-sm font-semibold text-stone-800 mb-3">Change admin password</p>
+              <input type="password" value={pw1} onChange={(e) => setPw1(e.target.value)} placeholder="New password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+              <input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} placeholder="Confirm new password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+              {pw1 && pw2 && pw1 !== pw2 && <p className="text-xs text-red-500 mb-2">Passwords don't match.</p>}
+              {pwSaved && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
+              <div className="flex gap-2">
+                <button onClick={savePassword} disabled={!pw1.trim() || pw1 !== pw2} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">Update password</button>
+                <button onClick={() => setShowPwChange(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Close</button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1111,6 +1247,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   return (
     <ClassContext.Provider value={{ className, onSwitchClass, switchLabel }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Work Sans', sans-serif" }}>
+      <div style={{ height: "5px", width: "100%", background: "linear-gradient(90deg, #2D3A4A 0%, #2D3A4A 55%, #EB464D 100%)" }} />
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Work+Sans:wght@400;500;600&family=Frank+Ruhl+Libre:wght@500;700&display=swap');
         .display-font { font-family: 'Fraunces', serif; }
@@ -1356,7 +1493,7 @@ function Header({ navigate }) {
   return (
     <div className="flex items-center justify-between mb-2">
       <div className="flex items-center gap-2">
-        <img src="/logo-transparent.png" alt="" className="w-11 h-11 object-contain shrink-0" />
+        <img src="/logo-transparent.png" alt="" className="w-16 h-16 object-contain shrink-0 -my-2" />
         <div>
           <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
           {className && (
@@ -4920,6 +5057,49 @@ function MessageDraftView({ student, flag, onBack, onSaveParentEmail, onLogSent 
 
 // ---------- Settings ----------
 
+function StudentContactFields({ student, onUpdateField }) {
+  return (
+    <div className="px-3 pb-3 border-t border-stone-100 pt-2 md:grid md:grid-cols-2 md:gap-2">
+      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 1</p>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+        <input value={student.parent1Name || ""} onChange={(e) => onUpdateField(student.id, "parent1Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+        <input type="tel" value={student.parentPhone || ""} onChange={(e) => onUpdateField(student.id, "parentPhone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Email (primary contact)</label>
+        <input type="email" value={student.parentEmail || ""} onChange={(e) => onUpdateField(student.id, "parentEmail", e.target.value)} placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+
+      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 2</p>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+        <input value={student.parent2Name || ""} onChange={(e) => onUpdateField(student.id, "parent2Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+        <input type="tel" value={student.parent2Phone || ""} onChange={(e) => onUpdateField(student.id, "parent2Phone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
+        <input type="email" value={student.parent2Email || ""} onChange={(e) => onUpdateField(student.id, "parent2Email", e.target.value)} placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
+        <input value={student.homeAddress || ""} onChange={(e) => onUpdateField(student.id, "homeAddress", e.target.value)} placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
+        <textarea value={student.notes || ""} onChange={(e) => onUpdateField(student.id, "notes", e.target.value)} rows={2} placeholder="Anything worth remembering about this student" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+      </div>
+    </div>
+  );
+}
+
 function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -4996,44 +5176,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                     <ConfirmDelete onConfirm={() => removeStudent(s.id)} size={14} />
                   </div>
                   {expandedStudents[s.id] && (
-                    <div className="px-3 pb-3 border-t border-stone-100 pt-2 md:grid md:grid-cols-2 md:gap-2">
-                      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 1</p>
-                      <div>
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
-                        <input value={s.parent1Name || ""} onChange={(e) => updateStudentField(s.id, "parent1Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
-                        <input type="tel" value={s.parentPhone || ""} onChange={(e) => updateStudentField(s.id, "parentPhone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                      </div>
-                      <div className="md:col-span-2">
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Email (primary contact)</label>
-                        <input type="email" value={s.parentEmail || ""} onChange={(e) => updateStudentField(s.id, "parentEmail", e.target.value)} placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                      </div>
-
-                      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 2</p>
-                      <div>
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
-                        <input value={s.parent2Name || ""} onChange={(e) => updateStudentField(s.id, "parent2Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
-                        <input type="tel" value={s.parent2Phone || ""} onChange={(e) => updateStudentField(s.id, "parent2Phone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                      </div>
-                      <div className="md:col-span-2">
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
-                        <input type="email" value={s.parent2Email || ""} onChange={(e) => updateStudentField(s.id, "parent2Email", e.target.value)} placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                      </div>
-
-                      <div className="md:col-span-2">
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
-                        <input value={s.homeAddress || ""} onChange={(e) => updateStudentField(s.id, "homeAddress", e.target.value)} placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                      </div>
-                      <div className="md:col-span-2">
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
-                        <textarea value={s.notes || ""} onChange={(e) => updateStudentField(s.id, "notes", e.target.value)} rows={2} placeholder="Anything worth remembering about this student" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                      </div>
-                    </div>
+                    <StudentContactFields student={s} onUpdateField={(id, field, value) => updateStudentField(id, field, value)} />
                   )}
                 </div>
               ))}
