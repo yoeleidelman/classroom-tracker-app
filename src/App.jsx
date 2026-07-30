@@ -517,7 +517,7 @@ export default function App() {
   };
 
   if (checkingSession) {
-    return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-indigo-700" size={28} /></div>;
+    return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-slate-700" size={28} /></div>;
   }
   if (!classId) {
     if (isAdminSession) {
@@ -562,7 +562,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         <ul className="space-y-2 mb-6">
           {activeClasses.map((cls) => (
             <li key={cls.id}>
-              <button onClick={() => onEnterClass(cls)} className="w-full text-left bg-white border border-stone-200 rounded-xl px-4 py-3 text-sm font-semibold text-stone-800 hover:border-indigo-300 flex items-center justify-between">
+              <button onClick={() => onEnterClass(cls)} className="w-full text-left bg-white border border-stone-200 rounded-xl px-4 py-3 text-sm font-semibold text-stone-800 hover:border-slate-300 flex items-center justify-between">
                 {cls.name}
                 <ArrowRight size={14} className="text-stone-300" />
               </button>
@@ -577,7 +577,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               {archivedClasses.map((cls) => (
                 <li key={cls.id} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-3">
                   <span className="text-sm text-stone-500">{cls.name}</span>
-                  <button onClick={() => onRestore(cls.id)} className="text-xs font-semibold text-indigo-700 hover:text-indigo-900">Restore</button>
+                  <button onClick={() => onRestore(cls.id)} className="text-xs font-semibold text-slate-700 hover:text-slate-900">Restore</button>
                 </li>
               ))}
             </ul>
@@ -590,12 +590,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Class name" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
             <input value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="Set a password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
             <div className="flex gap-2">
-              <button onClick={submitCreate} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Create class</button>
+              <button onClick={submitCreate} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Create class</button>
               <button onClick={() => setShowCreate(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
             </div>
           </div>
         ) : (
-          <button onClick={() => setShowCreate(true)} className="w-full text-xs font-semibold text-indigo-700 flex items-center justify-center gap-1.5 py-2 border border-dashed border-indigo-300 rounded-xl">
+          <button onClick={() => setShowCreate(true)} className="w-full text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5 py-2 border border-dashed border-slate-300 rounded-xl">
             <Plus size={12} /> Create a new class
           </button>
         )}
@@ -642,14 +642,14 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   return (
     <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4 py-10">
       <div className="max-w-sm w-full">
-        <h1 className="display-font text-2xl font-bold text-stone-900 mb-1 text-center">Classroom Tracker</h1>
+        <img src="/logo-transparent.png" alt="Classroom Tracker" className="w-56 mx-auto mb-4" />
         <p className="text-stone-500 text-sm text-center mb-6">Select your class to continue</p>
 
         {!showCreate && registry.filter((c) => !c.archived).length > 0 && (
           <div className="space-y-2 mb-4">
             {registry.filter((c) => !c.archived).map((cls) => (
               <button key={cls.id} onClick={() => { setPendingClass(cls); setError(""); setPwInput(""); }}
-                className={`w-full text-left bg-white border rounded-xl px-4 py-3 text-sm font-semibold text-stone-800 hover:border-indigo-300 ${pendingClass?.id === cls.id ? "border-indigo-500" : "border-stone-200"}`}>
+                className={`w-full text-left bg-white border rounded-xl px-4 py-3 text-sm font-semibold text-stone-800 hover:border-slate-300 ${pendingClass?.id === cls.id ? "border-slate-500" : "border-stone-200"}`}>
                 {cls.name}
               </button>
             ))}
@@ -662,7 +662,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
             <input type="password" value={pwInput} onChange={(e) => setPwInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && tryUnlock()}
               autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" placeholder="Class password" />
             {error && <p className="text-xs text-red-500 mb-2">{error}</p>}
-            <button onClick={tryUnlock} className="w-full bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Enter</button>
+            <button onClick={tryUnlock} className="w-full bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Enter</button>
           </div>
         )}
 
@@ -672,12 +672,12 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
             <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Class name (e.g. Grade 1)" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
             <input value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="Set a password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
             <div className="flex gap-2">
-              <button onClick={submitCreate} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Create class</button>
+              <button onClick={submitCreate} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Create class</button>
               {registry.length > 0 && <button onClick={() => setShowCreate(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>}
             </div>
           </div>
         ) : (
-          <button onClick={() => { setShowCreate(true); setPendingClass(null); }} className="w-full text-xs font-semibold text-indigo-700 flex items-center justify-center gap-1.5 mt-2 py-2">
+          <button onClick={() => { setShowCreate(true); setPendingClass(null); }} className="w-full text-xs font-semibold text-slate-700 flex items-center justify-center gap-1.5 mt-2 py-2">
             <Plus size={12} /> Create a new class
           </button>
         )}
@@ -688,7 +688,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
 
         <div className="mt-6 pt-4 border-t border-stone-200">
           {!showAdminLogin ? (
-            <button onClick={() => setShowAdminLogin(true)} className="w-full text-xs font-semibold text-stone-400 hover:text-indigo-700 text-center">
+            <button onClick={() => setShowAdminLogin(true)} className="w-full text-xs font-semibold text-stone-400 hover:text-slate-700 text-center">
               Administration login
             </button>
           ) : (
@@ -1103,7 +1103,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const openMessageDraft = (flag) => { setMessageFlag(flag); setView("message-draft"); };
 
   if (loading) {
-    return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-indigo-700" size={28} /></div>;
+    return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-slate-700" size={28} /></div>;
   }
 
   return (
@@ -1208,6 +1208,12 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       {view === "monthly-reports" && (
         <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
           onBack={() => setView("home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
+          onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
+      )}
+
+      {view === "range-report" && (
+        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
+          onBack={() => setView("communication")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
@@ -1348,15 +1354,15 @@ function Header({ navigate }) {
   return (
     <div className="flex items-center justify-between mb-2">
       <div className="flex items-center gap-2">
-        <img src="/icon-192.png" alt="" className="w-8 h-8 rounded-lg shrink-0" />
+        <img src="/logo-transparent.png" alt="" className="w-11 h-11 object-contain shrink-0" />
         <div>
           <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
           {className && (
-            <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-indigo-700">{className} · {switchLabel || "Switch class"}</button>
+            <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-slate-700">{className} · {switchLabel || "Switch class"}</button>
           )}
         </div>
       </div>
-      <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-indigo-700 p-1.5 rounded-lg hover:bg-stone-100">
+      <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-stone-100">
         <SettingsIcon size={18} />
       </button>
     </div>
@@ -1378,7 +1384,7 @@ function MainTabs({ active, navigate }) {
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>
+            className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>
             <Icon size={14} /> {t.label}
           </button>
         );
@@ -1443,14 +1449,14 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
       )}
 
       {reminderDue && (
-        <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
+        <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
           <div>
-            <p className="text-sm font-semibold text-indigo-900">Monthly reports are ready to generate</p>
-            <p className="text-xs text-indigo-700">For {monthLabel(now.getFullYear(), now.getMonth())} — review and send whenever you're ready.</p>
+            <p className="text-sm font-semibold text-slate-900">Monthly reports are ready to generate</p>
+            <p className="text-xs text-slate-700">For {monthLabel(now.getFullYear(), now.getMonth())} — review and send whenever you're ready.</p>
           </div>
           <div className="flex gap-2 shrink-0">
-            <button onClick={() => navigate("monthly-reports")} className="text-xs font-semibold bg-indigo-700 text-white rounded-lg px-3 py-1.5 hover:bg-indigo-800">Generate now</button>
-            <button onClick={() => onDismissMonthlyReminder(thisMonthKey)} className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-1.5 hover:bg-indigo-100">Dismiss</button>
+            <button onClick={() => navigate("monthly-reports")} className="text-xs font-semibold bg-slate-700 text-white rounded-lg px-3 py-1.5 hover:bg-slate-800">Generate now</button>
+            <button onClick={() => onDismissMonthlyReminder(thisMonthKey)} className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 py-1.5 hover:bg-slate-100">Dismiss</button>
           </div>
         </div>
       )}
@@ -1489,7 +1495,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
               <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
                 <div className="flex items-center gap-3">
                   {individualPointCats.length > 0 && (
-                    <button onClick={() => { setMultiSelect((v) => !v); setSelectedIds([]); }} className="text-xs font-semibold text-indigo-700 flex items-center gap-1">
+                    <button onClick={() => { setMultiSelect((v) => !v); setSelectedIds([]); }} className="text-xs font-semibold text-slate-700 flex items-center gap-1">
                       {multiSelect ? "Done selecting" : "Select multiple students"}
                     </button>
                   )}
@@ -1509,14 +1515,14 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 const isExpanded = expandedAttendance.includes(s.id);
                 const showFullPicker = !entry || isExpanded;
                 return (
-                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 ${isSelected ? "border-indigo-400 ring-1 ring-indigo-200" : "border-stone-200"}`}>
+                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 ${isSelected ? "border-slate-400 ring-1 ring-slate-200" : "border-stone-200"}`}>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                       {multiSelect && (
                         <input type="checkbox" checked={isSelected}
                           onChange={() => setSelectedIds((prev) => (isSelected ? prev.filter((id) => id !== s.id) : [...prev, s.id]))}
                           className="w-4 h-4 shrink-0" />
                       )}
-                      <button onClick={() => openDetail(s.id)} className="font-medium text-stone-800 text-sm hover:text-indigo-700 flex items-center gap-1.5 shrink-0 text-left whitespace-nowrap w-36">
+                      <button onClick={() => openDetail(s.id)} className="font-medium text-stone-800 text-sm hover:text-slate-700 flex items-center gap-1.5 shrink-0 text-left whitespace-nowrap w-36">
                         <span className="truncate">{s.name}</span>
                         {flags.length > 0 && (
                           <span className="flex items-center gap-0.5 text-amber-700 bg-amber-50 text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0">
@@ -1578,7 +1584,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
               })}
             </ul>
             {multiSelect && selectedIds.length > 0 && (
-              <div className="sticky bottom-3 mt-3 bg-white border border-indigo-200 shadow-lg rounded-xl p-3 flex flex-wrap items-center gap-2">
+              <div className="sticky bottom-3 mt-3 bg-white border border-slate-200 shadow-lg rounded-xl p-3 flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold text-stone-700">Award to {selectedIds.length} selected:</span>
                 {individualPointCats.map((cat) => (
                   <button key={cat.id} onClick={() => selectedIds.forEach((id) => addPoints(id, cat.id, cat.increment || 1))}
@@ -1636,12 +1642,12 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
 
       {!dayType && (
         <p className="text-xs text-stone-400 bg-stone-100 rounded-lg px-3 py-4 text-center">
-          No day type set for today. <button onClick={() => navigate("planner")} className="text-indigo-700 font-semibold underline">Set it in Planner</button>
+          No day type set for today. <button onClick={() => navigate("planner")} className="text-slate-700 font-semibold underline">Set it in Planner</button>
         </p>
       )}
       {dayType && !template && (
         <p className="text-xs text-stone-400 bg-stone-100 rounded-lg px-3 py-4 text-center">
-          "{dayType.label}" has no schedule template assigned. <button onClick={() => navigate("planner")} className="text-indigo-700 font-semibold underline">Set one up</button>
+          "{dayType.label}" has no schedule template assigned. <button onClick={() => navigate("planner")} className="text-slate-700 font-semibold underline">Set one up</button>
         </p>
       )}
       {template && template.length > 0 && (
@@ -1669,7 +1675,7 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
           ))}
         </div>
       )}
-      <button onClick={() => navigate("planner")} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mt-3">
+      <button onClick={() => navigate("planner")} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-3">
         Open full planner <ArrowRight size={11} />
       </button>
     </div>
@@ -1779,7 +1785,7 @@ function TimerWidget() {
       <div className="flex items-center justify-center gap-1.5 mb-3">
         {RINGTONES.map((r) => (
           <button key={r.id} onClick={() => setRingtone(r.id)}
-            className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${ringtone === r.id ? "bg-indigo-600 text-white border-indigo-600" : "text-stone-500 border-stone-300"}`}>
+            className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${ringtone === r.id ? "bg-slate-600 text-white border-slate-600" : "text-stone-500 border-stone-300"}`}>
             {r.label}
           </button>
         ))}
@@ -1792,11 +1798,11 @@ function TimerWidget() {
         ))}
         <input value={customMin} onChange={(e) => setCustomMin(e.target.value)} onKeyDown={(e) => e.key === "Enter" && setCustom()}
           placeholder="min" className="w-14 rounded-full border border-stone-300 px-2 py-1 text-xs text-center" />
-        <button onClick={setCustom} className="text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-full px-3 py-1 hover:bg-indigo-50">Set</button>
+        <button onClick={setCustom} className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-full px-3 py-1 hover:bg-slate-50">Set</button>
       </div>
       <div className="flex gap-2">
         {!running ? (
-          <button onClick={start} disabled={remaining === 0} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40">Start</button>
+          <button onClick={start} disabled={remaining === 0} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">Start</button>
         ) : (
           <button onClick={pause} className="flex-1 bg-amber-500 text-white rounded-lg py-2 text-sm font-semibold hover:bg-amber-600">Pause</button>
         )}
@@ -1931,7 +1937,7 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
                   {periodAttTypeMap[pa.typeId]?.label || pa.typeId}
                 </span>
                 <span className="text-stone-600">{pa.studentName}</span>
-                <span className="text-stone-400"> · {pa.time}</span>
+                <span className="text-stone-400"> · {pa.time}{pa.minutesLate ? ` · ${pa.minutesLate} min late` : ""}</span>
               </li>
             ))}
           </ul>
@@ -1975,8 +1981,8 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
       <MainTabs active="points" navigate={navigate} />
 
       <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-72">
-        <button onClick={() => setSubTab("rewards")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "rewards" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Rewards</button>
-        <button onClick={() => setSubTab("classlog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "classlog" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Class Log</button>
+        <button onClick={() => setSubTab("rewards")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "rewards" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Rewards</button>
+        <button onClick={() => setSubTab("classlog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "classlog" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Class Log</button>
       </div>
 
       {subTab === "classlog" ? (
@@ -1991,7 +1997,7 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
           </button>
         ))}
         <button onClick={() => setShowForm(true)}
-          className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showForm ? "bg-indigo-700 text-white border-indigo-700" : "text-indigo-700 border-indigo-300"}`}>
+          className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showForm ? "bg-slate-700 text-white border-slate-700" : "text-slate-700 border-slate-300"}`}>
           <Plus size={12} /> Add category
         </button>
       </div>
@@ -2042,7 +2048,7 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
             placeholder="e.g. Pizza party" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
 
           <div className="flex gap-2">
-            <button onClick={submitForm} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Create category</button>
+            <button onClick={submitForm} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Create category</button>
             {cats.length > 0 && <button onClick={() => setShowForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>}
           </div>
         </div>
@@ -2166,8 +2172,8 @@ function ClassLogView({ config, plannerDays, behaviorLogData, adjustBehaviorMark
         )}
         {(summaryMode === "weekly" || summaryMode === "both") && (
           <div className="flex gap-1 bg-stone-100 rounded-lg p-1 ml-auto">
-            <button onClick={() => setSummaryView("day")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${summaryView === "day" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Today</button>
-            <button onClick={() => setSummaryView("week")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${summaryView === "week" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>This Week</button>
+            <button onClick={() => setSummaryView("day")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${summaryView === "day" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Today</button>
+            <button onClick={() => setSummaryView("week")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${summaryView === "week" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>This Week</button>
           </div>
         )}
       </div>
@@ -2228,8 +2234,8 @@ function ClassLogView({ config, plannerDays, behaviorLogData, adjustBehaviorMark
           </div>
 
           {(summaryMode === "daily" || summaryMode === "both") && (
-            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3">
-              <p className="text-xs font-semibold text-indigo-900 mb-1.5">Today's totals</p>
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+              <p className="text-xs font-semibold text-slate-900 mb-1.5">Today's totals</p>
               <div className="flex gap-4">
                 {markTypes.map((m) => (
                   <span key={m.id} className="text-sm">
@@ -2287,7 +2293,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
       <div className="mb-6">
         <div className="flex items-center justify-between mb-2">
           <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Your class's assessments</p>
-          <button onClick={() => setShowAdd((v) => !v)} className="text-xs font-semibold text-indigo-700 flex items-center gap-1">
+          <button onClick={() => setShowAdd((v) => !v)} className="text-xs font-semibold text-slate-700 flex items-center gap-1">
             <Plus size={12} /> {showAdd ? "Close" : "Add assessment"}
           </button>
         </div>
@@ -2299,7 +2305,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
           <div className="flex flex-wrap gap-1.5 mb-2">
             {activeCats.map((cat) => (
               <span key={cat.id} className="flex items-center gap-1.5 bg-white border border-stone-200 rounded-full pl-1 pr-1.5 py-1">
-                <button onClick={() => openSkillCategoryReport(cat.id)} title="See the whole class's results" className="text-xs font-semibold text-stone-700 hover:text-indigo-700 px-2 py-0.5">
+                <button onClick={() => openSkillCategoryReport(cat.id)} title="See the whole class's results" className="text-xs font-semibold text-stone-700 hover:text-slate-700 px-2 py-0.5">
                   {cat.title}
                 </button>
                 <button onClick={() => hideAssessment(cat.id)} title="Hide from class" className="text-stone-300 hover:text-red-500 w-4 h-4 flex items-center justify-center text-sm leading-none">
@@ -2326,7 +2332,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
               const rows = buildUnifiedAssessmentRows(s, studentData[s.id] || emptyStudentData(), classAssessments, config).filter((r) => r.sortDate !== "0000-00-00");
               const lastDate = rows[0]?.sortDate;
               return (
-                <li key={s.id} onClick={() => openStudent(s.id)} className="bg-white rounded-xl border border-stone-200 px-4 py-3 flex items-center justify-between cursor-pointer hover:border-indigo-300">
+                <li key={s.id} onClick={() => openStudent(s.id)} className="bg-white rounded-xl border border-stone-200 px-4 py-3 flex items-center justify-between cursor-pointer hover:border-slate-300">
                   <div>
                     <span className="font-medium text-stone-800 block">{s.name}</span>
                     <span className="text-xs text-stone-400">{rows.length} recorded{lastDate ? ` · last ${lastDate}` : ""}</span>
@@ -2342,7 +2348,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
         </div>
 
         <div className="mt-6 md:mt-0">
-          <button onClick={openClassAssessment} className="w-full mb-4 flex items-center justify-center gap-2 bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800">
+          <button onClick={openClassAssessment} className="w-full mb-4 flex items-center justify-center gap-2 bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800">
             <Plus size={16} /> Log an assessment
           </button>
           <p className="text-xs text-stone-400 mb-2 font-semibold uppercase tracking-wide">Recent class assessments</p>
@@ -2356,7 +2362,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
                 </div>
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-stone-400">{Object.keys(ca.results || {}).length} students graded</span>
-                  <button onClick={() => openAssessmentReport(ca.id)} className="text-indigo-700 font-semibold hover:text-indigo-900">Generate parent reports</button>
+                  <button onClick={() => openAssessmentReport(ca.id)} className="text-slate-700 font-semibold hover:text-slate-900">Generate parent reports</button>
                 </div>
               </li>
             ))}
@@ -2412,8 +2418,8 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-4 mb-2">
       <div className="flex gap-1 bg-stone-100 rounded-lg p-1 mb-4 md:w-72">
-        <button onClick={() => setTab("library")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${tab === "library" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>From library</button>
-        <button onClick={() => setTab("create")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${tab === "create" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Create new</button>
+        <button onClick={() => setTab("library")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${tab === "library" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>From library</button>
+        <button onClick={() => setTab("create")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${tab === "create" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Create new</button>
       </div>
 
       {tab === "library" ? (
@@ -2423,7 +2429,7 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
             {libraryCats.map((cat) => (
               <li key={cat.id} className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-2">
                 <span className="text-sm font-medium text-stone-700">{cat.title} <span className="text-stone-400 font-normal">· {cat.items.length} items</span></span>
-                <button onClick={() => onActivate(cat.id)} className="text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 hover:bg-indigo-50">Add to class</button>
+                <button onClick={() => onActivate(cat.id)} className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50">Add to class</button>
               </li>
             ))}
           </ul>
@@ -2441,7 +2447,7 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
 
           <div className="flex items-center justify-between mb-1">
             <label className="block text-xs font-medium text-stone-500">Items</label>
-            <button onClick={() => setShowBulkAdd((v) => !v)} className="text-xs font-semibold text-indigo-700">
+            <button onClick={() => setShowBulkAdd((v) => !v)} className="text-xs font-semibold text-slate-700">
               {showBulkAdd ? "Add one at a time instead" : "Bulk add from a list"}
             </button>
           </div>
@@ -2464,12 +2470,12 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
                 placeholder={mode === "char" ? "Alef, א\nBeis, ב\nGimmel, ג" : "cat\ndog\nhouse"}
                 className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
               <div className="flex items-center gap-2 mb-3">
-                <label className="text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 cursor-pointer hover:bg-indigo-50">
+                <label className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 cursor-pointer hover:bg-slate-50">
                   Upload a file instead
                   <input type="file" accept=".txt,.csv" className="hidden" onChange={(e) => handleBulkFile(e.target.files[0])} />
                 </label>
               </div>
-              <button onClick={addBulkItems} disabled={!bulkText.trim()} className="w-full bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40">
+              <button onClick={addBulkItems} disabled={!bulkText.trim()} className="w-full bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
                 Add these items
               </button>
             </div>
@@ -2488,7 +2494,7 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
           )}
 
           <div className="flex gap-2">
-            <button onClick={submitCreate} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Save assessment</button>
+            <button onClick={submitCreate} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Save assessment</button>
             <button onClick={onCancel} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
           </div>
         </div>
@@ -2530,14 +2536,14 @@ function ClassAssessmentForm({ roster, onCancel, onSave }) {
 
       <div className="flex items-center justify-between mb-2">
         <label className="block text-sm font-semibold text-stone-700">Who took this assessment?</label>
-        <button onClick={toggleAll} className="text-xs font-semibold text-indigo-700 hover:text-indigo-900">{allSelected ? "Deselect all" : "Select all"}</button>
+        <button onClick={toggleAll} className="text-xs font-semibold text-slate-700 hover:text-slate-900">{allSelected ? "Deselect all" : "Select all"}</button>
       </div>
       <div className="flex flex-wrap gap-1.5 mb-4">
         {roster.map((s) => {
           const sel = selectedIds.includes(s.id);
           return (
             <button key={s.id} onClick={() => toggleStudent(s.id)}
-              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${sel ? "bg-indigo-700 text-white border-indigo-700" : "text-stone-600 border-stone-300"}`}>
+              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${sel ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
               {s.name}
             </button>
           );
@@ -2556,7 +2562,7 @@ function ClassAssessmentForm({ roster, onCancel, onSave }) {
         ))}
       </div>
       <button onClick={submit} disabled={selectedIds.length === 0}
-        className="w-full mt-4 bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40">
+        className="w-full mt-4 bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
         Save assessment
       </button>
     </div>
@@ -2569,7 +2575,7 @@ function AssessmentEntryView({ student, data, config, classAssessments, onBack, 
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Assessments</button>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-4">{student?.name}</h1>
-      <button onClick={onLogFluency} className="w-full md:w-72 mb-5 flex items-center justify-center gap-2 bg-indigo-50 text-indigo-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-100">
+      <button onClick={onLogFluency} className="w-full md:w-72 mb-5 flex items-center justify-center gap-2 bg-slate-50 text-slate-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-100">
         <Mic size={16} /> Log fluency check
       </button>
       {activeCats.length === 0 && (
@@ -2591,11 +2597,11 @@ function AssessmentEntryView({ student, data, config, classAssessments, onBack, 
                   const status = skill?.status || "new";
                   const color = status === "mastered" ? `bg-${config.statusColors.mastered}-500`
                     : status === "flagged" ? `bg-${config.statusColors.flagged}-500`
-                    : status === "practicing" ? "bg-indigo-300" : "bg-stone-200";
+                    : status === "practicing" ? "bg-slate-300" : "bg-stone-200";
                   return <span key={it.id} title={it.label} className={`w-2.5 h-2.5 rounded-full ${color}`} />;
                 })}
               </div>
-              <button onClick={() => onStartSession(cat.id)} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 hover:text-indigo-900">
+              <button onClick={() => onStartSession(cat.id)} className="text-xs font-semibold text-slate-700 flex items-center gap-1 hover:text-slate-900">
                 Start session <ArrowRight size={12} />
               </button>
             </div>
@@ -2692,18 +2698,8 @@ function AssessmentRowsList({ rows, onOpenSkillDetail, onOpenClassAssessmentRepo
 }
 
 function ContactInfoSection({ student, onUpdateField, onUpdateParentEmail }) {
-  const [expanded, setExpanded] = useState(false);
-  const hasParent2 = student?.parent2Name || student?.parent2Email || student?.parent2Phone;
-
   return (
-    <div className="mb-5 md:w-96 bg-white border border-stone-200 rounded-xl p-3">
-      <div className="flex items-center justify-between mb-2">
-        <p className="text-xs font-semibold text-stone-500 uppercase">Contact info</p>
-        <button onClick={() => setExpanded((v) => !v)} className="text-xs font-semibold text-indigo-700 flex items-center gap-1">
-          {expanded ? "Show less" : "Show all"} {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-        </button>
-      </div>
-
+    <div>
       <p className="text-xs font-semibold text-stone-400 uppercase mb-1">Parent / Guardian 1</p>
       <div className="grid grid-cols-2 gap-2 mb-2">
         <div>
@@ -2719,45 +2715,38 @@ function ContactInfoSection({ student, onUpdateField, onUpdateParentEmail }) {
       </div>
       <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
       <input type="email" defaultValue={student?.parentEmail || ""} onBlur={(e) => onUpdateParentEmail(e.target.value)}
-        placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+        placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
 
-      {!expanded && !hasParent2 && (
-        <p className="text-xs text-stone-400">Tap "Show all" for Parent 2, home address, and notes.</p>
-      )}
+      <p className="text-xs font-semibold text-stone-400 uppercase mb-1 pt-3 border-t border-stone-100">Parent / Guardian 2</p>
+      <div className="grid grid-cols-2 gap-2 mb-2">
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+          <input defaultValue={student?.parent2Name || ""} onBlur={(e) => onUpdateField("parent2Name", e.target.value)}
+            placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        </div>
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+          <input type="tel" defaultValue={student?.parent2Phone || ""} onBlur={(e) => onUpdateField("parent2Phone", e.target.value)}
+            placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        </div>
+      </div>
+      <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
+      <input type="email" defaultValue={student?.parent2Email || ""} onBlur={(e) => onUpdateField("parent2Email", e.target.value)}
+        placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
 
-      {expanded && (
-        <>
-          <p className="text-xs font-semibold text-stone-400 uppercase mb-1 pt-2 border-t border-stone-100">Parent / Guardian 2</p>
-          <div className="grid grid-cols-2 gap-2 mb-2">
-            <div>
-              <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
-              <input defaultValue={student?.parent2Name || ""} onBlur={(e) => onUpdateField("parent2Name", e.target.value)}
-                placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-            </div>
-            <div>
-              <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
-              <input type="tel" defaultValue={student?.parent2Phone || ""} onBlur={(e) => onUpdateField("parent2Phone", e.target.value)}
-                placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-            </div>
-          </div>
-          <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
-          <input type="email" defaultValue={student?.parent2Email || ""} onBlur={(e) => onUpdateField("parent2Email", e.target.value)}
-            placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+      <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
+      <input defaultValue={student?.homeAddress || ""} onBlur={(e) => onUpdateField("homeAddress", e.target.value)}
+        placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
 
-          <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
-          <input defaultValue={student?.homeAddress || ""} onBlur={(e) => onUpdateField("homeAddress", e.target.value)}
-            placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
-
-          <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
-          <textarea defaultValue={student?.notes || ""} onBlur={(e) => onUpdateField("notes", e.target.value)} rows={2}
-            placeholder="Anything worth remembering" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-        </>
-      )}
+      <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
+      <textarea defaultValue={student?.notes || ""} onBlur={(e) => onUpdateField("notes", e.target.value)} rows={2}
+        placeholder="Anything worth remembering" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
     </div>
   );
 }
 
 function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onUpdateField, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail }) {
+  const [showContact, setShowContact] = useState(false);
   const flags = getFlags(data, student.id, incidents, config);
   const catMap = {};
   config.incidents.categories.forEach((c) => (catMap[c.id] = c));
@@ -2767,130 +2756,153 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
 
   return (
     <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Home</button>
-      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{student?.name}</h1>
+      <div className={`content-shift ${showContact ? "open" : ""}`}>
+        <div className="flex items-center justify-between mb-1">
+          <button onClick={onBack} className="flex items-center text-stone-500 text-sm hover:text-stone-800"><ChevronLeft size={16} /> Home</button>
+          <button onClick={() => setShowContact(true)} className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50">
+            Contact info
+          </button>
+        </div>
+        <h1 className="display-font text-2xl font-bold text-stone-900 mb-4">{student?.name}</h1>
 
-      <ContactInfoSection student={student} onUpdateField={onUpdateField} onUpdateParentEmail={onUpdateParentEmail} />
-
-      {flags.length > 0 && (
-        <div className="mb-6 space-y-2">
-          {flags.map((f) => (
-            <div key={f.key} className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold text-amber-900">{f.label}</p>
-                  <p className="text-xs text-amber-700 mt-0.5">{f.message}</p>
-                </div>
-                <div className="flex flex-col items-end gap-1 shrink-0">
-                  {f.type !== "points" && (
-                    <button onClick={() => onDraftMessage(f)} className="flex items-center gap-1 text-xs whitespace-nowrap bg-indigo-700 text-white rounded-md px-2 py-1 hover:bg-indigo-800">
-                      <Mail size={11} /> Draft message
-                    </button>
-                  )}
-                  {(f.type === "skill" || f.type === "points") && (
-                    <button onClick={() => onAcknowledge(f.key)} className="text-xs whitespace-nowrap bg-white border border-amber-300 text-amber-800 rounded-md px-2 py-1 hover:bg-amber-100">
-                      {f.type === "points" ? "Redeem & reset" : "Mark addressed"}
-                    </button>
-                  )}
+        {flags.length > 0 && (
+          <div className="mb-6 space-y-2">
+            {flags.map((f) => (
+              <div key={f.key} className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-amber-900">{f.label}</p>
+                    <p className="text-xs text-amber-700 mt-0.5">{f.message}</p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1 shrink-0">
+                    {f.type !== "points" && (
+                      <button onClick={() => onDraftMessage(f)} className="flex items-center gap-1 text-xs whitespace-nowrap bg-slate-700 text-white rounded-md px-2 py-1 hover:bg-slate-800">
+                        <Mail size={11} /> Draft message
+                      </button>
+                    )}
+                    {(f.type === "skill" || f.type === "points") && (
+                      <button onClick={() => onAcknowledge(f.key)} className="text-xs whitespace-nowrap bg-white border border-amber-300 text-amber-800 rounded-md px-2 py-1 hover:bg-amber-100">
+                        {f.type === "points" ? "Redeem & reset" : "Mark addressed"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
 
-      <div className="flex gap-2 mb-6 md:w-96 flex-wrap">
-        <button onClick={onGoToAssessments} className="flex-1 flex items-center justify-center gap-2 bg-indigo-50 text-indigo-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-100">
-          <BookOpen size={16} /> Assessments
-        </button>
-        <button onClick={onLogIncident} className="flex-1 flex items-center justify-center gap-2 bg-rose-50 text-rose-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-rose-100">
-          <ClipboardList size={16} /> Log incident
-        </button>
-        <button onClick={onLogPeriodAttendance} className="flex-1 flex items-center justify-center gap-2 bg-amber-50 text-amber-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-amber-100">
-          <Calendar size={16} /> Period attendance
-        </button>
+        <div className="flex gap-2 mb-6 md:w-96 flex-wrap">
+          <button onClick={onGoToAssessments} className="flex-1 flex items-center justify-center gap-2 bg-slate-50 text-slate-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-100">
+            <BookOpen size={16} /> Assessments
+          </button>
+          <button onClick={onLogIncident} className="flex-1 flex items-center justify-center gap-2 bg-rose-50 text-rose-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-rose-100">
+            <ClipboardList size={16} /> Log incident
+          </button>
+          <button onClick={onLogPeriodAttendance} className="flex-1 flex items-center justify-center gap-2 bg-amber-50 text-amber-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-amber-100">
+            <Calendar size={16} /> Period attendance
+          </button>
+        </div>
+
+        <div className="md:flex md:gap-6 md:items-start">
+          <div className="flex-1 space-y-4">
+            <Section title="Attendance history">
+              {attendanceHistory.length === 0 && <p className="text-xs text-stone-400">No attendance logged yet.</p>}
+              <ul className="space-y-1.5 max-h-64 overflow-y-auto">
+                {attendanceHistory.map((a) => {
+                  const st = config.attendance.statuses.find((x) => x.id === a.status);
+                  return (
+                    <li key={a.date} className="flex items-center justify-between text-xs">
+                      <span className="text-stone-600">{a.date}</span>
+                      <span className="flex items-center gap-2">
+                        {a.time && <span className="text-stone-400">{a.time}</span>}
+                        <span className={`px-2 py-0.5 rounded-full font-semibold bg-${st?.color || "stone"}-100 text-${st?.color || "stone"}-700`}>{st?.label || a.status}</span>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </Section>
+
+            <Section title="Period attendance">
+              <p className="text-[10px] text-stone-400 mb-2">Separate from morning attendance — mid-day changes only.</p>
+              {(data.periodAttendance || []).length === 0 && <p className="text-xs text-stone-400">None logged.</p>}
+              <ul className="space-y-1.5 max-h-56 overflow-y-auto">
+                {(data.periodAttendance || []).map((pa) => {
+                  const t = config.periodAttendance.types.find((x) => x.id === pa.typeId);
+                  const periodLabel = pa.periodId ? (config.planner?.fullDaySchedule || []).concat(config.planner?.halfDaySchedule || []).find((p) => p.id === pa.periodId)?.label : null;
+                  return (
+                    <li key={pa.id} className="text-xs border-l-2 border-stone-200 pl-2 py-0.5">
+                      <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${t?.color || "stone"}-100 text-${t?.color || "stone"}-700`}>
+                        {t?.label || pa.typeId}
+                      </span>
+                      <span className="text-stone-400">{pa.date} {pa.time}{periodLabel ? ` · ${periodLabel}` : ""}{pa.minutesLate ? ` · ${pa.minutesLate} min late` : ""}</span>
+                      {pa.notes && <p className="text-stone-600 mt-0.5">{pa.notes}</p>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </Section>
+
+            {individualPointCats.length > 0 && (
+              <Section title="Points">
+                <ul className="space-y-1.5">
+                  {individualPointCats.map((c) => (
+                    <li key={c.id} className="flex items-center justify-between text-xs">
+                      <span className="text-stone-700">{c.label}</span>
+                      <span className="font-semibold text-stone-800">{data.points?.[c.id] || 0}{c.threshold ? ` / ${c.threshold}` : ""}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            )}
+          </div>
+
+          <div className="flex-1 space-y-4 mt-4 md:mt-0">
+            <Section title="Incidents">
+              {myIncidents.length === 0 && <p className="text-xs text-stone-400">None logged.</p>}
+              <ul className="space-y-1">
+                {myIncidents.map((inc) => (
+                  <li key={inc.id}>
+                    <button onClick={() => onOpenIncidentDetail(inc.id)} className="w-full text-left border-l-2 border-stone-200 pl-2 py-1 hover:bg-stone-50 rounded-r-lg">
+                      <div className="flex items-center justify-between">
+                        <span>
+                          <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${catMap[inc.category]?.color || "stone"}-100 text-${catMap[inc.category]?.color || "stone"}-700`}>
+                            {catMap[inc.category]?.label || inc.category || "Uncategorized"}
+                          </span>
+                          <span className="text-stone-400 text-xs">{inc.date}</span>
+                          {inc.studentIds?.length > 1 && <span className="text-stone-400 text-xs"> · involved {inc.studentIds.length} students</span>}
+                        </span>
+                        <ArrowRight size={11} className="text-stone-300 shrink-0" />
+                      </div>
+                      {inc.description && <p className="text-stone-600 text-xs mt-0.5">{inc.description}</p>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </Section>
+
+            <Section title="Assessments">
+              <AssessmentRowsList rows={buildUnifiedAssessmentRows(student, data, classAssessments, config)}
+                onOpenSkillDetail={onOpenSkillDetail} onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail}
+                emptyText="No assessments active for this class yet." />
+            </Section>
+          </div>
+        </div>
       </div>
 
-      <div className="md:grid md:grid-cols-2 md:gap-x-6 md:items-start">
-        <Section title="Attendance history">
-          {attendanceHistory.length === 0 && <p className="text-xs text-stone-400">No attendance logged yet.</p>}
-          <ul className="space-y-1.5 max-h-64 overflow-y-auto">
-            {attendanceHistory.map((a) => {
-              const st = config.attendance.statuses.find((x) => x.id === a.status);
-              return (
-                <li key={a.date} className="flex items-center justify-between text-xs">
-                  <span className="text-stone-600">{a.date}</span>
-                  <span className="flex items-center gap-2">
-                    {a.time && <span className="text-stone-400">{a.time}</span>}
-                    <span className={`px-2 py-0.5 rounded-full font-semibold bg-${st?.color || "stone"}-100 text-${st?.color || "stone"}-700`}>{st?.label || a.status}</span>
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </Section>
-
-        <Section title="Incidents">
-          {myIncidents.length === 0 && <p className="text-xs text-stone-400">None logged.</p>}
-          <ul className="space-y-1">
-            {myIncidents.map((inc) => (
-              <li key={inc.id}>
-                <button onClick={() => onOpenIncidentDetail(inc.id)} className="w-full text-left border-l-2 border-stone-200 pl-2 py-1 hover:bg-stone-50 rounded-r-lg">
-                  <div className="flex items-center justify-between">
-                    <span>
-                      <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${catMap[inc.category]?.color || "stone"}-100 text-${catMap[inc.category]?.color || "stone"}-700`}>
-                        {catMap[inc.category]?.label || inc.category || "Uncategorized"}
-                      </span>
-                      <span className="text-stone-400 text-xs">{inc.date}</span>
-                      {inc.studentIds?.length > 1 && <span className="text-stone-400 text-xs"> · involved {inc.studentIds.length} students</span>}
-                    </span>
-                    <ArrowRight size={11} className="text-stone-300 shrink-0" />
-                  </div>
-                  {inc.description && <p className="text-stone-600 text-xs mt-0.5">{inc.description}</p>}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </Section>
-
-        <Section title="Period attendance">
-          <p className="text-[10px] text-stone-400 mb-2">Separate from morning attendance — mid-day changes only.</p>
-          {(data.periodAttendance || []).length === 0 && <p className="text-xs text-stone-400">None logged.</p>}
-          <ul className="space-y-1.5 max-h-56 overflow-y-auto">
-            {(data.periodAttendance || []).map((pa) => {
-              const t = config.periodAttendance.types.find((x) => x.id === pa.typeId);
-              const periodLabel = pa.periodId ? (config.planner?.fullDaySchedule || []).concat(config.planner?.halfDaySchedule || []).find((p) => p.id === pa.periodId)?.label : null;
-              return (
-                <li key={pa.id} className="text-xs border-l-2 border-stone-200 pl-2 py-0.5">
-                  <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${t?.color || "stone"}-100 text-${t?.color || "stone"}-700`}>
-                    {t?.label || pa.typeId}
-                  </span>
-                  <span className="text-stone-400">{pa.date} {pa.time}{periodLabel ? ` · ${periodLabel}` : ""}</span>
-                  {pa.notes && <p className="text-stone-600 mt-0.5">{pa.notes}</p>}
-                </li>
-              );
-            })}
-          </ul>
-        </Section>
-
-        <Section title="Assessments">
-          <AssessmentRowsList rows={buildUnifiedAssessmentRows(student, data, classAssessments, config)}
-            onOpenSkillDetail={onOpenSkillDetail} onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail}
-            emptyText="No assessments active for this class yet." />
-        </Section>
-
-        {individualPointCats.length > 0 && (
-          <Section title="Points">
-            <ul className="space-y-1.5">
-              {individualPointCats.map((c) => (
-                <li key={c.id} className="flex items-center justify-between text-xs">
-                  <span className="text-stone-700">{c.label}</span>
-                  <span className="font-semibold text-stone-800">{data.points?.[c.id] || 0}{c.threshold ? ` / ${c.threshold}` : ""}</span>
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
+      {showContact && (
+        <div onClick={() => setShowContact(false)} className="lg:hidden" style={{ position: "fixed", top: 0, right: 0, bottom: 0, left: 0, backgroundColor: "rgba(0,0,0,0.2)", zIndex: 30 }} />
+      )}
+      <div className="w-full sm:w-96 lg:w-1/2 bg-stone-50 border-l border-stone-200 shadow-2xl overflow-y-auto"
+        style={{ position: "fixed", top: 0, right: 0, height: "100%", zIndex: 40, transform: showContact ? "translateX(0)" : "translateX(100%)", transition: "transform 300ms ease-in-out" }}>
+        <div className="p-4 lg:max-w-xl">
+          <div className="flex items-center justify-between mb-3">
+            <p className="font-semibold text-stone-800">Contact info — {student?.name}</p>
+            <button onClick={() => setShowContact(false)} className="text-stone-400 hover:text-stone-700 p-1"><ChevronRight size={20} /></button>
+          </div>
+          <ContactInfoSection student={student} onUpdateField={onUpdateField} onUpdateParentEmail={onUpdateParentEmail} />
+        </div>
       </div>
     </div>
   );
@@ -2904,9 +2916,14 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
 
-      <button onClick={() => navigate("monthly-reports")} className="w-full md:w-80 mb-5 flex items-center justify-center gap-2 bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800">
-        <Mail size={16} /> Generate monthly reports
-      </button>
+      <div className="flex flex-col md:flex-row gap-2 mb-5">
+        <button onClick={() => navigate("monthly-reports")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800">
+          <Mail size={16} /> Generate monthly reports
+        </button>
+        <button onClick={() => navigate("range-report")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-slate-700 border border-slate-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-50">
+          <Calendar size={16} /> Custom date range report
+        </button>
+      </div>
 
       {roster.length === 0 && <p className="text-stone-400 text-sm text-center py-10">Add students from Settings first.</p>}
       <ul className="space-y-2 md:grid md:grid-cols-2 md:gap-2 md:space-y-0">
@@ -2914,7 +2931,7 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
           const count = (studentData[s.id]?.communications || []).length;
           const lastEntry = (studentData[s.id]?.communications || [])[0];
           return (
-            <li key={s.id} onClick={() => openStudent(s.id)} className="bg-white rounded-xl border border-stone-200 px-4 py-3 flex items-center justify-between cursor-pointer hover:border-indigo-300">
+            <li key={s.id} onClick={() => openStudent(s.id)} className="bg-white rounded-xl border border-stone-200 px-4 py-3 flex items-center justify-between cursor-pointer hover:border-slate-300">
               <div>
                 <span className="font-medium text-stone-800 block">{s.name}</span>
                 {lastEntry && <span className="text-xs text-stone-400">Last: {lastEntry.date} · {lastEntry.subject || lastEntry.channel}</span>}
@@ -2951,7 +2968,7 @@ function CommunicationEntryView({ student, data, onBack, onAddEntry }) {
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Parent Communication</button>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-5">{student?.name}</h1>
 
-      <button onClick={() => setShowForm((v) => !v)} className="w-full md:w-96 mb-4 flex items-center justify-center gap-2 bg-indigo-50 text-indigo-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-100">
+      <button onClick={() => setShowForm((v) => !v)} className="w-full md:w-96 mb-4 flex items-center justify-center gap-2 bg-slate-50 text-slate-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-100">
         <Plus size={16} /> Add log entry
       </button>
 
@@ -2976,7 +2993,7 @@ function CommunicationEntryView({ student, data, onBack, onAddEntry }) {
           {adminRelayed && (
             <input value={adminNotes} onChange={(e) => setAdminNotes(e.target.value)} placeholder="How it was communicated to admin" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
           )}
-          <button onClick={submit} className="w-full bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Save entry</button>
+          <button onClick={submit} className="w-full bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Save entry</button>
         </div>
       )}
 
@@ -2986,7 +3003,7 @@ function CommunicationEntryView({ student, data, onBack, onAddEntry }) {
           <li key={e.id} className="bg-white rounded-lg border border-stone-200 px-3 py-2.5 text-sm">
             <div className="flex items-center justify-between mb-1">
               <span className="flex items-center gap-2">
-                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${e.type === "automated" ? "bg-indigo-100 text-indigo-700" : "bg-stone-100 text-stone-600"}`}>
+                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${e.type === "automated" ? "bg-slate-100 text-slate-700" : "bg-stone-100 text-stone-600"}`}>
                   {e.type === "automated" ? "Automated" : "Manual"}
                 </span>
                 <span className="text-xs text-stone-500 capitalize">{e.channel}</span>
@@ -3018,18 +3035,18 @@ function timeToMinutes(hhmm) {
 
 // Builds ONLY the facts for the given month, split by section, so nothing outside
 // the selected month or unchecked sections ever reaches the prompt.
-function buildMonthlyFacts(student, data, incidents, classAssessments, config, year, monthIdx, opts) {
-  const mk = monthKey(year, monthIdx);
+function buildRangeFacts(student, data, incidents, classAssessments, config, startDate, endDate, opts) {
+  const inRange = (d) => d >= startDate && d <= endDate;
   const statusMap = {};
   config.attendance.statuses.forEach((s) => (statusMap[s.id] = s));
   const startMin = timeToMinutes(config.attendance.classStartTime);
 
   let attendanceLines = null;
   if (opts.attendance) {
-    const entriesThisMonth = (data.attendance || []).filter((a) => a.date.startsWith(mk));
+    const entriesInRange = (data.attendance || []).filter((a) => inRange(a.date));
     attendanceLines = [];
     for (const st of config.attendance.statuses) {
-      const entries = entriesThisMonth.filter((a) => a.status === st.id);
+      const entries = entriesInRange.filter((a) => a.status === st.id);
       if (entries.length === 0 && st.flagType === "none") continue;
       let line = `${st.label}: ${entries.length} day(s)`;
       if (st.flagType === "late" && entries.length > 0) {
@@ -3047,17 +3064,23 @@ function buildMonthlyFacts(student, data, incidents, classAssessments, config, y
       }
       attendanceLines.push(line);
     }
-    if (entriesThisMonth.length === 0) attendanceLines.push("No attendance recorded this month.");
+    // Fold in period-level lateness (separate from morning attendance) so the two add up into one real total.
+    const periodLateEntries = (data.periodAttendance || []).filter((pa) => pa.typeId === "late-to-class" && inRange(pa.date) && pa.minutesLate);
+    if (periodLateEntries.length > 0) {
+      const periodLateTotal = periodLateEntries.reduce((sum, pa) => sum + (pa.minutesLate || 0), 0);
+      attendanceLines.push(`Late to class (mid-day, separate from morning attendance): ${periodLateEntries.length} time(s) — total ${periodLateTotal} min late`);
+    }
+    if (entriesInRange.length === 0 && periodLateEntries.length === 0) attendanceLines.push("No attendance recorded in this range.");
   }
 
   let incidentLines = null;
   if (opts.incidents) {
     const catMap = {};
     config.incidents.categories.forEach((c) => (catMap[c.id] = c.label));
-    const incidentsThisMonth = (incidents || []).filter((i) => i.studentIds?.includes(student.id) && i.date.startsWith(mk));
-    incidentLines = incidentsThisMonth.length === 0
-      ? ["No incidents this month."]
-      : incidentsThisMonth.map((i) => `${i.date} — ${catMap[i.category] || i.category}${i.description ? `: ${i.description}` : ""}`);
+    const incidentsInRange = (incidents || []).filter((i) => i.studentIds?.includes(student.id) && inRange(i.date));
+    incidentLines = incidentsInRange.length === 0
+      ? ["No incidents in this range."]
+      : incidentsInRange.map((i) => `${i.date} — ${catMap[i.category] || i.category}${i.description ? `: ${i.description}` : ""}`);
   }
 
   let assessmentLines = null;
@@ -3070,20 +3093,26 @@ function buildMonthlyFacts(student, data, incidents, classAssessments, config, y
         const key = skillKey(cat.id, item.id);
         const skill = data.skills[key];
         if (!skill || !skill.history) continue;
-        const thisMonthEntries = skill.history.filter((h) => h.date.startsWith(mk));
-        if (thisMonthEntries.length === 0) continue;
-        const last = thisMonthEntries[thisMonthEntries.length - 1];
+        const inRangeEntries = skill.history.filter((h) => inRange(h.date));
+        if (inRangeEntries.length === 0) continue;
+        const last = inRangeEntries[inRangeEntries.length - 1];
         lines.push(`${item.label} (${cat.title}): ${gradeLabel[last.result] || last.result}${skill.status === "mastered" ? " — mastered" : ""}`);
       }
     }
-    const caThisMonth = (classAssessments || []).filter((ca) => ca.date.startsWith(mk) && ca.results && ca.results[student.id] !== undefined);
-    for (const ca of caThisMonth) lines.push(`${ca.title} (${ca.date}): ${ca.results[student.id]}`);
-    const fluencyThisMonth = (data.fluency || []).filter((f) => f.date.startsWith(mk));
-    for (const f of fluencyThisMonth) lines.push(`Fluency check (${f.date}): ${f.wordsRead} words, hesitation ${f.hesitation}, ${f.mode}`);
+    const caInRange = (classAssessments || []).filter((ca) => inRange(ca.date) && ca.results && ca.results[student.id] !== undefined);
+    for (const ca of caInRange) lines.push(`${ca.title} (${ca.date}): ${ca.results[student.id]}`);
+    const fluencyInRange = (data.fluency || []).filter((f) => inRange(f.date));
+    for (const f of fluencyInRange) lines.push(`Fluency check (${f.date}): ${f.wordsRead} words, hesitation ${f.hesitation}, ${f.mode}`);
     assessmentLines = lines; // may be empty — handled by caller (section omitted entirely if empty)
   }
 
   return { attendanceLines, incidentLines, assessmentLines };
+}
+
+function buildMonthlyFacts(student, data, incidents, classAssessments, config, year, monthIdx, opts) {
+  const start = `${year}-${String(monthIdx + 1).padStart(2, "0")}-01`;
+  const end = `${year}-${String(monthIdx + 1).padStart(2, "0")}-31`;
+  return buildRangeFacts(student, data, incidents, classAssessments, config, start, end, opts);
 }
 
 function factsToPlainText(student, label, facts) {
@@ -3096,13 +3125,13 @@ function factsToPlainText(student, label, facts) {
 
 async function generateHybridReport(student, label, facts) {
   const sections = [];
-  if (facts.attendanceLines) sections.push(`ATTENDANCE THIS MONTH:\n${facts.attendanceLines.map((l) => `- ${l}`).join("\n")}`);
-  if (facts.incidentLines) sections.push(`INCIDENTS THIS MONTH:\n${facts.incidentLines.map((l) => `- ${l}`).join("\n")}`);
-  if (facts.assessmentLines && facts.assessmentLines.length > 0) sections.push(`ASSESSMENT ACTIVITY THIS MONTH:\n${facts.assessmentLines.map((l) => `- ${l}`).join("\n")}`);
+  if (facts.attendanceLines) sections.push(`ATTENDANCE (${label}):\n${facts.attendanceLines.map((l) => `- ${l}`).join("\n")}`);
+  if (facts.incidentLines) sections.push(`INCIDENTS (${label}):\n${facts.incidentLines.map((l) => `- ${l}`).join("\n")}`);
+  if (facts.assessmentLines && facts.assessmentLines.length > 0) sections.push(`ASSESSMENT ACTIVITY (${label}):\n${facts.assessmentLines.map((l) => `- ${l}`).join("\n")}`);
 
-  if (sections.length === 0) return "Nothing was logged for this student in the selected sections this month.";
+  if (sections.length === 0) return "Nothing was logged for this student in the selected sections for this period.";
 
-  const prompt = `You are drafting a short monthly note from a Hebrew school teacher to a parent, covering ${label}.
+  const prompt = `You are drafting a short note from a Hebrew school teacher to a parent, covering ${label}.
 
 STRICT RULES:
 - Use ONLY the facts listed below. Do not add, infer, guess, or embellish any detail not explicitly present.
@@ -3172,7 +3201,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
         <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
           {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((y) => <option key={y} value={y}>{y}</option>)}
         </select>
-        <button onClick={generateAll} className="ml-auto text-xs font-semibold bg-indigo-700 text-white rounded-lg px-3 py-2 hover:bg-indigo-800">Generate all</button>
+        <button onClick={generateAll} className="ml-auto text-xs font-semibold bg-slate-700 text-white rounded-lg px-3 py-2 hover:bg-slate-800">Generate all</button>
       </div>
 
       <div className="flex flex-wrap gap-4 mb-5 bg-white border border-stone-200 rounded-lg px-3 py-2.5">
@@ -3188,8 +3217,8 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
             <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
               <div className="flex items-center justify-between mb-2">
                 <span className="font-semibold text-stone-800 text-sm">{s.name}</span>
-                {!r && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 hover:bg-indigo-50">Generate report</button>}
-                {r?.loading && <Loader2 className="animate-spin text-indigo-700" size={16} />}
+                {!r && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50">Generate report</button>}
+                {r?.loading && <Loader2 className="animate-spin text-slate-700" size={16} />}
               </div>
               {r && !r.loading && (
                 <div>
@@ -3210,7 +3239,111 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
                     <button onClick={() => navigator.clipboard.writeText(r.draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><Copy size={12} /> Copy</button>
                     <a href={`mailto:${encodeURIComponent(r.email)}?subject=${encodeURIComponent(`Monthly report — ${label}`)}&body=${encodeURIComponent(r.draft)}`}
-                      className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-2.5 py-1.5 hover:bg-indigo-800"><Mail size={12} /> Open in Mail</a>
+                      className="flex items-center gap-1 text-xs font-semibold text-white bg-slate-700 rounded-lg px-2.5 py-1.5 hover:bg-slate-800"><Mail size={12} /> Open in Mail</a>
+                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
+                    <button onClick={() => logSent(s)} disabled={r.logged}
+                      className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
+                      {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-xs text-stone-400 text-center mt-4">Nothing sends automatically. Review each report — check "Show data used" if you want to verify the figures — then send it yourself and mark it logged.</p>
+    </div>
+  );
+}
+
+function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, onBack, onLogSent, onUpdateParentEmail }) {
+  const today = todayISO();
+  const [startDate, setStartDate] = useState(addDaysISO(today, -13));
+  const [endDate, setEndDate] = useState(today);
+  const [includeAttendance, setIncludeAttendance] = useState(true);
+  const [includeIncidents, setIncludeIncidents] = useState(true);
+  const [includeAssessments, setIncludeAssessments] = useState(false);
+  const [reports, setReports] = useState({});
+  const label = `${startDate} to ${endDate}`;
+  const opts = { attendance: includeAttendance, incidents: includeIncidents, assessments: includeAssessments };
+
+  const generateOne = async (student) => {
+    setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
+    const data = studentData[student.id] || emptyStudentData();
+    const facts = buildRangeFacts(student, data, incidents, classAssessments, config, startDate, endDate, opts);
+    const dataUsed = factsToPlainText(student, label, facts);
+    try {
+      const text = await generateHybridReport(student, label, facts);
+      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
+    } catch {
+      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: "Could not generate — here's the raw data instead:\n\n" + dataUsed, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
+    }
+  };
+
+  const generateAll = async () => { for (const s of roster) await generateOne(s); };
+
+  const logSent = (student) => {
+    const r = reports[student.id];
+    if (!r) return;
+    onLogSent(student.id, { date: todayISO(), channel: "email", type: "automated", source: "range-report", subject: `Report — ${label}`, body: r.draft });
+    setReports((prev) => ({ ...prev, [student.id]: { ...prev[student.id], logged: true } }));
+  };
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Custom date range report</h1>
+      <p className="text-xs text-stone-400 mb-4">AI-worded, but every figure comes from what's logged between these two dates only.</p>
+
+      <div className="flex flex-wrap items-end gap-2 mb-3">
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">From</label>
+          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white" />
+        </div>
+        <div>
+          <label className="block text-[10px] text-stone-400 mb-0.5">To</label>
+          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white" />
+        </div>
+        <button onClick={generateAll} className="ml-auto text-xs font-semibold bg-slate-700 text-white rounded-lg px-3 py-2 hover:bg-slate-800">Generate all</button>
+      </div>
+
+      <div className="flex flex-wrap gap-4 mb-5 bg-white border border-stone-200 rounded-lg px-3 py-2.5">
+        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAttendance} onChange={(e) => setIncludeAttendance(e.target.checked)} /> Attendance</label>
+        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeIncidents} onChange={(e) => setIncludeIncidents(e.target.checked)} /> Incidents</label>
+        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAssessments} onChange={(e) => setIncludeAssessments(e.target.checked)} /> Assessment activity</label>
+      </div>
+
+      <div className="space-y-3">
+        {roster.map((s) => {
+          const r = reports[s.id];
+          return (
+            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-semibold text-stone-800 text-sm">{s.name}</span>
+                {!r && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50">Generate report</button>}
+                {r?.loading && <Loader2 className="animate-spin text-slate-700" size={16} />}
+              </div>
+              {r && !r.loading && (
+                <div>
+                  <label className="block text-[10px] text-stone-400 mb-0.5">Parent email</label>
+                  <input type="email" value={r.email} onChange={(e) => { const v = e.target.value; setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], email: v } })); onUpdateParentEmail(s.id, v); }}
+                    placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                  <div className="flex items-start gap-1.5 mb-2">
+                    <textarea value={r.draft} onChange={(e) => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: e.target.value } }))}
+                      rows={6} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                    <MicButton onResult={(spoken) => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: prev[s.id].draft ? `${prev[s.id].draft} ${spoken}` : spoken } }))} />
+                  </div>
+                  <button onClick={() => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], showData: !prev[s.id].showData } }))}
+                    className="text-xs text-stone-500 underline mb-2">
+                    {r.showData ? "Hide" : "Show"} data used
+                  </button>
+                  {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
+                    <button onClick={() => navigator.clipboard.writeText(r.draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><Copy size={12} /> Copy</button>
+                    <a href={`mailto:${encodeURIComponent(r.email)}?subject=${encodeURIComponent(`Report — ${label}`)}&body=${encodeURIComponent(r.draft)}`}
+                      className="flex items-center gap-1 text-xs font-semibold text-white bg-slate-700 rounded-lg px-2.5 py-1.5 hover:bg-slate-800"><Mail size={12} /> Open in Mail</a>
                     <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
@@ -3280,7 +3413,7 @@ function AssessmentReportView({ assessment, roster, onBack, onLogSent, onUpdateP
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Assessments</button>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{assessment.title}</h1>
       <p className="text-xs text-stone-400 mb-4">{assessment.date} — reports use only this assessment's result, nothing else.</p>
-      <button onClick={generateAll} className="mb-4 text-xs font-semibold bg-indigo-700 text-white rounded-lg px-3 py-2 hover:bg-indigo-800">Generate all</button>
+      <button onClick={generateAll} className="mb-4 text-xs font-semibold bg-slate-700 text-white rounded-lg px-3 py-2 hover:bg-slate-800">Generate all</button>
 
       <div className="space-y-3">
         {students.map((s) => {
@@ -3290,8 +3423,8 @@ function AssessmentReportView({ assessment, roster, onBack, onLogSent, onUpdateP
             <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
               <div className="flex items-center justify-between mb-2">
                 <span className="font-semibold text-stone-800 text-sm">{s.name} <span className="text-stone-400 font-normal">— {grade}</span></span>
-                {!r && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 hover:bg-indigo-50">Generate report</button>}
-                {r?.loading && <Loader2 className="animate-spin text-indigo-700" size={16} />}
+                {!r && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50">Generate report</button>}
+                {r?.loading && <Loader2 className="animate-spin text-slate-700" size={16} />}
               </div>
               {r && !r.loading && (
                 <div>
@@ -3307,7 +3440,7 @@ function AssessmentReportView({ assessment, roster, onBack, onLogSent, onUpdateP
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
                     <button onClick={() => navigator.clipboard.writeText(r.draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><Copy size={12} /> Copy</button>
                     <a href={`mailto:${encodeURIComponent(r.email)}?subject=${encodeURIComponent(`${assessment.title} — Report`)}&body=${encodeURIComponent(r.draft)}`}
-                      className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-2.5 py-1.5 hover:bg-indigo-800"><Mail size={12} /> Open in Mail</a>
+                      className="flex items-center gap-1 text-xs font-semibold text-white bg-slate-700 rounded-lg px-2.5 py-1.5 hover:bg-slate-800"><Mail size={12} /> Open in Mail</a>
                     <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
@@ -3378,9 +3511,9 @@ function SkillCategoryReportView({ category, roster, studentData, config, onBack
                 <span className="font-semibold text-stone-800 text-sm">
                   {s.name} <span className="text-stone-400 font-normal">— {mastered}/{total} mastered{lastDate ? ` · last ${lastDate}` : ""}</span>
                 </span>
-                {!r && hasHistory && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 hover:bg-indigo-50">Generate report</button>}
+                {!r && hasHistory && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 hover:bg-slate-50">Generate report</button>}
                 {!hasHistory && <span className="text-xs text-stone-400">No results yet</span>}
-                {r?.loading && <Loader2 className="animate-spin text-indigo-700" size={16} />}
+                {r?.loading && <Loader2 className="animate-spin text-slate-700" size={16} />}
               </div>
               {r && !r.loading && (
                 <div>
@@ -3396,7 +3529,7 @@ function SkillCategoryReportView({ category, roster, studentData, config, onBack
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
                     <button onClick={() => navigator.clipboard.writeText(r.draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><Copy size={12} /> Copy</button>
                     <a href={`mailto:${encodeURIComponent(r.email)}?subject=${encodeURIComponent(`${category.title} — Progress note`)}&body=${encodeURIComponent(r.draft)}`}
-                      className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-2.5 py-1.5 hover:bg-indigo-800"><Mail size={12} /> Open in Mail</a>
+                      className="flex items-center gap-1 text-xs font-semibold text-white bg-slate-700 rounded-lg px-2.5 py-1.5 hover:bg-slate-800"><Mail size={12} /> Open in Mail</a>
                     <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
@@ -3472,7 +3605,7 @@ function FluencyDetailView({ student, entry, onBack, onLogSent, onUpdateParentEm
       </div>
 
       {!draft ? (
-        <button onClick={generate} disabled={loading} className="flex items-center gap-2 bg-indigo-700 text-white rounded-lg px-4 py-2.5 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-50">
+        <button onClick={generate} disabled={loading} className="flex items-center gap-2 bg-slate-700 text-white rounded-lg px-4 py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-50">
           {loading ? <Loader2 className="animate-spin" size={16} /> : <Mail size={16} />} Generate parent report
         </button>
       ) : (
@@ -3487,7 +3620,7 @@ function FluencyDetailView({ student, entry, onBack, onLogSent, onUpdateParentEm
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             <button onClick={() => navigator.clipboard.writeText(draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><Copy size={13} /> Copy</button>
-            <a href={`mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(`Fluency check — ${entry.date}`)}&body=${encodeURIComponent(draft)}`} className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-3 py-2 hover:bg-indigo-800"><Mail size={13} /> Open in Mail</a>
+            <a href={`mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(`Fluency check — ${entry.date}`)}&body=${encodeURIComponent(draft)}`} className="flex items-center gap-1 text-xs font-semibold text-white bg-slate-700 rounded-lg px-3 py-2 hover:bg-slate-800"><Mail size={13} /> Open in Mail</a>
             <WhatsAppButton phone={student?.parentPhone} message={draft} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -3564,7 +3697,7 @@ function SkillDetailView({ student, data, category, config, onBack, onLogSent, o
       </div>
 
       {!draft ? (
-        <button onClick={generate} disabled={loading || summaryLines.length === 0} className="flex items-center gap-2 bg-indigo-700 text-white rounded-lg px-4 py-2.5 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-50">
+        <button onClick={generate} disabled={loading || summaryLines.length === 0} className="flex items-center gap-2 bg-slate-700 text-white rounded-lg px-4 py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-50">
           {loading ? <Loader2 className="animate-spin" size={16} /> : <Mail size={16} />} Generate parent report
         </button>
       ) : (
@@ -3579,7 +3712,7 @@ function SkillDetailView({ student, data, category, config, onBack, onLogSent, o
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             <button onClick={() => navigator.clipboard.writeText(draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><Copy size={13} /> Copy</button>
-            <a href={`mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(`${category.title} — Progress note`)}&body=${encodeURIComponent(draft)}`} className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-3 py-2 hover:bg-indigo-800"><Mail size={13} /> Open in Mail</a>
+            <a href={`mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(`${category.title} — Progress note`)}&body=${encodeURIComponent(draft)}`} className="flex items-center gap-1 text-xs font-semibold text-white bg-slate-700 rounded-lg px-3 py-2 hover:bg-slate-800"><Mail size={13} /> Open in Mail</a>
             <WhatsAppButton phone={student?.parentPhone} message={draft} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -3672,7 +3805,7 @@ function IncidentDetailView({ incident, roster, config, onBack, onLogSent, onUpd
           <>
             <p className="text-sm text-stone-700 mb-3">{incident.description || "No additional description yet."}</p>
             <button onClick={() => { setEditCategory(incident.category || ""); setEditDescription(incident.description || ""); setEditing(true); }}
-              className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mb-1">
+              className="text-xs font-semibold text-slate-700 flex items-center gap-1 mb-1">
               {incident.category || incident.description ? "Edit details" : "+ Add details now"}
             </button>
           </>
@@ -3690,7 +3823,7 @@ function IncidentDetailView({ incident, roster, config, onBack, onLogSent, onUpd
             </div>
             <div className="flex gap-2">
               <button onClick={() => { onUpdateIncident(incident.id, { category: editCategory, description: editDescription }); setEditing(false); }}
-                className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Save details</button>
+                className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Save details</button>
               <button onClick={() => setEditing(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
             </div>
           </div>
@@ -3705,11 +3838,11 @@ function IncidentDetailView({ incident, roster, config, onBack, onLogSent, onUpd
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm font-semibold text-stone-800">{s.name}</span>
                   {!d && (
-                    <button onClick={() => generateFor(s)} className="flex items-center gap-1 text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-lg px-2.5 py-1.5 hover:bg-indigo-50">
+                    <button onClick={() => generateFor(s)} className="flex items-center gap-1 text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-2.5 py-1.5 hover:bg-slate-50">
                       <Mail size={12} /> Draft message
                     </button>
                   )}
-                  {d?.loading && <Loader2 className="animate-spin text-indigo-700" size={16} />}
+                  {d?.loading && <Loader2 className="animate-spin text-slate-700" size={16} />}
                 </div>
                 {d && !d.loading && (
                   <div className="mt-2">
@@ -3726,7 +3859,7 @@ function IncidentDetailView({ incident, roster, config, onBack, onLogSent, onUpd
                       <button onClick={() => generateFor(s)} className="flex items-center gap-1 text-[10px] font-semibold text-stone-600 border border-stone-300 rounded-lg px-2 py-1 hover:bg-stone-50"><RefreshCw size={11} /> Regenerate</button>
                       <button onClick={() => navigator.clipboard.writeText(d.draft)} className="flex items-center gap-1 text-[10px] font-semibold text-stone-600 border border-stone-300 rounded-lg px-2 py-1 hover:bg-stone-50"><Copy size={11} /> Copy</button>
                       <a href={`mailto:${encodeURIComponent(d.email)}?subject=${encodeURIComponent(`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`)}&body=${encodeURIComponent(d.draft)}`}
-                        className="flex items-center gap-1 text-[10px] font-semibold text-white bg-indigo-700 rounded-lg px-2 py-1 hover:bg-indigo-800"><Mail size={11} /> Open in Mail</a>
+                        className="flex items-center gap-1 text-[10px] font-semibold text-white bg-slate-700 rounded-lg px-2 py-1 hover:bg-slate-800"><Mail size={11} /> Open in Mail</a>
                       <WhatsAppButton phone={s.parentPhone} message={d.draft} className="flex items-center gap-1 text-[10px] font-semibold text-white bg-emerald-600 rounded-lg px-2 py-1 hover:bg-emerald-700" />
                       <button onClick={() => logSent(s)} disabled={d.logged}
                         className={`flex items-center gap-1 text-[10px] font-semibold rounded-lg px-2 py-1 ${d.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
@@ -3779,8 +3912,8 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
       <MainTabs active="planner" navigate={navigate} />
 
       <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-72">
-        <button onClick={() => setSubTab("calendar")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "calendar" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
-        <button onClick={() => setSubTab("benchmarks")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "benchmarks" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Benchmarks</button>
+        <button onClick={() => setSubTab("calendar")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "calendar" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
+        <button onClick={() => setSubTab("benchmarks")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "benchmarks" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Benchmarks</button>
       </div>
 
       {subTab === "benchmarks" ? (
@@ -3810,8 +3943,8 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
               return (
                 <button key={d} onClick={() => setSelectedDate(d)}
                   className={`relative aspect-square rounded-lg text-xs font-semibold flex flex-col items-center justify-center border ${
-                    selectedDate === d ? "border-indigo-600" : "border-transparent"
-                  } ${dayType ? `bg-${dayType.color}-100 text-${dayType.color}-800` : "bg-stone-50 text-stone-600 hover:bg-stone-100"} ${isToday ? "ring-2 ring-indigo-400" : ""}`}>
+                    selectedDate === d ? "border-slate-600" : "border-transparent"
+                  } ${dayType ? `bg-${dayType.color}-100 text-${dayType.color}-800` : "bg-stone-50 text-stone-600 hover:bg-stone-100"} ${isToday ? "ring-2 ring-slate-400" : ""}`}>
                   {dayNum}
                   <span className="flex gap-0.5 mt-0.5">
                     {hasNotes && <span className="w-1 h-1 rounded-full bg-stone-400" />}
@@ -3828,7 +3961,7 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
             ))}
           </div>
 
-          <button onClick={() => setShowBulk((v) => !v)} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mb-3">
+          <button onClick={() => setShowBulk((v) => !v)} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mb-3">
             {showBulk ? "Hide" : "Bulk-set day types"} <ChevronDown size={12} className={showBulk ? "rotate-180" : ""} />
           </button>
           {showBulk && <BulkDayTypeForm dayTypes={dayTypes} bulkSetByWeekday={bulkSetByWeekday} bulkSetByRange={bulkSetByRange} />}
@@ -3838,9 +3971,9 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
               <p className="text-xs font-semibold text-stone-700 mb-1">School calendar (2026–2027)</p>
               <p className="text-xs text-stone-400 mb-2">Sets every school day, weekend, holiday, and early-dismissal day for the year in one go, based on your school's official calendar. Overwrites any day types you've already set in that range.</p>
               <ConfirmDelete onConfirm={importSchoolCalendar} label="Import 2026–2027 school calendar"
-                className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-2 hover:bg-indigo-50"
+                className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 py-2 hover:bg-slate-50"
                 confirmText="Apply calendar — overwrites existing day types?"
-                armedClassName="text-xs font-semibold text-white bg-indigo-600 rounded-lg px-3 py-2 whitespace-nowrap" />
+                armedClassName="text-xs font-semibold text-white bg-slate-600 rounded-lg px-3 py-2 whitespace-nowrap" />
             </div>
           )}
 
@@ -3848,7 +3981,7 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
             <p className="text-xs font-semibold text-stone-700 mb-1">Have your own calendar or document?</p>
             <p className="text-xs text-stone-400 mb-2">Upload or paste any other schedule — a different calendar version, a district document, anything with dates in it — and pull the day types out of it the same way.</p>
             {!showDocImport ? (
-              <button onClick={() => setShowDocImport(true)} className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-2 hover:bg-indigo-50">
+              <button onClick={() => setShowDocImport(true)} className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 py-2 hover:bg-slate-50">
                 Import from a document
               </button>
             ) : (
@@ -4007,12 +4140,12 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
       <div className="flex flex-wrap items-center gap-1.5 mb-5">
         {subjects.map((s) => (
           <button key={s.id} onClick={() => { setActiveId(s.id); setShowAddSubject(false); }}
-            className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${activeId === s.id && !showAddSubject ? "bg-indigo-700 text-white border-indigo-700" : "text-stone-600 border-stone-300"}`}>
+            className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${activeId === s.id && !showAddSubject ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
             {s.label}
           </button>
         ))}
         <button onClick={() => setShowAddSubject(true)}
-          className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showAddSubject ? "bg-indigo-700 text-white border-indigo-700" : "text-indigo-700 border-indigo-300"}`}>
+          className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showAddSubject ? "bg-slate-700 text-white border-slate-700" : "text-slate-700 border-slate-300"}`}>
           <Plus size={12} /> Add subject
         </button>
       </div>
@@ -4024,7 +4157,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
           <input value={newSubjectName} onChange={(e) => setNewSubjectName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitSubject()}
             placeholder="e.g. Kriya, Chumash, Lining Up" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
           <div className="flex gap-2">
-            <button onClick={submitSubject} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Create subject</button>
+            <button onClick={submitSubject} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Create subject</button>
             {subjects.length > 0 && <button onClick={() => setShowAddSubject(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>}
           </div>
         </div>
@@ -4040,8 +4173,8 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
             </div>
             <div className="flex items-center gap-2">
               <div className="flex gap-1 bg-stone-100 rounded-lg p-1">
-                <button onClick={() => setViewMode("timeline")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "timeline" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Timeline</button>
-                <button onClick={() => setViewMode("calendar")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "calendar" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
+                <button onClick={() => setViewMode("timeline")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "timeline" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Timeline</button>
+                <button onClick={() => setViewMode("calendar")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "calendar" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
               </div>
               <ConfirmDelete onConfirm={() => removeSubject(active.id)} label="Delete subject" />
             </div>
@@ -4130,7 +4263,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
           </ul>
 
           {editingSegId && !pendingCascade && (
-            <div className="bg-white border border-indigo-200 rounded-xl p-4 md:w-96 mb-4">
+            <div className="bg-white border border-slate-200 rounded-xl p-4 md:w-96 mb-4">
               <p className="text-sm font-semibold text-stone-800 mb-3">Edit segment</p>
               <label className="block text-xs font-medium text-stone-500 mb-1">Label</label>
               <input value={editLabel} onChange={(e) => setEditLabel(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
@@ -4145,7 +4278,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={saveSegmentEdit} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Save changes</button>
+                <button onClick={saveSegmentEdit} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Save changes</button>
                 <button onClick={() => setEditingSegId(null)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
               </div>
             </div>
@@ -4180,13 +4313,13 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={submitSegment} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Add segment</button>
+                <button onClick={submitSegment} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Add segment</button>
                 <button onClick={() => setShowSegForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
               </div>
             </div>
           ) : (
             <div className="flex items-center gap-3 flex-wrap">
-              <button onClick={openSegForm} className="text-xs font-semibold text-indigo-700 flex items-center gap-1"><Plus size={12} /> Add segment</button>
+              <button onClick={openSegForm} className="text-xs font-semibold text-slate-700 flex items-center gap-1"><Plus size={12} /> Add segment</button>
               <button onClick={() => setShowDocImport((v) => !v)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-2.5 py-1 hover:bg-stone-50">
                 Import from a document
               </button>
@@ -4265,7 +4398,7 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
   };
 
   return (
-    <div className="bg-white border border-indigo-200 rounded-xl p-4 mt-3">
+    <div className="bg-white border border-slate-200 rounded-xl p-4 mt-3">
       <p className="text-sm font-semibold text-stone-800 mb-1">Import from a document</p>
       <p className="text-xs text-stone-400 mb-3">Paste the text, or upload a plain text/CSV file or a PDF. Nothing is applied until you review it below.</p>
 
@@ -4274,7 +4407,7 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
           <textarea value={rawText} onChange={(e) => { setRawText(e.target.value); setPdfBase64(null); setFileName(""); }} rows={5}
             placeholder="Paste your document text here..." className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
           <div className="flex items-center gap-2 mb-3">
-            <label className="text-xs font-semibold text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 cursor-pointer hover:bg-indigo-50">
+            <label className="text-xs font-semibold text-slate-700 border border-slate-200 rounded-lg px-3 py-1.5 cursor-pointer hover:bg-slate-50">
               Upload a file
               <input type="file" accept=".txt,.csv,.pdf" className="hidden" onChange={(e) => handleFile(e.target.files[0])} />
             </label>
@@ -4283,7 +4416,7 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
           {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
           <div className="flex gap-2">
             <button onClick={extract} disabled={extracting || (!rawText.trim() && !pdfBase64)}
-              className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40 flex items-center justify-center gap-2">
+              className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40 flex items-center justify-center gap-2">
               {extracting ? <Loader2 className="animate-spin" size={16} /> : null} {extracting ? "Reading document..." : "Extract dates"}
             </button>
             <button onClick={onClose} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
@@ -4311,7 +4444,7 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
             ))}
           </ul>
           <div className="flex gap-2">
-            <button onClick={apply} disabled={items.length === 0} className="flex-1 bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40">
+            <button onClick={apply} disabled={items.length === 0} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
               Apply {items.length} item{items.length === 1 ? "" : "s"}
             </button>
             <button onClick={() => setItems(null)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Start over</button>
@@ -4340,14 +4473,14 @@ function BulkDayTypeForm({ dayTypes, bulkSetByWeekday, bulkSetByRange }) {
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
       <div className="flex gap-2 mb-3">
-        <button onClick={() => setMode("weekday")} className={`flex-1 text-xs font-semibold py-1.5 rounded-lg border ${mode === "weekday" ? "bg-indigo-700 text-white border-indigo-700" : "border-stone-300 text-stone-600"}`}>By weekday (e.g. every Friday)</button>
-        <button onClick={() => setMode("range")} className={`flex-1 text-xs font-semibold py-1.5 rounded-lg border ${mode === "range" ? "bg-indigo-700 text-white border-indigo-700" : "border-stone-300 text-stone-600"}`}>By date range (e.g. a whole week off)</button>
+        <button onClick={() => setMode("weekday")} className={`flex-1 text-xs font-semibold py-1.5 rounded-lg border ${mode === "weekday" ? "bg-slate-700 text-white border-slate-700" : "border-stone-300 text-stone-600"}`}>By weekday (e.g. every Friday)</button>
+        <button onClick={() => setMode("range")} className={`flex-1 text-xs font-semibold py-1.5 rounded-lg border ${mode === "range" ? "bg-slate-700 text-white border-slate-700" : "border-stone-300 text-stone-600"}`}>By date range (e.g. a whole week off)</button>
       </div>
 
       {mode === "weekday" && (
         <div className="flex flex-wrap gap-1.5 mb-3">
           {WEEKDAY_LABELS.map((w, i) => (
-            <button key={w} onClick={() => toggleWeekday(i)} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${weekdays.includes(i) ? "bg-indigo-700 text-white border-indigo-700" : "border-stone-300 text-stone-600"}`}>{w}</button>
+            <button key={w} onClick={() => toggleWeekday(i)} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${weekdays.includes(i) ? "bg-slate-700 text-white border-slate-700" : "border-stone-300 text-stone-600"}`}>{w}</button>
           ))}
         </div>
       )}
@@ -4368,7 +4501,7 @@ function BulkDayTypeForm({ dayTypes, bulkSetByWeekday, bulkSetByRange }) {
         {dayTypes.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
       </select>
 
-      <button onClick={apply} className="w-full bg-indigo-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-indigo-800">Apply</button>
+      <button onClick={apply} className="w-full bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800">Apply</button>
     </div>
   );
 }
@@ -4472,12 +4605,12 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
           <label className="block text-[10px] text-stone-400 mb-0.5">Remind me this many days before</label>
           <input type="number" min={0} value={evLead} onChange={(e) => setEvLead(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
           <div className="flex gap-2">
-            <button onClick={saveEvent} className="flex-1 bg-indigo-700 text-white rounded-lg py-1.5 text-xs font-semibold hover:bg-indigo-800">Save</button>
+            <button onClick={saveEvent} className="flex-1 bg-slate-700 text-white rounded-lg py-1.5 text-xs font-semibold hover:bg-slate-800">Save</button>
             <button onClick={() => setShowEventForm(false)} className="px-3 text-xs text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
           </div>
         </div>
       ) : (
-        <button onClick={() => setShowEventForm(true)} className="text-xs font-semibold text-indigo-700 flex items-center gap-1"><Plus size={12} /> Add event</button>
+        <button onClick={() => setShowEventForm(true)} className="text-xs font-semibold text-slate-700 flex items-center gap-1"><Plus size={12} /> Add event</button>
       )}
     </div>
   );
@@ -4548,7 +4681,7 @@ function FluencyForm({ student, onCancel, onSave }) {
         </select>
         <label className="block text-sm font-semibold text-stone-700 mb-1">Notes</label>
         <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-5" placeholder="Anything else worth remembering" />
-        <button onClick={() => onSave({ wordsRead: Number(words) || 0, hesitation, mode, notes })} className="w-full bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800">
+        <button onClick={() => onSave({ wordsRead: Number(words) || 0, hesitation, mode, notes })} className="w-full bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800">
           Save fluency check
         </button>
       </div>
@@ -4581,7 +4714,7 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
             const selected = studentIds.includes(s.id);
             return (
               <button key={s.id} onClick={() => toggleStudent(s.id)}
-                className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${selected ? "bg-indigo-700 text-white border-indigo-700" : "text-stone-600 border-stone-300"}`}>
+                className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${selected ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
                 {s.name}
               </button>
             );
@@ -4589,13 +4722,13 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
         </div>
 
         <button disabled={studentIds.length === 0} onClick={save}
-          className="w-full bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40 mb-2">
+          className="w-full bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40 mb-2">
           Log it — that's enough for now
         </button>
         {studentIds.length === 0 && <p className="text-xs text-stone-400 text-center mb-3">Select at least one student</p>}
 
         {!showDetails ? (
-          <button onClick={() => setShowDetails(true)} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mx-auto mt-1">
+          <button onClick={() => setShowDetails(true)} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mx-auto mt-1">
             + Add details now instead
           </button>
         ) : (
@@ -4613,7 +4746,7 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
               <MicButton onResult={(spoken) => setDescription((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
             </div>
             <button disabled={studentIds.length === 0} onClick={save}
-              className="w-full bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40">
+              className="w-full bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
               Save with these details
             </button>
           </div>
@@ -4628,6 +4761,7 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
 function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCancel, onSave }) {
   const [typeId, setTypeId] = useState(config.periodAttendance.types[0]?.id || "");
   const [periodId, setPeriodId] = useState("");
+  const [minutesLate, setMinutesLate] = useState("");
   const [notes, setNotes] = useState("");
   const [time] = useState(() => new Date().toTimeString().slice(0, 5));
   const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
@@ -4635,7 +4769,7 @@ function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCance
 
   const save = () => {
     if (studentIds.length === 0 || !typeId) return;
-    onSave(studentIds, { date: todayISO(), time, typeId, periodId: periodId || null, notes });
+    onSave(studentIds, { date: todayISO(), time, typeId, periodId: periodId || null, notes, minutesLate: typeId === "late-to-class" && minutesLate ? Number(minutesLate) : null });
   };
 
   return (
@@ -4651,7 +4785,7 @@ function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCance
             const selected = studentIds.includes(s.id);
             return (
               <button key={s.id} onClick={() => toggleStudent(s.id)}
-                className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${selected ? "bg-indigo-700 text-white border-indigo-700" : "text-stone-600 border-stone-300"}`}>
+                className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${selected ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
                 {s.name}
               </button>
             );
@@ -4668,6 +4802,15 @@ function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCance
           ))}
         </div>
 
+        {typeId === "late-to-class" && (
+          <div className="mb-4">
+            <label className="block text-sm font-semibold text-stone-700 mb-1">Minutes late <span className="text-stone-400 font-normal">(optional)</span></label>
+            <input type="number" min="0" value={minutesLate} onChange={(e) => setMinutesLate(e.target.value)} placeholder="e.g. 15"
+              className="w-28 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <p className="text-[10px] text-stone-400 mt-1">Adds to this student's total lateness minutes when you generate a report later.</p>
+          </div>
+        )}
+
         {todaysPeriods && todaysPeriods.length > 0 && (
           <>
             <label className="block text-sm font-semibold text-stone-700 mb-1">Period <span className="text-stone-400 font-normal">(optional)</span></label>
@@ -4682,7 +4825,7 @@ function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCance
         <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Anything worth adding" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-5" />
 
         <button disabled={studentIds.length === 0 || !typeId} onClick={save}
-          className="w-full bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40">
+          className="w-full bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
           Log it
         </button>
         {studentIds.length === 0 && <p className="text-xs text-stone-400 text-center mt-2">Select at least one student</p>}
@@ -4745,7 +4888,7 @@ function MessageDraftView({ student, flag, onBack, onSaveParentEmail, onLogSent 
           placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
         <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
         {loading ? (
-          <div className="flex items-center justify-center py-16 bg-white border border-stone-200 rounded-lg mb-4"><Loader2 className="animate-spin text-indigo-700" size={22} /></div>
+          <div className="flex items-center justify-center py-16 bg-white border border-stone-200 rounded-lg mb-4"><Loader2 className="animate-spin text-slate-700" size={22} /></div>
         ) : error ? (
           <p className="text-xs text-rose-600 py-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>
         ) : null}
@@ -4761,7 +4904,7 @@ function MessageDraftView({ student, flag, onBack, onSaveParentEmail, onLogSent 
             className="flex items-center gap-1.5 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">
             {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? "Copied" : "Copy message"}
           </button>
-          <a href={mailtoHref} className="flex items-center gap-1.5 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-3 py-2 hover:bg-indigo-800"><Mail size={13} /> Open in Mail</a>
+          <a href={mailtoHref} className="flex items-center gap-1.5 text-xs font-semibold text-white bg-slate-700 rounded-lg px-3 py-2 hover:bg-slate-800"><Mail size={13} /> Open in Mail</a>
           <button onClick={logSent} disabled={logged}
             className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
             {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -4808,14 +4951,14 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <label className="block text-xs font-medium text-stone-500 mb-1">Class name</label>
               <div className="flex gap-2 mb-4">
                 <input value={classNameInput} onChange={(e) => setClassNameInput(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-                <button onClick={saveClassName} className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-2 hover:bg-indigo-50">Save</button>
+                <button onClick={saveClassName} className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 py-2 hover:bg-slate-50">Save</button>
               </div>
 
               <label className="block text-xs font-medium text-stone-500 mb-1">Change class password</label>
               <div className="flex flex-wrap gap-2 items-center mb-1">
                 <input type="password" value={newPw1} onChange={(e) => setNewPw1(e.target.value)} placeholder="New password" className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
                 <input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} placeholder="Confirm new password" className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-                <button onClick={savePassword} disabled={!newPw1.trim() || newPw1 !== newPw2} className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-2 hover:bg-indigo-50 disabled:opacity-40">Update password</button>
+                <button onClick={savePassword} disabled={!newPw1.trim() || newPw1 !== newPw2} className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 py-2 hover:bg-slate-50 disabled:opacity-40">Update password</button>
               </div>
               {newPw1 && newPw2 && newPw1 !== newPw2 && <p className="text-xs text-red-500 mb-2">Passwords don't match.</p>}
               {pwSaved && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
@@ -4830,7 +4973,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           <Section title="Demo & data reset">
             <p className="text-xs text-stone-400 mb-3">Useful when sharing this with another teacher for feedback, or starting fresh. Both replace your current roster, attendance, incidents, points, planner entries, and benchmarks — your Settings customizations (categories, thresholds, schedule templates) are kept either way.</p>
             <div className="flex flex-wrap gap-2">
-              <ConfirmDelete onConfirm={loadSampleData} label="Load sample data" className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-2 hover:bg-indigo-50" />
+              <ConfirmDelete onConfirm={loadSampleData} label="Load sample data" className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-lg px-3 py-2 hover:bg-slate-50" />
               <ConfirmDelete onConfirm={clearAllData} label="Clear all data" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" />
             </div>
           </Section>
@@ -4839,7 +4982,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             <div className="flex gap-2 mb-3">
               <input value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitNewStudent()}
                 placeholder="Add a student's name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-              <button onClick={submitNewStudent} className="bg-indigo-700 text-white rounded-lg px-3 py-1.5 flex items-center justify-center hover:bg-indigo-800"><Plus size={16} /></button>
+              <button onClick={submitNewStudent} className="bg-slate-700 text-white rounded-lg px-3 py-1.5 flex items-center justify-center hover:bg-slate-800"><Plus size={16} /></button>
             </div>
             {roster.length === 0 && <p className="text-xs text-stone-400">No students yet — add one above.</p>}
             <div className="space-y-2">
@@ -4915,7 +5058,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <ConfirmDelete onConfirm={() => update((c) => { c.planner.dayTypes.splice(i, 1); return c; })} size={14} />
             </div>
           ))}
-          <button onClick={() => update((c) => { c.planner = c.planner || { dayTypes: [] }; c.planner.dayTypes.push({ id: uid(), label: "New type", color: "sky", hidesAttendance: false, scheduleTemplate: "none" }); return c; })} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add day type</button>
+          <button onClick={() => update((c) => { c.planner = c.planner || { dayTypes: [] }; c.planner.dayTypes.push({ id: uid(), label: "New type", color: "sky", hidesAttendance: false, scheduleTemplate: "none" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add day type</button>
         </Section>
 
         <div className="md:col-span-2">
@@ -4935,7 +5078,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                     <ConfirmDelete onConfirm={() => update((c) => { c.planner[key].splice(i, 1); return c; })} size={13} />
                   </div>
                 ))}
-                <button onClick={() => update((c) => { c.planner[key] = c.planner[key] || []; c.planner[key].push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
+                <button onClick={() => update((c) => { c.planner[key] = c.planner[key] || []; c.planner[key].push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
               </div>
             ))}
           </Section>
@@ -4952,7 +5095,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <ConfirmDelete onConfirm={() => update((c) => { if (c.points.behaviorLog.markTypes.length > 1) c.points.behaviorLog.markTypes.splice(i, 1); return c; })} size={14} />
             </div>
           ))}
-          <button onClick={() => update((c) => { c.points.behaviorLog.markTypes.push({ id: uid(), label: "New mark", color: "sky" }); return c; })} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mt-1 mb-4"><Plus size={12} /> Add mark type</button>
+          <button onClick={() => update((c) => { c.points.behaviorLog.markTypes.push({ id: uid(), label: "New mark", color: "sky" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1 mb-4"><Plus size={12} /> Add mark type</button>
 
           <label className="block text-xs font-medium text-stone-500 mb-1">Summarize totals</label>
           <select value={config.points?.behaviorLog?.summaryMode || "daily"} onChange={(e) => update((c) => { c.points.behaviorLog.summaryMode = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
@@ -5025,7 +5168,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <ConfirmDelete onConfirm={() => update((c) => { if (c.gradeOptions.length > 2) c.gradeOptions.splice(i, 1); return c; })} size={14} />
             </div>
           ))}
-          <button onClick={() => update((c) => { c.gradeOptions.push({ id: uid(), label: "New option", weight: "neutral", color: "sky" }); return c; })} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add grading option</button>
+          <button onClick={() => update((c) => { c.gradeOptions.push({ id: uid(), label: "New option", weight: "neutral", color: "sky" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add grading option</button>
         </Section>
 
         <Section title="Kriya flag & mastery rules">
@@ -5060,7 +5203,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <ConfirmDelete onConfirm={() => update((c) => { if (c.attendance.statuses.length > 1) c.attendance.statuses.splice(i, 1); return c; })} size={14} />
             </div>
           ))}
-          <button onClick={() => update((c) => { c.attendance.statuses.push({ id: uid(), label: "New status", color: "stone", flagType: "none" }); return c; })} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add status</button>
+          <button onClick={() => update((c) => { c.attendance.statuses.push({ id: uid(), label: "New status", color: "stone", flagType: "none" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add status</button>
           </div>
         </Section>
 
@@ -5102,7 +5245,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <ConfirmDelete onConfirm={() => update((c) => { if (c.incidents.categories.length > 1) c.incidents.categories.splice(i, 1); return c; })} size={14} />
             </div>
           ))}
-          <button onClick={() => update((c) => { c.incidents.categories.push({ id: uid(), label: "New category", color: "stone" }); return c; })} className="text-xs font-semibold text-indigo-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add category</button>
+          <button onClick={() => update((c) => { c.incidents.categories.push({ id: uid(), label: "New category", color: "stone" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add category</button>
         </Section>
 
         <Section title="Incident flag rule">
@@ -5159,7 +5302,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                     <button onClick={() => update((c) => {
                       const newItem = c.categories[ci].mode === "skill" ? { id: uid(), label: "New skill", desc: "" } : { id: uid(), char: "", label: "New item" };
                       c.categories[ci].items.push(newItem); return c;
-                    })} className="text-xs font-semibold text-indigo-700 flex items-center gap-1"><Plus size={12} /> Add item</button>
+                    })} className="text-xs font-semibold text-slate-700 flex items-center gap-1"><Plus size={12} /> Add item</button>
                   </div>
                 )}
               </div>
