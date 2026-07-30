@@ -850,6 +850,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [loading, setLoading] = useState(true);
   const [roster, setRoster] = useState([]);
   const [studentData, setStudentData] = useState({});
+  const [globalStudents, setGlobalStudentsInClass] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
   const [classPoints, setClassPoints] = useState({});
@@ -889,6 +890,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const bl = await loadC("behaviorLogData", {});
       const al = await loadC("alerts", []);
       const initialized = await loadC("appInitialized", false);
+      const gs = await loadJSON("globalStudents", [], true);
+      setGlobalStudentsInClass(gs);
 
       let finalRoster = r, finalConfig = c, finalIncidents = inc, finalCA = ca, finalCP = cp, finalPD = pd, finalPE = pe, finalBS = bs;
       let sampleStudentData = null;
@@ -1088,12 +1091,39 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     persistStudent(studentId, { ...data, communications: [{ id: uid(), ...entry }, ...(data.communications || [])] });
   };
 
-  const addStudent = (name) => {
+  const addStudent = async (name) => {
     const trimmed = (name || "").trim();
     if (!trimmed) return;
     const id = uid();
-    persistRoster([...roster, { id, name: trimmed, parentEmail: "", parentPhone: "", notes: "" }]);
+    persistRoster([...roster, { id, name: trimmed, parentEmail: "", parentPhone: "", notes: "", enrollmentScope: "full-time" }]);
     setStudentData((prev) => ({ ...prev, [id]: emptyStudentData() }));
+    // New students are shared school-wide by default from here on, so any teacher can find and add them later.
+    const gs = await loadJSON("globalStudents", [], true);
+    const globalRecord = { id, name: trimmed, parent1Name: "", parentEmail: "", parentPhone: "", parent2Name: "", parent2Email: "", parent2Phone: "", homeAddress: "", notes: "" };
+    const nextGs = [...gs, globalRecord];
+    await saveJSON("globalStudents", nextGs, true);
+    setGlobalStudentsInClass(nextGs);
+  };
+
+  const refreshGlobalStudentsInClass = async () => {
+    const gs = await loadJSON("globalStudents", [], true);
+    setGlobalStudentsInClass(gs);
+  };
+
+  const addExistingStudent = (globalStudent, scope, periodIds) => {
+    if (roster.some((s) => s.id === globalStudent.id)) return; // already in this class
+    const rosterEntry = {
+      id: globalStudent.id, name: globalStudent.name,
+      parentEmail: globalStudent.parentEmail || "", parentPhone: globalStudent.parentPhone || "",
+      parent1Name: globalStudent.parent1Name || "", parent2Name: globalStudent.parent2Name || "",
+      parent2Email: globalStudent.parent2Email || "", parent2Phone: globalStudent.parent2Phone || "",
+      homeAddress: globalStudent.homeAddress || "", notes: globalStudent.notes || "",
+      linkedGlobalId: globalStudent.id,
+      enrollmentScope: scope, // "full-time" | "part-time" | "periods"
+      enrollmentPeriodIds: scope === "periods" ? periodIds : [],
+    };
+    persistRoster([...roster, rosterEntry]);
+    setStudentData((prev) => ({ ...prev, [globalStudent.id]: emptyStudentData() }));
   };
 
   const removeStudent = (id) => {
@@ -1479,7 +1509,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
         <SettingsView config={config} setConfig={persistConfig} onBack={() => setView("home")}
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
           loadSampleData={loadSampleData} clearAllData={clearAllData}
-          className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} />
+          className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass}
+          globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent} />
       )}
     </div>
     </ClassContext.Provider>
@@ -5100,7 +5131,73 @@ function StudentContactFields({ student, onUpdateField }) {
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass }) {
+function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCancel }) {
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [scope, setScope] = useState("full-time");
+  const [periodIds, setPeriodIds] = useState([]);
+  const rosterIds = new Set(roster.map((s) => s.id));
+  const results = (globalStudents || [])
+    .filter((s) => !s.archived && !rosterIds.has(s.id) && s.name.toLowerCase().includes(search.toLowerCase()))
+    .slice(0, 8);
+  const allPeriods = [...(config.planner?.fullDaySchedule || []), ...(config.planner?.halfDaySchedule || [])]
+    .filter((p, i, arr) => arr.findIndex((x) => x.id === p.id) === i);
+  const togglePeriod = (id) => setPeriodIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
+      {!selected ? (
+        <>
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by name..."
+            className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          {search && results.length === 0 && <p className="text-xs text-stone-400">No matching students found.</p>}
+          <ul className="space-y-1">
+            {results.map((s) => (
+              <li key={s.id}>
+                <button onClick={() => setSelected(s)} className="w-full text-left bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm hover:border-slate-300">
+                  {s.name}
+                </button>
+              </li>
+            ))}
+          </ul>
+          {!search && <p className="text-xs text-stone-400">Start typing a name to search across the whole school.</p>}
+        </>
+      ) : (
+        <>
+          <p className="text-sm font-semibold text-stone-800 mb-2">Add {selected.name} — how does this student belong to your class?</p>
+          <div className="space-y-1.5 mb-3">
+            <label className="flex items-center gap-2 text-sm text-stone-700"><input type="radio" checked={scope === "full-time"} onChange={() => setScope("full-time")} /> Full time — regular member of this class</label>
+            <label className="flex items-center gap-2 text-sm text-stone-700"><input type="radio" checked={scope === "part-time"} onChange={() => setScope("part-time")} /> Part time — in this class sometimes, no specific periods tracked</label>
+            <label className="flex items-center gap-2 text-sm text-stone-700"><input type="radio" checked={scope === "periods"} onChange={() => setScope("periods")} /> Specific periods — only for particular parts of the day</label>
+          </div>
+          {scope === "periods" && (
+            <div className="mb-3">
+              {allPeriods.length === 0 && <p className="text-xs text-stone-400 mb-2">No periods set up yet in your Planner schedule — add them there first, or choose Part time instead for now.</p>}
+              <div className="flex flex-wrap gap-1.5">
+                {allPeriods.map((p) => (
+                  <button key={p.id} onClick={() => togglePeriod(p.id)}
+                    className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${periodIds.includes(p.id) ? "bg-slate-700 text-white border-slate-700" : "text-stone-600 border-stone-300"}`}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="flex gap-2">
+            <button onClick={() => onAdd(selected, scope, periodIds)} disabled={scope === "periods" && periodIds.length === 0 && allPeriods.length > 0}
+              className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
+              Add to class
+            </button>
+            <button onClick={() => setSelected(null)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Back</button>
+          </div>
+        </>
+      )}
+      <button onClick={onCancel} className="text-xs text-stone-400 hover:text-stone-600 mt-2">Cancel</button>
+    </div>
+  );
+}
+
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
   const [newName, setNewName] = useState("");
@@ -5108,10 +5205,13 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
   const [newPw1, setNewPw1] = useState("");
   const [newPw2, setNewPw2] = useState("");
   const [pwSaved, setPwSaved] = useState(false);
+  const [showAddExisting, setShowAddExisting] = useState(false);
   const update = (mutator) => setConfig(mutator(structuredClone(config)));
   const toggleCat = (id) => setExpandedCats((p) => ({ ...p, [id]: !p[id] }));
   const toggleStudent = (id) => setExpandedStudents((p) => ({ ...p, [id]: !p[id] }));
   const submitNewStudent = () => { addStudent(newName); setNewName(""); };
+
+  useEffect(() => { if (onRefreshGlobalStudents) onRefreshGlobalStudents(); }, []); // eslint-disable-line
 
   const saveClassName = () => { if (classNameInput.trim() && onRenameClass) onRenameClass(classNameInput.trim()); };
   const savePassword = () => {
@@ -5161,17 +5261,30 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           </Section>
 
           <Section title="Students">
-            <div className="flex gap-2 mb-3">
+            <div className="flex gap-2 mb-2">
               <input value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitNewStudent()}
                 placeholder="Add a student's name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
               <button onClick={submitNewStudent} className="bg-slate-700 text-white rounded-lg px-3 py-1.5 flex items-center justify-center hover:bg-slate-800"><Plus size={16} /></button>
             </div>
+            <button onClick={() => setShowAddExisting((v) => !v)} className="text-xs font-semibold text-slate-700 mb-3">
+              {showAddExisting ? "Close" : "Or add an existing student from another class"}
+            </button>
+            {showAddExisting && (
+              <AddExistingStudentPanel globalStudents={globalStudents} roster={roster} config={config}
+                onAdd={(student, scope, periodIds) => { onAddExistingStudent(student, scope, periodIds); setShowAddExisting(false); }}
+                onCancel={() => setShowAddExisting(false)} />
+            )}
             {roster.length === 0 && <p className="text-xs text-stone-400">No students yet — add one above.</p>}
             <div className="space-y-2">
               {roster.map((s) => (
                 <div key={s.id} className="border border-stone-200 rounded-lg">
                   <div className="flex items-center gap-2 px-3 py-2">
                     <input value={s.name} onChange={(e) => updateStudentField(s.id, "name", e.target.value)} className="flex-1 text-sm font-semibold text-stone-800 border-none focus:outline-none bg-transparent" />
+                    {s.linkedGlobalId && (
+                      <span className="text-[9px] font-semibold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+                        {s.enrollmentScope === "full-time" ? "Full time" : s.enrollmentScope === "part-time" ? "Part time" : "Specific periods"}
+                      </span>
+                    )}
                     <button onClick={() => toggleStudent(s.id)} className="text-stone-400 p-1">{expandedStudents[s.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>
                     <ConfirmDelete onConfirm={() => removeStudent(s.id)} size={14} />
                   </div>
