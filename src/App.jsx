@@ -1049,7 +1049,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     const data = studentData[studentId];
     const without = (data.attendance || []).filter((a) => a.date !== date);
     const prevEntry = (data.attendance || []).find((a) => a.date === date);
-    const newData = { ...data, attendance: [...without, { date, status: statusId, time: prevEntry?.time || "" }] };
+    const isLate = config.attendance.statuses.find((st) => st.id === statusId)?.flagType === "late";
+    const defaultTime = isLate && !prevEntry?.time ? new Date().toTimeString().slice(0, 5) : (prevEntry?.time || "");
+    const newData = { ...data, attendance: [...without, { date, status: statusId, time: defaultTime }] };
     persistStudent(studentId, newData);
     const flags = getFlags(newData, studentId, incidents, config);
     const attFlag = flags.find((f) => f.type === "late" || f.type === "absent");
