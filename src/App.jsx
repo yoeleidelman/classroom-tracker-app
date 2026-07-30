@@ -328,6 +328,7 @@ async function saveJSON(key, value, shared = false) {
     console.error("Save failed", key, e);
   }
 }
+
 const ClassContext = createContext({ className: "", onSwitchClass: () => {} });
 
 // ---------- Flags ----------
@@ -2894,10 +2895,10 @@ ${sections.join("\n\n")}
 
 Write 2-3 short paragraphs, warm but factual, weaving the exact figures above into natural sentences. Sign off as "[Your name]". Output only the message text, nothing else.`;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
@@ -3019,10 +3020,10 @@ Date: ${assessment.date}
 Result: ${grade}
 
 Write 2-3 sentences, warm but factual. Sign off as "[Your name]". Output only the message text, nothing else.`;
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
@@ -3203,10 +3204,10 @@ Mode: ${entry.mode === "automatic" ? "reading automatically" : "still decoding l
 ${entry.notes ? `Teacher's note: ${entry.notes}` : ""}
 
 Write 2-3 sentences, warm but factual. Sign off as "[Your name]". Output only the message text, nothing else.`;
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
@@ -3284,10 +3285,10 @@ Recent results:
 ${summaryLines.map((l) => `- ${l}`).join("\n")}
 
 Write 2-3 sentences, warm but factual. Sign off as "[Your name]". Output only the message text, nothing else.`;
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
@@ -3379,10 +3380,10 @@ Description: ${incident.description || "(no additional description given)"}
 ${othersInvolved > 0 ? `Other students involved: ${othersInvolved}` : "No other students involved."}
 
 Write 2-3 sentences, warm but factual and non-alarming. Sign off as "[Your name]". Output only the message text, nothing else.`;
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
@@ -4008,10 +4009,10 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
       const content = pdfBase64
         ? [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } }, { type: "text", text: instructions }]
         : `${instructions}\n\nDocument text:\n${rawText}`;
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 2000, messages: [{ role: "user", content }] }),
+        body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 2000, messages: [{ role: "user", content }] }),
       });
       const data = await response.json();
       const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
@@ -4402,10 +4403,10 @@ Student's first name: ${student.name}
 Situation: ${flag.label}
 Suggested next step: ${flag.message}
 Keep it under 120 words, friendly but direct, no exaggeration. Sign off as "[Your name]". Output only the message text, nothing else.`;
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
