@@ -1,3 +1,18 @@
+// Tailwind color safelist — many classes in this file are built dynamically (e.g. `bg-${color}-500`),
+// which Tailwind's build step can't detect from source alone, so it silently skips generating their CSS.
+// Listing every actual combination here as plain text fixes that — a button set to any of these colors
+// will now render correctly instead of turning invisible. Add a color to this list if it's ever added to
+// COLOR_CHOICES below.
+// bg-emerald-100 bg-emerald-200 bg-emerald-400 bg-emerald-500 bg-emerald-600 text-emerald-700 text-emerald-800 border-emerald-500
+// bg-amber-100 bg-amber-200 bg-amber-400 bg-amber-500 bg-amber-600 text-amber-700 text-amber-800 border-amber-500
+// bg-rose-100 bg-rose-200 bg-rose-400 bg-rose-500 bg-rose-600 text-rose-700 text-rose-800 border-rose-500
+// bg-indigo-100 bg-indigo-200 bg-indigo-400 bg-indigo-500 bg-indigo-600 text-indigo-700 text-indigo-800 border-indigo-500
+// bg-sky-100 bg-sky-200 bg-sky-400 bg-sky-500 bg-sky-600 text-sky-700 text-sky-800 border-sky-500
+// bg-stone-100 bg-stone-200 bg-stone-400 bg-stone-500 bg-stone-600 text-stone-700 text-stone-800 border-stone-500
+// bg-violet-100 bg-violet-200 bg-violet-400 bg-violet-500 bg-violet-600 text-violet-700 text-violet-800 border-violet-500
+// bg-teal-100 bg-teal-200 bg-teal-400 bg-teal-500 bg-teal-600 text-teal-700 text-teal-800 border-teal-500
+// bg-fuchsia-100 bg-fuchsia-200 bg-fuchsia-400 bg-fuchsia-500 bg-fuchsia-600 text-fuchsia-700 text-fuchsia-800 border-fuchsia-500
+
 import { db } from "./firebase";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
@@ -5,7 +20,7 @@ import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
-  Star, Minus, Calendar, Bell, ChevronRight
+  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -117,6 +132,14 @@ const DEFAULT_CONFIG = {
     lateTierMessages: { 1: "Mention it to the student", 2: "Send a note home about lateness", 3: "Call the parent", 4: "Flag for admin" },
     absentTierMessages: { 1: "Note the pattern", 2: "Send a note home", 3: "Call the parent", 4: "Flag for admin" },
   },
+  periodAttendance: {
+    types: [
+      { id: "late-to-class", label: "Late to class", color: "amber" },
+      { id: "absent-subject", label: "Absent from subject", color: "rose" },
+      { id: "left-early", label: "Left early", color: "violet" },
+      { id: "returned-appointment", label: "Returned from appointment", color: "sky" },
+    ],
+  },
   incidents: {
     categories: [
       { id: "discipline", label: "Discipline", color: "rose" },
@@ -151,12 +174,25 @@ const DEFAULT_CONFIG = {
   },
 };
 
-const COLOR_CHOICES = ["emerald", "amber", "rose", "indigo", "sky", "violet", "stone", "lime", "fuchsia"];
+const COLOR_CHOICES = ["emerald", "amber", "rose", "indigo", "sky", "violet", "stone", "teal", "fuchsia"];
 const PAGE = "app-page";
 
 function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
 function uid() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
+function waLink(phone, message) {
+  const digits = (phone || "").replace(/[^\d]/g, "");
+  return `https://wa.me/${digits}?text=${encodeURIComponent(message)}`;
+}
+function WhatsAppButton({ phone, message, className }) {
+  if (!phone) return null;
+  return (
+    <a href={waLink(phone, message)} target="_blank" rel="noopener noreferrer"
+      className={className || "flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700"}>
+      <MessageCircle size={12} /> Send WhatsApp
+    </a>
+  );
+}
 function withinWindow(dateStr, windowDays) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - windowDays);
@@ -214,7 +250,7 @@ function computeSkillStatus(history, config) {
   return { status: "practicing", streak };
 }
 
-function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], points: {}, communications: [] }; }
+function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], points: {}, communications: [] }; }
 
 function buildSampleData() {
   const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
@@ -385,15 +421,12 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      // Deliberately does NOT remember the last class or admin session across app opens.
+      // Every visit starts at the login screen, and a password is required every time —
+      // this is intentional, not a bug: nobody should land in a classroom that isn't theirs
+      // just because it was the last one open on this device.
       const reg = await loadJSON("schoolClasses", [], true);
       setRegistry(reg);
-      const adminFlag = await loadJSON("isAdminSession", false, false);
-      const savedId = await loadJSON("selectedClassId", null, false);
-      if (adminFlag) setIsAdminSession(true);
-      if (savedId) {
-        const cls = reg.find((c) => c.id === savedId);
-        if (cls) { setClassId(cls.id); setClassName(cls.name); }
-      }
       setCheckingSession(false);
     })();
   }, []);
@@ -401,13 +434,11 @@ export default function App() {
   const selectClass = (cls) => {
     setClassId(cls.id);
     setClassName(cls.name);
-    saveJSON("selectedClassId", cls.id, false);
   };
 
   const switchClass = () => {
     setClassId(null);
     setClassName("");
-    saveJSON("selectedClassId", null, false);
   };
 
   const createClass = async (name, password) => {
@@ -417,6 +448,36 @@ export default function App() {
     setRegistry(next);
     await saveJSON("schoolClasses", next, true);
     return cls;
+  };
+
+  const renameClass = async (newName) => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const next = reg.map((c) => (c.id === classId ? { ...c, name: newName } : c));
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
+    setClassName(newName);
+  };
+
+  const changeClassPassword = async (newPassword) => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const next = reg.map((c) => (c.id === classId ? { ...c, password: newPassword } : c));
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
+  };
+
+  const archiveClass = async () => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const next = reg.map((c) => (c.id === classId ? { ...c, archived: true } : c));
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
+    switchClass();
+  };
+
+  const restoreClass = async (id) => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const next = reg.map((c) => (c.id === id ? { ...c, archived: false } : c));
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
   };
 
   const refreshRegistry = async () => {
@@ -430,12 +491,10 @@ export default function App() {
       // first time — this submission sets the admin password
       await saveJSON("adminSettings", { password }, true);
       setIsAdminSession(true);
-      saveJSON("isAdminSession", true, false);
       return { ok: true, created: true };
     }
     if (password === settings.password) {
       setIsAdminSession(true);
-      saveJSON("isAdminSession", true, false);
       return { ok: true, created: false };
     }
     return { ok: false };
@@ -443,7 +502,6 @@ export default function App() {
 
   const logoutAdmin = () => {
     setIsAdminSession(false);
-    saveJSON("isAdminSession", false, false);
     switchClass();
   };
 
@@ -463,21 +521,24 @@ export default function App() {
   }
   if (!classId) {
     if (isAdminSession) {
-      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} />;
+      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} />;
     }
     return <ClassGateScreen registry={registry} onSelect={selectClass} onCreate={createClass} onRefresh={refreshRegistry} onLoginAdmin={loginAdmin} />;
   }
   return (
     <ClassApp classId={classId} className={className}
       onSwitchClass={isAdminSession ? backToAdminDashboard : switchClass}
-      switchLabel={isAdminSession ? "Admin \u00b7 Back to dashboard" : "Switch class"} />
+      switchLabel={isAdminSession ? "Admin \u00b7 Back to dashboard" : "Switch class"}
+      onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} />
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
+  const activeClasses = registry.filter((c) => !c.archived);
+  const archivedClasses = registry.filter((c) => c.archived);
 
   useEffect(() => { onRefresh(); }, []); // eslint-disable-line
 
@@ -497,9 +558,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout 
         </div>
         <p className="text-stone-500 text-sm mb-6">Every class in the school. Tap one to open it with full access.</p>
 
-        {registry.length === 0 && <p className="text-stone-400 text-sm text-center py-10 bg-white rounded-xl border border-stone-200">No classes yet.</p>}
+        {activeClasses.length === 0 && <p className="text-stone-400 text-sm text-center py-10 bg-white rounded-xl border border-stone-200">No classes yet.</p>}
         <ul className="space-y-2 mb-6">
-          {registry.map((cls) => (
+          {activeClasses.map((cls) => (
             <li key={cls.id}>
               <button onClick={() => onEnterClass(cls)} className="w-full text-left bg-white border border-stone-200 rounded-xl px-4 py-3 text-sm font-semibold text-stone-800 hover:border-indigo-300 flex items-center justify-between">
                 {cls.name}
@@ -508,6 +569,20 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout 
             </li>
           ))}
         </ul>
+
+        {archivedClasses.length > 0 && (
+          <div className="mb-6">
+            <p className="text-xs font-semibold text-stone-400 uppercase mb-2">Archived</p>
+            <ul className="space-y-2">
+              {archivedClasses.map((cls) => (
+                <li key={cls.id} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-3">
+                  <span className="text-sm text-stone-500">{cls.name}</span>
+                  <button onClick={() => onRestore(cls.id)} className="text-xs font-semibold text-indigo-700 hover:text-indigo-900">Restore</button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {showCreate ? (
           <div className="bg-white border border-stone-200 rounded-xl p-4">
@@ -570,9 +645,9 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
         <h1 className="display-font text-2xl font-bold text-stone-900 mb-1 text-center">Classroom Tracker</h1>
         <p className="text-stone-500 text-sm text-center mb-6">Select your class to continue</p>
 
-        {!showCreate && registry.length > 0 && (
+        {!showCreate && registry.filter((c) => !c.archived).length > 0 && (
           <div className="space-y-2 mb-4">
-            {registry.map((cls) => (
+            {registry.filter((c) => !c.archived).map((cls) => (
               <button key={cls.id} onClick={() => { setPendingClass(cls); setError(""); setPwInput(""); }}
                 className={`w-full text-left bg-white border rounded-xl px-4 py-3 text-sm font-semibold text-stone-800 hover:border-indigo-300 ${pendingClass?.id === cls.id ? "border-indigo-500" : "border-stone-200"}`}>
                 {cls.name}
@@ -632,7 +707,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
+function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass }) {
   const loadC = useCallback((key, fallback) => loadJSON(`class:${classId}:${key}`, fallback, true), [classId]);
   const saveC = useCallback((key, value) => saveJSON(`class:${classId}:${key}`, value, true), [classId]);
 
@@ -655,6 +730,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
   const [sessionIdx, setSessionIdx] = useState(0);
   const [incidentPreset, setIncidentPreset] = useState(null);
   const [incidentReturn, setIncidentReturn] = useState("home");
+  const [periodAttPreset, setPeriodAttPreset] = useState(null);
+  const [periodAttReturn, setPeriodAttReturn] = useState("home");
   const [messageFlag, setMessageFlag] = useState(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
@@ -958,6 +1035,14 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
   const updateIncident = (incidentId, fields) => {
     persistIncidents(incidents.map((i) => (i.id === incidentId ? { ...i, ...fields } : i)));
   };
+
+  const addPeriodAttendance = (studentIds, entry) => {
+    studentIds.forEach((sid) => {
+      const data = studentData[sid] || emptyStudentData();
+      const next = [{ id: uid(), ...entry }, ...(data.periodAttendance || [])];
+      persistStudent(sid, { ...data, periodAttendance: next });
+    });
+  };
   const addClassAssessment = (entry) => persistClassAssessments([{ id: uid(), ...entry }, ...classAssessments]);
 
   const setAttendance = (studentId, date, statusId) => {
@@ -1006,6 +1091,15 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
   };
 
   const openIncidentForm = (studentId, returnTo) => { setIncidentPreset(studentId); setIncidentReturn(returnTo); setView("incident"); };
+  const openPeriodAttendanceForm = (studentId, returnTo) => { setPeriodAttPreset(studentId); setPeriodAttReturn(returnTo); setView("period-attendance"); };
+  const todaysScheduleForForm = (() => {
+    const entry = plannerDays?.[todayISO()];
+    const dayType = (config.planner?.dayTypes || []).find((t) => t.id === entry?.dayType);
+    if (!dayType) return null;
+    if (dayType.scheduleTemplate === "full") return config.planner?.fullDaySchedule || [];
+    if (dayType.scheduleTemplate === "half") return config.planner?.halfDaySchedule || [];
+    return null;
+  })();
   const openMessageDraft = (flag) => { setMessageFlag(flag); setView("message-draft"); };
 
   if (loading) {
@@ -1088,7 +1182,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
           removeStudent={removeStudent}
           setAttendance={setAttendance} setAttendanceTime={setAttendanceTime}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
-          openIncidentForm={(id) => openIncidentForm(id, "home")} navigate={setView}
+          openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={setView}
           monthlyReportState={monthlyReportState}
           onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
           plannerDays={plannerDays} plannerEvents={plannerEvents}
@@ -1176,7 +1270,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
         <StudentDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           incidents={incidents} classAssessments={classAssessments} config={config}
           onBack={() => setView("home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
-          onLogIncident={() => openIncidentForm(currentId, "detail")} onGoToAssessments={() => setView("assessment-entry")}
+          onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")} onGoToAssessments={() => setView("assessment-entry")}
           onDraftMessage={openMessageDraft} onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
           onOpenFluencyDetail={(entry) => { setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
@@ -1223,6 +1317,12 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
           onSave={(entry) => { addIncident(entry); setView(incidentReturn); }} />
       )}
 
+      {view === "period-attendance" && (
+        <PeriodAttendanceForm roster={roster} config={config} presetId={periodAttPreset} todaysPeriods={todaysScheduleForForm}
+          onCancel={() => setView(periodAttReturn)}
+          onSave={(studentIds, entry) => { addPeriodAttendance(studentIds, entry); setView(periodAttReturn); }} />
+      )}
+
       {view === "message-draft" && currentId && messageFlag && (
         <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag}
           onBack={() => setView("detail")} onSaveParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
@@ -1232,7 +1332,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel }) {
       {view === "settings" && (
         <SettingsView config={config} setConfig={persistConfig} onBack={() => setView("home")}
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
-          loadSampleData={loadSampleData} clearAllData={clearAllData} />
+          loadSampleData={loadSampleData} clearAllData={clearAllData}
+          className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} />
       )}
     </div>
     </ClassContext.Provider>
@@ -1284,7 +1385,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, openDetail, openIncidentForm, navigate, monthlyReportState, onDismissMonthlyReminder, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, alerts, dismissAlert }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, alerts, dismissAlert }) {
   const [date, setDate] = useState(todayISO());
   const [showPlan, setShowPlan] = useState(false);
   const [multiSelect, setMultiSelect] = useState(false);
@@ -1380,11 +1481,18 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 {selectedDayType.label} — attendance isn't applicable for this date.
               </p>
             )}
-            {individualPointCats.length > 0 && roster.length > 0 && (
-              <div className="flex items-center justify-between mb-2">
-                <button onClick={() => { setMultiSelect((v) => !v); setSelectedIds([]); }} className="text-xs font-semibold text-indigo-700 flex items-center gap-1">
-                  {multiSelect ? "Done selecting" : "Select multiple students"}
-                </button>
+            {roster.length > 0 && (
+              <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                <div className="flex items-center gap-3">
+                  {individualPointCats.length > 0 && (
+                    <button onClick={() => { setMultiSelect((v) => !v); setSelectedIds([]); }} className="text-xs font-semibold text-indigo-700 flex items-center gap-1">
+                      {multiSelect ? "Done selecting" : "Select multiple students"}
+                    </button>
+                  )}
+                  <button onClick={() => openPeriodAttendance(null)} className="text-xs font-semibold text-amber-700 flex items-center gap-1">
+                    <Calendar size={12} /> Log period attendance
+                  </button>
+                </div>
                 {multiSelect && selectedIds.length > 0 && <span className="text-xs text-stone-400">{selectedIds.length} selected</span>}
               </div>
             )}
@@ -1743,6 +1851,15 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
   });
   const hasClassLogActivity = Object.values(classLogTotals).some((v) => v > 0);
 
+  const todaysPeriodAttendance = [];
+  roster.forEach((s) => {
+    ((studentData[s.id]?.periodAttendance) || []).filter((pa) => pa.date === today).forEach((pa) => {
+      todaysPeriodAttendance.push({ ...pa, studentName: s.name });
+    });
+  });
+  const periodAttTypeMap = {};
+  config.periodAttendance.types.forEach((t) => (periodAttTypeMap[t.id] = t));
+
   const scratchpadNote = plannerDays?.[today]?.notes;
 
   return (
@@ -1797,6 +1914,22 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
             )}
           </div>
         )}
+
+        <div className="bg-white border border-stone-200 rounded-xl p-4">
+          <p className="font-semibold text-stone-800 text-sm mb-2">Period attendance today</p>
+          {todaysPeriodAttendance.length === 0 && <p className="text-xs text-stone-400">None logged.</p>}
+          <ul className="space-y-1">
+            {todaysPeriodAttendance.map((pa) => (
+              <li key={pa.id} className="text-xs">
+                <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${periodAttTypeMap[pa.typeId]?.color || "stone"}-100 text-${periodAttTypeMap[pa.typeId]?.color || "stone"}-700`}>
+                  {periodAttTypeMap[pa.typeId]?.label || pa.typeId}
+                </span>
+                <span className="text-stone-600">{pa.studentName}</span>
+                <span className="text-stone-400"> · {pa.time}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
 
         <div className="bg-white border border-stone-200 rounded-xl p-4">
           <p className="font-semibold text-stone-800 text-sm mb-2">Today's scratchpad</p>
@@ -2554,7 +2687,7 @@ function AssessmentRowsList({ rows, onOpenSkillDetail, onOpenClassAssessmentRepo
   );
 }
 
-function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail }) {
+function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail }) {
   const flags = getFlags(data, student.id, incidents, config);
   const catMap = {};
   config.incidents.categories.forEach((c) => (catMap[c.id] = c));
@@ -2600,12 +2733,15 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
         </div>
       )}
 
-      <div className="flex gap-2 mb-6 md:w-96">
+      <div className="flex gap-2 mb-6 md:w-96 flex-wrap">
         <button onClick={onGoToAssessments} className="flex-1 flex items-center justify-center gap-2 bg-indigo-50 text-indigo-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-100">
           <BookOpen size={16} /> Assessments
         </button>
         <button onClick={onLogIncident} className="flex-1 flex items-center justify-center gap-2 bg-rose-50 text-rose-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-rose-100">
           <ClipboardList size={16} /> Log incident
+        </button>
+        <button onClick={onLogPeriodAttendance} className="flex-1 flex items-center justify-center gap-2 bg-amber-50 text-amber-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-amber-100">
+          <Calendar size={16} /> Period attendance
         </button>
       </div>
 
@@ -2648,6 +2784,26 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
                 </button>
               </li>
             ))}
+          </ul>
+        </Section>
+
+        <Section title="Period attendance">
+          <p className="text-[10px] text-stone-400 mb-2">Separate from morning attendance — mid-day changes only.</p>
+          {(data.periodAttendance || []).length === 0 && <p className="text-xs text-stone-400">None logged.</p>}
+          <ul className="space-y-1.5 max-h-56 overflow-y-auto">
+            {(data.periodAttendance || []).map((pa) => {
+              const t = config.periodAttendance.types.find((x) => x.id === pa.typeId);
+              const periodLabel = pa.periodId ? (config.planner?.fullDaySchedule || []).concat(config.planner?.halfDaySchedule || []).find((p) => p.id === pa.periodId)?.label : null;
+              return (
+                <li key={pa.id} className="text-xs border-l-2 border-stone-200 pl-2 py-0.5">
+                  <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${t?.color || "stone"}-100 text-${t?.color || "stone"}-700`}>
+                    {t?.label || pa.typeId}
+                  </span>
+                  <span className="text-stone-400">{pa.date} {pa.time}{periodLabel ? ` · ${periodLabel}` : ""}</span>
+                  {pa.notes && <p className="text-stone-600 mt-0.5">{pa.notes}</p>}
+                </li>
+              );
+            })}
           </ul>
         </Section>
 
@@ -2989,6 +3145,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
                     <button onClick={() => navigator.clipboard.writeText(r.draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><Copy size={12} /> Copy</button>
                     <a href={`mailto:${encodeURIComponent(r.email)}?subject=${encodeURIComponent(`Monthly report — ${label}`)}&body=${encodeURIComponent(r.draft)}`}
                       className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-2.5 py-1.5 hover:bg-indigo-800"><Mail size={12} /> Open in Mail</a>
+                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -3085,6 +3242,7 @@ function AssessmentReportView({ assessment, roster, onBack, onLogSent, onUpdateP
                     <button onClick={() => navigator.clipboard.writeText(r.draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><Copy size={12} /> Copy</button>
                     <a href={`mailto:${encodeURIComponent(r.email)}?subject=${encodeURIComponent(`${assessment.title} — Report`)}&body=${encodeURIComponent(r.draft)}`}
                       className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-2.5 py-1.5 hover:bg-indigo-800"><Mail size={12} /> Open in Mail</a>
+                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -3173,6 +3331,7 @@ function SkillCategoryReportView({ category, roster, studentData, config, onBack
                     <button onClick={() => navigator.clipboard.writeText(r.draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><Copy size={12} /> Copy</button>
                     <a href={`mailto:${encodeURIComponent(r.email)}?subject=${encodeURIComponent(`${category.title} — Progress note`)}&body=${encodeURIComponent(r.draft)}`}
                       className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-2.5 py-1.5 hover:bg-indigo-800"><Mail size={12} /> Open in Mail</a>
+                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -3263,6 +3422,7 @@ function FluencyDetailView({ student, entry, onBack, onLogSent, onUpdateParentEm
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             <button onClick={() => navigator.clipboard.writeText(draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><Copy size={13} /> Copy</button>
             <a href={`mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(`Fluency check — ${entry.date}`)}&body=${encodeURIComponent(draft)}`} className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-3 py-2 hover:bg-indigo-800"><Mail size={13} /> Open in Mail</a>
+            <WhatsAppButton phone={student?.parentPhone} message={draft} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -3354,6 +3514,7 @@ function SkillDetailView({ student, data, category, config, onBack, onLogSent, o
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             <button onClick={() => navigator.clipboard.writeText(draft)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><Copy size={13} /> Copy</button>
             <a href={`mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(`${category.title} — Progress note`)}&body=${encodeURIComponent(draft)}`} className="flex items-center gap-1 text-xs font-semibold text-white bg-indigo-700 rounded-lg px-3 py-2 hover:bg-indigo-800"><Mail size={13} /> Open in Mail</a>
+            <WhatsAppButton phone={student?.parentPhone} message={draft} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -3500,6 +3661,7 @@ function IncidentDetailView({ incident, roster, config, onBack, onLogSent, onUpd
                       <button onClick={() => navigator.clipboard.writeText(d.draft)} className="flex items-center gap-1 text-[10px] font-semibold text-stone-600 border border-stone-300 rounded-lg px-2 py-1 hover:bg-stone-50"><Copy size={11} /> Copy</button>
                       <a href={`mailto:${encodeURIComponent(d.email)}?subject=${encodeURIComponent(`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`)}&body=${encodeURIComponent(d.draft)}`}
                         className="flex items-center gap-1 text-[10px] font-semibold text-white bg-indigo-700 rounded-lg px-2 py-1 hover:bg-indigo-800"><Mail size={11} /> Open in Mail</a>
+                      <WhatsAppButton phone={s.parentPhone} message={d.draft} className="flex items-center gap-1 text-[10px] font-semibold text-white bg-emerald-600 rounded-lg px-2 py-1 hover:bg-emerald-700" />
                       <button onClick={() => logSent(s)} disabled={d.logged}
                         className={`flex items-center gap-1 text-[10px] font-semibold rounded-lg px-2 py-1 ${d.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                         {d.logged ? "Logged as sent" : "Log as sent"}
@@ -4395,6 +4557,74 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
   );
 }
 
+// ---------- Period attendance (separate from morning attendance) ----------
+
+function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCancel, onSave }) {
+  const [typeId, setTypeId] = useState(config.periodAttendance.types[0]?.id || "");
+  const [periodId, setPeriodId] = useState("");
+  const [notes, setNotes] = useState("");
+  const [time] = useState(() => new Date().toTimeString().slice(0, 5));
+  const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
+  const toggleStudent = (id) => setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const save = () => {
+    if (studentIds.length === 0 || !typeId) return;
+    onSave(studentIds, { date: todayISO(), time, typeId, periodId: periodId || null, notes });
+  };
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Log period attendance</h1>
+      <p className="text-xs text-stone-400 mb-5">Logged at {time} — separate from morning attendance, for mid-day changes.</p>
+
+      <div className="md:w-96">
+        <label className="block text-sm font-semibold text-stone-700 mb-1">Students</label>
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {roster.map((s) => {
+            const selected = studentIds.includes(s.id);
+            return (
+              <button key={s.id} onClick={() => toggleStudent(s.id)}
+                className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${selected ? "bg-indigo-700 text-white border-indigo-700" : "text-stone-600 border-stone-300"}`}>
+                {s.name}
+              </button>
+            );
+          })}
+        </div>
+
+        <label className="block text-sm font-semibold text-stone-700 mb-1">What happened</label>
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {config.periodAttendance.types.map((t) => (
+            <button key={t.id} onClick={() => setTypeId(t.id)}
+              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${typeId === t.id ? `bg-${t.color}-500 text-white border-${t.color}-500` : "text-stone-600 border-stone-300"}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {todaysPeriods && todaysPeriods.length > 0 && (
+          <>
+            <label className="block text-sm font-semibold text-stone-700 mb-1">Period <span className="text-stone-400 font-normal">(optional)</span></label>
+            <select value={periodId} onChange={(e) => setPeriodId(e.target.value)} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4 bg-white">
+              <option value="">Not specified</option>
+              {todaysPeriods.map((p) => <option key={p.id} value={p.id}>{p.label} ({p.startTime}–{p.endTime})</option>)}
+            </select>
+          </>
+        )}
+
+        <label className="block text-sm font-semibold text-stone-700 mb-1">Notes <span className="text-stone-400 font-normal">(optional)</span></label>
+        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="Anything worth adding" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-5" />
+
+        <button disabled={studentIds.length === 0 || !typeId} onClick={save}
+          className="w-full bg-indigo-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-indigo-800 disabled:opacity-40">
+          Log it
+        </button>
+        {studentIds.length === 0 && <p className="text-xs text-stone-400 text-center mt-2">Select at least one student</p>}
+      </div>
+    </div>
+  );
+}
+
 // ---------- Message draft (AI-generated, never auto-sent) ----------
 
 async function generateMessage(student, flag) {
@@ -4479,14 +4709,26 @@ function MessageDraftView({ student, flag, onBack, onSaveParentEmail, onLogSent 
 
 // ---------- Settings ----------
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData }) {
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
   const [newName, setNewName] = useState("");
+  const [classNameInput, setClassNameInput] = useState(className || "");
+  const [newPw1, setNewPw1] = useState("");
+  const [newPw2, setNewPw2] = useState("");
+  const [pwSaved, setPwSaved] = useState(false);
   const update = (mutator) => setConfig(mutator(structuredClone(config)));
   const toggleCat = (id) => setExpandedCats((p) => ({ ...p, [id]: !p[id] }));
   const toggleStudent = (id) => setExpandedStudents((p) => ({ ...p, [id]: !p[id] }));
   const submitNewStudent = () => { addStudent(newName); setNewName(""); };
+
+  const saveClassName = () => { if (classNameInput.trim() && onRenameClass) onRenameClass(classNameInput.trim()); };
+  const savePassword = () => {
+    if (!newPw1.trim() || newPw1 !== newPw2 || !onChangePassword) return;
+    onChangePassword(newPw1.trim());
+    setNewPw1(""); setNewPw2(""); setPwSaved(true);
+    setTimeout(() => setPwSaved(false), 2500);
+  };
 
   return (
     <div className={`${PAGE} pb-16`}>
@@ -4495,6 +4737,30 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
       <div className="md:grid md:grid-cols-2 md:gap-x-6 md:items-start">
         <div className="md:col-span-2">
+          {onRenameClass && (
+            <Section title="Class management">
+              <label className="block text-xs font-medium text-stone-500 mb-1">Class name</label>
+              <div className="flex gap-2 mb-4">
+                <input value={classNameInput} onChange={(e) => setClassNameInput(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+                <button onClick={saveClassName} className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-2 hover:bg-indigo-50">Save</button>
+              </div>
+
+              <label className="block text-xs font-medium text-stone-500 mb-1">Change class password</label>
+              <div className="flex flex-wrap gap-2 items-center mb-1">
+                <input type="password" value={newPw1} onChange={(e) => setNewPw1(e.target.value)} placeholder="New password" className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+                <input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} placeholder="Confirm new password" className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+                <button onClick={savePassword} disabled={!newPw1.trim() || newPw1 !== newPw2} className="text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg px-3 py-2 hover:bg-indigo-50 disabled:opacity-40">Update password</button>
+              </div>
+              {newPw1 && newPw2 && newPw1 !== newPw2 && <p className="text-xs text-red-500 mb-2">Passwords don't match.</p>}
+              {pwSaved && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
+
+              <div className="mt-4 pt-4 border-t border-stone-200">
+                <p className="text-xs text-stone-400 mb-2">Archiving hides this class from the class picker — nothing is deleted, and an admin can restore it anytime from the Admin Dashboard.</p>
+                <ConfirmDelete onConfirm={onArchiveClass} label="Archive this class" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" />
+              </div>
+            </Section>
+          )}
+
           <Section title="Demo & data reset">
             <p className="text-xs text-stone-400 mb-3">Useful when sharing this with another teacher for feedback, or starting fresh. Both replace your current roster, attendance, incidents, points, planner entries, and benchmarks — your Settings customizations (categories, thresholds, schedule templates) are kept either way.</p>
             <div className="flex flex-wrap gap-2">
@@ -4520,13 +4786,37 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                   </div>
                   {expandedStudents[s.id] && (
                     <div className="px-3 pb-3 border-t border-stone-100 pt-2 md:grid md:grid-cols-2 md:gap-2">
+                      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 1</p>
                       <div>
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Parent email</label>
-                        <input type="email" value={s.parentEmail || ""} onChange={(e) => updateStudentField(s.id, "parentEmail", e.target.value)} placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+                        <input value={s.parent1Name || ""} onChange={(e) => updateStudentField(s.id, "parent1Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
                       </div>
                       <div>
-                        <label className="block text-[10px] text-stone-400 mb-0.5">Parent phone</label>
+                        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
                         <input type="tel" value={s.parentPhone || ""} onChange={(e) => updateStudentField(s.id, "parentPhone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="block text-[10px] text-stone-400 mb-0.5">Email (primary contact)</label>
+                        <input type="email" value={s.parentEmail || ""} onChange={(e) => updateStudentField(s.id, "parentEmail", e.target.value)} placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                      </div>
+
+                      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 2</p>
+                      <div>
+                        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+                        <input value={s.parent2Name || ""} onChange={(e) => updateStudentField(s.id, "parent2Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+                        <input type="tel" value={s.parent2Phone || ""} onChange={(e) => updateStudentField(s.id, "parent2Phone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
+                        <input type="email" value={s.parent2Email || ""} onChange={(e) => updateStudentField(s.id, "parent2Email", e.target.value)} placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                      </div>
+
+                      <div className="md:col-span-2">
+                        <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
+                        <input value={s.homeAddress || ""} onChange={(e) => updateStudentField(s.id, "homeAddress", e.target.value)} placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
                       </div>
                       <div className="md:col-span-2">
                         <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
