@@ -187,6 +187,7 @@ const DEFAULT_CONFIG = {
 };
 
 const COLOR_CHOICES = ["emerald", "amber", "rose", "indigo", "sky", "violet", "stone", "teal", "fuchsia"];
+const WEEKDAY_LABELS_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]; // indices match Date.getDay()
 const PAGE = "app-page";
 
 function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
@@ -278,10 +279,14 @@ function addDaysISO(dateStr, n) {
   return isoDate(d);
 }
 // The one place that decides "what periods happen on this date" — replaces what used to be
-// duplicated fixed full/half-day logic in half a dozen places. Half Day stays a single template
-// regardless of weekday (schools usually shorten the same way no matter which day it falls on).
-// A regular School Day now resolves by weekday, via config.planner.weekdaySchedule.
-function getScheduleForDate(dateStr, dayType, config) {
+// duplicated fixed full/half-day logic in half a dozen places. A one-time override for this
+// exact date (set by the teacher, e.g. for an assembly or field trip) always wins, regardless
+// of day type. Otherwise: Half Day stays a single template regardless of weekday (schools
+// usually shorten the same way no matter which day it falls on); a regular School Day resolves
+// by weekday, via config.planner.weekdaySchedule.
+function getScheduleForDate(dateStr, dayType, config, plannerDays) {
+  const override = plannerDays?.[dateStr]?.scheduleOverride;
+  if (override) return override;
   if (!dayType || dayType.scheduleTemplate === "none") return null;
   if (dayType.scheduleTemplate === "half") return config.planner?.halfDaySchedule || [];
   if (dayType.scheduleTemplate === "full") {
@@ -1128,6 +1133,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
   const [curriculumMilestones, setCurriculumMilestones] = useState([]);
   const [behaviorLogData, setBehaviorLogData] = useState({});
+  const [randomPickerData, setRandomPickerData] = useState({ pickCounts: {}, lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [view, setView] = useState("home");
@@ -1165,6 +1171,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const bs = await loadC("benchmarkSubjects", []);
       const cm = await loadC("curriculumMilestones", []);
       const bl = await loadC("behaviorLogData", {});
+      const rp = await loadC("randomPickerData", { pickCounts: {}, lastPickedId: null });
       const al = await loadC("alerts", []);
       const initialized = await loadC("appInitialized", false);
       const gs = await loadJSON("globalStudents", [], true);
@@ -1233,6 +1240,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       setBenchmarkSubjects(finalBS);
       setCurriculumMilestones(cm);
       setBehaviorLogData(bl);
+      setRandomPickerData(rp);
       setAlerts(al);
       const dataMap = {};
       for (const s of finalRoster) {
@@ -1372,6 +1380,13 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const dismissMilestoneReminder = (id) => updateMilestone(id, { dismissed: true });
 
   const persistBehaviorLogData = (next) => { setBehaviorLogData(next); saveC("behaviorLogData", next); };
+
+  const persistRandomPickerData = (next) => { setRandomPickerData(next); saveC("randomPickerData", next); };
+  const recordRandomPick = (studentId) => {
+    const nextCounts = { ...randomPickerData.pickCounts, [studentId]: (randomPickerData.pickCounts[studentId] || 0) + 1 };
+    persistRandomPickerData({ pickCounts: nextCounts, lastPickedId: studentId });
+  };
+  const resetRandomPicker = () => persistRandomPickerData({ pickCounts: {}, lastPickedId: null });
   const adjustBehaviorMark = (date, periodId, markId, delta) => {
     const dayEntry = behaviorLogData[date] || {};
     const periodEntry = dayEntry[periodId] || {};
@@ -1394,11 +1409,21 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     persistPlannerDays(sample.plannerDays);
     persistPlannerEvents(sample.plannerEvents);
     persistBenchmarkSubjects(sample.benchmarkSubjects);
+    const existingSchedules = config.planner?.schedules || [];
+    let samplePlanner = { ...config.planner };
+    if (existingSchedules.length === 0) {
+      const sampleScheduleId = uid();
+      samplePlanner = {
+        ...samplePlanner,
+        schedules: [{ id: sampleScheduleId, name: "Regular Schedule", periods: sample.sampleSchedule }],
+        weekdaySchedule: { 1: sampleScheduleId, 2: sampleScheduleId, 3: sampleScheduleId, 4: sampleScheduleId, 5: sampleScheduleId },
+      };
+    }
     persistConfig({
       ...config,
       categories: config.categories.map((cat) => (cat.id === "lname" ? { ...cat, active: true } : cat)),
       points: { ...config.points, categories: [...(config.points.categories || []), sample.pointsCategory] },
-      planner: { ...config.planner, fullDaySchedule: sample.sampleSchedule },
+      planner: samplePlanner,
     });
   };
 
@@ -1683,7 +1708,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     const todayStr = todayISO();
     const entry = plannerDays?.[todayStr];
     const dayType = (config.planner?.dayTypes || []).find((t) => t.id === entry?.dayType);
-    return getScheduleForDate(todayStr, dayType, config);
+    return getScheduleForDate(todayStr, dayType, config, plannerDays);
   })();
   const openMessageDraft = (flag) => { setMessageFlag(flag); setView("message-draft"); };
 
@@ -1787,6 +1812,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           setPlannerDay={setPlannerDay} addPoints={addPoints} behaviorLogData={behaviorLogData}
           birthdayDismissals={birthdayDismissals} onDismissBirthday={dismissBirthday} onCreateBirthdayEvent={createBirthdayEvent}
           curriculumMilestones={curriculumMilestones} onDismissMilestone={dismissMilestoneReminder} onAddPlannerEvent={addPlannerEvent}
+          randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
           alerts={alerts} dismissAlert={dismissAlert} />
       )}
 
@@ -2014,7 +2040,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, curriculumMilestones, onDismissMilestone, onAddPlannerEvent, alerts, dismissAlert }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, curriculumMilestones, onDismissMilestone, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert }) {
   const [date, setDate] = useState(todayISO());
   const [showPlan, setShowPlan] = useState(false);
   const [multiSelect, setMultiSelect] = useState(false);
@@ -2225,7 +2251,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 const isSelected = selectedIds.includes(s.id);
                 const isExpanded = expandedAttendance.includes(s.id);
                 const showFullPicker = !entry || isExpanded;
-                const studentAttendanceApplies = morningAttendanceApplies(s, date, selectedDayType, config);
+                const studentAttendanceApplies = morningAttendanceApplies(s, date, selectedDayType, config, plannerDays);
                 const homeworkEntry = (studentData[s.id]?.homework || []).find((h) => h.date === date);
                 return (
                   <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 overflow-x-auto ${isSelected ? "border-slate-400 ring-1 ring-slate-200" : "border-stone-200"}`}>
@@ -2344,6 +2370,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
           </div>
           <TodaysPlanPanel config={config} plannerDays={plannerDays} setPlannerDay={setPlannerDay} navigate={navigate} />
           <TimerWidget />
+          <RandomPickerWidget roster={roster} pickerData={randomPickerData} onPick={onRandomPick} onReset={onResetRandomPicker} />
           <ScratchpadWidget plannerDays={plannerDays} setPlannerDay={setPlannerDay} />
           <button onClick={() => navigate("day-recap")} className="w-full flex items-center justify-center gap-2 bg-stone-800 text-white rounded-xl py-2.5 text-sm font-semibold hover:bg-stone-900">
             End of day recap <ArrowRight size={14} />
@@ -2360,7 +2387,7 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
   const dayTypeMap = {};
   (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
   const dayType = entry.dayType ? dayTypeMap[entry.dayType] : null;
-  const template = getScheduleForDate(today, dayType, config);
+  const template = getScheduleForDate(today, dayType, config, plannerDays);
   const [slotDrafts, setSlotDrafts] = useState(entry.slotContent || {});
 
   useEffect(() => { setSlotDrafts(plannerDays?.[today]?.slotContent || {}); }, [today, plannerDays]);
@@ -2417,6 +2444,78 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
   );
 }
 
+// Weighted lottery, not a strict rotation — students picked fewer times get proportionally
+// higher odds (weight = 1 / (timesPicked + 1)), so it stays genuinely random while balancing
+// out over time. The most recently picked student is excluded outright, so nobody gets called
+// twice in a row (unless there's only one student in the room).
+function RandomPickerWidget({ roster, pickerData, onPick, onReset }) {
+  const [picking, setPicking] = useState(false);
+  const [displayName, setDisplayName] = useState(null);
+  const [finalPick, setFinalPick] = useState(null);
+  const intervalRef = useRef(null);
+
+  useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current); }, []);
+
+  const weightedPick = () => {
+    const candidates = roster.length > 1 ? roster.filter((s) => s.id !== pickerData.lastPickedId) : roster;
+    if (candidates.length === 0) return null;
+    const weights = candidates.map((s) => 1 / ((pickerData.pickCounts?.[s.id] || 0) + 1));
+    const total = weights.reduce((a, b) => a + b, 0);
+    let r = Math.random() * total;
+    for (let i = 0; i < candidates.length; i++) {
+      r -= weights[i];
+      if (r <= 0) return candidates[i];
+    }
+    return candidates[candidates.length - 1];
+  };
+
+  const startPick = () => {
+    if (roster.length === 0 || picking) return;
+    const winner = weightedPick();
+    if (!winner) return;
+    setPicking(true);
+    setFinalPick(null);
+    let ticks = 0;
+    const maxTicks = 14; // ~1.4s of rapid cycling before settling — the "fun animation" part
+    intervalRef.current = setInterval(() => {
+      const flash = roster[Math.floor(Math.random() * roster.length)];
+      setDisplayName(flash.name);
+      ticks++;
+      if (ticks >= maxTicks) {
+        clearInterval(intervalRef.current);
+        setDisplayName(winner.name);
+        setFinalPick(winner);
+        setPicking(false);
+        onPick(winner.id);
+      }
+    }, 100);
+  };
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <p className="font-semibold text-stone-800 text-sm">Random Student</p>
+        <button onClick={onReset} title="Clear fairness tracking and start fresh" className="text-xs text-stone-400 hover:text-stone-600">Reset</button>
+      </div>
+
+      <div className={`rounded-lg py-6 text-center mb-3 transition-colors ${finalPick ? "bg-emerald-50" : "bg-stone-50"}`}>
+        {displayName ? (
+          <p className={`font-bold transition-all ${picking ? "text-2xl text-stone-400" : "text-3xl text-emerald-700"}`}>
+            {finalPick ? "🎉 " : ""}{displayName}
+          </p>
+        ) : (
+          <p className="text-sm text-stone-400">Tap to pick a student</p>
+        )}
+      </div>
+
+      <button onClick={startPick} disabled={picking || roster.length === 0} className="w-full bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
+        {picking ? "Picking..." : "🎲 Pick a student"}
+      </button>
+      {roster.length === 0 && <p className="text-xs text-stone-400 text-center mt-2">Add students first.</p>}
+    </div>
+  );
+}
+
 function TimerWidget() {
   const PRESETS = [1, 3, 5, 10];
   const RINGTONES = [
@@ -2431,7 +2530,26 @@ function TimerWidget() {
   const [done, setDone] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
   const [ringtone, setRingtone] = useState("bell");
+  const [fullScreen, setFullScreen] = useState(false);
   const audioCtxRef = useRef(null);
+  const fsRef = useRef(null);
+
+  useEffect(() => {
+    if (fullScreen && fsRef.current && !document.fullscreenElement) {
+      fsRef.current.requestFullscreen?.().catch(() => { /* fullscreen unsupported/blocked — the overlay still shows full-viewport via CSS */ });
+    }
+  }, [fullScreen]);
+
+  useEffect(() => {
+    const handler = () => { if (!document.fullscreenElement) setFullScreen(false); };
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
+
+  const exitFullScreenMode = () => {
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    setFullScreen(false);
+  };
 
   useEffect(() => {
     if (!running) return;
@@ -2505,14 +2623,22 @@ function TimerWidget() {
   const mm = String(Math.floor(remaining / 60)).padStart(2, "0");
   const ss = String(remaining % 60).padStart(2, "0");
 
+  const pct = totalSeconds > 0 ? remaining / totalSeconds : 0;
+  const barColor = pct > 0.5 ? "emerald" : pct > 0.2 ? "amber" : "rose";
+  const finalCountdown = running && remaining <= 10 && remaining > 0;
+
   return (
+    <>
     <div className={`bg-white border rounded-xl p-4 ${done ? "border-amber-400 bg-amber-50" : "border-stone-200"}`}>
       <div className="flex items-center justify-between mb-3">
         <p className="font-semibold text-stone-800 text-sm">Timer</p>
-        <button onClick={() => setSoundOn((v) => !v)} title={soundOn ? "Sound on — tap to mute" : "Sound off — tap to unmute"}
-          className={`text-xs font-semibold px-2 py-1 rounded-full ${soundOn ? "bg-emerald-100 text-emerald-700" : "bg-stone-100 text-stone-500"}`}>
-          {soundOn ? "🔔 On" : "🔕 Off"}
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button onClick={() => setFullScreen(true)} title="Full-screen classroom display" className="text-xs font-semibold px-2 py-1 rounded-full bg-stone-100 text-stone-600 hover:bg-stone-200">⛶ Full screen</button>
+          <button onClick={() => setSoundOn((v) => !v)} title={soundOn ? "Sound on — tap to mute" : "Sound off — tap to unmute"}
+            className={`text-xs font-semibold px-2 py-1 rounded-full ${soundOn ? "bg-emerald-100 text-emerald-700" : "bg-stone-100 text-stone-500"}`}>
+            {soundOn ? "🔔 On" : "🔕 Off"}
+          </button>
+        </div>
       </div>
       <p className={`text-4xl font-bold text-center mb-3 ${done ? "text-amber-700" : "text-stone-900"}`}>{mm}:{ss}</p>
       {done && <p className="text-xs text-amber-700 font-semibold text-center mb-3">Time's up!</p>}
@@ -2544,6 +2670,34 @@ function TimerWidget() {
         <button onClick={reset} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Reset</button>
       </div>
     </div>
+
+    {fullScreen && (
+      <div ref={fsRef} className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-stone-900 ${finalCountdown ? "animate-pulse" : ""}`}>
+        <button onClick={exitFullScreenMode} className="absolute top-4 right-4 md:top-8 md:right-8 text-white bg-white/10 hover:bg-white/20 rounded-full px-4 py-2.5 text-sm md:text-base font-semibold flex items-center gap-2">
+          <ChevronLeft size={18} /> Exit full screen
+        </button>
+
+        <p className={`font-bold text-white leading-none mb-8 md:mb-12 ${finalCountdown ? "text-[22vw] md:text-[16vw]" : "text-[28vw] md:text-[20vw]"}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+          {mm}:{ss}
+        </p>
+
+        <div className="w-[85vw] max-w-4xl h-8 md:h-12 rounded-full bg-white/10 overflow-hidden">
+          <div className={`h-full rounded-full bg-${barColor}-500`} style={{ width: `${Math.max(0, Math.min(100, pct * 100))}%`, transition: "width 1s linear, background-color 0.5s" }} />
+        </div>
+
+        {done && <p className="text-3xl md:text-5xl font-bold text-amber-400 mt-8 animate-pulse">Time's up!</p>}
+
+        <div className="flex gap-4 mt-10 md:mt-14">
+          {!running ? (
+            <button onClick={start} disabled={remaining === 0} className="bg-white text-stone-900 rounded-xl px-8 py-3 text-lg font-bold hover:bg-stone-100 disabled:opacity-40">Start</button>
+          ) : (
+            <button onClick={pause} className="bg-amber-500 text-white rounded-xl px-8 py-3 text-lg font-bold hover:bg-amber-600">Pause</button>
+          )}
+          <button onClick={reset} className="bg-white/10 text-white rounded-xl px-8 py-3 text-lg font-bold hover:bg-white/20">Reset</button>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -2690,6 +2844,139 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
 
 // ---------- Points ----------
 
+const WHEEL_COLORS = ["#f43f5e", "#f59e0b", "#10b981", "#0ea5e9", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
+
+function RaffleView({ roster }) {
+  const [selectedIds, setSelectedIds] = useState(roster.map((s) => s.id)); // starts with everyone in
+  const [spinning, setSpinning] = useState(false);
+  const [winner, setWinner] = useState(null);
+  const [rotation, setRotation] = useState(0);
+  const [fullScreen, setFullScreen] = useState(false);
+  const fsRef = useRef(null);
+
+  useEffect(() => {
+    if (fullScreen && fsRef.current && !document.fullscreenElement) {
+      fsRef.current.requestFullscreen?.().catch(() => {});
+    }
+  }, [fullScreen]);
+
+  useEffect(() => {
+    const handler = () => { if (!document.fullscreenElement) setFullScreen(false); };
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
+
+  const exitFullScreenMode = () => {
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    setFullScreen(false);
+  };
+
+  const toggle = (id) => setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const participants = roster.filter((s) => selectedIds.includes(s.id));
+
+  const sliceDeg = participants.length > 0 ? 360 / participants.length : 360;
+  const gradientStops = participants.map((_, i) => {
+    const color = WHEEL_COLORS[i % WHEEL_COLORS.length];
+    return `${color} ${i * sliceDeg}deg ${(i + 1) * sliceDeg}deg`;
+  }).join(", ");
+  const wheelBackground = participants.length > 0 ? `conic-gradient(${gradientStops})` : "#e7e5e4";
+
+  const spin = () => {
+    if (participants.length === 0 || spinning) return;
+    setWinner(null);
+    setSpinning(true);
+    const winnerIndex = Math.floor(Math.random() * participants.length);
+    const sliceCenterAngle = winnerIndex * sliceDeg + sliceDeg / 2;
+    const neededFinalMod = (360 - sliceCenterAngle) % 360;
+    const extraSpins = 6 + Math.floor(Math.random() * 3);
+    setRotation((prev) => {
+      const prevMod = ((prev % 360) + 360) % 360;
+      let delta = neededFinalMod - prevMod;
+      if (delta < 0) delta += 360;
+      return prev + delta + extraSpins * 360;
+    });
+    setTimeout(() => {
+      setWinner(participants[winnerIndex]);
+      setSpinning(false);
+    }, 4200);
+  };
+
+  const Wheel = ({ size }) => (
+    <div className="relative" style={{ width: size, height: size }}>
+      <div className="absolute left-1/2 -translate-x-1/2 z-10" style={{ top: -size * 0.04 }}>
+        <div style={{ width: 0, height: 0, borderLeft: `${size * 0.035}px solid transparent`, borderRight: `${size * 0.035}px solid transparent`, borderTop: `${size * 0.06}px solid #292524` }} />
+      </div>
+      <div className="rounded-full shadow-lg" style={{ width: size, height: size, background: wheelBackground, transform: `rotate(${rotation}deg)`, transition: "transform 4.2s cubic-bezier(0.17, 0.67, 0.12, 0.99)" }} />
+      <div className="absolute rounded-full bg-white border-4 border-stone-800 flex items-center justify-center" style={{ width: size * 0.16, height: size * 0.16, top: "50%", left: "50%", transform: "translate(-50%, -50%)" }}>
+        <span style={{ fontSize: size * 0.06 }}>🎉</span>
+      </div>
+    </div>
+  );
+
+  const Legend = () => (
+    <div className="flex flex-wrap gap-2 justify-center max-w-md">
+      {participants.map((s, i) => (
+        <span key={s.id} className="flex items-center gap-1.5 text-xs font-medium">
+          <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: WHEEL_COLORS[i % WHEEL_COLORS.length] }} />
+          {s.name}
+        </span>
+      ))}
+    </div>
+  );
+
+  return (
+    <div>
+      <p className="text-xs text-stone-400 mb-4">Pick who's entered, then spin — no outside websites needed.</p>
+
+      <div className="flex gap-1.5 mb-2">
+        <button onClick={() => setSelectedIds(roster.map((s) => s.id))} className="text-xs font-semibold text-slate-700 border border-slate-300 rounded-full px-3 py-1 hover:bg-slate-50">Select all</button>
+        <button onClick={() => setSelectedIds([])} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-full px-3 py-1 hover:bg-stone-50">Select none</button>
+      </div>
+      <div className="flex flex-wrap gap-1.5 mb-5 md:w-[32rem]">
+        {roster.map((s) => (
+          <button key={s.id} onClick={() => toggle(s.id)}
+            className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedIds.includes(s.id) ? "bg-slate-700 text-white border-slate-700" : "text-stone-500 border-stone-300"}`}>
+            {s.name}
+          </button>
+        ))}
+        {roster.length === 0 && <p className="text-xs text-stone-400">Add students first.</p>}
+      </div>
+
+      <div className="flex flex-col items-center bg-white border border-stone-200 rounded-xl p-6 md:w-[32rem]">
+        <Wheel size={240} />
+        <div className="mt-4 mb-4"><Legend /></div>
+
+        {winner && !spinning && (
+          <div className="mb-4 text-center">
+            <p className="text-2xl font-bold text-emerald-700">🎉 {winner.name} 🎉</p>
+          </div>
+        )}
+
+        <div className="flex gap-2 w-full">
+          <button onClick={spin} disabled={spinning || participants.length === 0} className="flex-1 bg-slate-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">
+            {spinning ? "Spinning..." : "🎡 Spin the wheel"}
+          </button>
+          <button onClick={() => setFullScreen(true)} disabled={participants.length === 0} className="px-4 text-sm font-semibold text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-40">⛶ Full screen</button>
+        </div>
+      </div>
+
+      {fullScreen && (
+        <div ref={fsRef} className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-stone-900">
+          <button onClick={exitFullScreenMode} className="absolute top-4 right-4 md:top-8 md:right-8 text-white bg-white/10 hover:bg-white/20 rounded-full px-4 py-2.5 text-sm md:text-base font-semibold flex items-center gap-2">
+            <ChevronLeft size={18} /> Exit full screen
+          </button>
+          <Wheel size={Math.min(500, typeof window !== "undefined" ? window.innerHeight * 0.55 : 400)} />
+          <div className="mt-6 mb-6 text-white"><Legend /></div>
+          {winner && !spinning && <p className="text-4xl md:text-6xl font-bold text-emerald-400 mb-8 animate-pulse">🎉 {winner.name} 🎉</p>}
+          <button onClick={spin} disabled={spinning || participants.length === 0} className="bg-white text-stone-900 rounded-xl px-10 py-4 text-xl font-bold hover:bg-stone-100 disabled:opacity-40">
+            {spinning ? "Spinning..." : "🎡 Spin the wheel"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark }) {
   const [subTab, setSubTab] = useState("rewards");
   const cats = config.points?.categories || [];
@@ -2715,13 +3002,16 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
       <Header navigate={navigate} />
       <MainTabs active="points" navigate={navigate} />
 
-      <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-72">
+      <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-96">
         <button onClick={() => setSubTab("rewards")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "rewards" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Rewards</button>
         <button onClick={() => setSubTab("classlog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "classlog" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Class Log</button>
+        <button onClick={() => setSubTab("raffle")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "raffle" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Raffle</button>
       </div>
 
       {subTab === "classlog" ? (
         <ClassLogView config={config} plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark} />
+      ) : subTab === "raffle" ? (
+        <RaffleView roster={roster} />
       ) : (
       <>
       <div className="flex flex-wrap items-center gap-1.5 mb-5">
@@ -2871,7 +3161,7 @@ function ClassLogView({ config, plannerDays, behaviorLogData, adjustBehaviorMark
 
   const entry = plannerDays?.[date] || {};
   const dayType = entry.dayType ? dayTypeMap[entry.dayType] : null;
-  const template = getScheduleForDate(date, dayType, config);
+  const template = getScheduleForDate(date, dayType, config, plannerDays);
   const noSchool = dayType?.hidesAttendance;
 
   const dayTotals = (dateKey) => {
@@ -4051,12 +4341,12 @@ function formatTime12h(hhmm) {
 // no period data to confirm they're even there first thing. Specific-periods students only
 // get it if one of their assigned periods is the actual first period of THIS date's schedule —
 // different weekdays can now run different schedules, so "first period" isn't one fixed thing.
-function morningAttendanceApplies(student, date, dayType, config) {
+function morningAttendanceApplies(student, date, dayType, config, plannerDays) {
   const scope = student.enrollmentScope;
   if (!scope || scope === "full-time") return true;
   if (scope === "part-time") return false;
   if (scope === "periods") {
-    const periods = getScheduleForDate(date, dayType, config) || [];
+    const periods = getScheduleForDate(date, dayType, config, plannerDays) || [];
     if (periods.length === 0) return false;
     const firstId = periods.reduce((earliest, p) => (!earliest || p.startTime < earliest.startTime ? p : earliest), null)?.id;
     return firstId ? (student.enrollmentPeriodIds || []).includes(firstId) : false;
@@ -5697,6 +5987,30 @@ function BulkDayTypeForm({ dayTypes, bulkSetByWeekday, bulkSetByRange }) {
   );
 }
 
+function PeriodListEditor({ periods, onChange }) {
+  const updatePeriod = (i, field, value) => onChange(periods.map((p, idx) => (idx === i ? { ...p, [field]: value } : p)));
+  const movePeriod = (i, dir) => { const next = [...periods]; [next[i], next[i + dir]] = [next[i + dir], next[i]]; onChange(next); };
+  const removePeriod = (i) => onChange(periods.filter((_, idx) => idx !== i));
+  const addPeriod = () => onChange([...periods, { id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }]);
+
+  return (
+    <div>
+      {periods.map((slot, i) => (
+        <div key={slot.id} className="flex items-center gap-1.5 mb-1.5">
+          <input value={slot.label} onChange={(e) => updatePeriod(i, "label", e.target.value)} placeholder="Subject / period" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          <input type="time" value={slot.startTime} onChange={(e) => updatePeriod(i, "startTime", e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+          <span className="text-stone-400 text-xs">–</span>
+          <input type="time" value={slot.endTime} onChange={(e) => updatePeriod(i, "endTime", e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+          <button disabled={i === 0} onClick={() => movePeriod(i, -1)} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronUp size={13} /></button>
+          <button disabled={i === periods.length - 1} onClick={() => movePeriod(i, 1)} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronDown size={13} /></button>
+          <ConfirmDelete onConfirm={() => removePeriod(i)} size={13} />
+        </div>
+      ))}
+      <button onClick={addPeriod} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
+    </div>
+  );
+}
+
 function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlannerDay, clearPlannerDayType, addPlannerEvent, removePlannerEvent, config, onClose }) {
   const entry = plannerDays?.[date] || {};
   const [notes, setNotes] = useState(entry.notes || "");
@@ -5717,7 +6031,8 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
   };
 
   const dayType = dayTypes.find((t) => t.id === entry.dayType);
-  const template = getScheduleForDate(date, dayType, config);
+  const template = getScheduleForDate(date, dayType, config, plannerDays);
+  const hasOverride = !!entry.scheduleOverride;
 
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-4">
@@ -5738,25 +6053,37 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
         {entry.dayType && <button onClick={() => clearPlannerDayType(date)} className="text-xs text-stone-400 underline">Clear</button>}
       </div>
 
-      {template && template.length > 0 && (
+      {entry.dayType && (
         <div className="mb-4">
-          <p className="text-[10px] font-semibold text-stone-400 uppercase mb-1">Today's schedule</p>
-          <div className="space-y-2">
-            {template.map((slot) => (
-              <div key={slot.id} className="border border-stone-200 rounded-lg p-2">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-semibold text-stone-700">{slot.label}</span>
-                  <span className="text-[10px] text-stone-400">{slot.startTime}–{slot.endTime}</span>
-                </div>
-                <div className="flex items-start gap-1.5">
-                  <textarea
-                    value={slotDrafts[slot.id] || ""}
-                    onChange={(e) => setSlotDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))}
-                    onBlur={(e) => saveSlot(slot.id, e.target.value)}
-                    rows={2} placeholder="What's being covered..."
-                    className="flex-1 rounded-lg border border-stone-200 px-2 py-1 text-xs" />
-                  <MicButton onResult={(spoken) => {
-                    const next = slotDrafts[slot.id] ? `${slotDrafts[slot.id]} ${spoken}` : spoken;
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-[10px] font-semibold text-stone-400 uppercase">{hasOverride ? "Custom schedule — this date only" : "Today's schedule"}</p>
+            {hasOverride ? (
+              <button onClick={() => setPlannerDay(date, { scheduleOverride: null })} className="text-xs font-semibold text-rose-600 hover:text-rose-800">Reset to regular schedule</button>
+            ) : (
+              <button onClick={() => setPlannerDay(date, { scheduleOverride: (template || []).length > 0 ? template : [{ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }] })}
+                className="text-xs font-semibold text-slate-700 hover:text-slate-900">Customize just this day</button>
+            )}
+          </div>
+
+          {hasOverride ? (
+            <PeriodListEditor periods={template || []} onChange={(next) => setPlannerDay(date, { scheduleOverride: next })} />
+          ) : template && template.length > 0 && (
+            <div className="space-y-2">
+              {template.map((slot) => (
+                <div key={slot.id} className="border border-stone-200 rounded-lg p-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-semibold text-stone-700">{slot.label}</span>
+                    <span className="text-[10px] text-stone-400">{slot.startTime}–{slot.endTime}</span>
+                  </div>
+                  <div className="flex items-start gap-1.5">
+                    <textarea
+                      value={slotDrafts[slot.id] || ""}
+                      onChange={(e) => setSlotDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))}
+                      onBlur={(e) => saveSlot(slot.id, e.target.value)}
+                      rows={2} placeholder="What's being covered..."
+                      className="flex-1 rounded-lg border border-stone-200 px-2 py-1 text-xs" />
+                    <MicButton onResult={(spoken) => {
+                      const next = slotDrafts[slot.id] ? `${slotDrafts[slot.id]} ${spoken}` : spoken;
                     setSlotDrafts((prev) => ({ ...prev, [slot.id]: next }));
                     saveSlot(slot.id, next);
                   }} />
@@ -5764,6 +6091,7 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
               </div>
             ))}
           </div>
+          )}
         </div>
       )}
       {entry.dayType && !template && (
@@ -6488,29 +6816,6 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               </div>
             ))}
             <button onClick={() => update((c) => { c.planner.halfDaySchedule = c.planner.halfDaySchedule || []; c.planner.halfDaySchedule.push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
-          </Section>
-        </div>
-
-        <div className="md:col-span-2 hidden">
-          <Section title="Daily schedule templates">
-            <p className="text-xs text-stone-400 mb-3">Set up your bell schedule once — it applies to every day of that type. Order matters (drag isn't available, so use the arrows).</p>
-            {["fullDaySchedule", "halfDaySchedule"].map((key) => (
-              <div key={key} className="mb-5">
-                <p className="text-sm font-semibold text-stone-700 mb-2">{key === "fullDaySchedule" ? "Full Day Schedule" : "Half Day Schedule"}</p>
-                {(config.planner?.[key] || []).map((slot, i) => (
-                  <div key={slot.id} className="flex items-center gap-1.5 mb-1.5">
-                    <input value={slot.label} onChange={(e) => update((c) => { c.planner[key][i].label = e.target.value; return c; })} placeholder="Subject / period" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                    <input type="time" value={slot.startTime} onChange={(e) => update((c) => { c.planner[key][i].startTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
-                    <span className="text-stone-400 text-xs">–</span>
-                    <input type="time" value={slot.endTime} onChange={(e) => update((c) => { c.planner[key][i].endTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
-                    <button disabled={i === 0} onClick={() => update((c) => { const arr = c.planner[key]; [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronUp size={13} /></button>
-                    <button disabled={i === (config.planner?.[key] || []).length - 1} onClick={() => update((c) => { const arr = c.planner[key]; [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronDown size={13} /></button>
-                    <ConfirmDelete onConfirm={() => update((c) => { c.planner[key].splice(i, 1); return c; })} size={13} />
-                  </div>
-                ))}
-                <button onClick={() => update((c) => { c.planner[key] = c.planner[key] || []; c.planner[key].push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
-              </div>
-            ))}
           </Section>
         </div>
 
