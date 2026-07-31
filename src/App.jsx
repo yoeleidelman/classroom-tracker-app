@@ -179,8 +179,10 @@ const DEFAULT_CONFIG = {
       { id: "half-day", label: "Half Day", color: "amber", hidesAttendance: false, scheduleTemplate: "half" },
       { id: "no-school", label: "No School", color: "stone", hidesAttendance: true, scheduleTemplate: "none" },
     ],
-    fullDaySchedule: [],
+    fullDaySchedule: [], // legacy — kept only as a one-time migration source into `schedules` below
     halfDaySchedule: [],
+    schedules: [], // [{id, name, periods: [{id, label, startTime, endTime}]}] — named, reusable weekly schedules
+    weekdaySchedule: {}, // {1: scheduleId, 2: scheduleId, ...} — Mon(1)–Fri(5) → which named schedule applies by default
   },
 };
 
@@ -275,6 +277,34 @@ function addDaysISO(dateStr, n) {
   d.setDate(d.getDate() + n);
   return isoDate(d);
 }
+// The one place that decides "what periods happen on this date" — replaces what used to be
+// duplicated fixed full/half-day logic in half a dozen places. Half Day stays a single template
+// regardless of weekday (schools usually shorten the same way no matter which day it falls on).
+// A regular School Day now resolves by weekday, via config.planner.weekdaySchedule.
+function getScheduleForDate(dateStr, dayType, config) {
+  if (!dayType || dayType.scheduleTemplate === "none") return null;
+  if (dayType.scheduleTemplate === "half") return config.planner?.halfDaySchedule || [];
+  if (dayType.scheduleTemplate === "full") {
+    const weekday = new Date(`${dateStr}T00:00:00`).getDay();
+    const scheduleId = config.planner?.weekdaySchedule?.[weekday];
+    const schedules = config.planner?.schedules || [];
+    const matched = schedules.find((s) => s.id === scheduleId);
+    if (matched) return matched.periods;
+    return schedules[0]?.periods || [];
+  }
+  return null;
+}
+
+// For lookups that need to check every period that could ever exist, regardless of which
+// weekday's schedule it lives in (e.g. "what's this period called" for an old log entry, or
+// building the period picker for a "specific periods" enrollment).
+function getAllPeriodsEverywhere(config) {
+  const fromSchedules = (config.planner?.schedules || []).flatMap((s) => s.periods || []);
+  const fromHalfDay = config.planner?.halfDaySchedule || [];
+  const seen = new Set();
+  return [...fromSchedules, ...fromHalfDay].filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
+}
+
 function buildMonthGrid(year, monthIdx) {
   const first = new Date(year, monthIdx, 1);
   const startWeekday = first.getDay();
@@ -1096,6 +1126,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [plannerDays, setPlannerDays] = useState({});
   const [plannerEvents, setPlannerEvents] = useState([]);
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
+  const [curriculumMilestones, setCurriculumMilestones] = useState([]);
   const [behaviorLogData, setBehaviorLogData] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -1132,6 +1163,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const pd = await loadC("plannerDays", {});
       const pe = await loadC("plannerEvents", []);
       const bs = await loadC("benchmarkSubjects", []);
+      const cm = await loadC("curriculumMilestones", []);
       const bl = await loadC("behaviorLogData", {});
       const al = await loadC("alerts", []);
       const initialized = await loadC("appInitialized", false);
@@ -1175,7 +1207,20 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
 
       setRoster(finalRoster);
       const mergedPoints = { ...DEFAULT_CONFIG.points, ...(finalConfig.points || {}), behaviorLog: { ...DEFAULT_CONFIG.points.behaviorLog, ...((finalConfig.points || {}).behaviorLog || {}) } };
-      setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: finalConfig.planner || DEFAULT_CONFIG.planner });
+      let mergedPlanner = { ...DEFAULT_CONFIG.planner, ...(finalConfig.planner || {}) };
+      // One-time migration: classes set up before named weekly schedules existed had one flat
+      // fullDaySchedule used every day. Turn that into a named "Regular Schedule" assigned to
+      // every weekday, so nothing already-built breaks — teachers can then customize per weekday.
+      if ((!mergedPlanner.schedules || mergedPlanner.schedules.length === 0) && mergedPlanner.fullDaySchedule?.length > 0) {
+        const migratedScheduleId = uid();
+        mergedPlanner = {
+          ...mergedPlanner,
+          schedules: [{ id: migratedScheduleId, name: "Regular Schedule", periods: mergedPlanner.fullDaySchedule }],
+          weekdaySchedule: { 1: migratedScheduleId, 2: migratedScheduleId, 3: migratedScheduleId, 4: migratedScheduleId, 5: migratedScheduleId },
+        };
+        saveC("config", { ...finalConfig, planner: mergedPlanner });
+      }
+      setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: mergedPlanner });
       setIncidents(finalIncidents);
       setClassAssessments(finalCA);
       setClassPoints(finalCP);
@@ -1186,6 +1231,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       setPlannerDays(finalPD);
       setPlannerEvents(finalPE);
       setBenchmarkSubjects(finalBS);
+      setCurriculumMilestones(cm);
       setBehaviorLogData(bl);
       setAlerts(al);
       const dataMap = {};
@@ -1312,6 +1358,18 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const removeBenchmarkSegment = (subjectId, segmentId) => {
     persistBenchmarkSubjects(benchmarkSubjects.map((s) => s.id !== subjectId ? s : { ...s, segments: s.segments.filter((seg) => seg.id !== segmentId) }));
   };
+
+  const persistMilestones = (next) => { setCurriculumMilestones(next); saveC("curriculumMilestones", next); };
+  const addMilestone = (fields) => {
+    if (!fields.title?.trim()) return;
+    persistMilestones([...curriculumMilestones, { id: uid(), type: "unit", targetDate: "", completedDate: "", notes: "", dismissed: false, ...fields }]);
+  };
+  const updateMilestone = (id, fields) => {
+    persistMilestones(curriculumMilestones.map((m) => (m.id === id ? { ...m, ...fields } : m)));
+  };
+  const removeMilestone = (id) => persistMilestones(curriculumMilestones.filter((m) => m.id !== id));
+  const markMilestoneComplete = (id) => updateMilestone(id, { completedDate: todayISO(), dismissed: false });
+  const dismissMilestoneReminder = (id) => updateMilestone(id, { dismissed: true });
 
   const persistBehaviorLogData = (next) => { setBehaviorLogData(next); saveC("behaviorLogData", next); };
   const adjustBehaviorMark = (date, periodId, markId, delta) => {
@@ -1622,12 +1680,10 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const openIncidentForm = (studentId, returnTo) => { setIncidentPreset(studentId); setIncidentReturn(returnTo); setView("incident"); };
   const openPeriodAttendanceForm = (studentId, returnTo) => { setPeriodAttPreset(studentId); setPeriodAttReturn(returnTo); setView("period-attendance"); };
   const todaysScheduleForForm = (() => {
-    const entry = plannerDays?.[todayISO()];
+    const todayStr = todayISO();
+    const entry = plannerDays?.[todayStr];
     const dayType = (config.planner?.dayTypes || []).find((t) => t.id === entry?.dayType);
-    if (!dayType) return null;
-    if (dayType.scheduleTemplate === "full") return config.planner?.fullDaySchedule || [];
-    if (dayType.scheduleTemplate === "half") return config.planner?.halfDaySchedule || [];
-    return null;
+    return getScheduleForDate(todayStr, dayType, config);
   })();
   const openMessageDraft = (flag) => { setMessageFlag(flag); setView("message-draft"); };
 
@@ -1730,6 +1786,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setPlannerDay={setPlannerDay} addPoints={addPoints} behaviorLogData={behaviorLogData}
           birthdayDismissals={birthdayDismissals} onDismissBirthday={dismissBirthday} onCreateBirthdayEvent={createBirthdayEvent}
+          curriculumMilestones={curriculumMilestones} onDismissMilestone={dismissMilestoneReminder} onAddPlannerEvent={addPlannerEvent}
           alerts={alerts} dismissAlert={dismissAlert} />
       )}
 
@@ -1810,7 +1867,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           importSchoolCalendar={importSchoolCalendar}
           benchmarkSubjects={benchmarkSubjects} addBenchmarkSubject={addBenchmarkSubject}
           removeBenchmarkSubject={removeBenchmarkSubject} addBenchmarkSegment={addBenchmarkSegment}
-          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment} />
+          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment}
+          curriculumMilestones={curriculumMilestones} addMilestone={addMilestone} updateMilestone={updateMilestone}
+          removeMilestone={removeMilestone} markMilestoneComplete={markMilestoneComplete} />
       )}
 
       {view === "class-assessment-form" && (
@@ -1955,7 +2014,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, alerts, dismissAlert }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, curriculumMilestones, onDismissMilestone, onAddPlannerEvent, alerts, dismissAlert }) {
   const [date, setDate] = useState(todayISO());
   const [showPlan, setShowPlan] = useState(false);
   const [multiSelect, setMultiSelect] = useState(false);
@@ -1989,6 +2048,14 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
     })
     .filter((b) => b && b.daysAway >= 0 && b.daysAway <= BIRTHDAY_REMINDER_DAYS)
     .sort((a, b) => a.daysAway - b.daysAway);
+
+  const MILESTONE_REMINDER_DAYS = 5;
+  const upcomingMilestones = (curriculumMilestones || []).filter((m) => {
+    if (m.completedDate || m.dismissed || !m.targetDate) return false;
+    const daysAway = Math.round((new Date(`${m.targetDate}T00:00:00`) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+    return daysAway >= 0 && daysAway <= MILESTONE_REMINDER_DAYS;
+  });
+  const reachedMilestones = (curriculumMilestones || []).filter((m) => m.completedDate && !m.dismissed);
 
   const dayTypeMap = {};
   (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
@@ -2072,6 +2139,34 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         </div>
       ))}
 
+      {upcomingMilestones.map((m) => {
+        const daysAway = Math.round((new Date(`${m.targetDate}T00:00:00`) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+        return (
+          <div key={m.id} className="bg-sky-50 border border-sky-200 rounded-xl px-4 py-3 mb-3">
+            <p className="text-sm font-semibold text-sky-900">📚 Upcoming milestone: {m.title}</p>
+            <p className="text-xs text-sky-700">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label} — expected {daysAway === 0 ? "today" : daysAway === 1 ? "tomorrow" : `in ${daysAway} days`}</p>
+          </div>
+        );
+      })}
+
+      {reachedMilestones.map((m) => (
+        <div key={m.id} className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-3">
+          <p className="text-sm font-semibold text-amber-900">🎉 Milestone reached: {m.title}</p>
+          <p className="text-xs text-amber-700 mb-2">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label} — completed {m.completedDate}. Want to do anything with it?</p>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Siyum — ${m.title}`, category: "siyum", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
+              className="text-xs font-semibold bg-amber-700 text-white rounded-lg px-3 py-1.5 hover:bg-amber-800">Create Siyum event</button>
+            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Review — ${m.title}`, category: "classroom-activity", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
+              className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Schedule review day</button>
+            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Celebration — ${m.title}`, category: "siyum", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
+              className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Plan celebration</button>
+            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Invite parents — ${m.title}`, category: "parent-event", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
+              className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Invite parents</button>
+            <button onClick={() => onDismissMilestone(m.id)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-1.5 hover:bg-stone-100">Dismiss</button>
+          </div>
+        </div>
+      ))}
+
       {upcomingEvents.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-5">
           <p className="text-sm font-semibold text-amber-900 flex items-center gap-1.5 mb-1"><Bell size={14} /> Upcoming</p>
@@ -2130,7 +2225,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 const isSelected = selectedIds.includes(s.id);
                 const isExpanded = expandedAttendance.includes(s.id);
                 const showFullPicker = !entry || isExpanded;
-                const studentAttendanceApplies = morningAttendanceApplies(s, config);
+                const studentAttendanceApplies = morningAttendanceApplies(s, date, selectedDayType, config);
                 const homeworkEntry = (studentData[s.id]?.homework || []).find((h) => h.date === date);
                 return (
                   <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 overflow-x-auto ${isSelected ? "border-slate-400 ring-1 ring-slate-200" : "border-stone-200"}`}>
@@ -2265,8 +2360,7 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
   const dayTypeMap = {};
   (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
   const dayType = entry.dayType ? dayTypeMap[entry.dayType] : null;
-  const template = dayType?.scheduleTemplate === "full" ? config.planner?.fullDaySchedule || []
-    : dayType?.scheduleTemplate === "half" ? config.planner?.halfDaySchedule || [] : null;
+  const template = getScheduleForDate(today, dayType, config);
   const [slotDrafts, setSlotDrafts] = useState(entry.slotContent || {});
 
   useEffect(() => { setSlotDrafts(plannerDays?.[today]?.slotContent || {}); }, [today, plannerDays]);
@@ -2777,8 +2871,7 @@ function ClassLogView({ config, plannerDays, behaviorLogData, adjustBehaviorMark
 
   const entry = plannerDays?.[date] || {};
   const dayType = entry.dayType ? dayTypeMap[entry.dayType] : null;
-  const template = dayType?.scheduleTemplate === "full" ? config.planner?.fullDaySchedule || []
-    : dayType?.scheduleTemplate === "half" ? config.planner?.halfDaySchedule || [] : null;
+  const template = getScheduleForDate(date, dayType, config);
   const noSchool = dayType?.hidesAttendance;
 
   const dayTotals = (dateKey) => {
@@ -3526,7 +3619,7 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
               <ul className="space-y-1.5 max-h-56 overflow-y-auto">
                 {(data.periodAttendance || []).map((pa) => {
                   const t = config.periodAttendance.types.find((x) => x.id === pa.typeId);
-                  const periodLabel = pa.periodId ? (config.planner?.fullDaySchedule || []).concat(config.planner?.halfDaySchedule || []).find((p) => p.id === pa.periodId)?.label : null;
+                  const periodLabel = pa.periodId ? getAllPeriodsEverywhere(config).find((p) => p.id === pa.periodId)?.label : null;
                   return (
                     <li key={pa.id} className="text-xs border-l-2 border-stone-200 pl-2 py-0.5">
                       <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${t?.color || "stone"}-100 text-${t?.color || "stone"}-700`}>
@@ -3953,22 +4046,19 @@ function formatTime12h(hhmm) {
 
 // The single earliest-starting period across the class's schedule(s) — used to decide
 // whether a "specific periods" student's morning is actually covered by their assignment.
-function getFirstPeriodId(config) {
-  const all = [...(config.planner?.fullDaySchedule || []), ...(config.planner?.halfDaySchedule || [])];
-  if (all.length === 0) return null;
-  return all.reduce((earliest, p) => (!earliest || p.startTime < earliest.startTime ? p : earliest), null)?.id || null;
-}
-
 // Full-time (or a locally-created student with no scope set at all) always gets morning
 // attendance, matching how the app always worked. Part-time students never do, since there's
 // no period data to confirm they're even there first thing. Specific-periods students only
-// get it if one of their assigned periods is that actual first period of the day.
-function morningAttendanceApplies(student, config) {
+// get it if one of their assigned periods is the actual first period of THIS date's schedule —
+// different weekdays can now run different schedules, so "first period" isn't one fixed thing.
+function morningAttendanceApplies(student, date, dayType, config) {
   const scope = student.enrollmentScope;
   if (!scope || scope === "full-time") return true;
   if (scope === "part-time") return false;
   if (scope === "periods") {
-    const firstId = getFirstPeriodId(config);
+    const periods = getScheduleForDate(date, dayType, config) || [];
+    if (periods.length === 0) return false;
+    const firstId = periods.reduce((earliest, p) => (!earliest || p.startTime < earliest.startTime ? p : earliest), null)?.id;
     return firstId ? (student.enrollmentPeriodIds || []).includes(firstId) : false;
   }
   return true;
@@ -4866,7 +4956,89 @@ function IncidentDetailView({ incident, roster, config, onBack, onLogSent, onUpd
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerDay, clearPlannerDayType, bulkSetByWeekday, bulkSetByRange, addPlannerEvent, removePlannerEvent, importSchoolCalendar, benchmarkSubjects, addBenchmarkSubject, removeBenchmarkSubject, addBenchmarkSegment, updateBenchmarkSegment, removeBenchmarkSegment }) {
+const MILESTONE_TYPES = [
+  { id: "parsha", label: "Finished a Parsha" },
+  { id: "perek", label: "Finished a Perek" },
+  { id: "masechta", label: "Finished a Masechta" },
+  { id: "sefer", label: "Finished a Sefer" },
+  { id: "benchmark", label: "Completed benchmark" },
+  { id: "unit", label: "Finished learning unit" },
+  { id: "other", label: "Other" },
+];
+
+function MilestonesView({ milestones, addMilestone, updateMilestone, removeMilestone, markComplete }) {
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState("");
+  const [type, setType] = useState("unit");
+  const [targetDate, setTargetDate] = useState("");
+
+  const submit = () => {
+    if (!title.trim()) return;
+    addMilestone({ title: title.trim(), type, targetDate });
+    setTitle(""); setTargetDate(""); setType("unit"); setShowForm(false);
+  };
+
+  const upcoming = (milestones || []).filter((m) => !m.completedDate).sort((a, b) => (a.targetDate || "9999") < (b.targetDate || "9999") ? -1 : 1);
+  const completed = (milestones || []).filter((m) => m.completedDate).sort((a, b) => (a.completedDate < b.completedDate ? 1 : -1));
+
+  return (
+    <div className="md:w-[28rem]">
+      <p className="text-xs text-stone-400 mb-3">Track the big curriculum accomplishments — Parshas, Perakim, a whole Masechta or Sefer, benchmarks, or any learning unit — and get a nudge when one's coming up or done.</p>
+
+      {!showForm ? (
+        <button onClick={() => setShowForm(true)} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mb-4"><Plus size={12} /> Add milestone</button>
+      ) : (
+        <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-4">
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Parshas Bereishis" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          <select value={type} onChange={(e) => setType(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-2">
+            {MILESTONE_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+          <label className="block text-[10px] text-stone-400 mb-0.5">Expected date (optional)</label>
+          <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+          <div className="flex gap-2">
+            <button onClick={submit} disabled={!title.trim()} className="flex-1 bg-slate-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-slate-800 disabled:opacity-40">Add</button>
+            <button onClick={() => setShowForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Upcoming</p>
+      {upcoming.length === 0 && <p className="text-xs text-stone-400 mb-4">Nothing tracked yet.</p>}
+      <ul className="space-y-2 mb-5">
+        {upcoming.map((m) => (
+          <li key={m.id} className="bg-white border border-stone-200 rounded-lg p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold text-stone-800">{m.title}</p>
+                <p className="text-xs text-stone-400">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label}{m.targetDate ? ` · expected ${m.targetDate}` : ""}</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button onClick={() => markComplete(m.id)} className="text-xs font-semibold text-emerald-700 border border-emerald-200 rounded-lg px-2.5 py-1 hover:bg-emerald-50">Mark complete</button>
+                <ConfirmDelete onConfirm={() => removeMilestone(m.id)} size={13} />
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Completed</p>
+      {completed.length === 0 && <p className="text-xs text-stone-400">None yet.</p>}
+      <ul className="space-y-2">
+        {completed.map((m) => (
+          <li key={m.id} className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 flex items-center justify-between gap-2">
+            <div>
+              <p className="text-sm font-semibold text-emerald-900">🎉 {m.title}</p>
+              <p className="text-xs text-emerald-700">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label} · completed {m.completedDate}</p>
+            </div>
+            <ConfirmDelete onConfirm={() => removeMilestone(m.id)} size={13} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerDay, clearPlannerDayType, bulkSetByWeekday, bulkSetByRange, addPlannerEvent, removePlannerEvent, importSchoolCalendar, benchmarkSubjects, addBenchmarkSubject, removeBenchmarkSubject, addBenchmarkSegment, updateBenchmarkSegment, removeBenchmarkSegment, curriculumMilestones, addMilestone, updateMilestone, removeMilestone, markMilestoneComplete }) {
   const [subTab, setSubTab] = useState("calendar");
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -4908,12 +5080,16 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
       <Header navigate={navigate} />
       <MainTabs active="planner" navigate={navigate} />
 
-      <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-72">
+      <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-96">
         <button onClick={() => setSubTab("calendar")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "calendar" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
         <button onClick={() => setSubTab("benchmarks")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "benchmarks" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Benchmarks</button>
+        <button onClick={() => setSubTab("milestones")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "milestones" ? "bg-white text-slate-700 shadow-sm" : "text-stone-500"}`}>Milestones</button>
       </div>
 
-      {subTab === "benchmarks" ? (
+      {subTab === "milestones" ? (
+        <MilestonesView milestones={curriculumMilestones} addMilestone={addMilestone} updateMilestone={updateMilestone}
+          removeMilestone={removeMilestone} markComplete={markMilestoneComplete} />
+      ) : subTab === "benchmarks" ? (
         <BenchmarksView subjects={benchmarkSubjects} addSubject={addBenchmarkSubject} removeSubject={removeBenchmarkSubject}
           addSegment={addBenchmarkSegment} updateSegment={updateBenchmarkSegment} removeSegment={removeBenchmarkSegment}
           plannerDays={plannerDays} dayTypes={dayTypes} />
@@ -5008,7 +5184,7 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
         {selectedDate && (
           <div className="md:w-80 shrink-0 mt-5 md:mt-0">
             <DayDetailPanel date={selectedDate} dayTypes={dayTypes} plannerDays={plannerDays} plannerEvents={eventsForDate(selectedDate)}
-              fullDaySchedule={config.planner?.fullDaySchedule || []} halfDaySchedule={config.planner?.halfDaySchedule || []}
+              config={config}
               setPlannerDay={setPlannerDay} clearPlannerDayType={clearPlannerDayType}
               addPlannerEvent={addPlannerEvent} removePlannerEvent={removePlannerEvent}
               onClose={() => setSelectedDate(null)} />
@@ -5521,7 +5697,7 @@ function BulkDayTypeForm({ dayTypes, bulkSetByWeekday, bulkSetByRange }) {
   );
 }
 
-function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlannerDay, clearPlannerDayType, addPlannerEvent, removePlannerEvent, fullDaySchedule, halfDaySchedule, onClose }) {
+function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlannerDay, clearPlannerDayType, addPlannerEvent, removePlannerEvent, config, onClose }) {
   const entry = plannerDays?.[date] || {};
   const [notes, setNotes] = useState(entry.notes || "");
   const [showEventForm, setShowEventForm] = useState(false);
@@ -5541,7 +5717,7 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
   };
 
   const dayType = dayTypes.find((t) => t.id === entry.dayType);
-  const template = dayType?.scheduleTemplate === "full" ? fullDaySchedule : dayType?.scheduleTemplate === "half" ? halfDaySchedule : null;
+  const template = getScheduleForDate(date, dayType, config);
 
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-4">
@@ -6054,8 +6230,7 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
   const results = (globalStudents || [])
     .filter((s) => !s.archived && !rosterIds.has(s.id) && s.name.toLowerCase().includes(search.toLowerCase()))
     .slice(0, 8);
-  const allPeriods = [...(config.planner?.fullDaySchedule || []), ...(config.planner?.halfDaySchedule || [])]
-    .filter((p, i, arr) => arr.findIndex((x) => x.id === p.id) === i);
+  const allPeriods = getAllPeriodsEverywhere(config);
   const togglePeriod = (id) => setPeriodIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   return (
@@ -6113,6 +6288,7 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
 
 function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent }) {
   const [expandedCats, setExpandedCats] = useState({});
+  const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
   const [newName, setNewName] = useState("");
   const [classNameInput, setClassNameInput] = useState(className || "");
@@ -6244,6 +6420,78 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
         </Section>
 
         <div className="md:col-span-2">
+          <Section title="Weekly schedules">
+            <p className="text-xs text-stone-400 mb-3">Create as many named schedules as you need — a Monday & Thursday schedule, a different one for Wednesdays, whatever fits — then assign which one applies to each weekday below.</p>
+            {(config.planner?.schedules || []).map((sched, si) => (
+              <div key={sched.id} className="border border-stone-200 rounded-lg mb-2">
+                <div className="flex items-center gap-2 px-3 py-2">
+                  <input value={sched.name} onChange={(e) => update((c) => { c.planner.schedules[si].name = e.target.value; return c; })}
+                    className="flex-1 text-sm font-semibold text-stone-800 border-none focus:outline-none bg-transparent" placeholder="Schedule name" />
+                  <button onClick={() => setExpandedSchedules((p) => ({ ...p, [sched.id]: !p[sched.id] }))} className="text-stone-400 p-1">
+                    {expandedSchedules[sched.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                  </button>
+                  <ConfirmDelete onConfirm={() => update((c) => {
+                    c.planner.schedules.splice(si, 1);
+                    Object.keys(c.planner.weekdaySchedule || {}).forEach((wd) => { if (c.planner.weekdaySchedule[wd] === sched.id) delete c.planner.weekdaySchedule[wd]; });
+                    return c;
+                  })} size={14} />
+                </div>
+                {expandedSchedules[sched.id] && (
+                  <div className="px-3 pb-3 border-t border-stone-100 pt-2">
+                    {(sched.periods || []).map((slot, i) => (
+                      <div key={slot.id} className="flex items-center gap-1.5 mb-1.5">
+                        <input value={slot.label} onChange={(e) => update((c) => { c.planner.schedules[si].periods[i].label = e.target.value; return c; })} placeholder="Subject / period" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                        <input type="time" value={slot.startTime} onChange={(e) => update((c) => { c.planner.schedules[si].periods[i].startTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+                        <span className="text-stone-400 text-xs">–</span>
+                        <input type="time" value={slot.endTime} onChange={(e) => update((c) => { c.planner.schedules[si].periods[i].endTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+                        <button disabled={i === 0} onClick={() => update((c) => { const arr = c.planner.schedules[si].periods; [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronUp size={13} /></button>
+                        <button disabled={i === (sched.periods || []).length - 1} onClick={() => update((c) => { const arr = c.planner.schedules[si].periods; [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronDown size={13} /></button>
+                        <ConfirmDelete onConfirm={() => update((c) => { c.planner.schedules[si].periods.splice(i, 1); return c; })} size={13} />
+                      </div>
+                    ))}
+                    <button onClick={() => update((c) => { c.planner.schedules[si].periods = c.planner.schedules[si].periods || []; c.planner.schedules[si].periods.push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
+                  </div>
+                )}
+              </div>
+            ))}
+            <button onClick={() => update((c) => {
+              c.planner.schedules = c.planner.schedules || [];
+              c.planner.schedules.push({ id: uid(), name: `Schedule ${c.planner.schedules.length + 1}`, periods: [] });
+              return c;
+            })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1 mb-4"><Plus size={12} /> Add schedule</button>
+
+            <p className="text-sm font-semibold text-stone-700 mb-2 pt-2 border-t border-stone-100">Assign to weekdays</p>
+            <p className="text-xs text-stone-400 mb-2">Which schedule applies on a "Full day schedule" day, by weekday.</p>
+            {WEEKDAY_LABELS_FULL.map((label, wd) => (
+              <div key={wd} className="flex items-center gap-2 mb-1.5">
+                <span className="text-xs text-stone-600 w-20 shrink-0">{label}</span>
+                <select value={config.planner?.weekdaySchedule?.[wd] || ""} onChange={(e) => update((c) => { c.planner.weekdaySchedule = c.planner.weekdaySchedule || {}; if (e.target.value) c.planner.weekdaySchedule[wd] = e.target.value; else delete c.planner.weekdaySchedule[wd]; return c; })}
+                  className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                  <option value="">Not set</option>
+                  {(config.planner?.schedules || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </div>
+            ))}
+          </Section>
+
+          <Section title="Half day schedule">
+            <p className="text-xs text-stone-400 mb-3">Used for any day type set to "Half day schedule" — the same shortened schedule regardless of weekday.</p>
+            {(config.planner?.halfDaySchedule || []).map((slot, i) => (
+              <div key={slot.id} className="flex items-center gap-1.5 mb-1.5">
+                <input value={slot.label} onChange={(e) => update((c) => { c.planner.halfDaySchedule[i].label = e.target.value; return c; })} placeholder="Subject / period" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                <input type="time" value={slot.startTime} onChange={(e) => update((c) => { c.planner.halfDaySchedule[i].startTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+                <span className="text-stone-400 text-xs">–</span>
+                <input type="time" value={slot.endTime} onChange={(e) => update((c) => { c.planner.halfDaySchedule[i].endTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+                <button disabled={i === 0} onClick={() => update((c) => { const arr = c.planner.halfDaySchedule; [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronUp size={13} /></button>
+                <button disabled={i === (config.planner?.halfDaySchedule || []).length - 1} onClick={() => update((c) => { const arr = c.planner.halfDaySchedule; [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronDown size={13} /></button>
+                <ConfirmDelete onConfirm={() => update((c) => { c.planner.halfDaySchedule.splice(i, 1); return c; })} size={13} />
+              </div>
+            ))}
+            <button onClick={() => update((c) => { c.planner.halfDaySchedule = c.planner.halfDaySchedule || []; c.planner.halfDaySchedule.push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
+          </Section>
+        </div>
+
+        <div className="md:col-span-2 hidden">
           <Section title="Daily schedule templates">
             <p className="text-xs text-stone-400 mb-3">Set up your bell schedule once — it applies to every day of that type. Order matters (drag isn't available, so use the arrows).</p>
             {["fullDaySchedule", "halfDaySchedule"].map((key) => (
