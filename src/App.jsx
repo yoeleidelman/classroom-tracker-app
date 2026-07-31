@@ -281,23 +281,20 @@ function addDaysISO(dateStr, n) {
 // The one place that decides "what periods happen on this date" — replaces what used to be
 // duplicated fixed full/half-day logic in half a dozen places. A one-time override for this
 // exact date (set by the teacher, e.g. for an assembly or field trip) always wins, regardless
-// of day type. Otherwise: Half Day stays a single template regardless of weekday (schools
-// usually shorten the same way no matter which day it falls on); a regular School Day resolves
-// by weekday, via config.planner.weekdaySchedule.
+// of day type. Otherwise, ANY day type with a schedule (School Day, Half Day, or a custom type)
+// resolves the same way — by weekday, via config.planner.weekdaySchedule — so "Half Day" is just
+// another named schedule a teacher can assign to Friday (or wherever it belongs), not a
+// separate fixed mechanism. Only "none" (e.g. No School) has no schedule at all.
 function getScheduleForDate(dateStr, dayType, config, plannerDays) {
   const override = plannerDays?.[dateStr]?.scheduleOverride;
   if (override) return override;
   if (!dayType || dayType.scheduleTemplate === "none") return null;
-  if (dayType.scheduleTemplate === "half") return config.planner?.halfDaySchedule || [];
-  if (dayType.scheduleTemplate === "full") {
-    const weekday = new Date(`${dateStr}T00:00:00`).getDay();
-    const scheduleId = config.planner?.weekdaySchedule?.[weekday];
-    const schedules = config.planner?.schedules || [];
-    const matched = schedules.find((s) => s.id === scheduleId);
-    if (matched) return matched.periods;
-    return schedules[0]?.periods || [];
-  }
-  return null;
+  const weekday = new Date(`${dateStr}T00:00:00`).getDay();
+  const scheduleId = config.planner?.weekdaySchedule?.[weekday];
+  const schedules = config.planner?.schedules || [];
+  const matched = schedules.find((s) => s.id === scheduleId);
+  if (matched) return matched.periods;
+  return schedules[0]?.periods || [];
 }
 
 // For lookups that need to check every period that could ever exist, regardless of which
@@ -1227,6 +1224,19 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
         };
         saveC("config", { ...finalConfig, planner: mergedPlanner });
       }
+      // Second, independent migration: fold the old separate fixed half-day schedule into the
+      // same named-schedules system too, so "Half Day" becomes just another schedule assignable
+      // to any weekday instead of its own mechanism. Not auto-assigned to a weekday, since there's
+      // no reliable way to know which day(s) it was actually used for — that's a quick manual
+      // step for the teacher (Settings → Weekly schedules → assign it to Friday, or wherever).
+      const halfDayAlreadyMigrated = (mergedPlanner.schedules || []).some((s) => s.name === "Half Day Schedule");
+      if (!halfDayAlreadyMigrated && mergedPlanner.halfDaySchedule?.length > 0) {
+        mergedPlanner = {
+          ...mergedPlanner,
+          schedules: [...(mergedPlanner.schedules || []), { id: uid(), name: "Half Day Schedule", periods: mergedPlanner.halfDaySchedule }],
+        };
+        saveC("config", { ...finalConfig, planner: mergedPlanner });
+      }
       setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: mergedPlanner });
       setIncidents(finalIncidents);
       setClassAssessments(finalCA);
@@ -1732,6 +1742,32 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Work+Sans:wght@400;500;600&family=Frank+Ruhl+Libre:wght@500;700&display=swap');
         .display-font { font-family: 'Fraunces', serif; }
         .heb-font { font-family: 'Frank Ruhl Libre', serif; }
+
+        /* The "smooth, modern" feel — applied once, globally, so every button and tappable
+           card in the app gets the same tactile press feedback and smooth hover/color
+           transitions the full-screen timer already had, without editing each one by hand. */
+        button, a, [role="button"] {
+          transition: background-color 150ms cubic-bezier(0.4, 0, 0.2, 1), color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+                      border-color 150ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1),
+                      opacity 150ms cubic-bezier(0.4, 0, 0.2, 1), transform 120ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        button:not(:disabled):active, [role="button"]:not(:disabled):active {
+          transform: scale(0.96);
+        }
+        /* Hover-only lift, gated to devices that genuinely support hover (real mouse/trackpad) —
+           this avoids the common mobile bug where a hover effect gets "stuck" after a tap. */
+        @media (hover: hover) and (pointer: fine) {
+          button:not(:disabled):hover, [role="button"]:not(:disabled):hover {
+            filter: brightness(1.03);
+          }
+          .hover-lift:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+          }
+        }
+        .hover-lift {
+          transition: transform 150ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
 
         /* Structural layout guarantees — written by hand so these never depend on
            dynamic utility-CSS generation keeping pace with React's render cycle. */
@@ -2362,7 +2398,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
 
       {/* Class Tools drawer — slides in from the right and pushes the roster over to share the screen (like a Gmail side panel) — never dims or blocks it, at any width. Position/transform/transition are inline styles deliberately, so they never depend on utility-CSS generation timing. */}
       <div className="w-full sm:w-96 lg:w-1/2 bg-stone-50 border-l border-stone-200 shadow-2xl overflow-y-auto"
-        style={{ position: "fixed", top: 0, right: 0, height: "100%", zIndex: 40, transform: showPlan ? "translateX(0)" : "translateX(100%)", transition: "transform 300ms ease-in-out" }}>
+        style={{ position: "fixed", top: 0, right: 0, height: "100%", zIndex: 40, transform: showPlan ? "translateX(0)" : "translateX(100%)", transition: "transform 320ms cubic-bezier(0.4, 0, 0.2, 1)" }}>
         <div className="p-4 space-y-4 lg:max-w-xl">
           <div className="flex items-center justify-between">
             <p className="font-semibold text-stone-800">Class Tools</p>
@@ -2846,6 +2882,38 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
 
 const WHEEL_COLORS = ["#f43f5e", "#f59e0b", "#10b981", "#0ea5e9", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
 
+// Deliberately a real, stable top-level component (not defined inline inside RaffleView) —
+// if it were recreated on every render, React would treat each render's version as a brand
+// new component type and remount the div from scratch on every state change, which silently
+// destroys the CSS transition the spin animation depends on (there'd be no "previous rotation"
+// for the browser to animate from, so it would just snap straight to the final angle).
+function RaffleWheel({ size, wheelBackground, rotation }) {
+  return (
+    <div className="relative" style={{ width: size, height: size }}>
+      <div className="absolute left-1/2 -translate-x-1/2 z-10" style={{ top: -size * 0.04 }}>
+        <div style={{ width: 0, height: 0, borderLeft: `${size * 0.035}px solid transparent`, borderRight: `${size * 0.035}px solid transparent`, borderTop: `${size * 0.06}px solid #292524` }} />
+      </div>
+      <div className="rounded-full shadow-lg" style={{ width: size, height: size, background: wheelBackground, transform: `rotate(${rotation}deg)`, transition: "transform 4.2s cubic-bezier(0.17, 0.67, 0.12, 0.99)" }} />
+      <div className="absolute rounded-full bg-white border-4 border-stone-800 flex items-center justify-center" style={{ width: size * 0.16, height: size * 0.16, top: "50%", left: "50%", transform: "translate(-50%, -50%)" }}>
+        <span style={{ fontSize: size * 0.06 }}>🎉</span>
+      </div>
+    </div>
+  );
+}
+
+function RaffleLegend({ participants }) {
+  return (
+    <div className="flex flex-wrap gap-2 justify-center max-w-md">
+      {participants.map((s, i) => (
+        <span key={s.id} className="flex items-center gap-1.5 text-xs font-medium">
+          <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: WHEEL_COLORS[i % WHEEL_COLORS.length] }} />
+          {s.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function RaffleView({ roster }) {
   const [selectedIds, setSelectedIds] = useState(roster.map((s) => s.id)); // starts with everyone in
   const [spinning, setSpinning] = useState(false);
@@ -2901,29 +2969,6 @@ function RaffleView({ roster }) {
     }, 4200);
   };
 
-  const Wheel = ({ size }) => (
-    <div className="relative" style={{ width: size, height: size }}>
-      <div className="absolute left-1/2 -translate-x-1/2 z-10" style={{ top: -size * 0.04 }}>
-        <div style={{ width: 0, height: 0, borderLeft: `${size * 0.035}px solid transparent`, borderRight: `${size * 0.035}px solid transparent`, borderTop: `${size * 0.06}px solid #292524` }} />
-      </div>
-      <div className="rounded-full shadow-lg" style={{ width: size, height: size, background: wheelBackground, transform: `rotate(${rotation}deg)`, transition: "transform 4.2s cubic-bezier(0.17, 0.67, 0.12, 0.99)" }} />
-      <div className="absolute rounded-full bg-white border-4 border-stone-800 flex items-center justify-center" style={{ width: size * 0.16, height: size * 0.16, top: "50%", left: "50%", transform: "translate(-50%, -50%)" }}>
-        <span style={{ fontSize: size * 0.06 }}>🎉</span>
-      </div>
-    </div>
-  );
-
-  const Legend = () => (
-    <div className="flex flex-wrap gap-2 justify-center max-w-md">
-      {participants.map((s, i) => (
-        <span key={s.id} className="flex items-center gap-1.5 text-xs font-medium">
-          <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: WHEEL_COLORS[i % WHEEL_COLORS.length] }} />
-          {s.name}
-        </span>
-      ))}
-    </div>
-  );
-
   return (
     <div>
       <p className="text-xs text-stone-400 mb-4">Pick who's entered, then spin — no outside websites needed.</p>
@@ -2943,8 +2988,8 @@ function RaffleView({ roster }) {
       </div>
 
       <div className="flex flex-col items-center bg-white border border-stone-200 rounded-xl p-6 md:w-[32rem]">
-        <Wheel size={240} />
-        <div className="mt-4 mb-4"><Legend /></div>
+        <RaffleWheel size={240} wheelBackground={wheelBackground} rotation={rotation} />
+        <div className="mt-4 mb-4"><RaffleLegend participants={participants} /></div>
 
         {winner && !spinning && (
           <div className="mb-4 text-center">
@@ -2965,8 +3010,8 @@ function RaffleView({ roster }) {
           <button onClick={exitFullScreenMode} className="absolute top-4 right-4 md:top-8 md:right-8 text-white bg-white/10 hover:bg-white/20 rounded-full px-4 py-2.5 text-sm md:text-base font-semibold flex items-center gap-2">
             <ChevronLeft size={18} /> Exit full screen
           </button>
-          <Wheel size={Math.min(500, typeof window !== "undefined" ? window.innerHeight * 0.55 : 400)} />
-          <div className="mt-6 mb-6 text-white"><Legend /></div>
+          <RaffleWheel size={Math.min(500, typeof window !== "undefined" ? window.innerHeight * 0.55 : 400)} wheelBackground={wheelBackground} rotation={rotation} />
+          <div className="mt-6 mb-6 text-white"><RaffleLegend participants={participants} /></div>
           {winner && !spinning && <p className="text-4xl md:text-6xl font-bold text-emerald-400 mb-8 animate-pulse">🎉 {winner.name} 🎉</p>}
           <button onClick={spin} disabled={spinning || participants.length === 0} className="bg-white text-stone-900 rounded-xl px-10 py-4 text-xl font-bold hover:bg-stone-100 disabled:opacity-40">
             {spinning ? "Spinning..." : "🎡 Spin the wheel"}
@@ -3974,7 +4019,7 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
         <div onClick={() => setShowContact(false)} className="lg:hidden" style={{ position: "fixed", top: 0, right: 0, bottom: 0, left: 0, backgroundColor: "rgba(0,0,0,0.2)", zIndex: 30 }} />
       )}
       <div className="w-full sm:w-96 lg:w-1/2 bg-stone-50 border-l border-stone-200 shadow-2xl overflow-y-auto"
-        style={{ position: "fixed", top: 0, right: 0, height: "100%", zIndex: 40, transform: showContact ? "translateX(0)" : "translateX(100%)", transition: "transform 300ms ease-in-out" }}>
+        style={{ position: "fixed", top: 0, right: 0, height: "100%", zIndex: 40, transform: showContact ? "translateX(0)" : "translateX(100%)", transition: "transform 320ms cubic-bezier(0.4, 0, 0.2, 1)" }}>
         <div className="p-4 lg:max-w-xl">
           <div className="flex items-center justify-between mb-3">
             <p className="font-semibold text-stone-800">Contact info — {student?.name}</p>
@@ -5385,7 +5430,7 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
           plannerDays={plannerDays} dayTypes={dayTypes} />
       ) : (
       <div className="md:flex md:gap-6 md:items-start">
-        <div className="flex-1">
+        <div className="flex-1 md:max-w-xl">
           <div className="flex items-center justify-between mb-4">
             <button onClick={() => changeMonth(-1)} className="p-1.5 text-stone-400 hover:text-stone-700"><ChevronLeft size={18} /></button>
             <p className="display-font text-lg font-bold text-stone-900">{monthLabel(year, monthIdx)}</p>
@@ -5406,14 +5451,14 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
               const hebDateShort = hebrewDateFor(d).replace(/ \d{4}$/, "");
               return (
                 <button key={d} onClick={() => setSelectedDate(d)}
-                  className={`relative rounded-lg text-xs font-semibold flex flex-col items-start justify-start border p-1 aspect-square md:aspect-auto md:min-h-[4.5rem] overflow-hidden text-left ${
+                  className={`relative rounded-lg text-xs font-semibold flex flex-col items-start justify-start border p-1 min-h-[3.4rem] md:min-h-[4.5rem] overflow-hidden text-left ${
                     selectedDate === d ? "border-slate-600" : "border-transparent"
                   } ${dayType ? `bg-${dayType.color}-100 text-${dayType.color}-800` : "bg-stone-50 text-stone-600 hover:bg-stone-100"} ${isToday ? "ring-2 ring-slate-400" : ""}`}>
                   <div className="flex items-center justify-between w-full">
                     <span>{dayNum}</span>
                     {hasNotes && <span className="w-1 h-1 rounded-full bg-stone-400 shrink-0" />}
                   </div>
-                  <span className="hidden md:block text-[8px] font-normal text-stone-400 leading-tight whitespace-nowrap">{hebDateShort}</span>
+                  <span className="block text-[7px] md:text-[8px] font-normal text-stone-400 leading-tight whitespace-nowrap">{hebDateShort}</span>
                   <div className="hidden md:flex flex-col gap-0.5 mt-0.5 w-full overflow-hidden">
                     {dayEvents.slice(0, 2).map((e) => {
                       const cat = EVENT_CATEGORIES.find((c) => c.id === e.category) || EVENT_CATEGORIES[EVENT_CATEGORIES.length - 1];
@@ -6749,7 +6794,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
         <div className="md:col-span-2">
           <Section title="Weekly schedules">
-            <p className="text-xs text-stone-400 mb-3">Create as many named schedules as you need — a Monday & Thursday schedule, a different one for Wednesdays, whatever fits — then assign which one applies to each weekday below.</p>
+            <p className="text-xs text-stone-400 mb-3">Create as many named schedules as you need — a regular schedule, a shortened Half Day schedule, a different one for Wednesdays, whatever fits — then assign which one applies to each weekday below. If Friday is always a half day, for example, just create a "Half Day" schedule here and assign it to Friday.</p>
             {(config.planner?.schedules || []).map((sched, si) => (
               <div key={sched.id} className="border border-stone-200 rounded-lg mb-2">
                 <div className="flex items-center gap-2 px-3 py-2">
@@ -6800,22 +6845,6 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                 </select>
               </div>
             ))}
-          </Section>
-
-          <Section title="Half day schedule">
-            <p className="text-xs text-stone-400 mb-3">Used for any day type set to "Half day schedule" — the same shortened schedule regardless of weekday.</p>
-            {(config.planner?.halfDaySchedule || []).map((slot, i) => (
-              <div key={slot.id} className="flex items-center gap-1.5 mb-1.5">
-                <input value={slot.label} onChange={(e) => update((c) => { c.planner.halfDaySchedule[i].label = e.target.value; return c; })} placeholder="Subject / period" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                <input type="time" value={slot.startTime} onChange={(e) => update((c) => { c.planner.halfDaySchedule[i].startTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
-                <span className="text-stone-400 text-xs">–</span>
-                <input type="time" value={slot.endTime} onChange={(e) => update((c) => { c.planner.halfDaySchedule[i].endTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
-                <button disabled={i === 0} onClick={() => update((c) => { const arr = c.planner.halfDaySchedule; [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronUp size={13} /></button>
-                <button disabled={i === (config.planner?.halfDaySchedule || []).length - 1} onClick={() => update((c) => { const arr = c.planner.halfDaySchedule; [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronDown size={13} /></button>
-                <ConfirmDelete onConfirm={() => update((c) => { c.planner.halfDaySchedule.splice(i, 1); return c; })} size={13} />
-              </div>
-            ))}
-            <button onClick={() => update((c) => { c.planner.halfDaySchedule = c.planner.halfDaySchedule || []; c.planner.halfDaySchedule.push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-slate-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
           </Section>
         </div>
 
