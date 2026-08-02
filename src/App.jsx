@@ -20,6 +20,7 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebas
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
+import * as XLSX from "xlsx";
 import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
@@ -339,6 +340,74 @@ function getAllPeriodsEverywhere(config) {
   const fromHalfDay = config.planner?.halfDaySchedule || [];
   const seen = new Set();
   return [...fromSchedules, ...fromHalfDay].filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
+}
+
+// Bulk student import — maps whatever column headers a real-world spreadsheet happens to use
+// onto the app's actual student fields. Keyword lists are deliberately generous (covers common
+// phrasings like "Guardian Email" or "Cell Phone") since we can't know in advance how any given
+// school's file will be labeled — the admin still reviews and can correct every guess before
+// anything is actually imported, so a wrong guess here is never destructive on its own.
+const IMPORT_FIELD_OPTIONS = [
+  { field: "name", label: "Student name" },
+  { field: "parent1Name", label: "Parent 1 name" },
+  { field: "parentEmail", label: "Parent 1 email" },
+  { field: "parentPhone", label: "Parent 1 phone" },
+  { field: "parent2Name", label: "Parent 2 name" },
+  { field: "parent2Email", label: "Parent 2 email" },
+  { field: "parent2Phone", label: "Parent 2 phone" },
+  { field: "homeAddress", label: "Home address" },
+  { field: "gregorianBirthday", label: "Birthday" },
+  { field: "notes", label: "Notes" },
+  { field: "", label: "Don't import this column" },
+];
+
+const IMPORT_FIELD_KEYWORDS = {
+  name: ["student name", "child name", "full name", "name"],
+  parent1Name: ["parent name", "parent 1 name", "parent1 name", "guardian name", "guardian 1 name", "mother", "father", "guardian"],
+  parentEmail: ["parent email", "parent 1 email", "parent1 email", "guardian email", "email 1", "contact email", "email"],
+  parentPhone: ["parent phone", "parent 1 phone", "parent1 phone", "guardian phone", "phone 1", "contact phone", "cell phone", "cell", "mobile", "phone"],
+  parent2Name: ["parent 2 name", "parent2 name", "second parent", "guardian 2 name", "guardian 2"],
+  parent2Email: ["parent 2 email", "parent2 email", "second email", "email 2"],
+  parent2Phone: ["parent 2 phone", "parent2 phone", "second phone", "phone 2"],
+  homeAddress: ["home address", "street address", "mailing address", "address"],
+  gregorianBirthday: ["birthday", "birth date", "date of birth", "dob"],
+  notes: ["notes", "comments", "remarks"],
+};
+
+// Checked in this order — most specific first — so e.g. "Parent 2 Email" matches parent2Email
+// before the more generic "email" keyword under parentEmail gets a chance to claim it.
+const IMPORT_FIELD_CHECK_ORDER = ["parent2Name", "parent2Email", "parent2Phone", "parent1Name", "parentEmail", "parentPhone", "homeAddress", "gregorianBirthday", "notes", "name"];
+
+function guessImportField(header) {
+  const normalized = (header || "").toLowerCase().trim();
+  if (!normalized) return "";
+  for (const field of IMPORT_FIELD_CHECK_ORDER) {
+    if (IMPORT_FIELD_KEYWORDS[field].some((kw) => normalized === kw)) return field;
+  }
+  for (const field of IMPORT_FIELD_CHECK_ORDER) {
+    if (IMPORT_FIELD_KEYWORDS[field].some((kw) => normalized.includes(kw))) return field;
+  }
+  return "";
+}
+
+function parseSpreadsheetFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: "array" });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+        const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
+        resolve({ headers, rows });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(new Error("Couldn't read the file"));
+    reader.readAsArrayBuffer(file);
+  });
 }
 
 function buildMonthGrid(year, monthIdx) {
@@ -919,6 +988,23 @@ export default function App() {
     await saveJSON("schoolClasses", next, true);
   };
 
+  // Removes the class from the list permanently — its underlying records (roster, incidents,
+  // points, etc.) aren't individually cleaned up, since there's no cascading-delete mechanism
+  // for that, but they become unreachable once the class itself is gone from this list.
+  const deleteClassPermanently = async (id) => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const next = reg.filter((c) => c.id !== id);
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
+  };
+
+  // Same as deleteClassPermanently, but also navigates away afterward — for when a teacher
+  // deletes the class they're currently sitting inside of (mirrors what archiveClass does).
+  const deleteOwnClassPermanently = async () => {
+    await deleteClassPermanently(classId);
+    switchClass();
+  };
+
   const refreshRegistry = async () => {
     const reg = await loadJSON("schoolClasses", [], true);
     setRegistry(reg);
@@ -944,6 +1030,23 @@ export default function App() {
     return student;
   };
 
+  // One load, one save for the entire batch — used by the bulk file-import feature, so
+  // importing dozens of students doesn't mean dozens of separate round-trips.
+  const bulkAddGlobalStudents = async (newStudents) => {
+    const gs = await loadJSON("globalStudents", [], true);
+    const withDefaults = newStudents.map((fields) => ({
+      id: uid(), name: "",
+      parent1Name: "", parentEmail: "", parentPhone: "",
+      parent2Name: "", parent2Email: "", parent2Phone: "",
+      homeAddress: "", notes: "",
+      ...fields,
+    }));
+    const next = [...gs, ...withDefaults];
+    setGlobalStudents(next);
+    await saveJSON("globalStudents", next, true);
+    return withDefaults.length;
+  };
+
   const updateGlobalStudent = async (id, field, value) => {
     const gs = await loadJSON("globalStudents", [], true);
     const next = gs.map((s) => (s.id === id ? { ...s, [field]: value } : s));
@@ -954,6 +1057,16 @@ export default function App() {
   const archiveGlobalStudent = async (id) => {
     const gs = await loadJSON("globalStudents", [], true);
     const next = gs.map((s) => (s.id === id ? { ...s, archived: true } : s));
+    setGlobalStudents(next);
+    await saveJSON("globalStudents", next, true);
+  };
+
+  // Removes the student from the school-wide list permanently — a class roster that already
+  // enrolled them keeps its own local record of the enrollment, since roster entries aren't a
+  // live reference back to this list, so this doesn't touch any class's existing history.
+  const deleteGlobalStudentPermanently = async (id) => {
+    const gs = await loadJSON("globalStudents", [], true);
+    const next = gs.filter((s) => s.id !== id);
     setGlobalStudents(next);
     await saveJSON("globalStudents", next, true);
   };
@@ -1049,8 +1162,8 @@ export default function App() {
     }
     if (currentTeacher.role === "admin") {
       if (!classId) {
-        return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onChangePassword={changeAdminPassword}
-          globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent}
+        return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
+          globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory}
@@ -1059,7 +1172,7 @@ export default function App() {
       return (
         <ClassApp classId={classId} className={className}
           onSwitchClass={backToTeacherClassPicker} switchLabel="Admin · Back to dashboard"
-          onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass}
+          onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
           loggedInTeacher={currentTeacher} />
       );
     }
@@ -1071,7 +1184,7 @@ export default function App() {
     return (
       <ClassApp classId={classId} className={className}
         onSwitchClass={backToTeacherClassPicker} switchLabel="Switch class"
-        onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass}
+        onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
         loggedInTeacher={currentTeacher} />
     );
   }
@@ -1084,8 +1197,8 @@ export default function App() {
   }
   if (!classId) {
     if (isAdminSession) {
-      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onChangePassword={changeAdminPassword}
-        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent}
+      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
+        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory}
@@ -1097,7 +1210,7 @@ export default function App() {
     <ClassApp classId={classId} className={className}
       onSwitchClass={isAdminSession ? backToAdminDashboard : switchClass}
       switchLabel={isAdminSession ? "Admin \u00b7 Back to dashboard" : "Switch class"}
-      onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} />
+      onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently} />
   );
 }
 
@@ -1279,7 +1392,123 @@ function ProgramForm({ classes, existing, onSave, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onFetchDailyOverview, onFetchStudentHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram }) {
+function BulkImportPanel({ onImport, onCancel }) {
+  const [fileName, setFileName] = useState("");
+  const [parsed, setParsed] = useState(null); // { headers, rows }
+  const [mapping, setMapping] = useState({}); // header -> field
+  const [error, setError] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState(null); // { imported, skipped }
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError("");
+    setFileName(file.name);
+    setResult(null);
+    try {
+      const { headers, rows } = await parseSpreadsheetFile(file);
+      if (headers.length === 0 || rows.length === 0) {
+        setError("Couldn't find any student rows in that file — make sure the first row has column labels and there's at least one student below it.");
+        setParsed(null);
+        return;
+      }
+      const initialMapping = {};
+      headers.forEach((h) => { initialMapping[h] = guessImportField(h); });
+      setMapping(initialMapping);
+      setParsed({ headers, rows });
+    } catch (err) {
+      setError("Couldn't read that file — make sure it's a valid Excel (.xlsx) or CSV file.");
+      setParsed(null);
+    }
+  };
+
+  const nameHeader = parsed?.headers.find((h) => mapping[h] === "name");
+
+  const doImport = async () => {
+    if (!parsed || !nameHeader) return;
+    setImporting(true);
+    const students = [];
+    let skipped = 0;
+    parsed.rows.forEach((row) => {
+      const fields = {};
+      Object.entries(mapping).forEach(([header, field]) => {
+        if (field) fields[field] = String(row[header] || "").trim();
+      });
+      if (!fields.name) { skipped++; return; }
+      students.push(fields);
+    });
+    const imported = await onImport(students);
+    setImporting(false);
+    setResult({ imported, skipped });
+    setParsed(null);
+    setFileName("");
+  };
+
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
+      {result && (
+        <div className="mb-3">
+          <p className="text-sm font-semibold text-emerald-700">✓ Imported {result.imported} student{result.imported === 1 ? "" : "s"}</p>
+          {result.skipped > 0 && <p className="text-xs text-stone-400 mt-0.5">{result.skipped} row{result.skipped === 1 ? "" : "s"} skipped — no name found in the mapped name column.</p>}
+        </div>
+      )}
+
+      {!parsed && (
+        <>
+          <label className="block text-xs font-semibold text-stone-700 mb-1.5">Choose an Excel (.xlsx) or CSV file</label>
+          <p className="text-[10px] text-stone-400 mb-2">The first row should have column labels like "Student Name," "Parent Email," etc. — you'll get to check and fix how each column gets matched before anything is actually imported.</p>
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="text-sm mb-2" />
+          {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
+          <div>
+            <button onClick={onCancel} className="text-xs text-stone-400 hover:text-stone-700">Close</button>
+          </div>
+        </>
+      )}
+
+      {parsed && (
+        <>
+          <p className="text-xs font-semibold text-stone-700 mb-1">{fileName} — {parsed.rows.length} row{parsed.rows.length === 1 ? "" : "s"} found</p>
+          <p className="text-[10px] text-stone-400 mb-2">Check that each column matched the right field — change any that don't look right.</p>
+          <div className="space-y-1.5 mb-3 max-h-64 overflow-y-auto">
+            {parsed.headers.map((h) => (
+              <div key={h} className="flex items-center gap-2">
+                <span className="text-xs text-stone-600 w-28 shrink-0 truncate" title={h}>"{h}"</span>
+                <ChevronRight size={12} className="text-stone-300 shrink-0" />
+                <select value={mapping[h] || ""} onChange={(e) => setMapping((m) => ({ ...m, [h]: e.target.value }))}
+                  className="flex-1 rounded-lg border border-stone-300 px-2 py-1 text-xs bg-white">
+                  {IMPORT_FIELD_OPTIONS.map((opt) => <option key={opt.field || "none"} value={opt.field}>{opt.label}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+
+          {!nameHeader && (
+            <p className="text-xs text-amber-700 mb-2">⚠️ No column is mapped to "Student name" yet — pick one above before importing.</p>
+          )}
+
+          <p className="text-xs font-semibold text-stone-500 uppercase mb-1">Preview</p>
+          <div className="bg-white border border-stone-200 rounded-lg p-2 mb-3 text-xs space-y-1">
+            {parsed.rows.slice(0, 3).map((row, i) => (
+              <p key={i} className="text-stone-600">{nameHeader ? (row[nameHeader] || "(blank — will be skipped)") : "—"}</p>
+            ))}
+            {parsed.rows.length > 3 && <p className="text-stone-400">+{parsed.rows.length - 3} more</p>}
+          </div>
+
+          <div className="flex gap-2">
+            <button onClick={doImport} disabled={importing || !nameHeader}
+              className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+              {importing ? "Importing..." : `Import ${parsed.rows.length} student${parsed.rows.length === 1 ? "" : "s"}`}
+            </button>
+            <button onClick={() => { setParsed(null); setFileName(""); }} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onFetchDailyOverview, onFetchStudentHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -1301,6 +1530,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [studentHistoryData, setStudentHistoryData] = useState(null);
   const [studentHistoryLoading, setStudentHistoryLoading] = useState(false);
   const [showProgramForm, setShowProgramForm] = useState(false);
+  const [showArchivedClasses, setShowArchivedClasses] = useState(false);
+  const [showArchivedStudents, setShowArchivedStudents] = useState(false);
+  const [showBulkImport, setShowBulkImport] = useState(false);
   const [editingProgramId, setEditingProgramId] = useState(null);
   const activeClasses = registry.filter((c) => !c.archived);
   const archivedClasses = registry.filter((c) => c.archived);
@@ -1451,15 +1683,22 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
         {archivedClasses.length > 0 && (
           <div className="mb-6">
-            <p className="text-xs font-semibold text-stone-400 uppercase mb-2">Archived</p>
-            <ul className="space-y-2">
-              {archivedClasses.map((cls) => (
-                <li key={cls.id} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-3">
-                  <span className="text-sm text-stone-500">{cls.name}</span>
-                  <button onClick={() => onRestore(cls.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Restore</button>
-                </li>
-              ))}
-            </ul>
+            <button onClick={() => setShowArchivedClasses((v) => !v)} className="text-xs font-semibold text-stone-500 hover:text-stone-800 flex items-center gap-1">
+              {showArchivedClasses ? <ChevronUp size={12} /> : <ChevronDown size={12} />} {showArchivedClasses ? "Hide" : "Show"} archived classes ({archivedClasses.length})
+            </button>
+            {showArchivedClasses && (
+              <ul className="space-y-2 mt-2">
+                {archivedClasses.map((cls) => (
+                  <li key={cls.id} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-3">
+                    <span className="text-sm text-stone-500">{cls.name}</span>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => onRestore(cls.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Restore</button>
+                      <ConfirmDelete onConfirm={() => onDeleteClass(cls.id)} size={13} label="Delete forever" confirmText="Really delete forever?" className="text-xs text-stone-400 hover:text-red-500" />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
@@ -1496,6 +1735,14 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             <button onClick={submitNewStudent} className="bg-teal-700 text-white rounded-lg px-3 py-1.5 flex items-center justify-center hover:bg-teal-800"><Plus size={16} /></button>
           </div>
 
+          {!showBulkImport ? (
+            <button onClick={() => setShowBulkImport(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Import students from a file
+            </button>
+          ) : (
+            <BulkImportPanel onImport={onBulkAddStudents} onCancel={() => setShowBulkImport(false)} />
+          )}
+
           {activeStudents.length === 0 && <p className="text-xs text-stone-400 mb-2">{studentSearch ? "No students match." : "No students yet — add one above."}</p>}
           <div className="space-y-2 mb-4">
             {activeStudents.map((s) => (
@@ -1505,7 +1752,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                   <button onClick={() => setExpandedGlobalStudents((p) => ({ ...p, [s.id]: !p[s.id] }))} className="text-stone-400 p-1">
                     {expandedGlobalStudents[s.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                   </button>
-                  <ConfirmDelete onConfirm={() => onArchiveStudent(s.id)} size={14} />
+                  <ArchiveOrDeleteMenu onArchive={() => onArchiveStudent(s.id)} onDeletePermanently={() => onDeleteStudent(s.id)} size={14} />
                 </div>
                 {expandedGlobalStudents[s.id] && (
                   <StudentContactFields student={s} onUpdateField={(id, field, value) => onUpdateStudent(id, field, value)} />
@@ -1516,15 +1763,22 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
           {archivedStudents.length > 0 && (
             <div className="mb-2">
-              <p className="text-xs font-semibold text-stone-400 uppercase mb-2">Archived students</p>
-              <ul className="space-y-2">
-                {archivedStudents.map((s) => (
-                  <li key={s.id} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-2.5">
-                    <span className="text-sm text-stone-500">{s.name}</span>
-                    <button onClick={() => onRestoreStudent(s.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Restore</button>
-                  </li>
-                ))}
-              </ul>
+              <button onClick={() => setShowArchivedStudents((v) => !v)} className="text-xs font-semibold text-stone-500 hover:text-stone-800 flex items-center gap-1 mb-2">
+                {showArchivedStudents ? <ChevronUp size={12} /> : <ChevronDown size={12} />} {showArchivedStudents ? "Hide" : "Show"} archived students ({archivedStudents.length})
+              </button>
+              {showArchivedStudents && (
+                <ul className="space-y-2">
+                  {archivedStudents.map((s) => (
+                    <li key={s.id} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-2.5">
+                      <span className="text-sm text-stone-500">{s.name}</span>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => onRestoreStudent(s.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Restore</button>
+                        <ConfirmDelete onConfirm={() => onDeleteStudent(s.id)} size={13} label="Delete forever" confirmText="Really delete forever?" className="text-xs text-stone-400 hover:text-red-500" />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
         </div>
@@ -1625,6 +1879,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <ul className="space-y-2">
             {activeTeachers.map((t) => {
               const classNames = (t.assignedClassIds || []).map((cid) => activeClasses.find((c) => c.id === cid)?.name).filter(Boolean);
+              const isEditing = editingTeacherUid === t.uid;
               return (
                 <li key={t.uid} className="bg-white border border-stone-200 rounded-lg p-2.5">
                   <div className="flex items-center justify-between gap-2">
@@ -1632,9 +1887,38 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                       <span className="text-sm font-semibold text-stone-800">{t.name}</span>
                       <span className="text-xs text-stone-400 ml-2">{t.role === "admin" ? "Admin" : "Teacher"}{t.isSubstitute ? " · Substitute" : ""}</span>
                     </div>
-                    <button onClick={() => onDeactivateTeacher(t.uid)} className="text-xs font-semibold text-rose-600 hover:text-rose-800">Deactivate</button>
+                    <div className="flex items-center gap-3 shrink-0">
+                      {t.role === "teacher" && (
+                        <button onClick={() => setEditingTeacherUid(isEditing ? null : t.uid)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
+                          {isEditing ? "Cancel" : "Edit classes"}
+                        </button>
+                      )}
+                      <button onClick={() => onDeactivateTeacher(t.uid)} className="text-xs font-semibold text-rose-600 hover:text-rose-800">Deactivate</button>
+                    </div>
                   </div>
                   <p className="text-xs text-stone-400 mt-0.5">{t.email}{classNames.length > 0 ? ` · ${classNames.join(", ")}` : t.role === "teacher" ? " · No classes assigned yet" : ""}</p>
+
+                  {isEditing && (
+                    <div className="mt-2 pt-2 border-t border-stone-100">
+                      <p className="text-[10px] text-stone-400 mb-1.5">Tap to assign or unassign — changes save immediately.</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {activeClasses.length === 0 && <p className="text-xs text-stone-400">No classes yet.</p>}
+                        {activeClasses.map((c) => {
+                          const assigned = (t.assignedClassIds || []).includes(c.id);
+                          return (
+                            <button key={c.id}
+                              onClick={() => {
+                                const next = assigned ? (t.assignedClassIds || []).filter((id) => id !== c.id) : [...(t.assignedClassIds || []), c.id];
+                                onUpdateTeacher(t.uid, { assignedClassIds: next });
+                              }}
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${assigned ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                              {c.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -1860,7 +2144,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, loggedInTeacher }) {
+function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -1933,7 +2217,6 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const bl = await loadC("behaviorLogData", {});
       const rp = await loadC("randomPickerData", { pickCounts: {}, lastPickedId: null });
       const al = await loadC("alerts", []);
-      const initialized = await loadC("appInitialized", false);
       const gs = await loadJSON("globalStudents", [], true);
       setGlobalStudentsInClass(gs);
       const se = await loadJSON("schoolEvents", [], true);
@@ -1943,36 +2226,10 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
 
       let finalRoster = r, finalConfig = c, finalIncidents = inc, finalCA = ca, finalCP = cp, finalPD = pd, finalPE = pe, finalBS = bs;
       let sampleStudentData = null;
-
-      if (!initialized && r.length === 0) {
-        const sample = buildSampleData();
-        finalRoster = sample.roster;
-        finalIncidents = sample.incidents;
-        finalCA = sample.classAssessments;
-        finalCP = sample.classPoints;
-        finalPD = sample.plannerDays;
-        finalPE = sample.plannerEvents;
-        finalBS = sample.benchmarkSubjects;
-        const basePoints = c.points || DEFAULT_CONFIG.points;
-        const baseCategories = (c.categories || DEFAULT_CONFIG.categories).map((cat) => cat.id === "lname" ? { ...cat, active: true } : cat);
-        const basePlanner = c.planner || DEFAULT_CONFIG.planner;
-        finalConfig = {
-          ...c, categories: baseCategories,
-          points: { ...basePoints, categories: [...(basePoints.categories || []), sample.pointsCategory] },
-          planner: { ...basePlanner, fullDaySchedule: sample.sampleSchedule },
-        };
-        sampleStudentData = sample.studentData;
-        await saveC("roster", finalRoster);
-        await saveC("incidents", finalIncidents);
-        await saveC("classAssessments", finalCA);
-        await saveC("classPoints", finalCP);
-        await saveC("plannerDays", finalPD);
-        await saveC("plannerEvents", finalPE);
-        await saveC("benchmarkSubjects", finalBS);
-        await saveC("config", finalConfig);
-        for (const [sid, sd] of Object.entries(sampleStudentData)) await saveC(`kriya:${sid}`, sd);
-      }
-      if (!initialized) await saveC("appInitialized", true);
+      // New classes now start completely empty by default — no more automatic sample data.
+      // Teachers who want a sample roster/config to explore the app can still load one
+      // on-demand from Settings ("Load sample data"), which calls the same buildSampleData()
+      // function directly rather than this automatic first-load path.
 
       setRoster(finalRoster);
       const mergedPoints = { ...DEFAULT_CONFIG.points, ...(finalConfig.points || {}), behaviorLog: { ...DEFAULT_CONFIG.points.behaviorLog, ...((finalConfig.points || {}).behaviorLog || {}) } };
@@ -2764,7 +3021,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
         <SettingsView config={config} setConfig={persistConfig} onBack={() => setView("home")}
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
           loadSampleData={loadSampleData} clearAllData={clearAllData}
-          className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass}
+          className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
           globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent} />
       )}
     </div>
@@ -2898,9 +3155,9 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         </div>
       </div>
 
-      <button onClick={() => openIncidentForm(null)} title="Report an incident"
+      <button onClick={() => openIncidentForm(null)} title="Record an incident"
         className="fixed bottom-5 right-5 z-30 flex items-center gap-1.5 bg-rose-600 text-white rounded-full pl-3 pr-4 py-3 shadow-lg hover:bg-rose-700">
-        <ClipboardList size={16} /> <span className="text-xs font-semibold">Report incident</span>
+        <ClipboardList size={16} /> <span className="text-xs font-semibold">Record incident</span>
       </button>
 
       {alerts.filter((a) => !a.dismissed).length > 0 && (
@@ -3553,7 +3810,7 @@ function ClassModeView({ roster, studentData, config, addPoints, openIncidentFor
         </button>
       </div>
 
-      <div className="flex-1 flex flex-col gap-1.5 p-2 overflow-hidden">
+      <div className="flex-1 flex flex-col gap-1.5 p-2 pb-16 overflow-hidden">
         {activeRoster.map((s) => (
           <div key={s.id} className="flex-1 min-h-0 bg-white rounded-xl border border-stone-200 flex items-center justify-between gap-3 px-4 overflow-hidden">
             <p className={`display-font font-bold text-stone-900 truncate ${nameSize}`}>{s.name}</p>
@@ -3585,9 +3842,9 @@ function ClassModeView({ roster, studentData, config, addPoints, openIncidentFor
         ))}
       </div>
 
-      <button onClick={() => openIncidentForm(null)} title="Report an incident"
+      <button onClick={() => openIncidentForm(null)} title="Record an incident"
         className="fixed bottom-5 right-5 z-50 flex items-center gap-1.5 bg-rose-600 text-white rounded-full pl-3 pr-4 py-3 shadow-lg hover:bg-rose-700">
-        <ClipboardList size={16} /> <span className="text-xs font-semibold">Report incident</span>
+        <ClipboardList size={16} /> <span className="text-xs font-semibold">Record incident</span>
       </button>
     </div>
   );
@@ -7225,7 +7482,7 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
   return (
     <div className={PAGE}>
       <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Report incident</h1>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Record incident</h1>
       <p className="text-xs text-stone-400 mb-5">Logged at {formatTime12h(time)} — add details now, or come back and fill them in later.</p>
       <div className="md:w-96">
         <label className="block text-sm font-semibold text-stone-700 mb-1">Students involved</label>
@@ -7596,7 +7853,7 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent }) {
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -7646,8 +7903,11 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               {pwSaved && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
 
               <div className="mt-4 pt-4 border-t border-stone-200">
-                <p className="text-xs text-stone-400 mb-2">Archiving hides this class from the class picker — nothing is deleted, and an admin can restore it anytime from the Admin Dashboard.</p>
-                <ConfirmDelete onConfirm={onArchiveClass} label="Archive this class" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" />
+                <p className="text-xs text-stone-400 mb-2">Archiving hides this class from the class picker — nothing is deleted, and an admin can restore it anytime from the Admin Dashboard. Deleting removes it for good.</p>
+                <div className="flex gap-2">
+                  <ConfirmDelete onConfirm={onArchiveClass} label="Archive this class" className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50" confirmText="Archive it?" armedClassName="text-xs font-semibold text-white bg-stone-600 rounded-lg px-3 py-2" />
+                  <ConfirmDelete onConfirm={onDeleteClass} label="Delete permanently" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" confirmText="Delete forever?" armedClassName="text-xs font-semibold text-white bg-red-600 rounded-lg px-3 py-2" />
+                </div>
               </div>
             </Section>
           )}
@@ -8112,6 +8372,38 @@ function MicButton({ onResult, className }) {
       className={className || `flex items-center justify-center rounded-full w-7 h-7 shrink-0 ${listening ? "bg-rose-500 text-white animate-pulse" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>
       <Mic size={13} />
     </button>
+  );
+}
+
+function ArchiveOrDeleteMenu({ onArchive, onDeletePermanently, size }) {
+  const [open, setOpen] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => { setOpen(false); setConfirmingDelete(false); }, 5000);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  if (!open) {
+    return <button onClick={() => setOpen(true)} className="text-stone-400 hover:text-red-500 p-1"><Trash2 size={size || 14} /></button>;
+  }
+
+  if (confirmingDelete) {
+    return (
+      <div className="flex items-center gap-1">
+        <button onClick={() => { onDeletePermanently(); setOpen(false); }} className="text-[10px] font-semibold text-white bg-red-600 rounded-full px-2 py-1 whitespace-nowrap">Delete forever?</button>
+        <button onClick={() => { setOpen(false); setConfirmingDelete(false); }} className="text-[10px] text-stone-400 px-1">Cancel</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <button onClick={() => { onArchive(); setOpen(false); }} title="Keep the data, just hide it — you can bring it back later" className="text-[10px] font-semibold text-stone-600 border border-stone-300 rounded-full px-2 py-1 whitespace-nowrap hover:bg-stone-50">Archive</button>
+      <button onClick={() => setConfirmingDelete(true)} title="Permanently remove — cannot be undone" className="text-[10px] font-semibold text-red-600 border border-red-200 rounded-full px-2 py-1 whitespace-nowrap hover:bg-red-50">Delete</button>
+      <button onClick={() => setOpen(false)} className="text-[10px] text-stone-400 px-1">Cancel</button>
+    </div>
   );
 }
 
