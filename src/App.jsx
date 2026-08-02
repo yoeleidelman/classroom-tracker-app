@@ -3526,23 +3526,21 @@ function ScratchpadWidget({ plannerDays, setPlannerDay }) {
   );
 }
 
-// Columns chosen by roster size so the grid stays roughly balanced with the screen's
-// proportions — few students means fewer, bigger columns; more students means more, smaller
-// ones. Combined with grid-auto-rows: 1fr on a full-height container, this is what lets
-// everyone fit on one screen with no scrolling, at whatever size that allows.
-function classModeColumns(count) {
-  if (count <= 2) return 1;
-  if (count <= 4) return 2;
-  if (count <= 9) return 3;
-  if (count <= 16) return 4;
-  if (count <= 25) return 5;
-  return 6;
+// Text size chosen by roster size, same auto-fit principle as before, just applied to rows
+// instead of grid cells — few students means bigger text, more students means smaller, so
+// everyone still fits on one screen with no scrolling, at whatever size that allows.
+function classModeNameSize(count) {
+  if (count <= 6) return "text-4xl";
+  if (count <= 12) return "text-3xl";
+  if (count <= 20) return "text-2xl";
+  if (count <= 30) return "text-xl";
+  return "text-base";
 }
 
 function ClassModeView({ roster, studentData, config, addPoints, openIncidentForm, onExit, onOpenClassTools }) {
   const individualPointCats = (config.points?.categories || []).filter((c) => c.scope !== "class");
-  const cols = classModeColumns(roster.length || 1);
-  const nameSize = cols <= 2 ? "text-3xl" : cols === 3 ? "text-2xl" : cols === 4 ? "text-xl" : "text-base";
+  const activeRoster = roster.filter(participatesInPoints);
+  const nameSize = classModeNameSize(activeRoster.length || 1);
 
   return (
     <div className="fixed inset-0 z-40 bg-stone-50 flex flex-col">
@@ -3555,29 +3553,29 @@ function ClassModeView({ roster, studentData, config, addPoints, openIncidentFor
         </button>
       </div>
 
-      <div className="flex-1 grid gap-2 p-2 overflow-hidden" style={{ gridTemplateColumns: `repeat(${cols}, 1fr)`, gridAutoRows: "1fr" }}>
-        {roster.filter(participatesInPoints).map((s) => (
-          <div key={s.id} className="bg-white rounded-2xl border border-stone-200 shadow-sm flex flex-col items-center justify-center p-2 overflow-hidden">
-            <p className={`display-font font-bold text-stone-900 text-center leading-tight ${nameSize}`}>{s.name}</p>
+      <div className="flex-1 flex flex-col gap-1.5 p-2 overflow-hidden">
+        {activeRoster.map((s) => (
+          <div key={s.id} className="flex-1 min-h-0 bg-white rounded-xl border border-stone-200 flex items-center justify-between gap-3 px-4 overflow-hidden">
+            <p className={`display-font font-bold text-stone-900 truncate ${nameSize}`}>{s.name}</p>
             {individualPointCats.length > 0 && (
-              <div className="flex flex-wrap items-center justify-center gap-1.5 mt-2">
+              <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
                 {individualPointCats.map((cat) => {
                   if (cat.displayMode === "checkx") {
                     const checks = studentData[s.id]?.points?.[`${cat.id}:check`] || 0;
                     const xs = studentData[s.id]?.points?.[`${cat.id}:x`] || 0;
                     return (
-                      <div key={cat.id} className="flex items-center gap-1 bg-stone-50 rounded-full pl-2 pr-1 py-0.5">
-                        <button onClick={() => addPoints(s.id, `${cat.id}:check`, 1)} className="text-xs font-bold text-emerald-700 hover:bg-emerald-100 rounded-full px-1.5">{checks} ✓</button>
-                        <button onClick={() => addPoints(s.id, `${cat.id}:x`, 1)} className="text-xs font-bold text-rose-700 hover:bg-rose-100 rounded-full px-1.5">{xs} ✗</button>
+                      <div key={cat.id} className="flex items-center gap-1.5 bg-stone-50 rounded-full pl-3 pr-2 py-1.5">
+                        <button onClick={() => addPoints(s.id, `${cat.id}:check`, 1)} className="text-base font-bold text-emerald-700 hover:bg-emerald-100 rounded-full px-2.5 py-1">{checks} ✓</button>
+                        <button onClick={() => addPoints(s.id, `${cat.id}:x`, 1)} className="text-base font-bold text-rose-700 hover:bg-rose-100 rounded-full px-2.5 py-1">{xs} ✗</button>
                       </div>
                     );
                   }
                   const pts = studentData[s.id]?.points?.[cat.id] || 0;
                   return (
-                    <div key={cat.id} className="flex items-center gap-1 bg-stone-50 rounded-full pl-2 pr-1 py-0.5">
-                      <span className="text-sm font-bold text-stone-800">{pts}</span>
-                      <button onClick={() => addPoints(s.id, cat.id, -(cat.increment || 1))} className="w-6 h-6 flex items-center justify-center rounded-full border border-stone-300 text-stone-500 hover:bg-stone-100"><Minus size={11} /></button>
-                      <button onClick={() => addPoints(s.id, cat.id, cat.increment || 1)} className={`w-6 h-6 flex items-center justify-center rounded-full bg-${cat.color}-500 text-white hover:opacity-90`}><Plus size={11} /></button>
+                    <div key={cat.id} className="flex items-center gap-2 bg-stone-50 rounded-full pl-3 pr-1.5 py-1.5">
+                      <span className="text-lg font-bold text-stone-800">{pts}</span>
+                      <button onClick={() => addPoints(s.id, cat.id, -(cat.increment || 1))} className="w-9 h-9 flex items-center justify-center rounded-full border border-stone-300 text-stone-500 hover:bg-stone-100"><Minus size={16} /></button>
+                      <button onClick={() => addPoints(s.id, cat.id, cat.increment || 1)} className={`w-9 h-9 flex items-center justify-center rounded-full bg-${cat.color}-500 text-white hover:opacity-90`}><Plus size={16} /></button>
                     </div>
                   );
                 })}
