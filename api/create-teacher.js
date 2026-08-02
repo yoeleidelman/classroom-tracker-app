@@ -1,5 +1,6 @@
-import pkg from "firebase-admin";
-   const admin = pkg.apps ? pkg : pkg.default;
+import { createRequire } from "module";
+   const require = createRequire(import.meta.url);
+   const admin = require("firebase-admin");
 
 if (!admin.apps.length) {
   admin.initializeApp({
