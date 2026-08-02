@@ -1,20 +1,12 @@
-// api/create-teacher.js
-// Creates a real Firebase Auth login for a teacher, then writes their own record as its own
-// document (data/teacher:{uid}) rather than appending to one shared list — this is what lets
-// Firestore security rules check "is this document mine" precisely. This can only safely run
-// on the server: creating another person's account requires elevated admin credentials that
-// must never be exposed in the browser.
-import { initializeApp, getApps, cert } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+const admin = require("firebase-admin");
 
-if (!getApps().length) {
-  initializeApp({
-    credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
   });
 }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { name, email, password, role, assignedClassIds, isSubstitute } = req.body || {};
@@ -23,10 +15,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    const auth = getAuth();
-    const userRecord = await auth.createUser({ email, password, displayName: name });
+    const userRecord = await admin.auth().createUser({ email, password, displayName: name });
 
-    const db = getFirestore();
+    const db = admin.firestore();
     const ref = db.collection("data").doc(`teacher:${userRecord.uid}`);
     await ref.set({
       value: {
@@ -40,4 +31,4 @@ export default async function handler(req, res) {
     const message = err.code === "auth/email-already-exists" ? "That email already has an account." : (err.message || "Something went wrong creating the account.");
     return res.status(500).json({ error: message });
   }
-}
+};
