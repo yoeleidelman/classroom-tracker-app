@@ -1,4 +1,4 @@
-const admin = require("firebase-admin");
+import admin from "firebase-admin";
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -6,7 +6,7 @@ if (!admin.apps.length) {
   });
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { name, email, password, role, assignedClassIds, isSubstitute } = req.body || {};
@@ -31,4 +31,4 @@ module.exports = async function handler(req, res) {
     const message = err.code === "auth/email-already-exists" ? "That email already has an account." : (err.message || "Something went wrong creating the account.");
     return res.status(500).json({ error: message });
   }
-};
+}
