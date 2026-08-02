@@ -1,11 +1,12 @@
 import { createRequire } from "module";
-   const require = createRequire(import.meta.url);
-   const admin = require("firebase-admin");
-   console.log("DEBUG admin type:", typeof admin, "keys:", admin ? Object.keys(admin) : "admin is falsy/undefined");
+const require = createRequire(import.meta.url);
+const { initializeApp, getApps, cert } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+const { getFirestore } = require("firebase-admin/firestore");
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
+if (!getApps().length) {
+  initializeApp({
+    credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
   });
 }
 
@@ -18,9 +19,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const userRecord = await admin.auth().createUser({ email, password, displayName: name });
+    const auth = getAuth();
+    const userRecord = await auth.createUser({ email, password, displayName: name });
 
-    const db = admin.firestore();
+    const db = getFirestore();
     const ref = db.collection("data").doc(`teacher:${userRecord.uid}`);
     await ref.set({
       value: {
