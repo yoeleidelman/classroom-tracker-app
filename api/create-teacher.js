@@ -1,6 +1,7 @@
 import { createRequire } from "module";
    const require = createRequire(import.meta.url);
    const admin = require("firebase-admin");
+   console.log("DEBUG admin type:", typeof admin, "keys:", admin ? Object.keys(admin) : "admin is falsy/undefined");
 
 if (!admin.apps.length) {
   admin.initializeApp({
