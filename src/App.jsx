@@ -15,8 +15,8 @@
 // bg-teal-100 bg-teal-200 bg-teal-400 bg-teal-500 bg-teal-600 bg-teal-900 text-teal-700 text-teal-800 text-teal-900 border-teal-500
 
 import { db, auth } from "./firebase";
-import { doc, getDoc, setDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
@@ -148,6 +148,7 @@ const DEFAULT_CONFIG = {
   homework: {
     enabled: false,
     frequency: "daily", // "daily" | "weekly"
+    collectionDay: 1, // 0=Sunday..6=Saturday — only used when frequency is "weekly"
     missedThreshold: 3,
     windowDays: 30,
     missedTierMessages: { 1: "Mention it to the student", 2: "Send a note home about homework", 3: "Call the parent", 4: "Flag for admin" },
@@ -194,7 +195,7 @@ const PAGE = "app-page";
 
 function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
 function uid() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
-function todayISO() { return new Date().toISOString().slice(0, 10); }
+function todayISO() { return isoDate(new Date()); }
 function waLink(phone, message) {
   const digits = (phone || "").replace(/[^\d]/g, "");
   return `https://wa.me/${digits}?text=${encodeURIComponent(message)}`;
@@ -211,7 +212,7 @@ function WhatsAppButton({ phone, message, className }) {
 function withinWindow(dateStr, windowDays) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - windowDays);
-  return dateStr >= cutoff.toISOString().slice(0, 10);
+  return dateStr >= isoDate(cutoff);
 }
 function tierFor(count, threshold) { return Math.max(1, Math.min(4, count - threshold + 1)); }
 
@@ -274,7 +275,16 @@ function shabbosAwareReminderDate(year, monthIdx, dayOfMonth, avoidFriday) {
   return date;
 }
 
-function isoDate(d) { return d.toISOString().slice(0, 10); }
+// Converts a Date to a plain YYYY-MM-DD string using the browser's own local time — not UTC.
+// This matters: for anyone west of UTC (all of the US, for example), toISOString() rolls the
+// date over to the next day several hours before local midnight actually arrives, which is
+// exactly why the app was showing Monday while it was still Sunday morning in California.
+function isoDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 function addDaysISO(dateStr, n) {
   const d = new Date(dateStr + "T00:00:00");
   d.setDate(d.getDate() + n);
@@ -328,9 +338,11 @@ function useVisualViewportHeight() {
 async function fetchProgramRoster(memberClassIds) {
   const seen = new Set();
   const roster = [];
+  const allClasses = await loadJSON("schoolClasses", [], true);
   for (const classId of memberClassIds || []) {
+    const cls = allClasses.find((c) => c.id === classId);
     const clsRoster = await loadJSON(`class:${classId}:roster`, [], true);
-    clsRoster.forEach((s) => { if (!seen.has(s.id)) { seen.add(s.id); roster.push(s); } });
+    clsRoster.forEach((s) => { if (!seen.has(s.id)) { seen.add(s.id); roster.push({ ...s, sourceClassName: cls?.name || "" }); } });
   }
   return roster;
 }
@@ -580,6 +592,15 @@ async function saveJSON(key, value, shared = false) {
   }
 }
 
+async function deleteJSON(key) {
+  try {
+    const ref = doc(db, "data", key);
+    await deleteDoc(ref);
+  } catch (e) {
+    console.error("Delete failed", key, e);
+  }
+}
+
 // Loads every document whose ID starts with the given prefix (e.g. "teacher:") — used instead
 // of one giant array document specifically so Firestore security rules can precisely check
 // "does this document belong to me" per-teacher, which isn't reliably expressible against an
@@ -634,6 +655,16 @@ function GlobalAppStyles() {
         }
         .hover-lift {
           transition: transform 150ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* Keeps horizontal scrolling (drag/swipe) fully working, just hides the visible
+           scrollbar track for a cleaner look — three rules needed to cover every browser. */
+        .no-scrollbar {
+          scrollbar-width: none; /* Firefox */
+          -ms-overflow-style: none; /* old Edge/IE */
+        }
+        .no-scrollbar::-webkit-scrollbar {
+          display: none; /* Chrome, Safari, newer Edge */
         }
 
         /* Structural layout guarantees — written by hand so these never depend on
@@ -744,7 +775,7 @@ function getFlags(data, studentId, incidents, config) {
   for (const cat of config.points?.categories || []) {
     if (cat.scope !== "individual") continue;
     const pts = data.points?.[cat.id] || 0;
-    if (pts >= cat.threshold) {
+    if (cat.threshold > 0 && pts >= cat.threshold) {
       flags.push({ key: `points-${cat.id}`, type: "points", label: `${cat.label} — reward ready (${pts}/${cat.threshold})`, tier: 1, message: cat.rewardMessage || "Reward earned" });
     }
   }
@@ -771,18 +802,23 @@ export default function App() {
   // Real Firebase sign-in state — now drives the app's main screens (see the routing at the
   // bottom of this component). authChecked exists so we don't flash the sign-in screen for a
   // moment before Firebase has had a chance to report whether a session already exists.
+  // Persistence is set explicitly (rather than relying on the SDK's default) so a signed-in
+  // teacher stays signed in across closing and reopening the app, not just within one tab.
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setAuthUser(user);
-      if (user) {
-        const mine = await loadJSON(`teacher:${user.uid}`, null, true);
-        setCurrentTeacher(mine);
-      } else {
-        setCurrentTeacher(null);
-      }
-      setAuthChecked(true);
+    let unsubscribe = () => {};
+    setPersistence(auth, browserLocalPersistence).finally(() => {
+      unsubscribe = onAuthStateChanged(auth, async (user) => {
+        setAuthUser(user);
+        if (user) {
+          const mine = await loadJSON(`teacher:${user.uid}`, null, true);
+          setCurrentTeacher(mine);
+        } else {
+          setCurrentTeacher(null);
+        }
+        setAuthChecked(true);
+      });
     });
-    return unsubscribe;
+    return () => unsubscribe();
   }, []);
 
   // Teachers are stored one document per teacher (data/teacher:{uid}), not as a single array
@@ -803,6 +839,15 @@ export default function App() {
 
   const deactivateTeacherRecord = async (uid) => {
     await updateTeacherRecord(uid, { active: false });
+  };
+
+  // Removes the teacher's app-access record permanently — this revokes their ability to use
+  // the app (they'll hit the "not set up with access" screen if they try to sign in), but
+  // doesn't delete the underlying Firebase Auth login itself, since that requires the same
+  // kind of server-side admin function used to create accounts in the first place.
+  const deleteTeacherPermanently = async (uid) => {
+    await deleteJSON(`teacher:${uid}`);
+    setTeachers((prev) => prev.filter((t) => t.uid !== uid));
   };
 
   const signInTeacher = async (email, password) => {
@@ -899,6 +944,176 @@ export default function App() {
     return results;
   };
 
+  // Pulls everything a teacher would see about this student inside their own class — incidents,
+  // attendance, homework, points, and skill/assessment history — for every class they're
+  // enrolled in, plus each class's config so the profile view can resolve category and status
+  // labels exactly the way the classroom view itself does.
+  const fetchAdminStudentProfile = async (studentId) => {
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const results = { classes: [], programs: [] };
+    const enrolledClassIds = [];
+    for (const cls of allClasses) {
+      if (cls.archived) continue;
+      const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      const rosterEntry = clsRoster.find((s) => s.id === studentId);
+      if (!rosterEntry) continue;
+      enrolledClassIds.push(cls.id);
+      const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
+      const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
+      const studentData = await loadJSON(`class:${cls.id}:kriya:${studentId}`, emptyStudentData(), true);
+      const incCatMap = {};
+      (clsConfig.incidents?.categories || []).forEach((c) => (incCatMap[c.id] = c.label));
+      const incidents = clsIncidents.filter((i) => i.studentIds?.includes(studentId))
+        .map((i) => ({ ...i, categoryLabel: incCatMap[i.category] || i.category || "Uncategorized" }));
+      results.classes.push({
+        classId: cls.id, className: cls.name, config: clsConfig, rosterEntry,
+        incidents, attendance: studentData.attendance || [], homework: studentData.homework || [],
+        points: studentData.points || {}, skills: studentData.skills || {},
+      });
+    }
+    const allPrograms = await loadJSON("programs", [], true);
+    for (const prog of allPrograms) {
+      if (!(prog.memberClassIds || []).some((cid) => enrolledClassIds.includes(cid))) continue;
+      const progConfig = await loadJSON(`program:${prog.id}:config`, { points: { categories: [] } }, true);
+      const progPointsData = await loadJSON(`program:${prog.id}:pointsData`, {}, true);
+      results.programs.push({ programId: prog.id, programName: prog.name, config: progConfig, points: progPointsData[studentId] || {} });
+    }
+    return results;
+  };
+
+  // Builds the full set of export rows, one array per requested data type, for whatever scope
+  // was chosen (whole school, specific classes, or specific students). Two passes: first
+  // gathers exactly which students are in scope and which classes each is in, then generates
+  // each data type from that set — this is what keeps a student who's in multiple in-scope
+  // classes, or a program that spans them, from being double-counted.
+  const buildExportData = async ({ scope, classIds, studentIds, dataTypes }) => {
+    const allClasses = (await loadJSON("schoolClasses", [], true)).filter((c) => !c.archived);
+    const globalStudentsList = await loadJSON("globalStudents", [], true);
+    const globalMap = {};
+    globalStudentsList.forEach((s) => (globalMap[s.id] = s));
+
+    const relevantClasses = scope === "classes" ? allClasses.filter((c) => classIds.includes(c.id)) : allClasses;
+
+    const sheets = { Incidents: [], Assessments: [], Homework: [], Attendance: [], Points: [], "Shared Programs": [], "Parent & Contact Info": [] };
+    const studentNameMap = {};
+    const studentClassNames = {};
+    const studentIdsEncountered = new Set();
+    const contactRowsAdded = new Set();
+
+    for (const cls of relevantClasses) {
+      const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
+      const studentsInScope = scope === "students" ? clsRoster.filter((s) => studentIds.includes(s.id)) : clsRoster;
+      if (studentsInScope.length === 0) continue;
+      const studentIdsInScope = studentsInScope.map((s) => s.id);
+      studentsInScope.forEach((s) => {
+        studentIdsEncountered.add(s.id);
+        studentNameMap[s.id] = s.name;
+        if (!studentClassNames[s.id]) studentClassNames[s.id] = [];
+        studentClassNames[s.id].push(cls.name);
+      });
+
+      if (dataTypes.includes("incidents")) {
+        const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
+        const catMap = {};
+        (clsConfig.incidents?.categories || []).forEach((c) => (catMap[c.id] = c.label));
+        clsIncidents.forEach((inc) => {
+          (inc.studentIds || []).filter((sid) => studentIdsInScope.includes(sid)).forEach((sid) => {
+            sheets.Incidents.push({
+              Student: studentNameMap[sid] || "", Class: cls.name, Date: inc.date,
+              Category: catMap[inc.category] || inc.category || "Uncategorized", Description: inc.description || "",
+            });
+          });
+        });
+      }
+
+      if (dataTypes.includes("attendance") || dataTypes.includes("homework") || dataTypes.includes("points") || dataTypes.includes("assessments") || dataTypes.includes("contact")) {
+        for (const student of studentsInScope) {
+          const sd = await loadJSON(`class:${cls.id}:kriya:${student.id}`, emptyStudentData(), true);
+
+          if (dataTypes.includes("attendance")) {
+            const statusMap = {};
+            (clsConfig.attendance?.statuses || []).forEach((st) => (statusMap[st.id] = st.label));
+            (sd.attendance || []).forEach((a) => {
+              sheets.Attendance.push({ Student: student.name, Class: cls.name, Date: a.date, Status: statusMap[a.status] || a.status, Time: a.time || "" });
+            });
+          }
+
+          if (dataTypes.includes("homework")) {
+            (sd.homework || []).forEach((h) => {
+              sheets.Homework.push({ Student: student.name, Class: cls.name, Date: h.date, Status: h.status });
+            });
+          }
+
+          if (dataTypes.includes("points")) {
+            (clsConfig.points?.categories || []).filter((c) => c.scope !== "class").forEach((cat) => {
+              if (cat.displayMode === "checkx") {
+                sheets.Points.push({ Student: student.name, Class: cls.name, Category: cat.label, Checks: sd.points?.[`${cat.id}:check`] || 0, "X's": sd.points?.[`${cat.id}:x`] || 0 });
+              } else {
+                sheets.Points.push({ Student: student.name, Class: cls.name, Category: cat.label, Points: sd.points?.[cat.id] || 0, Threshold: cat.threshold || "" });
+              }
+            });
+          }
+
+          if (dataTypes.includes("assessments")) {
+            (clsConfig.categories || []).filter((c) => c.active).forEach((cat) => {
+              (cat.items || []).forEach((item) => {
+                const entry = sd.skills?.[skillKey(cat.id, item.id)];
+                if (!entry || !entry.history || entry.history.length === 0) return;
+                const { status } = computeSkillStatus(entry.history, cat);
+                sheets.Assessments.push({ Student: student.name, Class: cls.name, Category: cat.title, Item: item.label, Status: status, "Last graded": entry.history[entry.history.length - 1]?.date || "" });
+              });
+            });
+          }
+
+          if (dataTypes.includes("contact") && !contactRowsAdded.has(student.id)) {
+            contactRowsAdded.add(student.id);
+            const g = globalMap[student.id] || student;
+            sheets["Parent & Contact Info"].push({
+              Student: student.name, "Parent 1 Name": g.parent1Name || "", "Parent 1 Phone": g.parentPhone || "", "Parent 1 Email": g.parentEmail || "",
+              "Parent 2 Name": g.parent2Name || "", "Parent 2 Phone": g.parent2Phone || "", "Parent 2 Email": g.parent2Email || "", "Home Address": g.homeAddress || "",
+            });
+          }
+        }
+      }
+    }
+
+    if (dataTypes.includes("programs")) {
+      const allProgramsForExport = await loadJSON("programs", [], true);
+      for (const prog of allProgramsForExport) {
+        const overlapsScope = (prog.memberClassIds || []).some((cid) => relevantClasses.some((c) => c.id === cid));
+        if (!overlapsScope) continue;
+        const progConfig = await loadJSON(`program:${prog.id}:config`, { points: { categories: [] } }, true);
+        const progPointsData = await loadJSON(`program:${prog.id}:pointsData`, {}, true);
+        Object.keys(progPointsData).filter((sid) => studentIdsEncountered.has(sid)).forEach((sid) => {
+          (progConfig.points?.categories || []).forEach((cat) => {
+            sheets["Shared Programs"].push({ Student: studentNameMap[sid] || "", Program: prog.name, Category: cat.label, Points: progPointsData[sid]?.[cat.id] || 0 });
+          });
+        });
+      }
+    }
+
+    const result = {};
+    Object.entries(sheets).forEach(([name, rows]) => { if (rows.length > 0) result[name] = rows; });
+    return result;
+  };
+
+  // Scans every active class's roster once and builds { studentId: [className, ...] } — used
+  // to group the school-wide student list by class, rather than one call per student.
+  const fetchStudentClassMap = async () => {
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const map = {};
+    for (const cls of allClasses) {
+      if (cls.archived) continue;
+      const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      clsRoster.forEach((s) => {
+        if (!map[s.id]) map[s.id] = [];
+        map[s.id].push(cls.name);
+      });
+    }
+    return map;
+  };
+
   const refreshPrograms = async () => {
     const list = await loadJSON("programs", [], true);
     setPrograms(list);
@@ -925,6 +1140,31 @@ export default function App() {
     const next = list.filter((p) => p.id !== programId);
     setPrograms(next);
     await saveJSON("programs", next, true);
+  };
+
+  // Lets admin open and actually run a program directly — not just create/rename it — same
+  // data shape the teacher-side openProgram() builds, so PointsView (in programMode) can be
+  // reused completely unchanged here.
+  const fetchProgramDetail = async (programId) => {
+    const prog = (await loadJSON("programs", [], true)).find((p) => p.id === programId);
+    if (!prog) return null;
+    const roster = await fetchProgramRoster(prog.memberClassIds);
+    const cfg = await loadJSON(`program:${programId}:config`, { points: { categories: [] } }, true);
+    const pointsData = await loadJSON(`program:${programId}:pointsData`, {}, true);
+    return { roster, config: cfg, pointsData };
+  };
+
+  const addProgramPointsAdmin = async (programId, currentPointsData, studentId, catId, amount) => {
+    const current = currentPointsData[studentId]?.[catId] || 0;
+    const next = { ...currentPointsData, [studentId]: { ...currentPointsData[studentId], [catId]: Math.max(0, current + amount) } };
+    await saveJSON(`program:${programId}:pointsData`, next, true);
+    return next;
+  };
+
+  const addProgramCategoryAdmin = async (programId, currentConfig, newCat) => {
+    const next = { ...currentConfig, points: { ...currentConfig.points, categories: [...(currentConfig.points?.categories || []), newCat] } };
+    await saveJSON(`program:${programId}:config`, next, true);
+    return next;
   };
 
   useEffect(() => {
@@ -1165,9 +1405,9 @@ export default function App() {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
           globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
-          teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord}
-          onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory}
-          programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} />;
+          teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+          onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
+          programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
       }
       return (
         <ClassApp classId={classId} className={className}
@@ -1200,9 +1440,9 @@ export default function App() {
       return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
         globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
-        teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord}
-        onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory}
-        programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} />;
+        teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+        onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
+        programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
     }
     return <ClassGateScreen registry={registry} onSelect={selectClass} onCreate={createClass} onRefresh={refreshRegistry} onLoginAdmin={loginAdmin} />;
   }
@@ -1392,6 +1632,99 @@ function ProgramForm({ classes, existing, onSave, onCancel }) {
   );
 }
 
+const EXPORT_DATA_TYPE_OPTIONS = [
+  { id: "incidents", label: "Incidents" },
+  { id: "assessments", label: "Assessments" },
+  { id: "homework", label: "Homework" },
+  { id: "attendance", label: "Attendance" },
+  { id: "points", label: "Points" },
+  { id: "programs", label: "Shared programs" },
+  { id: "contact", label: "Parent & contact info" },
+];
+
+function ExportPanel({ classes, globalStudents, onExport, onCancel }) {
+  const [scope, setScope] = useState("school");
+  const [selectedClassIds, setSelectedClassIds] = useState([]);
+  const [selectedStudentIds, setSelectedStudentIds] = useState([]);
+  const [studentSearch, setStudentSearch] = useState("");
+  const [dataTypes, setDataTypes] = useState(EXPORT_DATA_TYPE_OPTIONS.map((o) => o.id));
+  const [exporting, setExporting] = useState(false);
+  const [result, setResult] = useState(null); // { sheetCount, rowCount } | { empty: true }
+
+  const toggleDataType = (id) => setDataTypes((prev) => (prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]));
+  const toggleClass = (id) => setSelectedClassIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const toggleStudent = (id) => setSelectedStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const filteredStudents = (globalStudents || []).filter((s) => !s.archived && s.name.toLowerCase().includes(studentSearch.toLowerCase()));
+  const canExport = dataTypes.length > 0 && (scope === "school" || (scope === "classes" && selectedClassIds.length > 0) || (scope === "students" && selectedStudentIds.length > 0));
+
+  const doExport = async () => {
+    setExporting(true);
+    setResult(null);
+    const summary = await onExport({ scope, classIds: selectedClassIds, studentIds: selectedStudentIds, dataTypes });
+    setResult(summary);
+    setExporting(false);
+  };
+
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
+      <label className="block text-xs font-semibold text-stone-700 mb-1.5">Who to include</label>
+      <div className="flex flex-wrap gap-2 mb-3">
+        {[{ id: "school", label: "Entire school" }, { id: "classes", label: "Specific classes" }, { id: "students", label: "Specific students" }].map((opt) => (
+          <button key={opt.id} onClick={() => setScope(opt.id)} className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${scope === opt.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {scope === "classes" && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {classes.length === 0 && <p className="text-xs text-stone-400">No classes yet.</p>}
+          {classes.map((c) => (
+            <button key={c.id} onClick={() => toggleClass(c.id)} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedClassIds.includes(c.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {scope === "students" && (
+        <div className="mb-3">
+          <input value={studentSearch} onChange={(e) => setStudentSearch(e.target.value)} placeholder="Search students..." className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+            {filteredStudents.length === 0 && <p className="text-xs text-stone-400">No students found.</p>}
+            {filteredStudents.map((s) => (
+              <button key={s.id} onClick={() => toggleStudent(s.id)} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedStudentIds.includes(s.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                {s.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <label className="block text-xs font-semibold text-stone-700 mb-1.5">What to include</label>
+      <div className="flex flex-wrap gap-2 mb-3">
+        {EXPORT_DATA_TYPE_OPTIONS.map((opt) => (
+          <label key={opt.id} className="flex items-center gap-1.5 text-xs bg-white border border-stone-300 rounded-full px-2.5 py-1.5">
+            <input type="checkbox" checked={dataTypes.includes(opt.id)} onChange={() => toggleDataType(opt.id)} />
+            {opt.label}
+          </label>
+        ))}
+      </div>
+
+      {result?.empty && <p className="text-xs text-amber-700 mb-2">No matching data found for that selection — nothing was downloaded.</p>}
+      {result && !result.empty && <p className="text-xs text-emerald-700 mb-2">✓ Downloaded — {result.sheetCount} sheet{result.sheetCount === 1 ? "" : "s"}, {result.rowCount} row{result.rowCount === 1 ? "" : "s"} total.</p>}
+
+      <div className="flex gap-2">
+        <button onClick={doExport} disabled={!canExport || exporting} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {exporting ? "Building export..." : "Export to Excel"}
+        </button>
+        <button onClick={onCancel} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Close</button>
+      </div>
+    </div>
+  );
+}
+
 function BulkImportPanel({ onImport, onCancel }) {
   const [fileName, setFileName] = useState("");
   const [parsed, setParsed] = useState(null); // { headers, rows }
@@ -1508,7 +1841,7 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onFetchDailyOverview, onFetchStudentHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -1529,14 +1862,69 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [studentHistoryId, setStudentHistoryId] = useState(null);
   const [studentHistoryData, setStudentHistoryData] = useState(null);
   const [studentHistoryLoading, setStudentHistoryLoading] = useState(false);
+  const [profileStudent, setProfileStudent] = useState(null);
+  const [profileData, setProfileData] = useState(null);
+  const openStudentProfile = (student) => {
+    setProfileStudent(student);
+    setProfileData(null);
+    onFetchStudentProfile(student.id).then(setProfileData);
+  };
+  const [openProgramId, setOpenProgramId] = useState(null);
+  const [programDetail, setProgramDetail] = useState(null);
+  const openProgramAdmin = (programId) => {
+    setOpenProgramId(programId);
+    setProgramDetail(null);
+    onFetchProgramDetail(programId).then(setProgramDetail);
+  };
+  const closeProgramAdmin = () => { setOpenProgramId(null); setProgramDetail(null); };
+  const addPointsInProgram = (studentId, catId, amount) => {
+    setProgramDetail((prev) => {
+      const current = prev.pointsData[studentId]?.[catId] || 0;
+      const nextPointsData = { ...prev.pointsData, [studentId]: { ...prev.pointsData[studentId], [catId]: Math.max(0, current + amount) } };
+      saveJSON(`program:${openProgramId}:pointsData`, nextPointsData, true);
+      return { ...prev, pointsData: nextPointsData };
+    });
+  };
+  const addCategoryInProgram = (newCat) => {
+    setProgramDetail((prev) => {
+      const nextConfig = { ...prev.config, points: { ...prev.config.points, categories: [...(prev.config.points?.categories || []), newCat] } };
+      saveJSON(`program:${openProgramId}:config`, nextConfig, true);
+      return { ...prev, config: nextConfig };
+    });
+  };
   const [showProgramForm, setShowProgramForm] = useState(false);
   const [showArchivedClasses, setShowArchivedClasses] = useState(false);
   const [showArchivedStudents, setShowArchivedStudents] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
+  const [showExportPanel, setShowExportPanel] = useState(false);
+  const handleExport = async (params) => {
+    const sheets = await onBuildExportData(params);
+    const sheetNames = Object.keys(sheets);
+    if (sheetNames.length === 0) return { empty: true };
+    const wb = XLSX.utils.book_new();
+    let rowCount = 0;
+    sheetNames.forEach((name) => {
+      const ws = XLSX.utils.json_to_sheet(sheets[name]);
+      XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31));
+      rowCount += sheets[name].length;
+    });
+    XLSX.writeFile(wb, `export-${todayISO()}.xlsx`);
+    return { sheetCount: sheetNames.length, rowCount };
+  };
+  const [studentClassMap, setStudentClassMap] = useState({});
+  useEffect(() => { onFetchStudentClassMap().then(setStudentClassMap); }, [globalStudents, registry]);
+  const [showArchivedTeachers, setShowArchivedTeachers] = useState(false);
   const [editingProgramId, setEditingProgramId] = useState(null);
   const activeClasses = registry.filter((c) => !c.archived);
   const archivedClasses = registry.filter((c) => c.archived);
-  const activeStudents = (globalStudents || []).filter((s) => !s.archived && s.name.toLowerCase().includes(studentSearch.toLowerCase()));
+  const activeStudents = (globalStudents || []).filter((s) => !s.archived && s.name.toLowerCase().includes(studentSearch.toLowerCase()))
+    .slice()
+    .sort((a, b) => {
+      const aClass = (studentClassMap[a.id] || [])[0] || "\uffff"; // unassigned sorts last
+      const bClass = (studentClassMap[b.id] || [])[0] || "\uffff";
+      if (aClass !== bClass) return aClass < bClass ? -1 : 1;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    });
   const archivedStudents = (globalStudents || []).filter((s) => s.archived);
   const activeTeachers = (teachers || []).filter((t) => t.active);
   const inactiveTeachers = (teachers || []).filter((t) => !t.active);
@@ -1719,8 +2107,20 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         )}
 
         <p className="text-[10px] text-stone-400 text-center mt-6 leading-relaxed">
-          Entering a class here gives full access to that class's data, same as its teacher sees \u2014 this is a soft admin gate, not enforced security.
+          Entering a class here gives full access to that class's data, same as its teacher sees — this is a soft admin gate, not enforced security.
         </p>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
+          <p className="text-xs text-stone-400 mb-3">Build a custom Excel report — pick who to include and what to include, and it downloads as one file with a sheet per type of data.</p>
+          {!showExportPanel ? (
+            <button onClick={() => setShowExportPanel(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Build an export
+            </button>
+          ) : (
+            <ExportPanel classes={activeClasses} globalStudents={globalStudents} onExport={handleExport} onCancel={() => setShowExportPanel(false)} />
+          )}
+        </div>
 
         <div className="mt-6 pt-6 border-t border-stone-200">
           <p className="text-sm font-semibold text-stone-800 mb-1">School-wide students</p>
@@ -1746,18 +2146,15 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           {activeStudents.length === 0 && <p className="text-xs text-stone-400 mb-2">{studentSearch ? "No students match." : "No students yet — add one above."}</p>}
           <div className="space-y-2 mb-4">
             {activeStudents.map((s) => (
-              <div key={s.id} className="bg-white border border-stone-200 rounded-lg">
-                <div className="flex items-center gap-2 px-3 py-2">
-                  <input value={s.name} onChange={(e) => onUpdateStudent(s.id, "name", e.target.value)} className="flex-1 text-sm font-semibold text-stone-800 border-none focus:outline-none bg-transparent" />
-                  <button onClick={() => setExpandedGlobalStudents((p) => ({ ...p, [s.id]: !p[s.id] }))} className="text-stone-400 p-1">
-                    {expandedGlobalStudents[s.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                  </button>
-                  <ArchiveOrDeleteMenu onArchive={() => onArchiveStudent(s.id)} onDeletePermanently={() => onDeleteStudent(s.id)} size={14} />
-                </div>
-                {expandedGlobalStudents[s.id] && (
-                  <StudentContactFields student={s} onUpdateField={(id, field, value) => onUpdateStudent(id, field, value)} />
+              <button key={s.id} onClick={() => openStudentProfile(s)} className="w-full bg-white border border-stone-200 rounded-lg px-3 py-2 flex items-center gap-2 text-left hover:border-teal-300">
+                <span className="flex-1 text-sm font-semibold text-stone-800">{s.name}</span>
+                {(studentClassMap[s.id] || []).length > 0 ? (
+                  <span className="text-[10px] font-semibold text-teal-700 bg-teal-50 px-2 py-0.5 rounded-full whitespace-nowrap">{studentClassMap[s.id].join(", ")}</span>
+                ) : (
+                  <span className="text-[10px] font-medium text-stone-400 bg-stone-100 px-2 py-0.5 rounded-full whitespace-nowrap">Not in a class yet</span>
                 )}
-              </div>
+                <ChevronRight size={16} className="text-stone-300 shrink-0" />
+              </button>
             ))}
           </div>
 
@@ -1846,7 +2243,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               return (
                 <li key={p.id} className="bg-white border border-stone-200 rounded-lg p-2.5">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-semibold text-stone-800">{p.name}</span>
+                    <button onClick={() => openProgramAdmin(p.id)} className="text-sm font-semibold text-stone-800 hover:text-teal-700 text-left flex-1">{p.name}</button>
                     <ConfirmDelete onConfirm={() => onRemoveProgram(p.id)} size={13} />
                   </div>
                   <p className="text-xs text-stone-400 mt-0.5">{memberNames.join(", ") || "No classes assigned"}</p>
@@ -1893,7 +2290,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                           {isEditing ? "Cancel" : "Edit classes"}
                         </button>
                       )}
-                      <button onClick={() => onDeactivateTeacher(t.uid)} className="text-xs font-semibold text-rose-600 hover:text-rose-800">Deactivate</button>
+                      <ArchiveOrDeleteMenu onArchive={() => onDeactivateTeacher(t.uid)} onDeletePermanently={() => onDeleteTeacher(t.uid)} size={14} />
                     </div>
                   </div>
                   <p className="text-xs text-stone-400 mt-0.5">{t.email}{classNames.length > 0 ? ` · ${classNames.join(", ")}` : t.role === "teacher" ? " · No classes assigned yet" : ""}</p>
@@ -1926,15 +2323,22 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
           {inactiveTeachers.length > 0 && (
             <div className="mt-3">
-              <p className="text-xs font-semibold text-stone-400 uppercase mb-2">Deactivated</p>
-              <ul className="space-y-2">
-                {inactiveTeachers.map((t) => (
-                  <li key={t.uid} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-2.5">
-                    <span className="text-sm text-stone-500">{t.name} — {t.email}</span>
-                    <button onClick={() => onUpdateTeacher(t.uid, { active: true })} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Reactivate</button>
-                  </li>
-                ))}
-              </ul>
+              <button onClick={() => setShowArchivedTeachers((v) => !v)} className="text-xs font-semibold text-stone-500 hover:text-stone-800 flex items-center gap-1 mb-2">
+                {showArchivedTeachers ? <ChevronUp size={12} /> : <ChevronDown size={12} />} {showArchivedTeachers ? "Hide" : "Show"} archived teachers ({inactiveTeachers.length})
+              </button>
+              {showArchivedTeachers && (
+                <ul className="space-y-2">
+                  {inactiveTeachers.map((t) => (
+                    <li key={t.uid} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-2.5">
+                      <span className="text-sm text-stone-500">{t.name} — {t.email}</span>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => onUpdateTeacher(t.uid, { active: true })} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Restore</button>
+                        <ConfirmDelete onConfirm={() => onDeleteTeacher(t.uid)} size={13} label="Delete forever" confirmText="Really delete forever?" className="text-xs text-stone-400 hover:text-red-500" />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
         </div>
@@ -1959,6 +2363,35 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           )}
         </div>
       </div>
+
+      {profileStudent && (
+        <AdminStudentProfile student={profileStudent} profileData={profileData}
+          onUpdateStudent={onUpdateStudent}
+          onArchiveStudent={(id) => { onArchiveStudent(id); setProfileStudent(null); }}
+          onDeleteStudent={(id) => { onDeleteStudent(id); setProfileStudent(null); }}
+          onClose={() => setProfileStudent(null)} />
+      )}
+
+      {openProgramId && (
+        <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
+          <div className="app-page-wide">
+            {!programDetail ? (
+              <p className="text-sm text-stone-400 mt-10 text-center">Loading...</p>
+            ) : (
+              <PointsView
+                roster={programDetail.roster}
+                studentData={Object.fromEntries(programDetail.roster.map((s) => [s.id, { points: programDetail.pointsData[s.id] || {} }]))}
+                classPoints={{}} config={programDetail.config}
+                addPoints={addPointsInProgram} addClassPoints={() => {}} resetClassPoints={() => {}}
+                onAddCategory={addCategoryInProgram} navigate={() => {}}
+                plannerDays={{}} behaviorLogData={{}} adjustBehaviorMark={() => {}}
+                programMode programName={(programs || []).find((p) => p.id === openProgramId)?.name || "Program"}
+                onBackFromProgram={closeProgramAdmin} backLabel="Back to Admin Dashboard"
+                programs={[]} onOpenProgram={() => {}} />
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3060,7 +3493,7 @@ function MainTabs({ active, navigate }) {
     { id: "planner", label: "Planner", icon: Calendar },
   ];
   return (
-    <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-[36rem] overflow-x-auto">
+    <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-[36rem] overflow-x-auto no-scrollbar">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = active === t.id;
@@ -3127,9 +3560,18 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
   const attendanceHidden = selectedDayType?.hidesAttendance;
   const attendanceApplicableStudents = roster.filter((s) => morningAttendanceApplies(s, date, selectedDayType, config, plannerDays));
   const allAttendanceLogged = attendanceApplicableStudents.length > 0 && attendanceApplicableStudents.every((s) => (studentData[s.id]?.attendance || []).some((a) => a.date === date));
-  const allHomeworkLogged = config.homework?.enabled && roster.length > 0 && roster.every((s) => (studentData[s.id]?.homework || []).some((h) => h.date === date));
-  const showAttendanceCollapsed = !attendanceHidden && allAttendanceLogged && !attendanceManuallyShown;
-  const showHomeworkCollapsed = config.homework?.enabled && allHomeworkLogged && !homeworkManuallyShown;
+  const homeworkActiveToday = homeworkAppliesToday(config, date);
+  const allHomeworkLogged = homeworkActiveToday && roster.length > 0 && roster.every((s) => (studentData[s.id]?.homework || []).some((h) => h.date === date));
+  const attendanceSkipped = !!plannerDays?.[date]?.attendanceSkipped;
+  const homeworkSkipped = !!plannerDays?.[date]?.homeworkSkipped;
+  const showAttendanceCollapsed = !attendanceHidden && (allAttendanceLogged || attendanceSkipped) && !attendanceManuallyShown;
+  const showHomeworkCollapsed = homeworkActiveToday && (allHomeworkLogged || homeworkSkipped) && !homeworkManuallyShown;
+
+  // Bringing a skipped section back into view also clears the skip flag — re-engaging with it
+  // means the teacher wants to actually use it now, not have it silently re-collapse once they
+  // mark a few students but not everyone.
+  const showAttendanceNow = () => { setAttendanceManuallyShown(true); if (attendanceSkipped) setPlannerDay(date, { attendanceSkipped: false }); };
+  const showHomeworkNow = () => { setHomeworkManuallyShown(true); if (homeworkSkipped) setPlannerDay(date, { homeworkSkipped: false }); };
 
   const upcomingEvents = (plannerEvents || []).filter((e) => {
     if (!e.reminderLeadDays && e.reminderLeadDays !== 0) return false;
@@ -3280,13 +3722,13 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
             {(!attendanceHidden && (showAttendanceCollapsed || showHomeworkCollapsed)) && (
               <div className="flex flex-wrap gap-2 mb-3">
                 {showAttendanceCollapsed && (
-                  <button onClick={() => setAttendanceManuallyShown(true)} className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5 hover:bg-emerald-100">
-                    <Check size={12} /> Attendance done — tap to review
+                  <button onClick={showAttendanceNow} className={`flex items-center gap-1.5 text-xs font-semibold rounded-full px-3 py-1.5 ${attendanceSkipped ? "text-stone-500 bg-stone-100 border border-stone-200 hover:bg-stone-200" : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"}`}>
+                    <Check size={12} /> {attendanceSkipped ? "Attendance skipped for today — tap to log" : "Attendance done — tap to review"}
                   </button>
                 )}
                 {showHomeworkCollapsed && (
-                  <button onClick={() => setHomeworkManuallyShown(true)} className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5 hover:bg-emerald-100">
-                    <Check size={12} /> Homework done — tap to review
+                  <button onClick={showHomeworkNow} className={`flex items-center gap-1.5 text-xs font-semibold rounded-full px-3 py-1.5 ${homeworkSkipped ? "text-stone-500 bg-stone-100 border border-stone-200 hover:bg-stone-200" : "text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100"}`}>
+                    <Check size={12} /> {homeworkSkipped ? "Homework skipped for today — tap to log" : "Homework done — tap to review"}
                   </button>
                 )}
               </div>
@@ -3302,7 +3744,17 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                   <button onClick={() => openPeriodAttendance(null)} className="text-xs font-semibold text-amber-700 flex items-center gap-1">
                     <Calendar size={12} /> Log period attendance
                   </button>
-                  {config.homework?.enabled && (
+                  {!attendanceHidden && !showAttendanceCollapsed && attendanceApplicableStudents.length > 0 && (
+                    <button onClick={() => setPlannerDay(date, { attendanceSkipped: true })} className="text-xs font-semibold text-stone-500 flex items-center gap-1 hover:text-stone-700">
+                      Skip attendance for today
+                    </button>
+                  )}
+                  {homeworkActiveToday && !showHomeworkCollapsed && (
+                    <button onClick={() => setPlannerDay(date, { homeworkSkipped: true })} className="text-xs font-semibold text-stone-500 flex items-center gap-1 hover:text-stone-700">
+                      Skip homework for today
+                    </button>
+                  )}
+                  {homeworkActiveToday && (
                     <button onClick={() => markNoHomeworkToday(date)} className="text-xs font-semibold text-stone-500 flex items-center gap-1 hover:text-stone-700">
                       No homework today
                     </button>
@@ -3322,7 +3774,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 const studentAttendanceApplies = morningAttendanceApplies(s, date, selectedDayType, config, plannerDays);
                 const homeworkEntry = (studentData[s.id]?.homework || []).find((h) => h.date === date);
                 return (
-                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 overflow-x-auto ${isSelected ? "border-teal-400 ring-1 ring-teal-200" : "border-stone-200"}`}>
+                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 overflow-x-auto no-scrollbar ${isSelected ? "border-teal-400 ring-1 ring-teal-200" : "border-stone-200"}`}>
                     <div className="flex flex-nowrap items-center gap-x-2 w-max min-w-full">
                       {multiSelect && (
                         <input type="checkbox" checked={isSelected}
@@ -3374,7 +3826,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                         </div>
                       )}
 
-                      {config.homework?.enabled && !showHomeworkCollapsed && (
+                      {homeworkActiveToday && !showHomeworkCollapsed && (
                         <div className="shrink-0">
                           {homeworkEntry?.status === "n/a" ? (
                             <span className="text-xs text-stone-400 italic whitespace-nowrap">No homework</span>
@@ -3414,10 +3866,6 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                           </div>
                         );
                       })}
-
-                      <div className="flex items-center gap-1 shrink-0 ml-auto">
-                        <ConfirmDelete onConfirm={() => removeStudent(s.id)} size={13} />
-                      </div>
                     </div>
                   </li>
                 );
@@ -3813,7 +4261,7 @@ function ClassModeView({ roster, studentData, config, addPoints, openIncidentFor
       <div className="flex-1 flex flex-col gap-1.5 p-2 pb-16 overflow-hidden">
         {activeRoster.map((s) => (
           <div key={s.id} className="flex-1 min-h-0 bg-white rounded-xl border border-stone-200 flex items-center justify-between gap-3 px-4 overflow-hidden">
-            <p className={`display-font font-bold text-stone-900 truncate ${nameSize}`}>{s.name}</p>
+            <p className={`font-bold text-stone-900 truncate ${nameSize}`}>{s.name}</p>
             {individualPointCats.length > 0 && (
               <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
                 {individualPointCats.map((cat) => {
@@ -3991,9 +4439,14 @@ function RaffleWheel({ size, wheelBackground, rotation, participants }) {
       <div className="rounded-full shadow-lg relative" style={{ width: size, height: size, background: wheelBackground, transform: `rotate(${rotation}deg)`, transition: "transform 5s cubic-bezier(0.33, 1, 0.68, 1)" }}>
         {participants.map((p, i) => {
           const centerAngle = i * sliceDeg + sliceDeg / 2;
+          // Text is rotated to match the slice's own angle, so it reads like a spoke pointing
+          // out from the center — flipped 180° on the wheel's left half so it stays right-side
+          // up instead of reading upside-down there.
+          const normalizedAngle = ((centerAngle % 360) + 360) % 360;
+          const flipped = normalizedAngle > 90 && normalizedAngle < 270;
           return (
             <div key={p.id} className="absolute" style={{ top: "50%", left: "50%", width: 0, height: 0 }}>
-              <div style={{ transform: `rotate(${centerAngle}deg) translateY(-${labelRadius}px) rotate(${-centerAngle}deg)` }}>
+              <div style={{ transform: `rotate(${centerAngle}deg) translateY(-${labelRadius}px) rotate(${flipped ? 180 : 0}deg)` }}>
                 <span className="text-white font-bold whitespace-nowrap" style={{ fontSize, textShadow: "0 1px 3px rgba(0,0,0,0.5)", display: "inline-block", transform: "translate(-50%, -50%)" }}>
                   {p.name}
                 </span>
@@ -4050,6 +4503,16 @@ function RaffleView({ roster }) {
   const toggle = (id) => setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const participants = roster.filter((s) => selectedIds.includes(s.id));
 
+  // Only shared programs carry sourceClassName (a regular class's own roster doesn't need
+  // grouping, since every student is already in the same one class).
+  const groupedByClass = roster.some((s) => s.sourceClassName)
+    ? roster.reduce((acc, s) => {
+        const key = s.sourceClassName || "Other";
+        (acc[key] = acc[key] || []).push(s);
+        return acc;
+      }, {})
+    : null;
+
   const sliceDeg = participants.length > 0 ? 360 / participants.length : 360;
   const gradientStops = participants.map((_, i) => {
     const color = WHEEL_COLORS[i % WHEEL_COLORS.length];
@@ -4085,13 +4548,31 @@ function RaffleView({ roster }) {
         <button onClick={() => setSelectedIds(roster.map((s) => s.id))} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-full px-3 py-1 hover:bg-teal-50">Select all</button>
         <button onClick={() => setSelectedIds([])} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-full px-3 py-1 hover:bg-stone-50">Select none</button>
       </div>
-      <div className="flex flex-wrap gap-1.5 mb-5 md:w-[32rem]">
-        {roster.map((s) => (
-          <button key={s.id} onClick={() => toggle(s.id)}
-            className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedIds.includes(s.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-500 border-stone-300"}`}>
-            {s.name}
-          </button>
-        ))}
+      <div className="mb-5 md:w-[32rem]">
+        {groupedByClass ? (
+          Object.entries(groupedByClass).map(([className, students]) => (
+            <div key={className} className="mb-3">
+              <p className="text-xs font-semibold text-stone-500 uppercase mb-1.5">{className}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {students.map((s) => (
+                  <button key={s.id} onClick={() => toggle(s.id)}
+                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedIds.includes(s.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-500 border-stone-300"}`}>
+                    {s.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {roster.map((s) => (
+              <button key={s.id} onClick={() => toggle(s.id)}
+                className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedIds.includes(s.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-500 border-stone-300"}`}>
+                {s.name}
+              </button>
+            ))}
+          </div>
+        )}
         {roster.length === 0 && <p className="text-xs text-stone-400">Add students first.</p>}
       </div>
 
@@ -4130,16 +4611,27 @@ function RaffleView({ roster }) {
   );
 }
 
-function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, programMode, programName, onBackFromProgram, programs, onOpenProgram }) {
+function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, programMode, programName, onBackFromProgram, backLabel, programs, onOpenProgram }) {
   const [subTab, setSubTab] = useState("rewards");
   const cats = config.points?.categories || [];
   const [activeId, setActiveId] = useState(cats[0]?.id || null);
   const active = cats.find((c) => c.id === activeId) || cats[0];
   const [showForm, setShowForm] = useState(cats.length === 0);
-  const [form, setForm] = useState({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "" });
+  const [form, setForm] = useState({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
 
   useEffect(() => { if (!activeId && cats[0]) setActiveId(cats[0].id); }, [cats, activeId]);
   useEffect(() => { if (programMode && subTab === "classlog") setSubTab("rewards"); }, [programMode, subTab]);
+
+  // Only shared programs carry sourceClassName (a regular class's own roster doesn't need
+  // grouping, since every student is already in that one class) — grouped list of
+  // [className, students[]] pairs when applicable, null otherwise.
+  const pointsRosterGrouped = roster.some((s) => s.sourceClassName)
+    ? Object.entries(roster.filter(participatesInPoints).reduce((acc, s) => {
+        const key = s.sourceClassName || "Other";
+        (acc[key] = acc[key] || []).push(s);
+        return acc;
+      }, {}))
+    : null;
 
   const submitForm = () => {
     const label = form.label.trim();
@@ -4148,7 +4640,7 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
     onAddCategory(newCat);
     setActiveId(newCat.id);
     setShowForm(false);
-    setForm({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "" });
+    setForm({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
   };
 
   return (
@@ -4156,7 +4648,7 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
       {programMode ? (
         <div className="flex items-center justify-between mb-5">
           <div>
-            <button onClick={onBackFromProgram} className="flex items-center text-stone-500 text-sm hover:text-stone-800 mb-1"><ChevronLeft size={16} /> Back to my class</button>
+            <button onClick={onBackFromProgram} className="flex items-center text-stone-500 text-sm hover:text-stone-800 mb-1"><ChevronLeft size={16} /> {backLabel || "Back to my class"}</button>
             <h1 className="display-font text-xl font-bold text-stone-900">{programName}</h1>
             <p className="text-xs text-stone-400">Shared program — points and raffles only, combined across every class in it.</p>
           </div>
@@ -4238,10 +4730,12 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
               <label className="block text-xs font-medium text-stone-500 mb-1">Add amount</label>
               <input type="number" min={1} value={form.increment} onChange={(e) => setForm((f) => ({ ...f, increment: Math.max(1, Number(e.target.value) || 1) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
             </div>
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-stone-500 mb-1">Reward at</label>
-              <input type="number" min={0} value={form.threshold} onChange={(e) => setForm((f) => ({ ...f, threshold: Math.max(0, Number(e.target.value) || 0) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-            </div>
+            {!form.indefinite && (
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-stone-500 mb-1">Reward at</label>
+                <input type="number" min={0} value={form.threshold} onChange={(e) => setForm((f) => ({ ...f, threshold: Math.max(0, Number(e.target.value) || 0) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+              </div>
+            )}
             <div className="flex-1">
               <label className="block text-xs font-medium text-stone-500 mb-1">Color</label>
               <select value={form.color} onChange={(e) => setForm((f) => ({ ...f, color: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
@@ -4249,6 +4743,11 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
               </select>
             </div>
           </div>
+
+          <label className="flex items-center gap-2 mb-3 text-xs text-stone-600">
+            <input type="checkbox" checked={form.indefinite} onChange={(e) => setForm((f) => ({ ...f, indefinite: e.target.checked, threshold: e.target.checked ? 0 : (f.threshold || 10) }))} />
+            No cap — just count up indefinitely (good for lines memorized, books read, and other ongoing totals)
+          </label>
 
           <label className="block text-xs font-medium text-stone-500 mb-1">Reward description</label>
           <input value={form.rewardMessage} onChange={(e) => setForm((f) => ({ ...f, rewardMessage: e.target.value }))}
@@ -4272,7 +4771,30 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
               onReset={() => { resetClassPoints(`${active.id}:check`); resetClassPoints(`${active.id}:x`); }} />
           ) : (
             <div className="space-y-1.5">
-              {roster.filter(participatesInPoints).map((s) => {
+              {pointsRosterGrouped ? (
+                pointsRosterGrouped.map(([className, students]) => (
+                  <div key={className} className="mb-3">
+                    <p className="text-xs font-semibold text-stone-500 uppercase mb-1.5">{className}</p>
+                    <div className="space-y-1.5">
+                      {students.map((s) => {
+                        const checks = studentData[s.id]?.points?.[`${active.id}:check`] || 0;
+                        const xs = studentData[s.id]?.points?.[`${active.id}:x`] || 0;
+                        return (
+                          <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
+                            <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
+                            <span className="text-sm font-bold text-emerald-700 shrink-0">{checks} ✓</span>
+                            <span className="text-sm font-bold text-rose-700 shrink-0">{xs} ✗</span>
+                            <div className="flex items-center gap-1.5 ml-auto">
+                              <button onClick={() => addPoints(s.id, `${active.id}:check`, 1)} className="w-8 h-8 flex items-center justify-center text-white bg-emerald-600 rounded-full hover:bg-emerald-700 text-sm font-bold">✓</button>
+                              <button onClick={() => addPoints(s.id, `${active.id}:x`, 1)} className="w-8 h-8 flex items-center justify-center text-white bg-rose-600 rounded-full hover:bg-rose-700 text-sm font-bold">✗</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))
+              ) : roster.filter(participatesInPoints).map((s) => {
                 const checks = studentData[s.id]?.points?.[`${active.id}:check`] || 0;
                 const xs = studentData[s.id]?.points?.[`${active.id}:x`] || 0;
                 return (
@@ -4296,9 +4818,39 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
             onReset={() => resetClassPoints(active.id)} />
         ) : (
           <div className="space-y-1.5">
-            {roster.filter(participatesInPoints).map((s) => {
+            {pointsRosterGrouped ? (
+              pointsRosterGrouped.map(([className, students]) => (
+                <div key={className} className="mb-3">
+                  <p className="text-xs font-semibold text-stone-500 uppercase mb-1.5">{className}</p>
+                  <div className="space-y-1.5">
+                    {students.map((s) => {
+                      const pts = studentData[s.id]?.points?.[active.id] || 0;
+                      const ready = active.threshold > 0 && pts >= active.threshold;
+                      return (
+                        <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
+                          <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
+                          <span className="text-sm font-bold text-stone-800 w-12 shrink-0">{pts}{active.threshold ? ` / ${active.threshold}` : ""}</span>
+                          {active.displayMode === "bar" && active.threshold > 0 && (
+                            <div className="w-24 shrink-0"><FillMeter value={pts} max={active.threshold} color={active.color} size="sm" /></div>
+                          )}
+                          {ready && <span className="text-xs text-amber-700 font-semibold">🎉 Ready</span>}
+                          <div className="flex items-center gap-1.5 ml-auto">
+                            <button onClick={() => addPoints(s.id, active.id, -(active.increment || 1))} className="w-7 h-7 flex items-center justify-center text-stone-400 border border-stone-200 rounded-full hover:bg-stone-50">
+                              <Minus size={12} />
+                            </button>
+                            <button onClick={() => addPoints(s.id, active.id, active.increment || 1)} className={`w-7 h-7 flex items-center justify-center text-white bg-${active.color}-500 rounded-full hover:opacity-90`}>
+                              <Plus size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            ) : roster.filter(participatesInPoints).map((s) => {
               const pts = studentData[s.id]?.points?.[active.id] || 0;
-              const ready = pts >= active.threshold;
+              const ready = active.threshold > 0 && pts >= active.threshold;
               return (
                 <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
                   <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
@@ -5580,6 +6132,16 @@ function formatTime12h(hhmm) {
 // no period data to confirm they're even there first thing. Specific-periods students only
 // get it if one of their assigned periods is the actual first period of THIS date's schedule —
 // different weekdays can now run different schedules, so "first period" isn't one fixed thing.
+// Whether homework tracking is actually active for this specific date — not just whether the
+// feature is enabled overall. In weekly mode, it's only active on the one chosen collection
+// day; other days shouldn't show the homework UI at all, since nothing is due that day.
+function homeworkAppliesToday(config, dateStr) {
+  if (!config.homework?.enabled) return false;
+  if (config.homework.frequency !== "weekly") return true;
+  const d = new Date(dateStr + "T00:00:00");
+  return d.getDay() === (config.homework.collectionDay ?? 1);
+}
+
 function morningAttendanceApplies(student, date, dayType, config, plannerDays) {
   const scope = student.enrollmentScope;
   if (!scope || scope === "full-time") return true;
@@ -6901,7 +7463,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
           </div>
 
           {viewMode === "timeline" ? (
-            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 overflow-x-auto">
+            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 overflow-x-auto no-scrollbar">
               <div className="relative h-12 bg-stone-100 rounded-lg mb-1" style={{ minWidth: 700 }}>
                 {months.map((m, i) => (
                   <div key={i} className="absolute top-0 bottom-0 border-l border-stone-200" style={{ left: `${(i / 12) * 100}%` }} />
@@ -8210,6 +8772,19 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                 <option value="weekly">Weekly</option>
               </select>
 
+              {config.homework.frequency === "weekly" && (
+                <>
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Collection day</label>
+                  <select value={config.homework.collectionDay ?? 1} onChange={(e) => update((c) => { c.homework.collectionDay = Number(e.target.value); return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-3">
+                    <option value={1}>Monday</option>
+                    <option value={2}>Tuesday</option>
+                    <option value={3}>Wednesday</option>
+                    <option value={4}>Thursday</option>
+                    <option value={5}>Friday</option>
+                  </select>
+                </>
+              )}
+
               <label className="block text-xs font-medium text-stone-500 mb-1">Missed homeworks within window before flagging</label>
               <div className="flex gap-2 mb-3">
                 <input type="number" min={1} value={config.homework.missedThreshold} onChange={(e) => update((c) => { c.homework.missedThreshold = Math.max(1, Number(e.target.value) || 1); return c; })} className="w-1/2 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" placeholder="Count" />
@@ -8372,6 +8947,145 @@ function MicButton({ onResult, className }) {
       className={className || `flex items-center justify-center rounded-full w-7 h-7 shrink-0 ${listening ? "bg-rose-500 text-white animate-pulse" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>
       <Mic size={13} />
     </button>
+  );
+}
+
+function AdminStudentProfile({ student, profileData, onUpdateStudent, onArchiveStudent, onDeleteStudent, onClose }) {
+  const [expandedClasses, setExpandedClasses] = useState({});
+  if (!student) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4">
+      <div className="bg-white rounded-2xl max-w-2xl w-full my-6 md:my-10">
+        <div className="flex items-center justify-between p-4 border-b border-stone-200">
+          <input value={student.name} onChange={(e) => onUpdateStudent(student.id, "name", e.target.value)}
+            className="display-font text-xl font-bold text-stone-900 border-none focus:outline-none bg-transparent flex-1" />
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-700 p-1"><ChevronRight size={22} /></button>
+        </div>
+
+        <div className="p-4 space-y-4">
+          <Section title="Parent & contact info">
+            <StudentContactFields student={student} onUpdateField={(id, field, value) => onUpdateStudent(id, field, value)} />
+          </Section>
+
+          {profileData === null && <p className="text-sm text-stone-400">Loading...</p>}
+
+          {profileData?.classes.length === 0 && (
+            <p className="text-sm text-stone-400">Not currently enrolled in any class.</p>
+          )}
+
+          {profileData?.classes.map((cls) => {
+            const expanded = expandedClasses[cls.classId];
+            const attCounts = {};
+            cls.attendance.forEach((a) => { attCounts[a.status] = (attCounts[a.status] || 0) + 1; });
+            const attSummary = (cls.config.attendance?.statuses || []).map((st) => `${attCounts[st.id] || 0} ${st.label}`).join(" · ");
+            const hwCounts = { completed: 0, missed: 0, "n/a": 0 };
+            cls.homework.forEach((h) => { hwCounts[h.status] = (hwCounts[h.status] || 0) + 1; });
+            const pointCats = (cls.config.points?.categories || []).filter((c) => c.scope !== "class");
+
+            return (
+              <Section key={cls.classId} title={cls.className}>
+                <button onClick={() => setExpandedClasses((p) => ({ ...p, [cls.classId]: !p[cls.classId] }))}
+                  className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-2">
+                  {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />} {expanded ? "Hide details" : "Show details"}
+                </button>
+
+                {expanded && (
+                  <div className="space-y-3 text-sm">
+                    {cls.config.attendance && (
+                      <div>
+                        <p className="text-xs font-semibold text-stone-500 uppercase mb-1">Attendance</p>
+                        <p className="text-stone-700">{attSummary || "No attendance logged yet."}</p>
+                      </div>
+                    )}
+
+                    {cls.config.homework?.enabled && (
+                      <div>
+                        <p className="text-xs font-semibold text-stone-500 uppercase mb-1">Homework</p>
+                        <p className="text-stone-700">{hwCounts.completed} completed · {hwCounts.missed} missed · {hwCounts["n/a"]} not assigned</p>
+                      </div>
+                    )}
+
+                    {pointCats.length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-stone-500 uppercase mb-1">Points</p>
+                        <div className="flex flex-wrap gap-2">
+                          {pointCats.map((cat) => {
+                            if (cat.displayMode === "checkx") {
+                              return <span key={cat.id} className="text-xs bg-stone-50 rounded-full px-2 py-1">{cat.label}: {cls.points[`${cat.id}:check`] || 0} ✓ / {cls.points[`${cat.id}:x`] || 0} ✗</span>;
+                            }
+                            return <span key={cat.id} className="text-xs bg-stone-50 rounded-full px-2 py-1">{cat.label}: {cls.points[cat.id] || 0}{cat.threshold ? ` / ${cat.threshold}` : ""}</span>;
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {(cls.config.categories || []).some((c) => c.active) && (
+                      <div>
+                        <p className="text-xs font-semibold text-stone-500 uppercase mb-1">Assessments</p>
+                        <div className="space-y-1">
+                          {(cls.config.categories || []).filter((c) => c.active).map((cat) => (
+                            <div key={cat.id}>
+                              {(cat.items || []).map((item) => {
+                                const entry = cls.skills[skillKey(cat.id, item.id)];
+                                if (!entry || !entry.history || entry.history.length === 0) return null;
+                                const { status } = computeSkillStatus(entry.history, cat);
+                                const statusColor = status === "flagged" ? "text-rose-600" : status === "mastered" ? "text-emerald-600" : "text-stone-500";
+                                return <p key={item.id} className="text-xs text-stone-600">{cat.title} — {item.label}: <span className={`font-semibold ${statusColor}`}>{status}</span></p>;
+                              })}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <p className="text-xs font-semibold text-stone-500 uppercase mb-1">Incidents ({cls.incidents.length})</p>
+                      {cls.incidents.length === 0 && <p className="text-xs text-stone-400">None logged.</p>}
+                      <ul className="space-y-1">
+                        {cls.incidents.slice(0, 10).map((i) => (
+                          <li key={i.id} className="text-xs text-stone-600">
+                            <span className="font-semibold">{i.date}</span> · {i.categoryLabel}{i.description ? ` — ${i.description}` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                )}
+              </Section>
+            );
+          })}
+
+          {profileData?.programs.length > 0 && (
+            <Section title="Shared programs">
+              <div className="space-y-2">
+                {profileData.programs.map((prog) => {
+                  const cats = prog.config.points?.categories || [];
+                  return (
+                    <div key={prog.programId} className="text-sm">
+                      <p className="font-semibold text-stone-800">{prog.programName}</p>
+                      <div className="flex flex-wrap gap-2 mt-1">
+                        {cats.length === 0 && <span className="text-xs text-stone-400">No point categories set up yet.</span>}
+                        {cats.map((cat) => (
+                          <span key={cat.id} className="text-xs bg-violet-50 text-violet-700 rounded-full px-2 py-1">{cat.label}: {prog.points[cat.id] || 0}</span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Section>
+          )}
+
+          <Section title="Manage this student">
+            <div className="flex gap-2">
+              <ConfirmDelete onConfirm={() => onArchiveStudent(student.id)} label="Archive student" className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50" confirmText="Archive it?" armedClassName="text-xs font-semibold text-white bg-stone-600 rounded-lg px-3 py-2" />
+              <ConfirmDelete onConfirm={() => onDeleteStudent(student.id)} label="Delete permanently" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" confirmText="Delete forever?" armedClassName="text-xs font-semibold text-white bg-red-600 rounded-lg px-3 py-2" />
+            </div>
+          </Section>
+        </div>
+      </div>
+    </div>
   );
 }
 
