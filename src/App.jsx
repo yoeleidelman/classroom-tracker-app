@@ -440,6 +440,18 @@ function eachDateInRange(startStr, endStr) {
   return out;
 }
 
+// 'full' = normal school day, 'half' = half-day schedule, 'none' = no school (Shabbos, etc.) —
+// shared by the benchmark calendar view and the school-aware date-range picker, so both agree
+// on what counts as a school day using the exact same logic.
+function scheduleKindForDate(dateStr, plannerDays, dayTypes) {
+  const dayTypeMap = {};
+  (dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
+  const dt = plannerDays?.[dateStr]?.dayType ? dayTypeMap[plannerDays[dateStr].dayType] : null;
+  if (dt?.hidesAttendance) return "none";
+  if (dt?.scheduleTemplate === "half") return "half";
+  return "full";
+}
+
 function computeSkillStatus(history, config) {
   if (!history || history.length === 0) return { status: "new", streak: 0 };
   const weightOf = (id) => config.gradeOptions.find((o) => o.id === id)?.weight || "neutral";
@@ -7294,6 +7306,73 @@ function schoolYearStart(refDate, yearOffset) {
 }
 function daysBetween(a, b) { return Math.round((b - a) / 86400000); }
 
+// Lets a teacher see which days actually have school while picking a date range — the whole
+// point being they can visually spot "oh, there's no school those two days" instead of picking
+// blind in a plain native date input. First click sets the start, next click (on a later date)
+// sets the end; clicking again after a range is already set starts a fresh selection.
+function SchoolCalendarRangePicker({ startValue, endValue, onSelectStart, onSelectEnd, plannerDays, dayTypes }) {
+  const initialDate = startValue ? new Date(startValue + "T00:00:00") : new Date();
+  const [monthOffset, setMonthOffset] = useState(0);
+  const baseYear = initialDate.getFullYear();
+  const baseMonth = initialDate.getMonth();
+  const monthIdx0 = baseMonth + monthOffset;
+  const year = baseYear + Math.floor(monthIdx0 / 12);
+  const monthIdx = ((monthIdx0 % 12) + 12) % 12;
+  const grid = buildMonthGrid(year, monthIdx);
+
+  const handleClick = (d) => {
+    if (!startValue || (startValue && endValue)) {
+      onSelectStart(d);
+      onSelectEnd("");
+    } else if (d < startValue) {
+      onSelectStart(d);
+    } else {
+      onSelectEnd(d);
+    }
+  };
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3">
+      <div className="flex items-center justify-between mb-2">
+        <button type="button" onClick={() => setMonthOffset((m) => m - 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronLeft size={16} /></button>
+        <p className="text-sm font-semibold text-stone-800">{monthLabel(year, monthIdx)}</p>
+        <button type="button" onClick={() => setMonthOffset((m) => m + 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronRight size={16} /></button>
+      </div>
+      <div className="grid grid-cols-7 gap-1 mb-1">
+        {WEEKDAY_LABELS.map((w) => <div key={w} className="text-center text-[9px] font-semibold text-stone-400">{w}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1">
+        {grid.map((d, i) => {
+          if (!d) return <div key={i} />;
+          const kind = scheduleKindForDate(d, plannerDays, dayTypes);
+          const dayNum = Number(d.slice(-2));
+          const isStart = d === startValue;
+          const isEnd = d === endValue;
+          const inRange = startValue && endValue && d > startValue && d < endValue;
+          let colorClass = "text-stone-700 hover:bg-stone-100";
+          if (kind === "none") colorClass = "text-stone-300 hover:bg-stone-100";
+          else if (kind === "half") colorClass = "text-stone-700 bg-amber-50 hover:bg-amber-100";
+          if (isStart || isEnd) colorClass = "bg-teal-700 text-white font-bold";
+          else if (inRange) colorClass = "bg-teal-100 text-teal-800";
+          return (
+            <button key={d} type="button" onClick={() => handleClick(d)}
+              title={kind === "none" ? "No school" : kind === "half" ? "Half day" : "School day"}
+              className={`relative aspect-square rounded-lg text-xs flex items-center justify-center ${colorClass}`}>
+              {dayNum}
+              {kind === "none" && !isStart && !isEnd && <span className="absolute bottom-0.5 text-[7px]">•</span>}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-3 mt-2 text-[10px] text-stone-400 flex-wrap">
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-stone-700 inline-block" /> School day</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-200 inline-block" /> Half day</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-stone-200 inline-block" /> No school</span>
+      </div>
+    </div>
+  );
+}
+
 function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updateSegment, removeSegment, plannerDays, dayTypes }) {
   const [activeId, setActiveId] = useState(subjects[0]?.id || null);
   const [showAddSubject, setShowAddSubject] = useState(subjects.length === 0);
@@ -7401,17 +7480,6 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
     return active.segments.find((seg) => dateStr >= seg.startDate && dateStr <= seg.endDate) || null;
   };
 
-  const dayTypeMap = {};
-  (dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
-
-  // 'full' = normal school day, 'half' = half-day schedule, 'none' = no school (Shabbos, etc.)
-  const scheduleKindForDate = (dateStr) => {
-    const dt = plannerDays?.[dateStr]?.dayType ? dayTypeMap[plannerDays[dateStr].dayType] : null;
-    if (dt?.hidesAttendance) return "none";
-    if (dt?.scheduleTemplate === "half") return "half";
-    return "full";
-  };
-
   const calMonthIdx0 = yearStart.getMonth() + calMonthOffset;
   const calYear = yearStart.getFullYear() + Math.floor(calMonthIdx0 / 12);
   const calMonthIdx = ((calMonthIdx0 % 12) + 12) % 12;
@@ -7476,7 +7544,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
                       <div className={`absolute inset-0 rounded-md bg-${seg.color}-100`} />
                       <div className="absolute inset-0 flex items-end rounded-md overflow-hidden">
                         {dates.map((d) => {
-                          const kind = scheduleKindForDate(d);
+                          const kind = scheduleKindForDate(d, plannerDays, dayTypes);
                           if (kind === "none") return <div key={d} className="flex-1 h-full" />;
                           return <div key={d} className={`flex-1 bg-${seg.color}-500 ${kind === "half" ? "h-1/2" : "h-full"}`} />;
                         })}
@@ -7509,7 +7577,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
                 {calGrid.map((d, i) => {
                   if (!d) return <div key={i} />;
                   const seg = segmentForDate(d);
-                  const kind = scheduleKindForDate(d);
+                  const kind = scheduleKindForDate(d, plannerDays, dayTypes);
                   const dayNum = Number(d.slice(-2));
                   const colorClass = !seg || kind === "none"
                     ? "bg-stone-50 text-stone-400"
@@ -7549,15 +7617,11 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
               <p className="text-sm font-semibold text-stone-800 mb-3">Edit segment</p>
               <label className="block text-xs font-medium text-stone-500 mb-1">Label</label>
               <input value={editLabel} onChange={(e) => setEditLabel(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
-              <div className="flex gap-2 mb-4">
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-stone-500 mb-1">From</label>
-                  <input type="date" value={editStart} onChange={(e) => setEditStart(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                </div>
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-stone-500 mb-1">To</label>
-                  <input type="date" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                </div>
+              <p className="text-xs font-medium text-stone-500 mb-1">
+                {editStart || "Tap a date to set the start"}{editEnd ? ` → ${editEnd}` : editStart ? " → tap another date to set the end" : ""}
+              </p>
+              <div className="mb-4">
+                <SchoolCalendarRangePicker startValue={editStart} endValue={editEnd} onSelectStart={setEditStart} onSelectEnd={setEditEnd} plannerDays={plannerDays} dayTypes={dayTypes} />
               </div>
               <div className="flex gap-2">
                 <button onClick={saveSegmentEdit} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Save changes</button>
@@ -7584,15 +7648,11 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
             <div className="bg-white border border-stone-200 rounded-xl p-4 md:w-96">
               <label className="block text-xs font-medium text-stone-500 mb-1">Label</label>
               <input value={segLabel} onChange={(e) => setSegLabel(e.target.value)} placeholder="e.g. Kamatz/Patach" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
-              <div className="flex gap-2 mb-3">
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-stone-500 mb-1">From</label>
-                  <input type="date" value={segStart} onChange={(e) => setSegStart(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                </div>
-                <div className="flex-1">
-                  <label className="block text-xs font-medium text-stone-500 mb-1">To</label>
-                  <input type="date" value={segEnd} onChange={(e) => setSegEnd(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                </div>
+              <p className="text-xs font-medium text-stone-500 mb-1">
+                {segStart || "Tap a date to set the start"}{segEnd ? ` → ${segEnd}` : segStart ? " → tap another date to set the end" : ""}
+              </p>
+              <div className="mb-3">
+                <SchoolCalendarRangePicker startValue={segStart} endValue={segEnd} onSelectStart={setSegStart} onSelectEnd={setSegEnd} plannerDays={plannerDays} dayTypes={dayTypes} />
               </div>
               <div className="flex gap-2">
                 <button onClick={submitSegment} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Add segment</button>
