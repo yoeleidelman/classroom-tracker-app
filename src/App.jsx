@@ -16,7 +16,7 @@
 
 import { db, auth } from "./firebase";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
@@ -873,6 +873,30 @@ export default function App() {
 
   const signOutTeacher = () => signOut(auth);
 
+  // Self-service password change — Firebase requires a "recent" sign-in for security-sensitive
+  // operations like this, so we re-authenticate with their current password first (proving they
+  // really are who they say they are right now) before applying the new one.
+  const changeMyPassword = async (currentPassword, newPassword) => {
+    try {
+      const user = auth.currentUser;
+      if (!user) return { ok: false, error: "You're not signed in." };
+      const credential = EmailAuthProvider.credential(user.email, currentPassword);
+      await reauthenticateWithCredential(user, credential);
+      await updatePassword(user, newPassword);
+      return { ok: true };
+    } catch (e) {
+      if (e.code === "auth/invalid-credential" || e.code === "auth/wrong-password") return { ok: false, error: "That current password isn't right." };
+      if (e.code === "auth/weak-password") return { ok: false, error: "New password needs to be at least 6 characters." };
+      return { ok: false, error: "Couldn't change the password — try again." };
+    }
+  };
+
+  const changeMyName = async (newName) => {
+    if (!currentTeacher) return;
+    await updateTeacherRecord(currentTeacher.uid, { name: newName });
+    setCurrentTeacher((prev) => ({ ...prev, name: newName }));
+  };
+
   const enterAssignedClass = (cls) => { setClassId(cls.id); setClassName(cls.name); };
 
   const signOutStaff = async () => {
@@ -1415,6 +1439,7 @@ export default function App() {
     if (currentTeacher.role === "admin") {
       if (!classId) {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
+          currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName}
           globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
@@ -1425,7 +1450,7 @@ export default function App() {
         <ClassApp classId={classId} className={className}
           onSwitchClass={backToTeacherClassPicker} switchLabel="Admin · Back to dashboard"
           onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
-          loggedInTeacher={currentTeacher} />
+          loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} />
       );
     }
     // Real teacher — only ever sees classes they're actually assigned to.
@@ -1437,7 +1462,7 @@ export default function App() {
       <ClassApp classId={classId} className={className}
         onSwitchClass={backToTeacherClassPicker} switchLabel="Switch class"
         onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
-        loggedInTeacher={currentTeacher} />
+        loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} />
     );
   }
 
@@ -1853,7 +1878,7 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -1909,6 +1934,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showArchivedStudents, setShowArchivedStudents] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
+  const [showMyAccount, setShowMyAccount] = useState(false);
   const handleExport = async (params) => {
     const sheets = await onBuildExportData(params);
     const sheetNames = Object.keys(sheets);
@@ -1987,7 +2013,10 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       <div className="max-w-lg mx-auto">
         <div className="flex items-center justify-between mb-1">
           <h1 className="display-font text-2xl font-bold text-stone-900">Admin Dashboard</h1>
-          <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
+          <div className="flex items-center gap-3">
+            {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
+            <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
+          </div>
         </div>
         <p className="text-stone-500 text-sm mb-6">Every class in the school. Tap one to open it with full access.</p>
 
@@ -2404,6 +2433,10 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           </div>
         </div>
       )}
+
+      {showMyAccount && currentTeacher && (
+        <MyAccountPanel teacher={currentTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
+      )}
     </div>
   );
 }
@@ -2589,7 +2622,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher }) {
+function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -2616,11 +2649,12 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
   const [curriculumMilestones, setCurriculumMilestones] = useState([]);
   const [behaviorLogData, setBehaviorLogData] = useState({});
-  const [randomPickerData, setRandomPickerData] = useState({ pickCounts: {}, lastPickedId: null });
+  const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [view, setView] = useState("home");
   const [showPlan, setShowPlan] = useState(false);
+  const [showMyAccount, setShowMyAccount] = useState(false);
   const viewportHeight = useVisualViewportHeight();
   const [openProgramId, setOpenProgramId] = useState(null);
   const [programRoster, setProgramRoster] = useState([]);
@@ -2660,7 +2694,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const bs = await loadC("benchmarkSubjects", []);
       const cm = await loadC("curriculumMilestones", []);
       const bl = await loadC("behaviorLogData", {});
-      const rp = await loadC("randomPickerData", { pickCounts: {}, lastPickedId: null });
+      const rp = await loadC("randomPickerData", { bag: [], lastPickedId: null });
       const al = await loadC("alerts", []);
       const gs = await loadJSON("globalStudents", [], true);
       setGlobalStudentsInClass(gs);
@@ -2859,11 +2893,10 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const persistBehaviorLogData = (next) => { setBehaviorLogData(next); saveC("behaviorLogData", next); };
 
   const persistRandomPickerData = (next) => { setRandomPickerData(next); saveC("randomPickerData", next); };
-  const recordRandomPick = (studentId) => {
-    const nextCounts = { ...randomPickerData.pickCounts, [studentId]: (randomPickerData.pickCounts[studentId] || 0) + 1 };
-    persistRandomPickerData({ pickCounts: nextCounts, lastPickedId: studentId });
+  const recordRandomPick = (studentId, newBag) => {
+    persistRandomPickerData({ bag: newBag, lastPickedId: studentId });
   };
-  const resetRandomPicker = () => persistRandomPickerData({ pickCounts: {}, lastPickedId: null });
+  const resetRandomPicker = () => persistRandomPickerData({ bag: [], lastPickedId: null });
   const adjustBehaviorMark = (date, periodId, markId, delta) => {
     const dayEntry = behaviorLogData[date] || {};
     const periodEntry = dayEntry[periodId] || {};
@@ -3240,7 +3273,12 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   return (
     <ClassContext.Provider value={{ className, onSwitchClass, switchLabel }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Work Sans', sans-serif" }}>
-      <div style={{ height: "5px", width: "100%", background: "linear-gradient(90deg, #134E4A 0%, #134E4A 55%, #D97706 100%)" }} />
+      <div style={{
+        height: "48px", width: "100%",
+        background: "linear-gradient(90deg, #2D3A4A 0%, #2D3A4A 55%, #EB464D 100%)",
+        WebkitMaskImage: "linear-gradient(180deg, black 0%, transparent 100%)",
+        maskImage: "linear-gradient(180deg, black 0%, transparent 100%)",
+      }} />
       <GlobalAppStyles />
 
       {view === "home" && (
@@ -3467,7 +3505,12 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
           loadSampleData={loadSampleData} clearAllData={clearAllData}
           className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
-          globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent} />
+          globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent}
+          loggedInTeacher={loggedInTeacher} onOpenMyAccount={() => setShowMyAccount(true)} />
+      )}
+
+      {showMyAccount && loggedInTeacher && (
+        <MyAccountPanel teacher={loggedInTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
       )}
     </div>
     </ClassContext.Provider>
@@ -3964,10 +4007,20 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
   );
 }
 
-// Weighted lottery, not a strict rotation — students picked fewer times get proportionally
-// higher odds (weight = 1 / (timesPicked + 1)), so it stays genuinely random while balancing
-// out over time. The most recently picked student is excluded outright, so nobody gets called
-// twice in a row (unless there's only one student in the room).
+// Shuffle-bag, not a weighted lottery — every student is guaranteed to be picked exactly once
+// before anyone repeats (click it N times with N students, everyone gets called), the order is
+// freshly randomized each round, and the round boundary itself is protected too: when the bag
+// empties and reshuffles, the new round's first pick is never the same student who ended the
+// previous one, so there's never a back-to-back repeat even across a reset.
+function shuffleArray(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 function RandomPickerWidget({ roster, pickerData, onPick, onReset }) {
   const [picking, setPicking] = useState(false);
   const [displayName, setDisplayName] = useState(null);
@@ -3976,22 +4029,27 @@ function RandomPickerWidget({ roster, pickerData, onPick, onReset }) {
 
   useEffect(() => () => { if (intervalRef.current) clearInterval(intervalRef.current); }, []);
 
-  const weightedPick = () => {
-    const candidates = roster.length > 1 ? roster.filter((s) => s.id !== pickerData.lastPickedId) : roster;
-    if (candidates.length === 0) return null;
-    const weights = candidates.map((s) => 1 / ((pickerData.pickCounts?.[s.id] || 0) + 1));
-    const total = weights.reduce((a, b) => a + b, 0);
-    let r = Math.random() * total;
-    for (let i = 0; i < candidates.length; i++) {
-      r -= weights[i];
-      if (r <= 0) return candidates[i];
+  const drawNext = () => {
+    const rosterIds = roster.map((s) => s.id);
+    // Drop anyone no longer in the roster (removed since the bag was built) — keeps the bag
+    // valid without needing a manual reset every time the class list changes.
+    let bag = (pickerData.bag || []).filter((id) => rosterIds.includes(id));
+    if (bag.length === 0) {
+      bag = shuffleArray(rosterIds);
+      if (pickerData.lastPickedId && bag.length > 1 && bag[0] === pickerData.lastPickedId) {
+        const swapWith = 1 + Math.floor(Math.random() * (bag.length - 1));
+        [bag[0], bag[swapWith]] = [bag[swapWith], bag[0]];
+      }
     }
-    return candidates[candidates.length - 1];
+    const nextId = bag[0];
+    const remainingBag = bag.slice(1);
+    const winner = roster.find((s) => s.id === nextId);
+    return { winner, remainingBag };
   };
 
   const startPick = () => {
     if (roster.length === 0 || picking) return;
-    const winner = weightedPick();
+    const { winner, remainingBag } = drawNext();
     if (!winner) return;
     setPicking(true);
     setFinalPick(null);
@@ -4006,7 +4064,7 @@ function RandomPickerWidget({ roster, pickerData, onPick, onReset }) {
         setDisplayName(winner.name);
         setFinalPick(winner);
         setPicking(false);
-        onPick(winner.id);
+        onPick(winner.id, remainingBag);
       }
     }, 100);
   };
@@ -4015,7 +4073,7 @@ function RandomPickerWidget({ roster, pickerData, onPick, onReset }) {
     <div className="bg-white border border-stone-200 rounded-xl p-4">
       <div className="flex items-center justify-between mb-3">
         <p className="font-semibold text-stone-800 text-sm">Random Student</p>
-        <button onClick={onReset} title="Clear fairness tracking and start fresh" className="text-xs text-stone-400 hover:text-stone-600">Reset</button>
+        <button onClick={onReset} title="Discard whoever's left in the current round and shuffle a brand new one right now" className="text-xs text-stone-400 hover:text-stone-600">Reset</button>
       </div>
 
       <div className={`rounded-lg py-6 text-center mb-3 transition-colors ${finalPick ? "bg-emerald-50" : "bg-stone-50"}`}>
@@ -4451,14 +4509,18 @@ function RaffleWheel({ size, wheelBackground, rotation, participants }) {
       <div className="rounded-full shadow-lg relative" style={{ width: size, height: size, background: wheelBackground, transform: `rotate(${rotation}deg)`, transition: "transform 5s cubic-bezier(0.33, 1, 0.68, 1)" }}>
         {participants.map((p, i) => {
           const centerAngle = i * sliceDeg + sliceDeg / 2;
-          // Text is rotated to match the slice's own angle, so it reads like a spoke pointing
-          // out from the center — flipped 180° on the wheel's left half so it stays right-side
-          // up instead of reading upside-down there.
-          const normalizedAngle = ((centerAngle % 360) + 360) % 360;
-          const flipped = normalizedAngle > 90 && normalizedAngle < 270;
+          // Un-rotated text reads left-to-right, which in this rotation system corresponds to
+          // "pointing right" (90°) — so subtracting 90° is what actually aligns the text along
+          // the slice's own radial axis (center-to-edge), rather than across it. Flipped 180° on
+          // whichever half would otherwise read upside-down, checked against the real final
+          // rotation, not the raw slice angle.
+          let netRotation = centerAngle - 90;
+          const normalized = ((netRotation % 360) + 360) % 360;
+          if (normalized > 90 && normalized < 270) netRotation += 180;
+          const innerRotation = netRotation - centerAngle;
           return (
             <div key={p.id} className="absolute" style={{ top: "50%", left: "50%", width: 0, height: 0 }}>
-              <div style={{ transform: `rotate(${centerAngle}deg) translateY(-${labelRadius}px) rotate(${flipped ? 180 : 0}deg)` }}>
+              <div style={{ transform: `rotate(${centerAngle}deg) translateY(-${labelRadius}px) rotate(${innerRotation}deg)` }}>
                 <span className="text-white font-bold whitespace-nowrap" style={{ fontSize, textShadow: "0 1px 3px rgba(0,0,0,0.5)", display: "inline-block", transform: "translate(-50%, -50%)" }}>
                   {p.name}
                 </span>
@@ -7352,8 +7414,14 @@ function SchoolCalendarRangePicker({ startValue, endValue, onSelectStart, onSele
           let colorClass = "text-stone-700 hover:bg-stone-100";
           if (kind === "none") colorClass = "text-stone-300 hover:bg-stone-100";
           else if (kind === "half") colorClass = "text-stone-700 bg-amber-50 hover:bg-amber-100";
-          if (isStart || isEnd) colorClass = "bg-teal-700 text-white font-bold";
-          else if (inRange) colorClass = "bg-teal-100 text-teal-800";
+          if (isStart || isEnd) {
+            colorClass = "bg-teal-700 text-white font-bold";
+          } else if (inRange && kind !== "none") {
+            // Only real school days get the "selected" highlight — a no-school day that
+            // happens to fall inside the picked range stays visually muted, so the teacher
+            // can actually see which days in that span have school and which don't.
+            colorClass = kind === "half" ? "bg-teal-100 text-teal-800 ring-1 ring-inset ring-amber-300" : "bg-teal-100 text-teal-800";
+          }
           return (
             <button key={d} type="button" onClick={() => handleClick(d)}
               title={kind === "none" ? "No school" : kind === "half" ? "Half day" : "School day"}
@@ -8475,7 +8543,7 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent }) {
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onOpenMyAccount }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -8507,6 +8575,14 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
       <div className="md:grid md:grid-cols-2 md:gap-x-6 md:items-start">
         <div className="md:col-span-2">
+          {loggedInTeacher && (
+            <Section title="My account">
+              <p className="text-xs text-stone-400 mb-2">This is your own sign-in — separate from this class's password below.</p>
+              <button onClick={onOpenMyAccount} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">
+                Change my name or password
+              </button>
+            </Section>
+          )}
           {onRenameClass && (
             <Section title="Class management">
               <label className="block text-xs font-medium text-stone-500 mb-1">Class name</label>
@@ -9143,6 +9219,71 @@ function AdminStudentProfile({ student, profileData, onUpdateStudent, onArchiveS
               <ConfirmDelete onConfirm={() => onDeleteStudent(student.id)} label="Delete permanently" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" confirmText="Delete forever?" armedClassName="text-xs font-semibold text-white bg-red-600 rounded-lg px-3 py-2" />
             </div>
           </Section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
+  const [name, setName] = useState(teacher?.name || "");
+  const [nameSaved, setNameSaved] = useState(false);
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwSuccess, setPwSuccess] = useState(false);
+
+  const saveName = async () => {
+    if (!name.trim()) return;
+    await onUpdateName(name.trim());
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  const submitPasswordChange = async () => {
+    setPwError("");
+    if (newPw.length < 6) { setPwError("New password needs to be at least 6 characters."); return; }
+    if (newPw !== confirmPw) { setPwError("New passwords don't match."); return; }
+    setPwSaving(true);
+    const result = await onChangePassword(currentPw, newPw);
+    setPwSaving(false);
+    if (!result.ok) { setPwError(result.error); return; }
+    setPwSuccess(true);
+    setCurrentPw(""); setNewPw(""); setConfirmPw("");
+    setTimeout(() => setPwSuccess(false), 3000);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4">
+      <GlobalAppStyles />
+      <div className="bg-white rounded-2xl max-w-md w-full my-8">
+        <div className="flex items-center justify-between p-4 border-b border-stone-200">
+          <p className="display-font text-xl font-bold text-stone-900">My Account</p>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-700 p-1"><ChevronRight size={22} /></button>
+        </div>
+        <div className="p-4 space-y-5">
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Your name</label>
+            <div className="flex gap-2">
+              <input value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+              <button onClick={saveName} className="bg-teal-700 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
+            </div>
+            {nameSaved && <p className="text-xs text-emerald-600 mt-1">Saved.</p>}
+          </div>
+
+          <div className="pt-4 border-t border-stone-200">
+            <p className="text-sm font-semibold text-stone-800 mb-2">Change password</p>
+            <input type="password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} placeholder="Current password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="New password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <input type="password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} placeholder="Confirm new password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            {pwError && <p className="text-xs text-rose-600 mb-2">{pwError}</p>}
+            {pwSuccess && <p className="text-xs text-emerald-600 mb-2">✓ Password changed.</p>}
+            <button onClick={submitPasswordChange} disabled={pwSaving || !currentPw || !newPw || !confirmPw} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+              {pwSaving ? "Changing..." : "Change password"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
