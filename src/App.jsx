@@ -25,7 +25,7 @@ import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
-  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2
+  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -98,6 +98,14 @@ const DEFAULT_RULES = [
   { id: "shva-na", label: "Shva Na", desc: "Vocal shva — pronounced quickly" },
   { id: "shva-nach", label: "Shva Nach", desc: "Silent shva" },
   { id: "dagesh-chazak", label: "Dagesh Chazak", desc: "Doubling dagesh in a letter" },
+];
+
+// Seeded once, the first time schoolTools is ever loaded and nothing has been saved yet. Once an
+// admin adds, edits, or removes anything, a real (saved) list exists in Firestore and this default
+// no longer applies — it's a starting point, not something re-applied on every load.
+const DEFAULT_SCHOOL_TOOLS = [
+  { id: "seed-chumash-quest", category: "tool", label: "Chumash Quest", url: "https://chumash-quest.yoeleidel.chatgpt.site", description: "" },
+  { id: "seed-curriculum-generator", category: "tool", label: "Curriculum Generator", url: "https://chinuchapp.com/curriculum-generator", description: "" },
 ];
 
 const DEFAULT_CONFIG = {
@@ -905,6 +913,7 @@ export default function App() {
   const [registry, setRegistry] = useState([]);
   const [globalStudents, setGlobalStudents] = useState([]);
   const [schoolEvents, setSchoolEvents] = useState([]);
+  const [schoolTools, setSchoolTools] = useState([]);
   const [teachers, setTeachers] = useState([]);
   const [programs, setPrograms] = useState([]);
   const [currentTeacher, setCurrentTeacher] = useState(null); // the signed-in teacher's own record, once real login exists
@@ -1056,6 +1065,7 @@ export default function App() {
     const schoolEventsList = await loadJSON("schoolEvents", [], true);
     schoolEventsList.filter((e) => e.date === dateStr).forEach((e) => results.events.push({ ...e, sourceClassName: "School-wide" }));
     results.events.sort((a, b) => (a.sourceClassName < b.sourceClassName ? -1 : 1));
+    results.incidents.sort((a, b) => (a.flaggedForAdmin === b.flaggedForAdmin ? 0 : a.flaggedForAdmin ? -1 : 1)); // flagged incidents surface first — that's the whole point
     return results;
   };
 
@@ -1477,6 +1487,38 @@ export default function App() {
     await saveJSON("schoolEvents", next, true);
   };
 
+  // Teaching Tools — a school-wide, admin-managed list of outside links (tools, generators,
+  // shared resource folders/files) every class sees the same copy of. Mirrors the schoolEvents
+  // pattern exactly: re-fetch before mutating so this stays correct even if multiple admin tabs
+  // are open, or the local state is stale.
+  const refreshSchoolTools = async () => {
+    const t = await loadJSON("schoolTools", DEFAULT_SCHOOL_TOOLS, true);
+    setSchoolTools(t);
+  };
+
+  const addSchoolTool = async (fields) => {
+    const t = await loadJSON("schoolTools", DEFAULT_SCHOOL_TOOLS, true);
+    const tool = { id: uid(), category: "tool", label: "", url: "", description: "", ...fields };
+    const next = [...t, tool];
+    setSchoolTools(next);
+    await saveJSON("schoolTools", next, true);
+    return tool;
+  };
+
+  const updateSchoolTool = async (id, fields) => {
+    const t = await loadJSON("schoolTools", DEFAULT_SCHOOL_TOOLS, true);
+    const next = t.map((x) => (x.id === id ? { ...x, ...fields } : x));
+    setSchoolTools(next);
+    await saveJSON("schoolTools", next, true);
+  };
+
+  const removeSchoolTool = async (id) => {
+    const t = await loadJSON("schoolTools", DEFAULT_SCHOOL_TOOLS, true);
+    const next = t.filter((x) => x.id !== id);
+    setSchoolTools(next);
+    await saveJSON("schoolTools", next, true);
+  };
+
   const restoreGlobalStudent = async (id) => {
     const gs = await loadJSON("globalStudents", [], true);
     const next = gs.map((s) => (s.id === id ? { ...s, archived: false } : s));
@@ -1544,6 +1586,7 @@ export default function App() {
           currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName}
           globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
+          schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
@@ -1579,6 +1622,7 @@ export default function App() {
       return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
         globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
+          schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
         programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
@@ -1660,6 +1704,43 @@ function SchoolEventForm({ classes, existing, onSave, onCancel }) {
         <button onClick={save} disabled={!title.trim() || (appliesMode === "selected" && selectedClassIds.length === 0)}
           className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
           {existing ? "Save changes" : "Create event"}
+        </button>
+        <button onClick={onCancel} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function SchoolToolForm({ existing, onSave, onCancel }) {
+  const [category, setCategory] = useState(existing?.category || "tool");
+  const [label, setLabel] = useState(existing?.label || "");
+  const [url, setUrl] = useState(existing?.url || "");
+  const [description, setDescription] = useState(existing?.description || "");
+
+  const save = () => {
+    if (!label.trim() || !url.trim()) return;
+    let finalUrl = url.trim();
+    if (!/^https?:\/\//i.test(finalUrl)) finalUrl = `https://${finalUrl}`; // teachers pasting a bare domain shouldn't end up with a broken link
+    onSave({ category, label: label.trim(), url: finalUrl, description: description.trim() });
+  };
+
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
+      <label className="block text-xs font-semibold text-stone-700 mb-1">Type</label>
+      <div className="flex gap-1.5 mb-2">
+        <button onClick={() => setCategory("tool")} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${category === "tool" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>Outside tool</button>
+        <button onClick={() => setCategory("resource")} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${category === "resource" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>Shared file / folder</button>
+      </div>
+      <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={category === "tool" ? "e.g. Chumash Quest" : "e.g. Kriya worksheets folder"} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <label className="block text-[10px] text-stone-400 mb-0.5">Link</label>
+      <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <label className="block text-[10px] text-stone-400 mb-0.5">Description (optional)</label>
+      <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="A short note on what this is" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+      <div className="flex gap-2">
+        <button onClick={save} disabled={!label.trim() || !url.trim()}
+          className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {existing ? "Save changes" : "Add"}
         </button>
         <button onClick={onCancel} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
       </div>
@@ -1980,7 +2061,7 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -1993,6 +2074,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [expandedGlobalStudents, setExpandedGlobalStudents] = useState({});
   const [showEventForm, setShowEventForm] = useState(false);
   const [editingEventId, setEditingEventId] = useState(null);
+  const [showToolForm, setShowToolForm] = useState(false);
+  const [editingToolId, setEditingToolId] = useState(null);
   const [showTeacherForm, setShowTeacherForm] = useState(false);
   const [editingTeacherUid, setEditingTeacherUid] = useState(null);
   const [overviewDate, setOverviewDate] = useState(todayISO());
@@ -2086,7 +2169,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
     setStudentHistoryLoading(false);
   };
 
-  useEffect(() => { onRefresh(); onRefreshStudents(); onRefreshEvents(); onRefreshTeachers(); onRefreshPrograms(); }, []); // eslint-disable-line
+  useEffect(() => { onRefresh(); onRefreshStudents(); onRefreshEvents(); onRefreshTools(); onRefreshTeachers(); onRefreshPrograms(); }, []); // eslint-disable-line
 
   const submitCreate = async () => {
     if (!newName.trim() || !newPw.trim()) return;
@@ -2150,7 +2233,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               {overviewData.incidents.length === 0 && <p className="text-xs text-stone-400">None logged for this date.</p>}
               <ul className="space-y-1.5">
                 {overviewData.incidents.map((i) => (
-                  <li key={`${i.sourceClassName}-${i.id}`} className="text-xs bg-rose-50 border border-rose-100 rounded-lg px-2 py-1.5">
+                  <li key={`${i.sourceClassName}-${i.id}`}
+                    className={`text-xs rounded-lg px-2 py-1.5 ${i.flaggedForAdmin ? "bg-rose-100 border-2 border-rose-400" : "bg-rose-50 border border-rose-100"}`}>
+                    {i.flaggedForAdmin && <Flag size={12} className="inline text-rose-600 fill-rose-600 mr-1 -mt-0.5" />}
                     <span className="font-semibold text-rose-900">{i.sourceClassName}</span>
                     <span className="text-stone-500"> · {i.categoryLabel}</span>
                     {(i.studentIds || []).length > 0 && (
@@ -2187,6 +2272,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                   <ul className="space-y-1.5">
                     {studentHistoryData.incidents.map((i) => (
                       <li key={i.id} className="text-xs bg-stone-50 border border-stone-100 rounded-lg px-2 py-1.5">
+                        {i.flaggedForAdmin && <Flag size={12} className="inline text-rose-600 fill-rose-600 mr-1 -mt-0.5" />}
                         <span className="font-semibold text-stone-800">{i.sourceClassName}</span>
                         <span className="text-stone-500"> · {i.date} · {i.categoryLabel}</span>
                         {i.description && <p className="text-stone-600 mt-0.5">{i.description}</p>}
@@ -2361,6 +2447,43 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                 </li>
               );
             })}
+          </ul>
+        </div>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Teaching Tools</p>
+          <p className="text-xs text-stone-400 mb-3">Outside tools and shared files every class can reach from their own Tools tab — add one here and it shows up for everyone, the same list for every class.</p>
+
+          {!showToolForm && (
+            <button onClick={() => { setEditingToolId(null); setShowToolForm(true); }} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Add tool or resource
+            </button>
+          )}
+
+          {showToolForm && (
+            <SchoolToolForm existing={(schoolTools || []).find((t) => t.id === editingToolId)}
+              onSave={async (fields) => {
+                if (editingToolId) await onUpdateTool(editingToolId, fields);
+                else await onAddTool(fields);
+                setShowToolForm(false); setEditingToolId(null);
+              }}
+              onCancel={() => { setShowToolForm(false); setEditingToolId(null); }} />
+          )}
+
+          {(schoolTools || []).length === 0 && !showToolForm && <p className="text-xs text-stone-400">Nothing added yet.</p>}
+          <ul className="space-y-2">
+            {(schoolTools || []).map((t) => (
+              <li key={t.id} className="bg-white border border-stone-200 rounded-lg p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-stone-800">{t.category === "resource" ? "📁" : "🔗"} {t.label}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => { setEditingToolId(t.id); setShowToolForm(true); }} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Edit</button>
+                    <ConfirmDelete onConfirm={() => onRemoveTool(t.id)} size={13} />
+                  </div>
+                </div>
+                <p className="text-xs text-stone-400 mt-0.5 break-all">{t.description ? `${t.description} · ` : ""}{t.url}</p>
+              </li>
+            ))}
           </ul>
         </div>
 
@@ -2738,6 +2861,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [studentData, setStudentData] = useState({});
   const [globalStudents, setGlobalStudentsInClass] = useState([]);
   const [schoolEvents, setSchoolEventsInClass] = useState([]);
+  const [schoolTools, setSchoolToolsInClass] = useState([]);
   const [programsInClass, setProgramsInClass] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
@@ -2806,6 +2930,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       setGlobalStudentsInClass(gs);
       const se = await loadJSON("schoolEvents", [], true);
       setSchoolEventsInClass(se);
+      const st = await loadJSON("schoolTools", DEFAULT_SCHOOL_TOOLS, true);
+      setSchoolToolsInClass(st);
       const progs = await loadJSON("programs", [], true);
       setProgramsInClass(progs.filter((p) => (p.memberClassIds || []).includes(classId)));
 
@@ -3492,9 +3618,17 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           openStudent={(id) => { setCurrentId(id); setView("comm-entry"); }} />
       )}
 
+      {view === "tools" && (
+        <ToolsView schoolTools={schoolTools} navigate={setView} />
+      )}
+
       {view === "comm-entry" && currentId && (
         <CommunicationEntryView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           onBack={() => setView("communication")} onAddEntry={(entry) => addCommunication(currentId, entry)} />
+      )}
+
+      {view === "class-announcement" && (
+        <ClassAnnouncementView roster={roster} config={config} loggedInTeacher={loggedInTeacher} onBack={() => setView("communication")} />
       )}
 
       {view === "monthly-reports" && (
@@ -3705,6 +3839,7 @@ function MainTabs({ active, navigate }) {
     { id: "points", label: "Points", icon: Star },
     { id: "communication", label: "Comm", icon: Mail },
     { id: "planner", label: "Planner", icon: Calendar },
+    { id: "tools", label: "Tools", icon: Wrench },
   ];
   return (
     <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-[36rem] overflow-x-auto no-scrollbar">
@@ -6031,6 +6166,7 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
                   <ul className="space-y-1 mb-2">
                     {crossClassData.incidents.map((inc) => (
                       <li key={inc.id} className="text-xs bg-white border border-violet-100 rounded-lg px-2 py-1.5">
+                        {inc.flaggedForAdmin && <Flag size={12} className="inline text-rose-600 fill-rose-600 mr-1 -mt-0.5" />}
                         <span className="font-semibold text-violet-900">{inc.sourceClassName}</span>
                         <span className="text-stone-400"> · {inc.date} · {inc.categoryLabel}</span>
                         {inc.description && <p className="text-stone-600 mt-0.5">{inc.description}</p>}
@@ -6153,9 +6289,11 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
               <ul className="space-y-1">
                 {myIncidents.map((inc) => (
                   <li key={inc.id}>
-                    <button onClick={() => onOpenIncidentDetail(inc.id)} className="w-full text-left border-l-2 border-stone-200 pl-2 py-1 hover:bg-stone-50 rounded-r-lg">
+                    <button onClick={() => onOpenIncidentDetail(inc.id)}
+                      className={`w-full text-left border-l-2 pl-2 py-1 hover:bg-stone-50 rounded-r-lg ${inc.flaggedForAdmin ? "border-rose-400" : "border-stone-200"}`}>
                       <div className="flex items-center justify-between">
                         <span>
+                          {inc.flaggedForAdmin && <Flag size={11} className="inline text-rose-600 fill-rose-600 mr-1 -mt-0.5" />}
                           <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${catMap[inc.category]?.color || "stone"}-100 text-${catMap[inc.category]?.color || "stone"}-700`}>
                             {catMap[inc.category]?.label || inc.category || "Uncategorized"}
                           </span>
@@ -6416,8 +6554,12 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
 
+      <button onClick={() => navigate("class-announcement")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
+        <Mail size={16} /> Message the whole class
+      </button>
+
       <div className="flex flex-col md:flex-row gap-2 mb-5">
-        <button onClick={() => navigate("monthly-reports")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
+        <button onClick={() => navigate("monthly-reports")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
           <Mail size={16} /> Generate monthly reports
         </button>
         <button onClick={() => navigate("range-report")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
@@ -6447,6 +6589,49 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+function ToolsView({ schoolTools, navigate }) {
+  const tools = (schoolTools || []).filter((t) => t.category !== "resource");
+  const resources = (schoolTools || []).filter((t) => t.category === "resource");
+
+  const ToolCard = ({ t }) => (
+    <a href={t.url} target="_blank" rel="noopener noreferrer"
+      className="block bg-white border border-stone-200 rounded-xl p-3 hover:border-teal-300">
+      <p className="text-sm font-semibold text-stone-800">{t.label}</p>
+      {t.description && <p className="text-xs text-stone-400 mt-0.5">{t.description}</p>}
+    </a>
+  );
+
+  return (
+    <div className={PAGE}>
+      <Header navigate={navigate} />
+      <MainTabs active="tools" navigate={navigate} />
+
+      {tools.length === 0 && resources.length === 0 ? (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">Nothing added yet — your admin can add tools and shared files from the admin dashboard.</p>
+      ) : (
+        <>
+          {tools.length > 0 && (
+            <div className="mb-6">
+              <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Tools</p>
+              <div className="grid gap-2 md:grid-cols-2">
+                {tools.map((t) => <ToolCard key={t.id} t={t} />)}
+              </div>
+            </div>
+          )}
+          {resources.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-2">Shared files &amp; folders</p>
+              <div className="grid gap-2 md:grid-cols-2">
+                {resources.map((t) => <ToolCard key={t.id} t={t} />)}
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -7385,6 +7570,33 @@ Write 2-3 sentences announcing this accomplishment to the class's families. Outp
   return applyMessageDisclaimer(text, config);
 }
 
+// A general-purpose class-wide announcement — the teacher gives a rough topic in their own
+// words, and this turns it into a polished, formal notice to every parent at once. Deliberately
+// pushes toward a more formal register than buildStyleInstructions' usual tone setting, since a
+// broadcast announcement to the whole class reads differently than a warm note about one child —
+// while still keeping the class's school-term wording and sign-off consistent with everything else.
+async function generateClassAnnouncementMessage(topic, config, teacherName) {
+  const prompt = `${buildStyleInstructions(config, teacherName)}
+
+This one is a class-wide announcement going out to every parent at once — not about any one student. Regardless of the tone described above, write this specific message in a formal, official register appropriate for a broadcast notice — clear, businesslike, no casual phrasing — since this is what parents expect from an official class-wide notice.
+
+STRICT RULES:
+- Use ONLY the information given below. Do not invent specifics (times, amounts, locations) that weren't stated.
+- If the topic is vague or missing a detail, write around it naturally rather than inventing one.
+
+What this announcement is about, in the teacher's own words: ${topic}
+
+Write a short, clear announcement — 2-4 sentences. Output only the message text, nothing else.`;
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+  });
+  const data = await response.json();
+  const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+  return applyMessageDisclaimer(text, config);
+}
+
 function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
@@ -7437,6 +7649,14 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
           </span>
           {incident.time && <span className="text-xs text-stone-400">Logged at {incident.time}</span>}
         </div>
+        <button onClick={() => onUpdateIncident(incident.id, { flaggedForAdmin: !incident.flaggedForAdmin })}
+          className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2 mb-3 text-left ${incident.flaggedForAdmin ? "bg-rose-50 border-rose-300" : "bg-white border-stone-300"}`}>
+          <Flag size={16} className={incident.flaggedForAdmin ? "text-rose-600 fill-rose-600" : "text-stone-400"} />
+          <span className={`text-sm font-semibold ${incident.flaggedForAdmin ? "text-rose-700" : "text-stone-600"}`}>
+            {incident.flaggedForAdmin ? "Flagged for admin" : "Flag for admin"}
+          </span>
+          <span className="text-xs text-stone-400 ml-auto">{incident.flaggedForAdmin ? "Shows on the admin overview" : "Tap to flag"}</span>
+        </button>
         {!editing ? (
           <>
             <p className="text-sm text-stone-700 mb-3">{incident.description || "No additional description yet."}</p>
@@ -8572,9 +8792,10 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
   const [description, setDescription] = useState("");
   const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
   const [showDetails, setShowDetails] = useState(false);
+  const [flaggedForAdmin, setFlaggedForAdmin] = useState(false);
   const toggleStudent = (id) => setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const save = () => onSave({ category, date, time, description, studentIds });
+  const save = () => onSave({ category, date, time, description, studentIds, flaggedForAdmin });
 
   return (
     <div className={PAGE}>
@@ -8594,6 +8815,15 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
             );
           })}
         </div>
+
+        <button onClick={() => setFlaggedForAdmin((v) => !v)}
+          className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 mb-4 text-left ${flaggedForAdmin ? "bg-rose-50 border-rose-300" : "bg-white border-stone-300"}`}>
+          <Flag size={18} className={flaggedForAdmin ? "text-rose-600 fill-rose-600" : "text-stone-400"} />
+          <span className={`text-sm font-semibold ${flaggedForAdmin ? "text-rose-700" : "text-stone-600"}`}>
+            {flaggedForAdmin ? "Flagged for admin" : "Flag for admin"}
+          </span>
+          <span className="text-xs text-stone-400 ml-auto">{flaggedForAdmin ? "Shows on the admin overview" : "Tap to flag"}</span>
+        </button>
 
         <button disabled={studentIds.length === 0} onClick={save}
           className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40 mb-2">
@@ -8834,6 +9064,70 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
         </div>
         <p className="text-xs text-stone-400 mb-4">Nothing sends automatically — review the message, then send it yourself.</p>
         <button onClick={onDone} className="text-xs font-semibold bg-teal-700 text-white rounded-lg px-4 py-2 hover:bg-teal-800">Done</button>
+      </div>
+    </div>
+  );
+}
+
+function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
+  const [topic, setTopic] = useState("");
+  const [subject, setSubject] = useState("");
+  const [draft, setDraft] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+
+  const run = async () => {
+    if (!topic.trim()) return;
+    setLoading(true); setError(false); setDraft(null);
+    try {
+      const text = await generateClassAnnouncementMessage(topic.trim(), config, loggedInTeacher?.name);
+      setDraft(text || "");
+    } catch {
+      setError(true);
+      setDraft(""); // generation failed, but the teacher can still write and send it manually
+    } finally { setLoading(false); }
+  };
+
+  const parentEmails = roster.map((s) => s.parentEmail).filter(Boolean);
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Message the whole class</h1>
+      <p className="text-stone-500 text-sm mb-5">A quick note in your own words, turned into a formal announcement to every family at once.</p>
+      <div className="md:w-[32rem]">
+        <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
+        <div className="flex items-start gap-1.5 mb-3">
+          <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
+            placeholder="e.g. Trip this Thursday — bring $10 and a labeled lunch. No school Friday for a teacher in-service day."
+            className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+          <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+        </div>
+        <button onClick={run} disabled={!topic.trim() || loading}
+          className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft ? "Regenerate" : "Generate announcement"}
+        </button>
+
+        {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
+
+        {draft !== null && !loading && (
+          <>
+            <p className="text-xs text-stone-400 mb-3">
+              {parentEmails.length > 0
+                ? `Goes out to ${parentEmails.length} parent email${parentEmails.length === 1 ? "" : "s"} on file, privately bcc'd — no one sees anyone else's address.`
+                : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
+            </p>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
+            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+            <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
+            <div className="flex items-start gap-1.5 mb-4">
+              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+              <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+            </div>
+            <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
+            <p className="text-xs text-stone-400 mt-3">Nothing sends automatically — review the message, then send it yourself.</p>
+          </>
+        )}
       </div>
     </div>
   );
@@ -10157,6 +10451,7 @@ function AdminStudentProfile({ student, profileData, onUpdateStudent, onArchiveS
                       <ul className="space-y-1">
                         {cls.incidents.slice(0, 10).map((i) => (
                           <li key={i.id} className="text-xs text-stone-600">
+                            {i.flaggedForAdmin && <Flag size={11} className="inline text-rose-600 fill-rose-600 mr-1 -mt-0.5" />}
                             <span className="font-semibold">{i.date}</span> · {i.categoryLabel}{i.description ? ` — ${i.description}` : ""}
                           </li>
                         ))}
