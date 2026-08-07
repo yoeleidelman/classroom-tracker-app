@@ -2776,6 +2776,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [messageFlag, setMessageFlag] = useState(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
+  const [initialAssessmentStudentId, setInitialAssessmentStudentId] = useState(null); // auto-opens a student's modal in the Assessments grid when navigating in from elsewhere
+  const [detailReturnView, setDetailReturnView] = useState("detail"); // fluency-detail/skill-detail are reachable from both StudentDetailView and the Assessments grid modal — this tracks which one "Back" should return to
   const [selectedSkillCat, setSelectedSkillCat] = useState(null);
   const [selectedSkillReportCat, setSelectedSkillReportCat] = useState(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState(null);
@@ -2993,6 +2995,20 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     persistBenchmarkSubjects([...benchmarkSubjects, { id: uid(), label: trimmed, segments: [] }]);
   };
   const removeBenchmarkSubject = (id) => persistBenchmarkSubjects(benchmarkSubjects.filter((s) => s.id !== id));
+  // Every subject from Settings now shows a Planner row automatically — there's no longer a
+  // separate "create the benchmark subject" step first. The first time a segment is added for a
+  // subject that doesn't have a benchmarkSubjects entry yet, this creates it and adds the segment
+  // in the same update, rather than requiring it to already exist.
+  const addBenchmarkSegmentBySubjectLabel = (label, segment) => {
+    const trimmed = (label || "").trim();
+    if (!trimmed) return;
+    const existing = benchmarkSubjects.find((s) => s.label.trim().toLowerCase() === trimmed.toLowerCase());
+    if (existing) {
+      persistBenchmarkSubjects(benchmarkSubjects.map((s) => s.id === existing.id ? { ...s, segments: [...s.segments, { id: uid(), ...segment }] } : s));
+    } else {
+      persistBenchmarkSubjects([...benchmarkSubjects, { id: uid(), label: trimmed, segments: [{ id: uid(), ...segment }] }]);
+    }
+  };
   const addBenchmarkSegment = (subjectId, segment) => {
     persistBenchmarkSubjects(benchmarkSubjects.map((s) => s.id === subjectId ? { ...s, segments: [...s.segments, { id: uid(), ...segment }] } : s));
   };
@@ -3003,6 +3019,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   };
   const removeBenchmarkSegment = (subjectId, segmentId) => {
     persistBenchmarkSubjects(benchmarkSubjects.map((s) => s.id !== subjectId ? s : { ...s, segments: s.segments.filter((seg) => seg.id !== segmentId) }));
+  };
+  const toggleSubjectHiddenFromPlanner = (subjectId) => {
+    persistConfig({ ...config, subjects: config.subjects.map((s) => s.id === subjectId ? { ...s, hiddenFromPlanner: !s.hiddenFromPlanner } : s) });
   };
 
   const dismissSegmentCelebration = (segmentId) => {
@@ -3504,12 +3523,17 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
 
       {view === "assessments" && (
         <AssessmentsListView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
-          openStudent={(id) => { setCurrentId(id); setView("assessment-entry"); }}
           openClassAssessment={() => setView("class-assessment-form")}
           openAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
           openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); setView("skill-category-report"); }}
           activateAssessment={activateAssessment} hideAssessment={hideAssessment} createCustomAssessment={createCustomAssessment}
           updateClassAssessmentResult={updateClassAssessmentResult}
+          onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); setView("session"); }}
+          onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setView("fluency"); }}
+          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
+          onOpenFluencyDetail={(studentId, entry) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
+          onOpenSkillDetail={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedSkillCat(catId); setView("skill-detail"); }}
+          initialStudentId={initialAssessmentStudentId}
           navigate={setView} />
       )}
 
@@ -3553,7 +3577,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           importSchoolCalendar={importSchoolCalendar}
           benchmarkSubjects={benchmarkSubjects} addBenchmarkSubject={addBenchmarkSubject}
           removeBenchmarkSubject={removeBenchmarkSubject} addBenchmarkSegment={addBenchmarkSegment}
-          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment} />
+          addBenchmarkSegmentBySubjectLabel={addBenchmarkSegmentBySubjectLabel}
+          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment}
+          toggleSubjectHiddenFromPlanner={toggleSubjectHiddenFromPlanner} />
       )}
 
       {view === "class-assessment-form" && (
@@ -3561,26 +3587,17 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onSave={(entry) => { addClassAssessment(entry); setView("assessments"); }} />
       )}
 
-      {view === "assessment-entry" && currentId && (
-        <AssessmentEntryView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]} config={config} classAssessments={classAssessments}
-          onBack={() => setView("assessments")}
-          onStartSession={(catId) => { setSessionCat(catId); setSessionIdx(0); setView("session"); }}
-          onLogFluency={() => setView("fluency")}
-          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
-          onOpenFluencyDetail={(entry) => { setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
-          onOpenSkillDetail={(catId) => { setSelectedSkillCat(catId); setView("skill-detail"); }} />
-      )}
-
       {view === "detail" && currentId && (
         <StudentDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           incidents={incidents} classAssessments={classAssessments} config={config}
           onBack={() => setView("home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
-          onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")} onGoToAssessments={() => setView("assessment-entry")}
+          onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")}
+          onGoToAssessments={() => { setInitialAssessmentStudentId(currentId); setView("assessments"); }}
           onDraftMessage={openMessageDraft} onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onUpdateField={(field, value) => updateStudentField(currentId, field, value)}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
-          onOpenFluencyDetail={(entry) => { setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
-          onOpenSkillDetail={(catId) => { setSelectedSkillCat(catId); setView("skill-detail"); }}
+          onOpenFluencyDetail={(entry) => { setDetailReturnView("detail"); setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
+          onOpenSkillDetail={(catId) => { setDetailReturnView("detail"); setSelectedSkillCat(catId); setView("skill-detail"); }}
           onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setView("incident-detail"); }}
           onFetchCrossClassHistory={fetchCrossClassHistory} currentClassName={className} />
       )}
@@ -3595,14 +3612,14 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
 
       {view === "fluency-detail" && currentId && selectedFluencyEntry && (
         <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView("detail")} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
+          onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
 
       {view === "skill-detail" && currentId && selectedSkillCat && (
         <SkillDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           category={config.categories.find((c) => c.id === selectedSkillCat)} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView("detail")} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
+          onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
 
@@ -3610,14 +3627,14 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
         <SessionView category={config.categories.find((c) => c.id === sessionCat)} config={config}
           idx={sessionIdx} setIdx={setSessionIdx}
           onGrade={(itemId, result) => gradeItem(sessionCat, itemId, result, classSessionDate)}
-          onFinish={() => (classSessionQueue ? advanceClassSession() : setView("assessment-entry"))}
+          onFinish={() => (classSessionQueue ? advanceClassSession() : setView("assessments"))}
           studentName={roster.find((s) => s.id === currentId)?.name}
           classSessionProgress={classSessionQueue ? { pos: classSessionPos, total: classSessionQueue.length } : null} />
       )}
 
       {view === "fluency" && currentId && (
-        <FluencyForm student={roster.find((s) => s.id === currentId)} onCancel={() => setView("assessment-entry")}
-          onSave={(entry) => { addFluencyEntry(currentId, entry); setView("assessment-entry"); }} />
+        <FluencyForm student={roster.find((s) => s.id === currentId)} onCancel={() => setView("assessments")}
+          onSave={(entry) => { addFluencyEntry(currentId, entry); setView("assessments"); }} />
       )}
 
       {view === "incident" && (
@@ -5299,7 +5316,7 @@ function ClassPointsCard({ cat, value, onAdd, onSubtract, onReset }) {
 
 // ---------- Assessments ----------
 
-function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, navigate }) {
+function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId, navigate }) {
   const [showAdd, setShowAdd] = useState(false);
   const activeCats = config.categories.filter((c) => c.active !== false);
   const libraryCats = config.categories.filter((c) => c.active === false);
@@ -5347,7 +5364,8 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
       <AssessmentGridView roster={roster} studentData={studentData} classAssessments={classAssessments} config={config}
         onUpdateResult={updateClassAssessmentResult} onOpenAssessmentReport={openAssessmentReport}
         onStartSession={onStartSession} onLogFluency={onLogFluency}
-        onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail} />
+        onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail}
+        initialStudentId={initialStudentId} />
     </div>
   );
 }
@@ -5482,9 +5500,9 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
   );
 }
 
-function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail }) {
+function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
-  const [activeStudentId, setActiveStudentId] = useState(null);
+  const [activeStudentId, setActiveStudentId] = useState(initialStudentId || null);
   const subjects = config?.subjects || [];
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
 
@@ -5574,8 +5592,11 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
       {activeStudent && (
         <AssessmentStudentModal student={activeStudent} data={studentData[activeStudent.id] || emptyStudentData()} config={config} classAssessments={classAssessments}
           onClose={() => setActiveStudentId(null)}
-          onStartSession={onStartSession} onLogFluency={onLogFluency}
-          onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail}
+          onStartSession={(catId) => onStartSession(activeStudent.id, catId)}
+          onLogFluency={() => onLogFluency(activeStudent.id)}
+          onOpenClassAssessmentReport={onOpenClassAssessmentReport}
+          onOpenFluencyDetail={(entry) => onOpenFluencyDetail(activeStudent.id, entry)}
+          onOpenSkillDetail={(catId) => onOpenSkillDetail(activeStudent.id, catId)}
         />
       )}
     </div>
@@ -5667,11 +5688,38 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
   );
 }
 
+// Adaptive subject picker — pill buttons when the list is small (≤4), a plain dropdown once
+// it grows past that, so the interface stays clean no matter how many subjects a school uses.
+// value/onChange work with a subject id, matching how every current caller already tracks selection.
+function SubjectPicker({ subjects, value, onChange, placeholder = "Select a subject" }) {
+  if (subjects.length === 0) return null;
+  if (subjects.length <= 4) {
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {subjects.map((s) => (
+          <button key={s.id} onClick={() => onChange(s.id === value ? null : s.id)}
+            className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${value === s.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+  return (
+    <select value={value || ""} onChange={(e) => onChange(e.target.value || null)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+      <option value="">{placeholder}</option>
+      {subjects.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+    </select>
+  );
+}
+
 function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
   const [subjectId, setSubjectId] = useState(null);
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(todayISO());
   const [results, setResults] = useState({});
+  const [notes, setNotes] = useState({});
+  const [noteOpenFor, setNoteOpenFor] = useState({});
   const [selectedIds, setSelectedIds] = useState(roster.map((s) => s.id)); // defaults to everyone, adjustable
 
   const allSelected = selectedIds.length === roster.length;
@@ -5682,7 +5730,12 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
 
   const submit = () => {
     const filteredResults = {};
-    selectedIds.forEach((id) => { if (results[id] !== undefined && results[id] !== "") filteredResults[id] = results[id]; });
+    selectedIds.forEach((id) => {
+      const grade = (results[id] || "").trim();
+      const note = (notes[id] || "").trim();
+      if (!grade && !note) return; // nothing entered for this student — skip
+      filteredResults[id] = note ? { grade, note } : grade;
+    });
     onSave({ subjectId, title: title.trim(), date, results: filteredResults });
   };
 
@@ -5695,13 +5748,8 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
       {subjects.length === 0 ? (
         <p className="text-xs text-stone-400 mb-4">No subjects set up yet — add some in Settings first, or this will just be logged without one.</p>
       ) : (
-        <div className="flex flex-wrap gap-1.5 mb-4">
-          {subjects.map((s) => (
-            <button key={s.id} onClick={() => setSubjectId(s.id === subjectId ? null : s.id)}
-              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${subjectId === s.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
-              {s.label}
-            </button>
-          ))}
+        <div className="mb-4">
+          <SubjectPicker subjects={subjects} value={subjectId} onChange={setSubjectId} placeholder="Select a subject" />
         </div>
       )}
 
@@ -5735,14 +5783,28 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
 
       <label className="block text-sm font-semibold text-stone-700 mb-2">Grades</label>
       {selectedIds.length === 0 && <p className="text-xs text-stone-400 mb-2">Select at least one student above.</p>}
-      <div className="md:grid md:grid-cols-2 md:gap-2">
-        {roster.filter((s) => selectedIds.includes(s.id)).map((s) => (
-          <div key={s.id} className="flex items-center gap-2 mb-2">
-            <span className="flex-1 text-sm text-stone-700">{s.name}</span>
-            <input value={results[s.id] || ""} onChange={(e) => setResults((prev) => ({ ...prev, [s.id]: e.target.value }))}
-              placeholder="e.g. 90%, Pass, B+" className="w-32 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-          </div>
-        ))}
+      <div className="md:grid md:grid-cols-2 md:gap-x-4">
+        {roster.filter((s) => selectedIds.includes(s.id)).map((s) => {
+          const noteShown = !!noteOpenFor[s.id] || !!(notes[s.id] || "").trim();
+          return (
+            <div key={s.id} className="mb-2">
+              <div className="flex items-center gap-2">
+                <span className="flex-1 text-sm text-stone-700">{s.name}</span>
+                {!noteShown && (
+                  <button onClick={() => setNoteOpenFor((prev) => ({ ...prev, [s.id]: true }))}
+                    className="text-[11px] font-semibold text-stone-400 hover:text-teal-700">+ Note</button>
+                )}
+                <input value={results[s.id] || ""} onChange={(e) => setResults((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                  placeholder="e.g. 90%, Pass, B+" className="w-32 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+              </div>
+              {noteShown && (
+                <input value={notes[s.id] || ""} onChange={(e) => setNotes((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                  placeholder="Note — anything worth remembering about this result" autoFocus={!!noteOpenFor[s.id] && !notes[s.id]}
+                  className="w-full mt-1 rounded-lg border border-stone-200 bg-stone-50 px-2 py-1.5 text-xs" />
+              )}
+            </div>
+          );
+        })}
       </div>
       <button onClick={submit} disabled={selectedIds.length === 0}
         className="w-full mt-4 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
@@ -5752,54 +5814,6 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
   );
 }
 
-function AssessmentEntryView({ student, data, config, classAssessments, onBack, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail }) {
-  const activeCats = config.categories.filter((c) => c.active !== false);
-  return (
-    <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Assessments</button>
-      <h1 className="display-font text-2xl font-bold text-stone-900 mb-4">{student?.name}</h1>
-      <button onClick={onLogFluency} className="w-full md:w-72 mb-5 flex items-center justify-center gap-2 bg-teal-50 text-teal-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-100">
-        <Mic size={16} /> Log fluency check
-      </button>
-      {activeCats.length === 0 && (
-        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">No assessments active yet — add one from the Assessments tab.</p>
-      )}
-      <div className="md:grid md:grid-cols-2 md:gap-3 space-y-3 md:space-y-0 mb-6">
-        {activeCats.map((cat) => {
-          const total = cat.items.length;
-          const mastered = cat.items.filter((it) => data.skills[skillKey(cat.id, it.id)]?.status === "mastered").length;
-          return (
-            <div key={cat.id} className="bg-white rounded-xl border border-stone-200 p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-semibold text-stone-800 text-sm">{cat.title}</span>
-                <span className="text-xs text-stone-400">{mastered}/{total} mastered</span>
-              </div>
-              <div className="flex flex-wrap gap-1 mb-2">
-                {cat.items.map((it) => {
-                  const skill = data.skills[skillKey(cat.id, it.id)];
-                  const status = skill?.status || "new";
-                  const color = status === "mastered" ? `bg-${config.statusColors.mastered}-500`
-                    : status === "flagged" ? `bg-${config.statusColors.flagged}-500`
-                    : status === "practicing" ? "bg-teal-300" : "bg-stone-200";
-                  return <span key={it.id} title={it.label} className={`w-2.5 h-2.5 rounded-full ${color}`} />;
-                })}
-              </div>
-              <button onClick={() => onStartSession(cat.id)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 hover:text-teal-900">
-                Start session <ArrowRight size={12} />
-              </button>
-            </div>
-          );
-        })}
-      </div>
-
-      <Section title="All assessments">
-        <AssessmentRowsList rows={buildUnifiedAssessmentRows(student, data, classAssessments, config)}
-          onOpenSkillDetail={onOpenSkillDetail} onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail}
-          emptyText="Nothing recorded yet for this student." />
-      </Section>
-    </div>
-  );
-}
 
 // ---------- Student detail ----------
 
@@ -7501,7 +7515,7 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerDay, clearPlannerDayType, bulkSetByWeekday, bulkSetByRange, addPlannerEvent, removePlannerEvent, importSchoolCalendar, benchmarkSubjects, addBenchmarkSubject, removeBenchmarkSubject, addBenchmarkSegment, updateBenchmarkSegment, removeBenchmarkSegment }) {
+function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerDay, clearPlannerDayType, bulkSetByWeekday, bulkSetByRange, addPlannerEvent, removePlannerEvent, importSchoolCalendar, benchmarkSubjects, addBenchmarkSubject, removeBenchmarkSubject, addBenchmarkSegment, addBenchmarkSegmentBySubjectLabel, updateBenchmarkSegment, removeBenchmarkSegment, toggleSubjectHiddenFromPlanner }) {
   const [subTab, setSubTab] = useState("calendar");
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -7550,7 +7564,9 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
 
       {subTab === "benchmarks" ? (
         <BenchmarksView subjects={benchmarkSubjects} addSubject={addBenchmarkSubject} removeSubject={removeBenchmarkSubject}
-          addSegment={addBenchmarkSegment} updateSegment={updateBenchmarkSegment} removeSegment={removeBenchmarkSegment}
+          addSegment={addBenchmarkSegment} addSegmentBySubjectLabel={addBenchmarkSegmentBySubjectLabel}
+          updateSegment={updateBenchmarkSegment} removeSegment={removeBenchmarkSegment}
+          onToggleHidden={toggleSubjectHiddenFromPlanner}
           plannerDays={plannerDays} dayTypes={dayTypes} config={config} />
       ) : (
       <div className="md:flex md:gap-6 md:items-start">
@@ -7735,9 +7751,10 @@ function SchoolCalendarRangePicker({ startValue, endValue, onSelectStart, onSele
   );
 }
 
-function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updateSegment, removeSegment, plannerDays, dayTypes, config }) {
-  const [activeId, setActiveId] = useState(null); // which subject's edit modal is open — none, by default
-  const [showAddSubject, setShowAddSubject] = useState(subjects.length === 0);
+function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSegmentBySubjectLabel, updateSegment, removeSegment, onToggleHidden, plannerDays, dayTypes, config }) {
+  const [activeKey, setActiveKey] = useState(null); // which row's edit modal is open — none, by default
+  const [showAddSubject, setShowAddSubject] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   const [showDocImport, setShowDocImport] = useState(false);
   const [newSubjectName, setNewSubjectName] = useState("");
   const [showSegForm, setShowSegForm] = useState(false);
@@ -7752,13 +7769,31 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
   const [editEnd, setEditEnd] = useState("");
   const [pendingCascade, setPendingCascade] = useState(null); // { delta, items: [{id,label,newStart,newEnd}] }
 
-  const active = subjects.find((s) => s.id === activeId);
-  const openSubject = (subjId) => {
-    setActiveId(subjId);
+  // Every subject from Settings gets a row automatically — no separate "add it to Benchmarks"
+  // step. A row is "virtual" (benchmarkSubjectId: null) until its first segment is added, at
+  // which point addSegmentBySubjectLabel creates the underlying record transparently. Anything
+  // tracked in Benchmarks that isn't a real subject (a routine, a behavior goal) still shows too,
+  // appended after the real subjects, matched up by label so existing segment data is never lost.
+  const centralSubjects = config?.subjects || [];
+  const visibleCentralSubjects = centralSubjects.filter((cs) => !cs.hiddenFromPlanner);
+  const hiddenCentralSubjects = centralSubjects.filter((cs) => cs.hiddenFromPlanner);
+  const matchedBenchmarkIds = new Set();
+  const subjectRows = visibleCentralSubjects.map((cs) => {
+    const match = subjects.find((bs) => bs.label.trim().toLowerCase() === cs.label.trim().toLowerCase());
+    if (match) matchedBenchmarkIds.add(match.id);
+    return { key: `central-${cs.id}`, centralSubjectId: cs.id, benchmarkSubjectId: match?.id || null, label: cs.label, segments: match?.segments || [] };
+  });
+  const nonSubjectRows = subjects.filter((bs) => !matchedBenchmarkIds.has(bs.id))
+    .map((bs) => ({ key: `bm-${bs.id}`, centralSubjectId: null, benchmarkSubjectId: bs.id, label: bs.label, segments: bs.segments }));
+  const displayRows = [...subjectRows, ...nonSubjectRows];
+
+  const active = displayRows.find((r) => r.key === activeKey);
+  const openSubject = (key) => {
+    setActiveKey(key);
     setShowSegForm(false); setEditingSegId(null); setPendingCascade(null); setShowDocImport(false);
   };
   const closeSubject = () => {
-    setActiveId(null);
+    setActiveKey(null);
     setShowSegForm(false); setEditingSegId(null); setPendingCascade(null); setShowDocImport(false);
   };
 
@@ -7771,7 +7806,9 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
   const submitSegment = () => {
     if (!segLabel.trim() || !active) return;
     const color = COLOR_CHOICES[(active.segments.length) % COLOR_CHOICES.length];
-    addSegment(active.id, { label: segLabel.trim(), startDate: segStart, endDate: segEnd, color });
+    const newSeg = { label: segLabel.trim(), startDate: segStart, endDate: segEnd, color };
+    if (active.benchmarkSubjectId) addSegment(active.benchmarkSubjectId, newSeg);
+    else addSegmentBySubjectLabel(active.label, newSeg);
     setSegLabel(""); setShowSegForm(false);
   };
 
@@ -7798,10 +7835,10 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
   };
 
   const saveSegmentEdit = () => {
-    if (!active) return;
+    if (!active || !active.benchmarkSubjectId) return;
     const oldSeg = active.segments.find((s) => s.id === editingSegId);
     if (!oldSeg) return;
-    updateSegment(active.id, editingSegId, { label: editLabel.trim() || oldSeg.label, startDate: editStart, endDate: editEnd });
+    updateSegment(active.benchmarkSubjectId, editingSegId, { label: editLabel.trim() || oldSeg.label, startDate: editStart, endDate: editEnd });
 
     if (editEnd !== oldSeg.endDate) {
       const delta = daysBetween(new Date(oldSeg.endDate + "T00:00:00"), new Date(editEnd + "T00:00:00"));
@@ -7825,9 +7862,9 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
   };
 
   const applyCascade = () => {
-    if (pendingCascade) {
+    if (pendingCascade && active?.benchmarkSubjectId) {
       for (const item of pendingCascade.items) {
-        updateSegment(active.id, item.id, { startDate: item.newStart, endDate: item.newEnd });
+        updateSegment(active.benchmarkSubjectId, item.id, { startDate: item.newStart, endDate: item.newEnd });
       }
     }
     setPendingCascade(null);
@@ -7859,38 +7896,25 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
         <p className="text-sm font-semibold text-stone-800">{yearStart.getFullYear()}–{yearStart.getFullYear() + 1} school year</p>
         <button onClick={() => setShowAddSubject(true)}
           className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showAddSubject ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300"}`}>
-          <Plus size={12} /> Add subject
+          <Plus size={12} /> Track something else
         </button>
       </div>
 
       {showAddSubject && (
         <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-96">
-          <p className="text-sm font-semibold text-stone-800 mb-3">New benchmark subject</p>
-          {(config?.subjects || []).filter((cs) => !subjects.some((s) => s.label.toLowerCase() === cs.label.toLowerCase())).length > 0 && (
-            <>
-              <p className="text-xs font-medium text-stone-500 mb-1.5">From your subjects</p>
-              <div className="flex flex-wrap gap-1.5 mb-3">
-                {(config.subjects || []).filter((cs) => !subjects.some((s) => s.label.toLowerCase() === cs.label.toLowerCase())).map((cs) => (
-                  <button key={cs.id} onClick={() => { addSubject(cs.label); setShowAddSubject(false); }}
-                    className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-full px-3 py-1 hover:bg-teal-50">
-                    + {cs.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-          <p className="text-xs text-stone-400 mb-2">Or track something that isn't a subject — a routine, a behavior goal, anything you want to pace out over the year.</p>
+          <p className="text-sm font-semibold text-stone-800 mb-3">Track something that isn't a subject</p>
+          <p className="text-xs text-stone-400 mb-2">Every subject from Settings already has its own row below automatically — this is for a routine, a behavior goal, anything else you want to pace out over the year.</p>
           <input value={newSubjectName} onChange={(e) => setNewSubjectName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitSubject()}
             placeholder="e.g. Lining Up, Circle Time Routine" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
           <div className="flex gap-2">
-            <button onClick={submitSubject} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Create subject</button>
-            {subjects.length > 0 && <button onClick={() => setShowAddSubject(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>}
+            <button onClick={submitSubject} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Create</button>
+            <button onClick={() => setShowAddSubject(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
           </div>
         </div>
       )}
 
-      {subjects.length === 0 && !showAddSubject ? (
-        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">No subjects yet — add one to start pacing it out.</p>
+      {displayRows.length === 0 ? (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">No subjects yet — add some in Settings to see them here.</p>
       ) : (
         <div className="bg-white border border-stone-200 rounded-xl p-4 overflow-x-auto no-scrollbar">
           <div style={{ minWidth: 700 }}>
@@ -7901,22 +7925,28 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
                 </span>
               ))}
             </div>
-            {subjects.map((subj) => (
-              <div key={subj.id} className="mb-3">
-                <button onClick={() => openSubject(subj.id)} className="text-xs font-semibold text-stone-700 hover:text-teal-700 mb-1 block">
-                  {subj.label}
-                </button>
+            {displayRows.map((row) => (
+              <div key={row.key} className="mb-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <button onClick={() => openSubject(row.key)} className="text-xs font-semibold text-stone-700 hover:text-teal-700">
+                    {row.label}
+                  </button>
+                  {row.centralSubjectId && (
+                    <button onClick={() => onToggleHidden(row.centralSubjectId)} title="Hide from Planner"
+                      className="text-[10px] text-stone-300 hover:text-stone-600">Hide</button>
+                  )}
+                </div>
                 <div className="relative h-6 bg-stone-100 rounded-lg">
                   {months.map((m, i) => (
                     <div key={i} className="absolute top-0 bottom-0 border-l border-stone-200" style={{ left: `${(i / 12) * 100}%` }} />
                   ))}
-                  {subj.segments.length === 0 && (
+                  {row.segments.length === 0 && (
                     <span className="absolute inset-0 flex items-center pl-2 text-[10px] text-stone-300">No segments yet</span>
                   )}
-                  {subj.segments.map((seg) => (
-                    <div key={seg.id} title={`${seg.label}: ${seg.startDate} – ${seg.endDate} (tap to open ${subj.label})`}
+                  {row.segments.map((seg) => (
+                    <div key={seg.id} title={`${seg.label}: ${seg.startDate} – ${seg.endDate} (tap to open ${row.label})`}
                       className="absolute top-0.5 bottom-0.5 cursor-pointer" style={barStyle(seg)}
-                      onClick={() => openSubject(subj.id)}>
+                      onClick={() => openSubject(row.key)}>
                       <div className={`absolute inset-0 rounded-md bg-${seg.color}-400`} />
                     </div>
                   ))}
@@ -7925,6 +7955,23 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
             ))}
           </div>
           <p className="text-[10px] text-stone-400 mt-2">Tap any subject to open and edit its segments — everything else stays right where it is.</p>
+          {hiddenCentralSubjects.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-stone-100">
+              <button onClick={() => setShowHidden((v) => !v)} className="text-[10px] font-semibold text-stone-400 hover:text-stone-600">
+                {showHidden ? "Hide" : `${hiddenCentralSubjects.length} hidden — show`}
+              </button>
+              {showHidden && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {hiddenCentralSubjects.map((cs) => (
+                    <button key={cs.id} onClick={() => onToggleHidden(cs.id)}
+                      className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-full px-3 py-1 hover:bg-stone-50">
+                      {cs.label} — show
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -7941,7 +7988,12 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
                 <button onClick={() => setViewMode("timeline")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "timeline" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Timeline</button>
                 <button onClick={() => setViewMode("calendar")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "calendar" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
               </div>
-              <ConfirmDelete onConfirm={() => { removeSubject(active.id); closeSubject(); }} label="Delete subject" />
+              {active.centralSubjectId ? (
+                <button onClick={() => { onToggleHidden(active.centralSubjectId); closeSubject(); }}
+                  className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-1.5 hover:bg-stone-50">Hide from Planner</button>
+              ) : (
+                <ConfirmDelete onConfirm={() => { removeSubject(active.benchmarkSubjectId); closeSubject(); }} label="Delete" />
+              )}
             </div>
 
             {viewMode === "timeline" ? (
@@ -8021,7 +8073,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
                     <span className="font-medium text-stone-700">{seg.label}</span>
                     <span className="text-stone-400">{seg.startDate} → {seg.endDate}</span>
                   </button>
-                  <ConfirmDelete onConfirm={() => removeSegment(active.id, seg.id)} size={13} />
+                  <ConfirmDelete onConfirm={() => removeSegment(active.benchmarkSubjectId, seg.id)} size={13} />
                 </li>
               ))}
             </ul>
@@ -8084,7 +8136,11 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
             {showDocImport && (
               <DocumentImportPanel mode="benchmark"
                 onApplyBenchmark={(items) => {
-                  items.forEach((it, i) => addSegment(active.id, { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(active.segments.length + i) % COLOR_CHOICES.length] }));
+                  items.forEach((it, i) => {
+                    const newSeg = { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(active.segments.length + i) % COLOR_CHOICES.length] };
+                    if (active.benchmarkSubjectId) addSegment(active.benchmarkSubjectId, newSeg);
+                    else addSegmentBySubjectLabel(active.label, newSeg);
+                  });
                 }}
                 onClose={() => setShowDocImport(false)} />
             )}
