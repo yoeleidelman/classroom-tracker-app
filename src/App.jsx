@@ -2749,7 +2749,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [plannerDays, setPlannerDays] = useState({});
   const [plannerEvents, setPlannerEvents] = useState([]);
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
-  const [curriculumMilestones, setCurriculumMilestones] = useState([]);
+  const [segmentCelebrationDismissals, setSegmentCelebrationDismissals] = useState({}); // segmentId -> true, once dismissed
   const [behaviorLogData, setBehaviorLogData] = useState({});
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
@@ -2757,6 +2757,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [view, setView] = useState("home");
   const [showPlan, setShowPlan] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const viewportHeight = useVisualViewportHeight();
   const [openProgramId, setOpenProgramId] = useState(null);
   const [programRoster, setProgramRoster] = useState([]);
@@ -2779,6 +2780,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [selectedSkillReportCat, setSelectedSkillReportCat] = useState(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState(null);
   const [selectedReflectionMonth, setSelectedReflectionMonth] = useState(null);
+  const [celebratingSegment, setCelebratingSegment] = useState(null); // { subjectLabel, segment } — which completed benchmark segment is being announced
 
   useEffect(() => {
     (async () => {
@@ -2794,7 +2796,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       const pd = await loadC("plannerDays", {});
       const pe = await loadC("plannerEvents", []);
       const bs = await loadC("benchmarkSubjects", []);
-      const cm = await loadC("curriculumMilestones", []);
+      const scd = await loadC("segmentCelebrationDismissals", {});
       const bl = await loadC("behaviorLogData", {});
       const rp = await loadC("randomPickerData", { bag: [], lastPickedId: null });
       const al = await loadC("alerts", []);
@@ -2865,7 +2867,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       setPlannerDays(finalPD);
       setPlannerEvents(finalPE);
       setBenchmarkSubjects(finalBS);
-      setCurriculumMilestones(cm);
+      setSegmentCelebrationDismissals(scd);
       setBehaviorLogData(bl);
       setRandomPickerData(rp);
       setAlerts(al);
@@ -2879,6 +2881,15 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       setLoading(false);
     })();
   }, [classId]);
+
+  // One-time auto-trigger for the guided setup wizard — fires once real data has loaded (not on
+  // the initial default config) and only if this teacher has never opened it before. Never fires
+  // for an admin just browsing into the class — this is for the class's own teacher.
+  useEffect(() => {
+    if (!loading && !config.onboarding?.started && loggedInTeacher?.role !== "admin") {
+      setShowOnboarding(true);
+    }
+  }, [loading]); // eslint-disable-line
 
   const persistConfig = (next) => { setConfig(next); saveC("config", next); };
   const persistStudent = (id, newData) => { setStudentData((prev) => ({ ...prev, [id]: newData })); saveC(`kriya:${id}`, newData); };
@@ -2994,17 +3005,11 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     persistBenchmarkSubjects(benchmarkSubjects.map((s) => s.id !== subjectId ? s : { ...s, segments: s.segments.filter((seg) => seg.id !== segmentId) }));
   };
 
-  const persistMilestones = (next) => { setCurriculumMilestones(next); saveC("curriculumMilestones", next); };
-  const addMilestone = (fields) => {
-    if (!fields.title?.trim()) return;
-    persistMilestones([...curriculumMilestones, { id: uid(), type: "unit", targetDate: "", completedDate: "", notes: "", dismissed: false, ...fields }]);
+  const dismissSegmentCelebration = (segmentId) => {
+    const next = { ...segmentCelebrationDismissals, [segmentId]: true };
+    setSegmentCelebrationDismissals(next);
+    saveC("segmentCelebrationDismissals", next);
   };
-  const updateMilestone = (id, fields) => {
-    persistMilestones(curriculumMilestones.map((m) => (m.id === id ? { ...m, ...fields } : m)));
-  };
-  const removeMilestone = (id) => persistMilestones(curriculumMilestones.filter((m) => m.id !== id));
-  const markMilestoneComplete = (id) => updateMilestone(id, { completedDate: todayISO(), dismissed: false });
-  const dismissMilestoneReminder = (id) => updateMilestone(id, { dismissed: true });
 
   const persistBehaviorLogData = (next) => { setBehaviorLogData(next); saveC("behaviorLogData", next); };
 
@@ -3421,9 +3426,18 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setPlannerDay={setPlannerDay} addPoints={addPoints} behaviorLogData={behaviorLogData}
           birthdayDismissals={birthdayDismissals} onDismissBirthday={dismissBirthday} onCreateBirthdayEvent={createBirthdayEvent}
-          curriculumMilestones={curriculumMilestones} onDismissMilestone={dismissMilestoneReminder} onAddPlannerEvent={addPlannerEvent}
+          benchmarkSubjects={benchmarkSubjects} segmentCelebrationDismissals={segmentCelebrationDismissals} onDismissSegmentCelebration={dismissSegmentCelebration}
+          onCelebrateSegment={(subjectLabel, segment) => { setCelebratingSegment({ subjectLabel, segment }); setView("segment-celebration-message"); }}
+          onAddPlannerEvent={addPlannerEvent}
           randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
           alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan} />
+      )}
+
+      {view === "segment-celebration-message" && celebratingSegment && (
+        <SegmentCelebrationMessageView subjectLabel={celebratingSegment.subjectLabel} segmentLabel={celebratingSegment.segment.label}
+          roster={roster} config={config} loggedInTeacher={loggedInTeacher}
+          onBack={() => setView("home")}
+          onDone={() => { dismissSegmentCelebration(celebratingSegment.segment.id); setView("home"); }} />
       )}
 
       {view === "class-mode" && (
@@ -3465,13 +3479,13 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       )}
 
       {view === "monthly-reports" && (
-        <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
+        <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
           onBack={() => setView("home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
       {view === "range-report" && (
-        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
+        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
           onBack={() => setView("communication")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
@@ -3539,9 +3553,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           importSchoolCalendar={importSchoolCalendar}
           benchmarkSubjects={benchmarkSubjects} addBenchmarkSubject={addBenchmarkSubject}
           removeBenchmarkSubject={removeBenchmarkSubject} addBenchmarkSegment={addBenchmarkSegment}
-          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment}
-          curriculumMilestones={curriculumMilestones} addMilestone={addMilestone} updateMilestone={updateMilestone}
-          removeMilestone={removeMilestone} markMilestoneComplete={markMilestoneComplete} />
+          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment} />
       )}
 
       {view === "class-assessment-form" && (
@@ -3632,11 +3644,15 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           loadSampleData={loadSampleData} clearAllData={clearAllData}
           className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
           globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent}
-          loggedInTeacher={loggedInTeacher} onOpenMyAccount={() => setShowMyAccount(true)} />
+          loggedInTeacher={loggedInTeacher} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)} />
       )}
 
       {showMyAccount && loggedInTeacher && (
         <MyAccountPanel teacher={loggedInTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
+      )}
+
+      {showOnboarding && (
+        <OnboardingWizard config={config} setConfig={persistConfig} onClose={() => setShowOnboarding(false)} />
       )}
     </div>
     </ClassContext.Provider>
@@ -3691,7 +3707,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, curriculumMilestones, onDismissMilestone, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan }) {
   const [date, setDate] = useState(todayISO());
   const [multiSelect, setMultiSelect] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -3727,13 +3743,16 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
     .filter((b) => b && b.daysAway >= 0 && b.daysAway <= BIRTHDAY_REMINDER_DAYS)
     .sort((a, b) => a.daysAway - b.daysAway);
 
-  const MILESTONE_REMINDER_DAYS = 5;
-  const upcomingMilestones = (curriculumMilestones || []).filter((m) => {
-    if (m.completedDate || m.dismissed || !m.targetDate) return false;
-    const daysAway = Math.round((new Date(`${m.targetDate}T00:00:00`) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
-    return daysAway >= 0 && daysAway <= MILESTONE_REMINDER_DAYS;
-  });
-  const reachedMilestones = (curriculumMilestones || []).filter((m) => m.completedDate && !m.dismissed);
+  const SEGMENT_CELEBRATION_WINDOW_DAYS = 5;
+  const recentlyCompletedSegments = (benchmarkSubjects || []).flatMap((subj) =>
+    (subj.segments || [])
+      .filter((seg) => {
+        if (segmentCelebrationDismissals?.[seg.id]) return false;
+        const daysSince = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) - new Date(`${seg.endDate}T00:00:00`)) / 86400000);
+        return daysSince >= 0 && daysSince <= SEGMENT_CELEBRATION_WINDOW_DAYS;
+      })
+      .map((seg) => ({ subjectId: subj.id, subjectLabel: subj.label, segment: seg }))
+  );
 
   const dayTypeMap = {};
   (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
@@ -3842,30 +3861,16 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         </div>
       ))}
 
-      {upcomingMilestones.map((m) => {
-        const daysAway = Math.round((new Date(`${m.targetDate}T00:00:00`) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
-        return (
-          <div key={m.id} className="bg-sky-50 border border-sky-200 rounded-xl px-4 py-3 mb-3">
-            <p className="text-sm font-semibold text-sky-900">📚 Upcoming milestone: {m.title}</p>
-            <p className="text-xs text-sky-700">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label} — expected {daysAway === 0 ? "today" : daysAway === 1 ? "tomorrow" : `in ${daysAway} days`}</p>
-          </div>
-        );
-      })}
-
-      {reachedMilestones.map((m) => (
-        <div key={m.id} className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-3">
-          <p className="text-sm font-semibold text-amber-900">🎉 Milestone reached: {m.title}</p>
-          <p className="text-xs text-amber-700 mb-2">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label} — completed {m.completedDate}. Want to do anything with it?</p>
+      {recentlyCompletedSegments.map(({ subjectLabel, segment }) => (
+        <div key={segment.id} className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-3">
+          <p className="text-sm font-semibold text-amber-900">🎉 {subjectLabel} — {segment.label} complete!</p>
+          <p className="text-xs text-amber-700 mb-2">Finished {segment.endDate}. Want to mark the occasion?</p>
           <div className="flex gap-2 flex-wrap">
-            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Siyum — ${m.title}`, category: "siyum", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
-              className="text-xs font-semibold bg-amber-700 text-white rounded-lg px-3 py-1.5 hover:bg-amber-800">Create Siyum event</button>
-            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Review — ${m.title}`, category: "classroom-activity", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
-              className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Schedule review day</button>
-            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Celebration — ${m.title}`, category: "siyum", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
-              className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Plan celebration</button>
-            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Invite parents — ${m.title}`, category: "parent-event", reminderLeadDays: 1 }); onDismissMilestone(m.id); }}
-              className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Invite parents</button>
-            <button onClick={() => onDismissMilestone(m.id)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-1.5 hover:bg-stone-100">Dismiss</button>
+            <button onClick={() => navigate("points")} className="text-xs font-semibold bg-amber-700 text-white rounded-lg px-3 py-1.5 hover:bg-amber-800">Celebrate with the class</button>
+            <button onClick={() => onCelebrateSegment(subjectLabel, segment)} className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Announce to parents</button>
+            <button onClick={() => { onAddPlannerEvent({ date: todayStr, title: `Celebration — ${subjectLabel}: ${segment.label}`, category: "siyum", reminderLeadDays: 1 }); onDismissSegmentCelebration(segment.id); }}
+              className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-100">Schedule a celebration</button>
+            <button onClick={() => onDismissSegmentCelebration(segment.id)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-1.5 hover:bg-stone-100">Dismiss</button>
           </div>
         </div>
       ))}
@@ -5294,9 +5299,8 @@ function ClassPointsCard({ cat, value, onAdd, onSubtract, onReset }) {
 
 // ---------- Assessments ----------
 
-function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openStudent, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, navigate }) {
+function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, navigate }) {
   const [showAdd, setShowAdd] = useState(false);
-  const [viewMode, setViewMode] = useState("students"); // "students" | "grid"
   const activeCats = config.categories.filter((c) => c.active !== false);
   const libraryCats = config.categories.filter((c) => c.active === false);
 
@@ -5337,71 +5341,13 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
         )}
       </div>
 
-      <div className="flex items-center gap-2 mb-4">
-        <button onClick={() => setViewMode("students")} className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${viewMode === "students" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>By Student</button>
-        <button onClick={() => setViewMode("grid")} className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${viewMode === "grid" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>Grid — whole class, whole year</button>
-      </div>
-
-      {viewMode === "grid" ? (
-        <div>
-          <button onClick={openClassAssessment} className="mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800">
-            <Plus size={16} /> Log an assessment
-          </button>
-          <AssessmentGridView roster={roster} classAssessments={classAssessments} config={config} onUpdateResult={updateClassAssessmentResult} />
-        </div>
-      ) : (
-      <div className="md:grid md:grid-cols-2 md:gap-6">
-        <div>
-          <p className="text-stone-500 text-sm mb-3">Select a student for one-on-one work, or to see everything recorded for them.</p>
-          {roster.length === 0 && <p className="text-stone-400 text-sm text-center py-10">Add students from the Home tab first.</p>}
-          <ul className="space-y-2">
-            {roster.map((s) => {
-              const flags = getFlags(studentData[s.id], s.id, incidents, config).filter((f) => f.type === "skill");
-              const rows = buildUnifiedAssessmentRows(s, studentData[s.id] || emptyStudentData(), classAssessments, config).filter((r) => r.sortDate !== "0000-00-00");
-              const lastDate = rows[0]?.sortDate;
-              return (
-                <li key={s.id} onClick={() => openStudent(s.id)} className="bg-white rounded-xl border border-stone-200 px-4 py-3 flex items-center justify-between cursor-pointer hover:border-teal-300">
-                  <div>
-                    <span className="font-medium text-stone-800 block">{s.name}</span>
-                    <span className="text-xs text-stone-400">{rows.length} recorded{lastDate ? ` · last ${lastDate}` : ""}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {flags.length > 0 && <span className="flex items-center gap-1 text-amber-700 bg-amber-50 text-xs font-semibold px-2 py-1 rounded-full"><AlertTriangle size={12} /> {flags.length}</span>}
-                    <ArrowRight size={14} className="text-stone-300" />
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-
-        <div className="mt-6 md:mt-0">
-          <button onClick={openClassAssessment} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
-            <Plus size={16} /> Log an assessment
-          </button>
-          <p className="text-xs text-stone-400 mb-2 font-semibold uppercase tracking-wide">Recent class assessments</p>
-          {classAssessments.length === 0 && <p className="text-xs text-stone-400">None logged yet.</p>}
-          <ul className="space-y-2">
-            {classAssessments.slice(0, 8).map((ca) => {
-              const subj = (config.subjects || []).find((s) => s.id === ca.subjectId)?.label;
-              const heading = subj && ca.title ? `${subj} — ${ca.title}` : subj || ca.title || "Untitled assessment";
-              return (
-                <li key={ca.id} className="bg-white rounded-lg border border-stone-200 px-3 py-2 text-xs">
-                  <div className="flex justify-between">
-                    <span className="font-semibold text-stone-700">{heading}</span>
-                    <span className="text-stone-400">{ca.date}</span>
-                  </div>
-                  <div className="flex items-center justify-between mt-1">
-                    <span className="text-stone-400">{Object.keys(ca.results || {}).length} students graded</span>
-                    <button onClick={() => openAssessmentReport(ca.id)} className="text-teal-700 font-semibold hover:text-teal-900">Generate parent reports</button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      </div>
-      )}
+      <button onClick={openClassAssessment} className="mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800">
+        <Plus size={16} /> Log an assessment
+      </button>
+      <AssessmentGridView roster={roster} studentData={studentData} classAssessments={classAssessments} config={config}
+        onUpdateResult={updateClassAssessmentResult} onOpenAssessmentReport={openAssessmentReport}
+        onStartSession={onStartSession} onLogFluency={onLogFluency}
+        onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail} />
     </div>
   );
 }
@@ -5536,8 +5482,9 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
   );
 }
 
-function AssessmentGridView({ roster, classAssessments, config, onUpdateResult }) {
+function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail }) {
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
+  const [activeStudentId, setActiveStudentId] = useState(null);
   const subjects = config?.subjects || [];
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
 
@@ -5563,7 +5510,8 @@ function AssessmentGridView({ roster, classAssessments, config, onUpdateResult }
   }
 
   const activeAssessment = activeCell ? classAssessments.find((ca) => ca.id === activeCell.assessmentId) : null;
-  const activeStudent = activeCell ? roster.find((s) => s.id === activeCell.studentId) : null;
+  const activeCellStudent = activeCell ? roster.find((s) => s.id === activeCell.studentId) : null;
+  const activeStudent = activeStudentId ? roster.find((s) => s.id === activeStudentId) : null;
 
   return (
     <div>
@@ -5575,8 +5523,10 @@ function AssessmentGridView({ roster, classAssessments, config, onUpdateResult }
                 Assessment
               </th>
               {roster.map((s) => (
-                <th key={s.id} className="sticky top-0 z-10 bg-stone-50 border-b border-stone-200 px-3 py-2 text-xs font-semibold text-stone-600 whitespace-nowrap text-center">
-                  {s.name}
+                <th key={s.id} className="sticky top-0 z-10 bg-stone-50 border-b border-stone-200 px-3 py-2 text-xs font-semibold whitespace-nowrap text-center">
+                  <button onClick={() => setActiveStudentId(s.id)} className="text-stone-600 hover:text-teal-700 underline decoration-dotted underline-offset-2">
+                    {s.name}
+                  </button>
                 </th>
               ))}
             </tr>
@@ -5586,9 +5536,13 @@ function AssessmentGridView({ roster, classAssessments, config, onUpdateResult }
               const isNewGroup = i === 0 || ca.subjectId !== sorted[i - 1].subjectId;
               return (
                 <tr key={ca.id} className={isNewGroup && i > 0 ? "border-t-2 border-t-stone-300" : ""}>
-                  <td className="sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
+                  <td className="group sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
                     <div className="font-semibold text-stone-800 text-xs">{subjectLabel(ca.subjectId)}</div>
                     <div className="text-[11px] text-stone-400">{ca.title ? `${ca.title} · ` : ""}{ca.date}</div>
+                    <button onClick={() => onOpenAssessmentReport(ca.id)}
+                      className="text-[10px] font-semibold text-teal-700 hover:text-teal-900 opacity-0 group-hover:opacity-100">
+                      Generate parent reports
+                    </button>
                   </td>
                   {roster.map((s) => {
                     const grade = getResultGrade(ca.results?.[s.id]);
@@ -5608,14 +5562,75 @@ function AssessmentGridView({ roster, classAssessments, config, onUpdateResult }
         </table>
       </div>
 
-      {activeCell && activeAssessment && activeStudent && (
+      {activeCell && activeAssessment && activeCellStudent && (
         <AssessmentCellDetail
-          assessment={activeAssessment} student={activeStudent} subjectLabel={subjectLabel(activeAssessment.subjectId)}
-          value={activeAssessment.results?.[activeStudent.id]}
-          onSave={(value) => { onUpdateResult(activeAssessment.id, activeStudent.id, value); setActiveCell(null); }}
+          assessment={activeAssessment} student={activeCellStudent} subjectLabel={subjectLabel(activeAssessment.subjectId)}
+          value={activeAssessment.results?.[activeCellStudent.id]}
+          onSave={(value) => { onUpdateResult(activeAssessment.id, activeCellStudent.id, value); setActiveCell(null); }}
           onClose={() => setActiveCell(null)}
         />
       )}
+
+      {activeStudent && (
+        <AssessmentStudentModal student={activeStudent} data={studentData[activeStudent.id] || emptyStudentData()} config={config} classAssessments={classAssessments}
+          onClose={() => setActiveStudentId(null)}
+          onStartSession={onStartSession} onLogFluency={onLogFluency}
+          onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail}
+        />
+      )}
+    </div>
+  );
+}
+
+function AssessmentStudentModal({ student, data, config, classAssessments, onClose, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail }) {
+  const activeCats = config.categories.filter((c) => c.active !== false);
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <p className="text-base font-semibold text-stone-800">{student.name}</p>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-700 text-xs font-semibold">Close</button>
+        </div>
+
+        <button onClick={onLogFluency} className="w-full md:w-72 mb-5 flex items-center justify-center gap-2 bg-teal-50 text-teal-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-100">
+          <Mic size={16} /> Log fluency check
+        </button>
+
+        {activeCats.length > 0 && (
+          <div className="md:grid md:grid-cols-2 md:gap-3 space-y-3 md:space-y-0 mb-6">
+            {activeCats.map((cat) => {
+              const total = cat.items.length;
+              const mastered = cat.items.filter((it) => data.skills[skillKey(cat.id, it.id)]?.status === "mastered").length;
+              return (
+                <div key={cat.id} className="bg-stone-50 rounded-xl border border-stone-200 p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-semibold text-stone-800 text-sm">{cat.title}</span>
+                    <span className="text-xs text-stone-400">{mastered}/{total} mastered</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {cat.items.map((it) => {
+                      const skill = data.skills[skillKey(cat.id, it.id)];
+                      const status = skill?.status || "new";
+                      const color = status === "mastered" ? `bg-${config.statusColors.mastered}-500`
+                        : status === "flagged" ? `bg-${config.statusColors.flagged}-500`
+                        : status === "practicing" ? "bg-teal-300" : "bg-stone-200";
+                      return <span key={it.id} title={it.label} className={`w-2.5 h-2.5 rounded-full ${color}`} />;
+                    })}
+                  </div>
+                  <button onClick={() => onStartSession(cat.id)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 hover:text-teal-900">
+                    Start session <ArrowRight size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <p className="text-xs font-semibold text-stone-500 uppercase mb-2">All assessments</p>
+        <AssessmentRowsList rows={buildUnifiedAssessmentRows(student, data, classAssessments, config)}
+          onOpenSkillDetail={onOpenSkillDetail} onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail}
+          emptyText="Nothing recorded yet for this student." />
+      </div>
     </div>
   );
 }
@@ -6667,17 +6682,32 @@ ${sections.join("\n\n")}
 
 Write 2-3 short paragraphs weaving the exact figures above into natural sentences. Output only the message text, nothing else.`;
 
+  console.log(`[generateHybridReport] prompt for ${student.name} (${label}): ${prompt.length} chars, ${sections.length} section(s)`);
+
   const response = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
+
+  if (!response.ok) {
+    let bodyText = "";
+    try { bodyText = await response.text(); } catch { /* body already consumed or unreadable */ }
+    console.error(`[generateHybridReport] API error for ${student.name}: HTTP ${response.status} ${response.statusText}`, bodyText);
+    console.error("[generateHybridReport] full prompt that triggered the error:", prompt);
+    throw new Error(`Report generation failed: HTTP ${response.status} ${response.statusText}`);
+  }
+
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+  if (!text) {
+    console.error(`[generateHybridReport] Empty text in successful response for ${student.name}. Raw response:`, JSON.stringify(data));
+    console.error("[generateHybridReport] full prompt that produced an empty response:", prompt);
+  }
   return applyMessageDisclaimer(text, config);
 }
 
-function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, onBack, onLogSent, onUpdateParentEmail }) {
+function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [monthIdx, setMonthIdx] = useState(now.getMonth());
@@ -6694,9 +6724,10 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
     const facts = buildMonthlyFacts(student, data, incidents, classAssessments, config, year, monthIdx, opts);
     const dataUsed = factsToPlainText(student, label, facts);
     try {
-      const text = await generateHybridReport(student, label, facts);
+      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher?.name);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
-    } catch {
+    } catch (err) {
+      console.error("Monthly report generation failed:", err);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: "Could not generate — here's the raw data instead:\n\n" + dataUsed, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
     }
   };
@@ -6777,7 +6808,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
   );
 }
 
-function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, onBack, onLogSent, onUpdateParentEmail }) {
+function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
   const today = todayISO();
   const [startDate, setStartDate] = useState(addDaysISO(today, -13));
   const [endDate, setEndDate] = useState(today);
@@ -6794,9 +6825,10 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
     const facts = buildRangeFacts(student, data, incidents, classAssessments, config, startDate, endDate, opts);
     const dataUsed = factsToPlainText(student, label, facts);
     try {
-      const text = await generateHybridReport(student, label, facts);
+      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher?.name);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
-    } catch {
+    } catch (err) {
+      console.error("Custom date range report generation failed:", err);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: "Could not generate — here's the raw data instead:\n\n" + dataUsed, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
     }
   };
@@ -7314,6 +7346,31 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   return applyMessageDisclaimer(text, config);
 }
 
+// A class-wide announcement — not addressed to one student's parent, but to every parent in the
+// class at once — for celebrating a benchmark segment the whole class just finished together.
+async function generateSegmentCelebrationMessage(subjectLabel, segmentLabel, config, teacherName) {
+  const prompt = `${buildStyleInstructions(config, teacherName)}
+
+This one is a class-wide announcement to every parent at once, not about one specific student — the whole class just finished something together.
+
+STRICT RULES:
+- Use ONLY the facts given below. Do not invent details about how it went or who did well.
+- Write it as a general class announcement, not addressed to any one child.
+
+Subject: ${subjectLabel}
+What the class just completed: ${segmentLabel}
+
+Write 2-3 sentences announcing this accomplishment to the class's families. Output only the message text, nothing else.`;
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+  });
+  const data = await response.json();
+  const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+  return applyMessageDisclaimer(text, config);
+}
+
 function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
@@ -7444,89 +7501,7 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-const MILESTONE_TYPES = [
-  { id: "parsha", label: "Finished a Parsha" },
-  { id: "perek", label: "Finished a Perek" },
-  { id: "masechta", label: "Finished a Masechta" },
-  { id: "sefer", label: "Finished a Sefer" },
-  { id: "benchmark", label: "Completed benchmark" },
-  { id: "unit", label: "Finished learning unit" },
-  { id: "other", label: "Other" },
-];
-
-function MilestonesView({ milestones, addMilestone, updateMilestone, removeMilestone, markComplete }) {
-  const [showForm, setShowForm] = useState(false);
-  const [title, setTitle] = useState("");
-  const [type, setType] = useState("unit");
-  const [targetDate, setTargetDate] = useState("");
-
-  const submit = () => {
-    if (!title.trim()) return;
-    addMilestone({ title: title.trim(), type, targetDate });
-    setTitle(""); setTargetDate(""); setType("unit"); setShowForm(false);
-  };
-
-  const upcoming = (milestones || []).filter((m) => !m.completedDate).sort((a, b) => (a.targetDate || "9999") < (b.targetDate || "9999") ? -1 : 1);
-  const completed = (milestones || []).filter((m) => m.completedDate).sort((a, b) => (a.completedDate < b.completedDate ? 1 : -1));
-
-  return (
-    <div className="md:w-[28rem]">
-      <p className="text-xs text-stone-400 mb-3">Track the big curriculum accomplishments — Parshas, Perakim, a whole Masechta or Sefer, benchmarks, or any learning unit — and get a nudge when one's coming up or done.</p>
-
-      {!showForm ? (
-        <button onClick={() => setShowForm(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-4"><Plus size={12} /> Add milestone</button>
-      ) : (
-        <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-4">
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Parshas Bereishis" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-          <select value={type} onChange={(e) => setType(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-2">
-            {MILESTONE_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
-          <label className="block text-[10px] text-stone-400 mb-0.5">Expected date (optional)</label>
-          <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
-          <div className="flex gap-2">
-            <button onClick={submit} disabled={!title.trim()} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">Add</button>
-            <button onClick={() => setShowForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
-          </div>
-        </div>
-      )}
-
-      <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Upcoming</p>
-      {upcoming.length === 0 && <p className="text-xs text-stone-400 mb-4">Nothing tracked yet.</p>}
-      <ul className="space-y-2 mb-5">
-        {upcoming.map((m) => (
-          <li key={m.id} className="bg-white border border-stone-200 rounded-lg p-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <p className="text-sm font-semibold text-stone-800">{m.title}</p>
-                <p className="text-xs text-stone-400">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label}{m.targetDate ? ` · expected ${m.targetDate}` : ""}</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button onClick={() => markComplete(m.id)} className="text-xs font-semibold text-emerald-700 border border-emerald-200 rounded-lg px-2.5 py-1 hover:bg-emerald-50">Mark complete</button>
-                <ConfirmDelete onConfirm={() => removeMilestone(m.id)} size={13} />
-              </div>
-            </div>
-          </li>
-        ))}
-      </ul>
-
-      <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Completed</p>
-      {completed.length === 0 && <p className="text-xs text-stone-400">None yet.</p>}
-      <ul className="space-y-2">
-        {completed.map((m) => (
-          <li key={m.id} className="bg-emerald-50 border border-emerald-200 rounded-lg p-2.5 flex items-center justify-between gap-2">
-            <div>
-              <p className="text-sm font-semibold text-emerald-900">🎉 {m.title}</p>
-              <p className="text-xs text-emerald-700">{MILESTONE_TYPES.find((t) => t.id === m.type)?.label} · completed {m.completedDate}</p>
-            </div>
-            <ConfirmDelete onConfirm={() => removeMilestone(m.id)} size={13} />
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerDay, clearPlannerDayType, bulkSetByWeekday, bulkSetByRange, addPlannerEvent, removePlannerEvent, importSchoolCalendar, benchmarkSubjects, addBenchmarkSubject, removeBenchmarkSubject, addBenchmarkSegment, updateBenchmarkSegment, removeBenchmarkSegment, curriculumMilestones, addMilestone, updateMilestone, removeMilestone, markMilestoneComplete }) {
+function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerDay, clearPlannerDayType, bulkSetByWeekday, bulkSetByRange, addPlannerEvent, removePlannerEvent, importSchoolCalendar, benchmarkSubjects, addBenchmarkSubject, removeBenchmarkSubject, addBenchmarkSegment, updateBenchmarkSegment, removeBenchmarkSegment }) {
   const [subTab, setSubTab] = useState("calendar");
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -7571,13 +7546,9 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
       <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-96">
         <button onClick={() => setSubTab("calendar")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "calendar" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
         <button onClick={() => setSubTab("benchmarks")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "benchmarks" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Benchmarks</button>
-        <button onClick={() => setSubTab("milestones")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "milestones" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Milestones</button>
       </div>
 
-      {subTab === "milestones" ? (
-        <MilestonesView milestones={curriculumMilestones} addMilestone={addMilestone} updateMilestone={updateMilestone}
-          removeMilestone={removeMilestone} markComplete={markMilestoneComplete} />
-      ) : subTab === "benchmarks" ? (
+      {subTab === "benchmarks" ? (
         <BenchmarksView subjects={benchmarkSubjects} addSubject={addBenchmarkSubject} removeSubject={removeBenchmarkSubject}
           addSegment={addBenchmarkSegment} updateSegment={updateBenchmarkSegment} removeSegment={removeBenchmarkSegment}
           plannerDays={plannerDays} dayTypes={dayTypes} config={config} />
@@ -7765,7 +7736,7 @@ function SchoolCalendarRangePicker({ startValue, endValue, onSelectStart, onSele
 }
 
 function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updateSegment, removeSegment, plannerDays, dayTypes, config }) {
-  const [activeId, setActiveId] = useState(subjects[0]?.id || null);
+  const [activeId, setActiveId] = useState(null); // which subject's edit modal is open — none, by default
   const [showAddSubject, setShowAddSubject] = useState(subjects.length === 0);
   const [showDocImport, setShowDocImport] = useState(false);
   const [newSubjectName, setNewSubjectName] = useState("");
@@ -7773,9 +7744,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
   const [segLabel, setSegLabel] = useState("");
   const [segStart, setSegStart] = useState(todayISO());
   const [segEnd, setSegEnd] = useState(addDaysISO(todayISO(), 13));
-  const [yearOffset, setYearOffset] = useState(0);
   const [viewMode, setViewMode] = useState("timeline"); // timeline | calendar
-  const [showAllSubjects, setShowAllSubjects] = useState(false);
   const [calMonthOffset, setCalMonthOffset] = useState(0);
   const [editingSegId, setEditingSegId] = useState(null);
   const [editLabel, setEditLabel] = useState("");
@@ -7783,10 +7752,17 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
   const [editEnd, setEditEnd] = useState("");
   const [pendingCascade, setPendingCascade] = useState(null); // { delta, items: [{id,label,newStart,newEnd}] }
 
-  useEffect(() => { if (!activeId && subjects[0]) setActiveId(subjects[0].id); }, [subjects, activeId]);
   const active = subjects.find((s) => s.id === activeId);
+  const openSubject = (subjId) => {
+    setActiveId(subjId);
+    setShowSegForm(false); setEditingSegId(null); setPendingCascade(null); setShowDocImport(false);
+  };
+  const closeSubject = () => {
+    setActiveId(null);
+    setShowSegForm(false); setEditingSegId(null); setPendingCascade(null); setShowDocImport(false);
+  };
 
-  const yearStart = schoolYearStart(new Date(), yearOffset);
+  const yearStart = schoolYearStart(new Date()); // locked to the current school year — no year navigation exposed here
   const yearEnd = new Date(yearStart.getFullYear() + 1, 6, 31);
   const totalDays = daysBetween(yearStart, yearEnd);
   const months = Array.from({ length: 12 }).map((_, i) => new Date(yearStart.getFullYear(), yearStart.getMonth() + i, 1));
@@ -7879,27 +7855,15 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
 
   return (
     <div>
-      <div className="flex gap-1 bg-stone-100 rounded-lg p-1 w-fit mb-3">
-        <button onClick={() => setShowAllSubjects(false)} className={`text-xs font-semibold px-3 py-1.5 rounded-md ${!showAllSubjects ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>One Subject</button>
-        <button onClick={() => setShowAllSubjects(true)} className={`text-xs font-semibold px-3 py-1.5 rounded-md ${showAllSubjects ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>All Subjects</button>
-      </div>
-
-      {!showAllSubjects && (
-      <div className="flex flex-wrap items-center gap-1.5 mb-5">
-        {subjects.map((s) => (
-          <button key={s.id} onClick={() => { setActiveId(s.id); setShowAddSubject(false); }}
-            className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${activeId === s.id && !showAddSubject ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
-            {s.label}
-          </button>
-        ))}
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <p className="text-sm font-semibold text-stone-800">{yearStart.getFullYear()}–{yearStart.getFullYear() + 1} school year</p>
         <button onClick={() => setShowAddSubject(true)}
           className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showAddSubject ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300"}`}>
           <Plus size={12} /> Add subject
         </button>
       </div>
-      )}
 
-      {!showAllSubjects && showAddSubject && (
+      {showAddSubject && (
         <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-96">
           <p className="text-sm font-semibold text-stone-800 mb-3">New benchmark subject</p>
           {(config?.subjects || []).filter((cs) => !subjects.some((s) => s.label.toLowerCase() === cs.label.toLowerCase())).length > 0 && (
@@ -7925,216 +7889,206 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, updat
         </div>
       )}
 
-      {!showAllSubjects && !showAddSubject && active && (
-        <div>
-          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-            <div className="flex items-center gap-2">
-              <button onClick={() => setYearOffset((y) => y - 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronLeft size={16} /></button>
-              <p className="text-sm font-semibold text-stone-800">{active.label} — {yearStart.getFullYear()}–{yearStart.getFullYear() + 1}</p>
-              <button onClick={() => setYearOffset((y) => y + 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronRight size={16} /></button>
+      {subjects.length === 0 && !showAddSubject ? (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">No subjects yet — add one to start pacing it out.</p>
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-xl p-4 overflow-x-auto no-scrollbar">
+          <div style={{ minWidth: 700 }}>
+            <div className="relative h-4 mb-2">
+              {months.map((m, i) => (
+                <span key={i} className="absolute text-[9px] text-stone-400" style={{ left: `${(i / 12) * 100}%` }}>
+                  {m.toLocaleDateString("en-US", { month: "short" })}
+                </span>
+              ))}
             </div>
-            <div className="flex items-center gap-2">
+            {subjects.map((subj) => (
+              <div key={subj.id} className="mb-3">
+                <button onClick={() => openSubject(subj.id)} className="text-xs font-semibold text-stone-700 hover:text-teal-700 mb-1 block">
+                  {subj.label}
+                </button>
+                <div className="relative h-6 bg-stone-100 rounded-lg">
+                  {months.map((m, i) => (
+                    <div key={i} className="absolute top-0 bottom-0 border-l border-stone-200" style={{ left: `${(i / 12) * 100}%` }} />
+                  ))}
+                  {subj.segments.length === 0 && (
+                    <span className="absolute inset-0 flex items-center pl-2 text-[10px] text-stone-300">No segments yet</span>
+                  )}
+                  {subj.segments.map((seg) => (
+                    <div key={seg.id} title={`${seg.label}: ${seg.startDate} – ${seg.endDate} (tap to open ${subj.label})`}
+                      className="absolute top-0.5 bottom-0.5 cursor-pointer" style={barStyle(seg)}
+                      onClick={() => openSubject(subj.id)}>
+                      <div className={`absolute inset-0 rounded-md bg-${seg.color}-400`} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-stone-400 mt-2">Tap any subject to open and edit its segments — everything else stays right where it is.</p>
+        </div>
+      )}
+
+      {active && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={closeSubject}>
+          <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-base font-semibold text-stone-800">{active.label}</p>
+              <button onClick={closeSubject} className="text-stone-400 hover:text-stone-700 text-xs font-semibold">Close</button>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 mb-2">
               <div className="flex gap-1 bg-stone-100 rounded-lg p-1">
                 <button onClick={() => setViewMode("timeline")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "timeline" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Timeline</button>
                 <button onClick={() => setViewMode("calendar")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${viewMode === "calendar" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
               </div>
-              <ConfirmDelete onConfirm={() => removeSubject(active.id)} label="Delete subject" />
+              <ConfirmDelete onConfirm={() => { removeSubject(active.id); closeSubject(); }} label="Delete subject" />
             </div>
-          </div>
 
-          {viewMode === "timeline" ? (
-            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 overflow-x-auto no-scrollbar">
-              <div className="relative h-12 bg-stone-100 rounded-lg mb-1" style={{ minWidth: 700 }}>
-                {months.map((m, i) => (
-                  <div key={i} className="absolute top-0 bottom-0 border-l border-stone-200" style={{ left: `${(i / 12) * 100}%` }} />
-                ))}
-                {active.segments.map((seg) => {
-                  const dates = eachDateInRange(seg.startDate, seg.endDate);
-                  return (
-                    <div key={seg.id} title={`${seg.label}: ${seg.startDate} – ${seg.endDate} (tap to edit)`}
-                      className="absolute top-1 bottom-1 cursor-pointer" style={barStyle(seg)} onClick={() => openEditSegment(seg)}>
-                      <div className={`absolute inset-0 rounded-md bg-${seg.color}-100`} />
-                      <div className="absolute inset-0 flex items-end rounded-md overflow-hidden">
-                        {dates.map((d) => {
-                          const kind = scheduleKindForDate(d, plannerDays, dayTypes);
-                          if (kind === "none") return <div key={d} className="flex-1 h-full" />;
-                          return <div key={d} className={`flex-1 bg-${seg.color}-500 ${kind === "half" ? "h-1/2" : "h-full"}`} />;
-                        })}
+            {viewMode === "timeline" ? (
+              <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 mb-4 overflow-x-auto no-scrollbar">
+                <div className="relative h-12 bg-stone-100 rounded-lg mb-1" style={{ minWidth: 650 }}>
+                  {months.map((m, i) => (
+                    <div key={i} className="absolute top-0 bottom-0 border-l border-stone-200" style={{ left: `${(i / 12) * 100}%` }} />
+                  ))}
+                  {active.segments.map((seg) => {
+                    const dates = eachDateInRange(seg.startDate, seg.endDate);
+                    return (
+                      <div key={seg.id} title={`${seg.label}: ${seg.startDate} – ${seg.endDate} (tap to edit)`}
+                        className="absolute top-1 bottom-1 cursor-pointer" style={barStyle(seg)} onClick={() => openEditSegment(seg)}>
+                        <div className={`absolute inset-0 rounded-md bg-${seg.color}-100`} />
+                        <div className="absolute inset-0 flex items-end rounded-md overflow-hidden">
+                          {dates.map((d) => {
+                            const kind = scheduleKindForDate(d, plannerDays, dayTypes);
+                            if (kind === "none") return <div key={d} className="flex-1 h-full" />;
+                            return <div key={d} className={`flex-1 bg-${seg.color}-500 ${kind === "half" ? "h-1/2" : "h-full"}`} />;
+                          })}
+                        </div>
+                        <span className="absolute -top-4 left-0.5 text-[9px] font-semibold text-stone-600 whitespace-nowrap">{seg.label}</span>
                       </div>
-                      <span className="absolute -top-4 left-0.5 text-[9px] font-semibold text-stone-600 whitespace-nowrap">{seg.label}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="relative h-4" style={{ minWidth: 700 }}>
-                {months.map((m, i) => (
-                  <span key={i} className="absolute text-[9px] text-stone-400" style={{ left: `${(i / 12) * 100}%` }}>
-                    {m.toLocaleDateString("en-US", { month: "short" })}
-                  </span>
-                ))}
-              </div>
-              <p className="text-[10px] text-stone-400 mt-2">Full-height = school day, half-height = half day, gap = no school. Tap a bar to edit its dates.</p>
-            </div>
-          ) : (
-            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-96">
-              <div className="flex items-center justify-between mb-3">
-                <button onClick={() => setCalMonthOffset((m) => m - 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronLeft size={16} /></button>
-                <p className="text-sm font-semibold text-stone-800">{monthLabel(calYear, calMonthIdx)}</p>
-                <button onClick={() => setCalMonthOffset((m) => m + 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronRight size={16} /></button>
-              </div>
-              <div className="grid grid-cols-7 gap-1 mb-1">
-                {WEEKDAY_LABELS.map((w) => <div key={w} className="text-center text-[9px] font-semibold text-stone-400">{w}</div>)}
-              </div>
-              <div className="grid grid-cols-7 gap-1">
-                {calGrid.map((d, i) => {
-                  if (!d) return <div key={i} />;
-                  const seg = segmentForDate(d);
-                  const kind = scheduleKindForDate(d, plannerDays, dayTypes);
-                  const dayNum = Number(d.slice(-2));
-                  const colorClass = !seg || kind === "none"
-                    ? "bg-stone-50 text-stone-400"
-                    : kind === "half"
-                      ? `bg-${seg.color}-200 text-stone-700`
-                      : `bg-${seg.color}-400 text-white`;
-                  return (
-                    <div key={d} title={kind === "none" ? "No school" : seg ? `${seg.label}${kind === "half" ? " (half day)" : ""}` : ""}
-                      className={`relative aspect-square rounded-lg text-[10px] font-semibold flex items-center justify-center ${colorClass}`}>
-                      {dayNum}
-                      {kind === "none" && <span className="absolute -top-0.5 -right-0.5 text-stone-300 text-[8px]">•</span>}
-                    </div>
-                  );
-                })}
-              </div>
-              <p className="text-[10px] text-stone-400 mt-2">Solid = full school day in a benchmark, light = half day, blank = no school.</p>
-            </div>
-          )}
-
-          <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Segments</p>
-          <ul className="space-y-1.5 mb-4">
-            {active.segments.length === 0 && <li className="text-xs text-stone-400">No segments yet — add your first benchmark period below.</li>}
-            {active.segments.map((seg) => (
-              <li key={seg.id} className="flex items-center justify-between bg-white border border-stone-200 rounded-lg px-3 py-2 text-xs">
-                <button onClick={() => openEditSegment(seg)} className="flex items-center gap-2 text-left hover:opacity-70">
-                  <span className={`w-2.5 h-2.5 rounded-full bg-${seg.color}-400 shrink-0`} />
-                  <span className="font-medium text-stone-700">{seg.label}</span>
-                  <span className="text-stone-400">{seg.startDate} → {seg.endDate}</span>
-                </button>
-                <ConfirmDelete onConfirm={() => removeSegment(active.id, seg.id)} size={13} />
-              </li>
-            ))}
-          </ul>
-
-          {editingSegId && !pendingCascade && (
-            <div className="bg-white border border-teal-200 rounded-xl p-4 md:w-96 mb-4">
-              <p className="text-sm font-semibold text-stone-800 mb-3">Edit segment</p>
-              <label className="block text-xs font-medium text-stone-500 mb-1">Label</label>
-              <input value={editLabel} onChange={(e) => setEditLabel(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
-              <p className="text-xs font-medium text-stone-500 mb-1">
-                {editStart || "Tap a date to set the start"}{editEnd ? ` → ${editEnd}` : editStart ? " → tap another date to set the end" : ""}
-              </p>
-              <div className="mb-4">
-                <SchoolCalendarRangePicker startValue={editStart} endValue={editEnd} onSelectStart={setEditStart} onSelectEnd={setEditEnd} plannerDays={plannerDays} dayTypes={dayTypes} />
-              </div>
-              <div className="flex gap-2">
-                <button onClick={saveSegmentEdit} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Save changes</button>
-                <button onClick={() => setEditingSegId(null)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
-              </div>
-            </div>
-          )}
-
-          {pendingCascade && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 md:w-96 mb-4">
-              <p className="text-sm font-semibold text-amber-900 mb-1">Shift the following segment{pendingCascade.items.length > 1 ? "s" : ""} too?</p>
-              <p className="text-xs text-amber-700 mb-3">
-                {pendingCascade.items.map((it) => it.label).join(", ")} {pendingCascade.items.length > 1 ? "were" : "was"} lined up right after this one.
-                Moving the end date by {Math.abs(pendingCascade.delta)} day{Math.abs(pendingCascade.delta) === 1 ? "" : "s"} {pendingCascade.delta > 0 ? "later" : "earlier"} can carry them forward automatically, keeping everything connected.
-              </p>
-              <div className="flex gap-2">
-                <button onClick={applyCascade} className="flex-1 bg-amber-600 text-white rounded-lg py-2 text-sm font-semibold hover:bg-amber-700">Yes, shift them too</button>
-                <button onClick={dismissCascade} className="px-4 text-sm text-amber-700 border border-amber-300 rounded-lg hover:bg-amber-100">No, just this one</button>
-              </div>
-            </div>
-          )}
-
-          {showSegForm ? (
-            <div className="bg-white border border-stone-200 rounded-xl p-4 md:w-96">
-              <label className="block text-xs font-medium text-stone-500 mb-1">Label</label>
-              <input value={segLabel} onChange={(e) => setSegLabel(e.target.value)} placeholder="e.g. Kamatz/Patach" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
-              <p className="text-xs font-medium text-stone-500 mb-1">
-                {segStart || "Tap a date to set the start"}{segEnd ? ` → ${segEnd}` : segStart ? " → tap another date to set the end" : ""}
-              </p>
-              <div className="mb-3">
-                <SchoolCalendarRangePicker startValue={segStart} endValue={segEnd} onSelectStart={setSegStart} onSelectEnd={setSegEnd} plannerDays={plannerDays} dayTypes={dayTypes} />
-              </div>
-              <div className="flex gap-2">
-                <button onClick={submitSegment} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Add segment</button>
-                <button onClick={() => setShowSegForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <div className="flex items-center gap-3 flex-wrap">
-              <button onClick={openSegForm} className="text-xs font-semibold text-teal-700 flex items-center gap-1"><Plus size={12} /> Add segment</button>
-              <button onClick={() => setShowDocImport((v) => !v)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-2.5 py-1 hover:bg-stone-50">
-                Import from a document
-              </button>
-            </div>
-          )}
-          {showDocImport && (
-            <DocumentImportPanel mode="benchmark"
-              onApplyBenchmark={(items) => {
-                items.forEach((it, i) => addSegment(active.id, { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(active.segments.length + i) % COLOR_CHOICES.length] }));
-              }}
-              onClose={() => setShowDocImport(false)} />
-          )}
-        </div>
-      )}
-
-      {showAllSubjects && (
-        <div>
-          <div className="flex items-center gap-2 mb-3">
-            <button onClick={() => setYearOffset((y) => y - 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronLeft size={16} /></button>
-            <p className="text-sm font-semibold text-stone-800">{yearStart.getFullYear()}–{yearStart.getFullYear() + 1} — every subject</p>
-            <button onClick={() => setYearOffset((y) => y + 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronRight size={16} /></button>
-          </div>
-          {subjects.length === 0 ? (
-            <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">No subjects yet — add one to start pacing it out.</p>
-          ) : (
-            <div className="bg-white border border-stone-200 rounded-xl p-4 overflow-x-auto no-scrollbar">
-              <div style={{ minWidth: 700 }}>
-                <div className="relative h-4 mb-2">
+                    );
+                  })}
+                </div>
+                <div className="relative h-4" style={{ minWidth: 650 }}>
                   {months.map((m, i) => (
                     <span key={i} className="absolute text-[9px] text-stone-400" style={{ left: `${(i / 12) * 100}%` }}>
                       {m.toLocaleDateString("en-US", { month: "short" })}
                     </span>
                   ))}
                 </div>
-                {subjects.map((subj) => (
-                  <div key={subj.id} className="mb-3">
-                    <button onClick={() => { setActiveId(subj.id); setShowAllSubjects(false); }}
-                      className="text-xs font-semibold text-stone-700 hover:text-teal-700 mb-1 block">
-                      {subj.label}
-                    </button>
-                    <div className="relative h-6 bg-stone-100 rounded-lg">
-                      {months.map((m, i) => (
-                        <div key={i} className="absolute top-0 bottom-0 border-l border-stone-200" style={{ left: `${(i / 12) * 100}%` }} />
-                      ))}
-                      {subj.segments.length === 0 && (
-                        <span className="absolute inset-0 flex items-center pl-2 text-[10px] text-stone-300">No segments yet</span>
-                      )}
-                      {subj.segments.map((seg) => (
-                        <div key={seg.id} title={`${seg.label}: ${seg.startDate} – ${seg.endDate} (tap to open ${subj.label})`}
-                          className="absolute top-0.5 bottom-0.5 cursor-pointer" style={barStyle(seg)}
-                          onClick={() => { setActiveId(subj.id); setShowAllSubjects(false); }}>
-                          <div className={`absolute inset-0 rounded-md bg-${seg.color}-400`} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                <p className="text-[10px] text-stone-400 mt-2">Full-height = school day, half-height = half day, gap = no school. Tap a bar to edit its dates.</p>
               </div>
-              <p className="text-[10px] text-stone-400 mt-2">Tap a subject name or a bar to open it and edit its segments.</p>
-            </div>
-          )}
+            ) : (
+              <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 mb-4 md:w-96">
+                <div className="flex items-center justify-between mb-3">
+                  <button onClick={() => setCalMonthOffset((m) => m - 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronLeft size={16} /></button>
+                  <p className="text-sm font-semibold text-stone-800">{monthLabel(calYear, calMonthIdx)}</p>
+                  <button onClick={() => setCalMonthOffset((m) => m + 1)} className="p-1 text-stone-400 hover:text-stone-700"><ChevronRight size={16} /></button>
+                </div>
+                <div className="grid grid-cols-7 gap-1 mb-1">
+                  {WEEKDAY_LABELS.map((w) => <div key={w} className="text-center text-[9px] font-semibold text-stone-400">{w}</div>)}
+                </div>
+                <div className="grid grid-cols-7 gap-1">
+                  {calGrid.map((d, i) => {
+                    if (!d) return <div key={i} />;
+                    const seg = segmentForDate(d);
+                    const kind = scheduleKindForDate(d, plannerDays, dayTypes);
+                    const dayNum = Number(d.slice(-2));
+                    const colorClass = !seg || kind === "none"
+                      ? "bg-white text-stone-400"
+                      : kind === "half"
+                        ? `bg-${seg.color}-200 text-stone-700`
+                        : `bg-${seg.color}-400 text-white`;
+                    return (
+                      <div key={d} title={kind === "none" ? "No school" : seg ? `${seg.label}${kind === "half" ? " (half day)" : ""}` : ""}
+                        className={`relative aspect-square rounded-lg text-[10px] font-semibold flex items-center justify-center ${colorClass}`}>
+                        {dayNum}
+                        {kind === "none" && <span className="absolute -top-0.5 -right-0.5 text-stone-300 text-[8px]">•</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-stone-400 mt-2">Solid = full school day in a benchmark, light = half day, blank = no school.</p>
+              </div>
+            )}
+
+            <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Segments</p>
+            <ul className="space-y-1.5 mb-4">
+              {active.segments.length === 0 && <li className="text-xs text-stone-400">No segments yet — add your first benchmark period below.</li>}
+              {active.segments.map((seg) => (
+                <li key={seg.id} className="flex items-center justify-between bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-xs">
+                  <button onClick={() => openEditSegment(seg)} className="flex items-center gap-2 text-left hover:opacity-70">
+                    <span className={`w-2.5 h-2.5 rounded-full bg-${seg.color}-400 shrink-0`} />
+                    <span className="font-medium text-stone-700">{seg.label}</span>
+                    <span className="text-stone-400">{seg.startDate} → {seg.endDate}</span>
+                  </button>
+                  <ConfirmDelete onConfirm={() => removeSegment(active.id, seg.id)} size={13} />
+                </li>
+              ))}
+            </ul>
+
+            {editingSegId && !pendingCascade && (
+              <div className="bg-white border border-teal-200 rounded-xl p-4 mb-4">
+                <p className="text-sm font-semibold text-stone-800 mb-3">Edit segment</p>
+                <label className="block text-xs font-medium text-stone-500 mb-1">Label</label>
+                <input value={editLabel} onChange={(e) => setEditLabel(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+                <p className="text-xs font-medium text-stone-500 mb-1">
+                  {editStart || "Tap a date to set the start"}{editEnd ? ` → ${editEnd}` : editStart ? " → tap another date to set the end" : ""}
+                </p>
+                <div className="mb-4">
+                  <SchoolCalendarRangePicker startValue={editStart} endValue={editEnd} onSelectStart={setEditStart} onSelectEnd={setEditEnd} plannerDays={plannerDays} dayTypes={dayTypes} />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={saveSegmentEdit} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Save changes</button>
+                  <button onClick={() => setEditingSegId(null)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+                </div>
+              </div>
+            )}
+
+            {pendingCascade && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4">
+                <p className="text-sm font-semibold text-amber-900 mb-1">Shift the following segment{pendingCascade.items.length > 1 ? "s" : ""} too?</p>
+                <p className="text-xs text-amber-700 mb-3">
+                  {pendingCascade.items.map((it) => it.label).join(", ")} {pendingCascade.items.length > 1 ? "were" : "was"} lined up right after this one.
+                  Moving the end date by {Math.abs(pendingCascade.delta)} day{Math.abs(pendingCascade.delta) === 1 ? "" : "s"} {pendingCascade.delta > 0 ? "later" : "earlier"} can carry them forward automatically, keeping everything connected.
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={applyCascade} className="flex-1 bg-amber-600 text-white rounded-lg py-2 text-sm font-semibold hover:bg-amber-700">Yes, shift them too</button>
+                  <button onClick={dismissCascade} className="px-4 text-sm text-amber-700 border border-amber-300 rounded-lg hover:bg-amber-100">No, just this one</button>
+                </div>
+              </div>
+            )}
+
+            {showSegForm ? (
+              <div className="bg-white border border-stone-200 rounded-xl p-4">
+                <label className="block text-xs font-medium text-stone-500 mb-1">Label</label>
+                <input value={segLabel} onChange={(e) => setSegLabel(e.target.value)} placeholder="e.g. Kamatz/Patach" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+                <p className="text-xs font-medium text-stone-500 mb-1">
+                  {segStart || "Tap a date to set the start"}{segEnd ? ` → ${segEnd}` : segStart ? " → tap another date to set the end" : ""}
+                </p>
+                <div className="mb-3">
+                  <SchoolCalendarRangePicker startValue={segStart} endValue={segEnd} onSelectStart={setSegStart} onSelectEnd={setSegEnd} plannerDays={plannerDays} dayTypes={dayTypes} />
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={submitSegment} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Add segment</button>
+                  <button onClick={() => setShowSegForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3 flex-wrap">
+                <button onClick={openSegForm} className="text-xs font-semibold text-teal-700 flex items-center gap-1"><Plus size={12} /> Add segment</button>
+                <button onClick={() => setShowDocImport((v) => !v)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-2.5 py-1 hover:bg-stone-50">
+                  Import from a document
+                </button>
+              </div>
+            )}
+            {showDocImport && (
+              <DocumentImportPanel mode="benchmark"
+                onApplyBenchmark={(items) => {
+                  items.forEach((it, i) => addSegment(active.id, { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(active.segments.length + i) % COLOR_CHOICES.length] }));
+                }}
+                onClose={() => setShowDocImport(false)} />
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -8777,6 +8731,58 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
   );
 }
 
+function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, config, loggedInTeacher, onBack, onDone }) {
+  const [draft, setDraft] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  const run = useCallback(async () => {
+    setLoading(true); setError(false);
+    try {
+      const text = await generateSegmentCelebrationMessage(subjectLabel, segmentLabel, config, loggedInTeacher?.name);
+      setDraft(text || "Could not generate a draft — please write one manually.");
+    } catch { setError(true); } finally { setLoading(false); }
+  }, [subjectLabel, segmentLabel]);
+
+  useEffect(() => { run(); }, [run]);
+
+  const parentEmails = roster.map((s) => s.parentEmail).filter(Boolean);
+  const subject = `${subjectLabel} — ${segmentLabel} complete!`;
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Announce to the class</h1>
+      <p className="text-stone-500 text-sm mb-5">{subjectLabel} — {segmentLabel}</p>
+      <div className="md:w-[32rem]">
+        <p className="text-xs text-stone-400 mb-3">
+          {parentEmails.length > 0
+            ? `Goes out to ${parentEmails.length} parent email${parentEmails.length === 1 ? "" : "s"} on file, privately bcc'd — no one sees anyone else's address.`
+            : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
+        </p>
+        <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
+        {loading ? (
+          <div className="flex items-center justify-center py-16 bg-white border border-stone-200 rounded-lg mb-4"><Loader2 className="animate-spin text-teal-700" size={22} /></div>
+        ) : error ? (
+          <p className="text-xs text-rose-600 py-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>
+        ) : null}
+        {!loading && (
+          <div className="flex items-start gap-1.5 mb-4">
+            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2 mb-2">
+          <button onClick={run} className="flex items-center gap-1.5 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
+          <MailActionButtons bcc={parentEmails} subject={subject} body={draft} />
+        </div>
+        <p className="text-xs text-stone-400 mb-4">Nothing sends automatically — review the message, then send it yourself.</p>
+        <button onClick={onDone} className="text-xs font-semibold bg-teal-700 text-white rounded-lg px-4 py-2 hover:bg-teal-800">Done</button>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Settings ----------
 
 const HEBREW_MONTHS = [
@@ -8937,7 +8943,386 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onOpenMyAccount }) {
+const ONBOARDING_STEPS = [
+  { key: "welcome", label: "Welcome" },
+  { key: "subjects", label: "Subjects" },
+  { key: "schedule", label: "Schedule" },
+  { key: "attendance", label: "Attendance" },
+  { key: "homework", label: "Homework" },
+  { key: "points", label: "Points" },
+  { key: "incidents", label: "Incidents" },
+  { key: "messages", label: "Parent Messages" },
+  { key: "birthdays", label: "Birthdays" },
+  { key: "done", label: "All Set" },
+];
+
+// The guided setup wizard — a friendlier front door to settings that already exist elsewhere,
+// not a separate system. Every change here writes through the same config object Settings uses,
+// via the same update(mutator) pattern, so nothing gets out of sync and nothing is duplicated.
+function OnboardingWizard({ config, setConfig, onClose }) {
+  const completedSteps = config.onboarding?.completedSteps || [];
+  const firstIncomplete = ONBOARDING_STEPS.findIndex((s) => !completedSteps.includes(s.key));
+  const [stepIdx, setStepIdx] = useState(firstIncomplete === -1 ? 0 : firstIncomplete);
+
+  const update = (mutator) => setConfig(mutator(structuredClone(config)));
+  const step = ONBOARDING_STEPS[stepIdx];
+
+  const markStarted = (c) => {
+    c.onboarding = c.onboarding || { started: false, finished: false, completedSteps: [] };
+    c.onboarding.started = true;
+    return c;
+  };
+  const markComplete = (key) => {
+    update((c) => {
+      markStarted(c);
+      if (!c.onboarding.completedSteps.includes(key)) c.onboarding.completedSteps.push(key);
+      return c;
+    });
+  };
+
+  const goNext = () => {
+    if (stepIdx === ONBOARDING_STEPS.length - 1) {
+      update((c) => {
+        markStarted(c);
+        if (!c.onboarding.completedSteps.includes(step.key)) c.onboarding.completedSteps.push(step.key);
+        c.onboarding.finished = true;
+        return c;
+      });
+      onClose();
+    } else {
+      markComplete(step.key);
+      setStepIdx((i) => i + 1);
+    }
+  };
+  const goBack = () => setStepIdx((i) => Math.max(0, i - 1));
+  const pause = () => {
+    update((c) => { markStarted(c); return c; });
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 relative">
+        <button onClick={pause} className="absolute top-4 right-4 text-stone-400 hover:text-stone-700 text-xs font-semibold">Close</button>
+
+        <div className="flex items-center gap-1 mb-6 pr-12">
+          {ONBOARDING_STEPS.map((s, i) => (
+            <div key={s.key} className={`h-1.5 flex-1 rounded-full ${i <= stepIdx ? "bg-teal-600" : "bg-stone-200"}`} />
+          ))}
+        </div>
+
+        {step.key === "welcome" && <OnboardingWelcomeStep />}
+        {step.key === "subjects" && <OnboardingSubjectsStep config={config} update={update} />}
+        {step.key === "schedule" && <OnboardingScheduleStep config={config} update={update} />}
+        {step.key === "attendance" && <OnboardingAttendanceStep config={config} update={update} />}
+        {step.key === "homework" && <OnboardingHomeworkStep config={config} update={update} />}
+        {step.key === "points" && <OnboardingPointsStep config={config} update={update} />}
+        {step.key === "incidents" && <OnboardingIncidentsStep config={config} update={update} />}
+        {step.key === "messages" && <OnboardingMessagesStep config={config} update={update} />}
+        {step.key === "birthdays" && <OnboardingBirthdaysStep />}
+        {step.key === "done" && <OnboardingDoneStep config={config} />}
+
+        <div className="flex items-center justify-between mt-6 pt-4 border-t border-stone-100">
+          <button onClick={goBack} disabled={stepIdx === 0} className={`text-xs text-stone-400 hover:text-stone-700 ${stepIdx === 0 ? "opacity-0 pointer-events-none" : ""}`}>Back</button>
+          <div className="flex items-center gap-3">
+            {step.key !== "welcome" && step.key !== "done" && (
+              <button onClick={goNext} className="text-xs text-stone-500 hover:text-stone-700">Skip</button>
+            )}
+            <button onClick={goNext} className="bg-teal-700 text-white rounded-lg px-5 py-2 text-sm font-semibold hover:bg-teal-800">
+              {stepIdx === ONBOARDING_STEPS.length - 1 ? "Finish" : "Next"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OnboardingWelcomeStep() {
+  return (
+    <div>
+      <h2 className="display-font text-2xl font-bold text-stone-900 mb-2">Let's set up your class</h2>
+      <p className="text-sm text-stone-600 mb-3">A few quick questions to get things set up the way you'd actually use them — skip anything you're not sure about, and change any of it later in Settings.</p>
+      <p className="text-xs text-stone-400">This won't take long, and you don't have to finish it in one sitting — closing it anytime saves your place, and you can pick back up from Settings whenever you're ready.</p>
+    </div>
+  );
+}
+
+function OnboardingSubjectsStep({ config, update }) {
+  const [newSubjectInput, setNewSubjectInput] = useState("");
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">What do you teach?</h2>
+      <p className="text-sm text-stone-600 mb-4">This feeds Benchmarks, Assessments, and your weekly schedule — named once, used everywhere.</p>
+      {(config.subjects || []).length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {config.subjects.map((subj) => (
+            <span key={subj.id} className="flex items-center gap-1.5 text-xs font-semibold bg-teal-50 text-teal-800 border border-teal-200 rounded-full pl-3 pr-1.5 py-1">
+              {subj.label}
+              <button onClick={() => update((c) => { c.subjects = c.subjects.filter((s) => s.id !== subj.id); return c; })} className="text-teal-400 hover:text-teal-700 text-sm leading-none">×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="text-xs font-medium text-stone-500 mb-1.5">Tap to add</p>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {SUBJECT_LIBRARY.filter((lib) => !(config.subjects || []).some((s) => s.label.toLowerCase() === lib.toLowerCase())).map((lib) => (
+          <button key={lib} onClick={() => update((c) => { c.subjects = [...(c.subjects || []), { id: uid(), label: lib }]; return c; })}
+            className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-full px-3 py-1 hover:bg-stone-50">
+            + {lib}
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <input value={newSubjectInput} onChange={(e) => setNewSubjectInput(e.target.value)} placeholder="Other — type your own"
+          className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        <button onClick={() => {
+          const trimmed = newSubjectInput.trim();
+          if (!trimmed) return;
+          update((c) => { c.subjects = [...(c.subjects || []), { id: uid(), label: trimmed }]; return c; });
+          setNewSubjectInput("");
+        }} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Add</button>
+      </div>
+    </div>
+  );
+}
+
+function OnboardingScheduleStep({ config, update }) {
+  const schedules = config.planner?.schedules || [];
+  const regular = schedules.find((s) => s.name === "Regular Schedule") || schedules[0];
+
+  const ensureRegularSchedule = () => {
+    if (regular) return regular.id;
+    const id = uid();
+    update((c) => {
+      c.planner = c.planner || {};
+      c.planner.schedules = [...(c.planner.schedules || []), { id, name: "Regular Schedule", periods: [] }];
+      return c;
+    });
+    return id;
+  };
+
+  const applyToWeekdays = () => {
+    const id = regular?.id || ensureRegularSchedule();
+    update((c) => {
+      c.planner = c.planner || {};
+      c.planner.weekdaySchedule = { ...(c.planner.weekdaySchedule || {}), 1: id, 2: id, 3: id, 4: id, 5: id };
+      return c;
+    });
+  };
+
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Build your daily schedule</h2>
+      <p className="text-sm text-stone-600 mb-4">Add your periods — pick from the subjects you just added, or type something else for blocks like recess or lunch. You can build more schedules (a half day, a Friday-only one) later in Settings.</p>
+      {!regular ? (
+        <button onClick={ensureRegularSchedule} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 mb-3">
+          Start building
+        </button>
+      ) : (
+        <>
+          <PeriodListEditor periods={regular.periods || []} subjects={config.subjects}
+            onChange={(next) => update((c) => {
+              const idx = c.planner.schedules.findIndex((s) => s.id === regular.id);
+              if (idx > -1) c.planner.schedules[idx].periods = next;
+              return c;
+            })} />
+          {(regular.periods || []).length > 0 && (
+            <button onClick={applyToWeekdays} className="text-xs font-semibold text-teal-700 hover:text-teal-900 mt-2">
+              Use this schedule every weekday
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function OnboardingAttendanceStep({ config, update }) {
+  const statuses = config.attendance?.statuses || [];
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Attendance statuses</h2>
+      <p className="text-sm text-stone-600 mb-4">These are the statuses you'll tap on Home each day. The defaults work for most classes — rename or adjust colors if you'd like, or just move on.</p>
+      {statuses.map((st, i) => (
+        <div key={st.id} className="flex items-center gap-2 mb-2">
+          <input value={st.label} onChange={(e) => update((c) => { c.attendance.statuses[i].label = e.target.value; return c; })} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          <select value={st.color} onChange={(e) => update((c) => { c.attendance.statuses[i].color = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-1.5 py-1.5 text-xs bg-white">
+            {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <ConfirmDelete onConfirm={() => update((c) => { if (c.attendance.statuses.length > 1) c.attendance.statuses.splice(i, 1); return c; })} size={14} />
+        </div>
+      ))}
+      <button onClick={() => update((c) => { c.attendance.statuses.push({ id: uid(), label: "New status", color: "stone", flagType: "none" }); return c; })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add status</button>
+      <p className="text-xs text-stone-400 mt-4">Lateness and absence flagging rules are already set to sensible defaults — fine-tune those anytime in Settings.</p>
+    </div>
+  );
+}
+
+function OnboardingHomeworkStep({ config, update }) {
+  const hw = config.homework || {};
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Track homework?</h2>
+      <p className="text-sm text-stone-600 mb-4">Entirely optional — some classes track it daily, some weekly, some not at all.</p>
+      <label className="flex items-center gap-2 text-sm text-stone-700 mb-3">
+        <input type="checkbox" checked={hw.enabled || false} onChange={(e) => update((c) => { c.homework.enabled = e.target.checked; return c; })} />
+        Track homework for this class
+      </label>
+      {hw.enabled && (
+        <>
+          <label className="block text-xs font-medium text-stone-500 mb-1">How often do you collect it?</label>
+          <select value={hw.frequency} onChange={(e) => update((c) => { c.homework.frequency = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-3">
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          {hw.frequency === "weekly" && (
+            <>
+              <label className="block text-xs font-medium text-stone-500 mb-1">Which day?</label>
+              <select value={hw.collectionDay ?? 1} onChange={(e) => update((c) => { c.homework.collectionDay = Number(e.target.value); return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                <option value={1}>Monday</option>
+                <option value={2}>Tuesday</option>
+                <option value={3}>Wednesday</option>
+                <option value={4}>Thursday</option>
+                <option value={5}>Friday</option>
+              </select>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function OnboardingPointsStep({ config, update }) {
+  const categories = config.points?.categories || [];
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState("");
+  const [displayMode, setDisplayMode] = useState("bar");
+
+  const create = () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    update((c) => {
+      c.points = c.points || { categories: [] };
+      c.points.categories = [...(c.points.categories || []), {
+        id: uid(), label: trimmed, color: "indigo", scope: "individual", displayMode,
+        increment: 1, threshold: displayMode === "checkx" ? 5 : 10, rewardMessage: "",
+      }];
+      return c;
+    });
+    setName(""); setShowCreate(false);
+  };
+
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">A points or rewards system?</h2>
+      <p className="text-sm text-stone-600 mb-4">Also entirely optional — a fill-up bar toward a reward, a simple counter, or nothing at all.</p>
+      {categories.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {categories.map((cat) => (
+            <span key={cat.id} className={`text-xs font-semibold bg-${cat.color}-50 text-${cat.color}-800 border border-${cat.color}-200 rounded-full px-3 py-1`}>{cat.label}</span>
+          ))}
+        </div>
+      )}
+      {showCreate ? (
+        <div className="bg-stone-50 rounded-lg p-3">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Diligence Points" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          <select value={displayMode} onChange={(e) => setDisplayMode(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-3">
+            <option value="bar">Fill-up visual toward a reward</option>
+            <option value="counter">Simple counter</option>
+            <option value="checkx">Check / X tally</option>
+          </select>
+          <div className="flex gap-2">
+            <button onClick={create} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Create category</button>
+            <button onClick={() => setShowCreate(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setShowCreate(true)} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">
+          + Add a points category
+        </button>
+      )}
+      <p className="text-xs text-stone-400 mt-4">You can add more categories, or fine-tune amounts and thresholds, anytime from the Points tab.</p>
+    </div>
+  );
+}
+
+function OnboardingIncidentsStep({ config, update }) {
+  const categories = config.incidents?.categories || [];
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Incident categories</h2>
+      <p className="text-sm text-stone-600 mb-4">What you'll pick from when logging an incident. These defaults cover most classrooms — adjust if you'd like.</p>
+      {categories.map((cat, i) => (
+        <div key={cat.id} className="flex items-center gap-2 mb-2">
+          <input value={cat.label} onChange={(e) => update((c) => { c.incidents.categories[i].label = e.target.value; return c; })} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          <select value={cat.color} onChange={(e) => update((c) => { c.incidents.categories[i].color = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-1.5 py-1.5 text-xs bg-white">
+            {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <ConfirmDelete onConfirm={() => update((c) => { if (c.incidents.categories.length > 1) c.incidents.categories.splice(i, 1); return c; })} size={14} />
+        </div>
+      ))}
+      <button onClick={() => update((c) => { c.incidents.categories.push({ id: uid(), label: "New category", color: "stone" }); return c; })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add category</button>
+    </div>
+  );
+}
+
+function OnboardingMessagesStep({ config, update }) {
+  const style = config.messageStyle || {};
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Parent messages</h2>
+      <p className="text-sm text-stone-600 mb-4">Controls how the AI drafts messages to parents — the tone and how it refers to your school. Sample writing, custom opening/closing lines, and more are available later in Settings.</p>
+
+      <label className="block text-xs font-medium text-stone-500 mb-1">How you refer to the school</label>
+      <input value={style.schoolTerm ?? "school"} onChange={(e) => update((c) => { c.messageStyle.schoolTerm = e.target.value; return c; })}
+        placeholder="e.g. school, yeshiva, or your school's name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+
+      <label className="block text-xs font-medium text-stone-500 mb-1">Tone</label>
+      <select value={style.tone ?? "warm"} onChange={(e) => update((c) => { c.messageStyle.tone = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+        <option value="warm">Warm & personal</option>
+        <option value="formal">Formal & professional</option>
+        <option value="brief">Brief & direct</option>
+      </select>
+    </div>
+  );
+}
+
+function OnboardingBirthdaysStep() {
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">One thing worth knowing</h2>
+      <p className="text-sm text-stone-600 mb-3">If you enter a student's Hebrew birthday under their info in Settings, you'll automatically get a reminder right on Home about a week before it — with a one-tap way to add it to your Planner.</p>
+      <p className="text-sm text-stone-600">Nothing to set up here — it just works once the birthday is on file.</p>
+    </div>
+  );
+}
+
+function OnboardingDoneStep({ config }) {
+  const summary = [
+    { done: (config.subjects || []).length > 0, label: `${(config.subjects || []).length} subject${(config.subjects || []).length === 1 ? "" : "s"} added` },
+    { done: (config.planner?.schedules || []).some((s) => (s.periods || []).length > 0), label: "Schedule started" },
+    { done: config.homework?.enabled, label: "Homework tracking on" },
+    { done: (config.points?.categories || []).length > 0, label: "Points category created" },
+  ];
+  return (
+    <div>
+      <h2 className="display-font text-2xl font-bold text-stone-900 mb-2">You're all set</h2>
+      <p className="text-sm text-stone-600 mb-4">Here's a quick look at what's in place — everything here, and everything you skipped, stays adjustable in Settings whenever you want.</p>
+      <ul className="space-y-1.5">
+        {summary.map((s, i) => (
+          <li key={i} className="flex items-center gap-2 text-sm">
+            <span className={s.done ? "text-emerald-600" : "text-stone-300"}>{s.done ? "✓" : "○"}</span>
+            <span className={s.done ? "text-stone-700" : "text-stone-400"}>{s.label}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onOpenMyAccount, onOpenOnboarding }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -8991,6 +9376,35 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               </button>
             </Section>
           )}
+
+          <Section title="Guided setup">
+            {(() => {
+              const ob = config.onboarding || { started: false, finished: false, completedSteps: [] };
+              const doneCount = ob.completedSteps.length;
+              if (ob.finished) {
+                return (
+                  <>
+                    <p className="text-xs text-stone-400 mb-3">You've been through guided setup — everything it touched is still adjustable below, any time.</p>
+                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">Go through it again</button>
+                  </>
+                );
+              }
+              if (ob.started) {
+                return (
+                  <>
+                    <p className="text-xs text-stone-400 mb-3">You're partway through — {doneCount} of {ONBOARDING_STEPS.length} sections done. Pick up right where you left off.</p>
+                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Continue setup</button>
+                  </>
+                );
+              }
+              return (
+                <>
+                  <p className="text-xs text-stone-400 mb-3">A short, skippable walkthrough to help set up your class — subjects, schedule, points, and more, one question at a time.</p>
+                  <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Start guided setup</button>
+                </>
+              );
+            })()}
+          </Section>
 
           <Section title="Subjects">
             <p className="text-xs text-stone-400 mb-3">What you teach this year — feeds Benchmarks, Assessments, and (where it makes sense) your weekly schedule, so a subject is named once and stays consistent everywhere. Things like recess or lunch don't belong here — those stay as plain schedule blocks.</p>
@@ -9801,13 +10215,16 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
 // often doesn't unless one's been explicitly set, which is exactly why the same click can open
 // a real draft on one device and just a blank browser tab on another). "Copy message" is the
 // fallback that works everywhere regardless of that setup — paste into whatever's actually open.
-function MailActionButtons({ email, subject, body, size = "normal" }) {
+function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
   const [copied, setCopied] = useState(false);
-  const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const bccParam = bcc && bcc.length > 0 ? `&bcc=${encodeURIComponent(bcc.join(","))}` : "";
+  const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email || "")}${bccParam}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 
   const copyToClipboard = async () => {
     try {
-      await navigator.clipboard.writeText(`To: ${email}\nSubject: ${subject}\n\n${body}`);
+      const toLine = email ? `To: ${email}\n` : "";
+      const bccLine = bcc && bcc.length > 0 ? `Bcc: ${bcc.join(", ")}\n` : "";
+      await navigator.clipboard.writeText(`${toLine}${bccLine}Subject: ${subject}\n\n${body}`);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch { /* clipboard permission denied — button just won't show feedback */ }
