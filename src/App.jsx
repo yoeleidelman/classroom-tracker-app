@@ -17,7 +17,7 @@
 import { db, auth } from "./firebase";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
-import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
@@ -749,9 +749,80 @@ const ClassContext = createContext({ className: "", onSwitchClass: () => {} });
 function GlobalAppStyles() {
   return (
     <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Work+Sans:wght@400;500;600&family=Frank+Ruhl+Libre:wght@500;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Inter:wght@400;500;600;700&family=Frank+Ruhl+Libre:wght@500;700&display=swap');
         .display-font { font-family: 'Fraunces', serif; }
         .heb-font { font-family: 'Frank Ruhl Libre', serif; }
+
+        /* ===== SJA Classroom Tracker — "Warm Scholarly" design system ===== */
+        /* Tailwind v4 exposes every color/radius utility through CSS custom properties
+           (e.g. .bg-teal-700 reads var(--color-teal-700)) — redefining those properties
+           once here reskins every bg-/text-/border-/ring-/hover: usage across the whole
+           app consistently, without touching each of the thousands of individual
+           className strings. Body line-height set globally per the spec (~1.6). */
+        :root {
+          /* Pine-teal — primary actions, active nav, "present" */
+          --color-teal-50: #f0f7f5; --color-teal-100: #e1efec; --color-teal-200: #c3dfd9;
+          --color-teal-300: #94c3ba; --color-teal-400: #5fa294; --color-teal-500: #34816f;
+          --color-teal-600: #1c7867; --color-teal-700: #0e6e62; --color-teal-800: #0b5a50;
+          --color-teal-900: #08403a;
+          /* SJA red — logo, alerts, destructive */
+          --color-rose-50: #fdf2f1; --color-rose-100: #f8e5e2; --color-rose-200: #f0c4bd;
+          --color-rose-300: #e3968a; --color-rose-400: #d16e5d; --color-rose-500: #c94a3a;
+          --color-rose-600: #c0362c; --color-rose-700: #a02e25; --color-rose-800: #7d251e;
+          --color-rose-900: #5f1c17;
+          /* Gold — points, rewards, "late" */
+          --color-amber-50: #fdf8ef; --color-amber-100: #f6ead0; --color-amber-200: #ecd5a3;
+          --color-amber-300: #deb96c; --color-amber-400: #cd9c47; --color-amber-500: #c99530;
+          --color-amber-600: #c08526; --color-amber-700: #b7791f; --color-amber-800: #8f5f19;
+          --color-amber-900: #6f4a14;
+          /* Success green */
+          --color-emerald-50: #f0f8f4; --color-emerald-100: #e2f0e8; --color-emerald-200: #bfe0cf;
+          --color-emerald-300: #8fc9ab; --color-emerald-400: #5fae86; --color-emerald-500: #3f9268;
+          --color-emerald-600: #368269; --color-emerald-700: #2e7d5b; --color-emerald-800: #245f47;
+          --color-emerald-900: #1c4a38;
+          /* Warm-paper neutrals — background, ink, muted fill, borders */
+          --color-stone-50: #f6f2e9; --color-stone-100: #efe9dc; --color-stone-200: #e7dfcf;
+          --color-stone-300: #d8cdb6; --color-stone-400: #a89b7f; --color-stone-500: #6f6659;
+          --color-stone-600: #5c5347; --color-stone-700: #453f36; --color-stone-800: #332e28;
+          --color-stone-900: #2b2723;
+          /* Radius scale: 6px inputs/chips · 10px buttons · 14px cards/rows · 20px panels */
+          --radius-md: 6px; --radius-lg: 10px; --radius-xl: 14px; --radius-2xl: 20px;
+          /* Secondary informational accents (cross-class history, shared-program panels) —
+             warmed from Tailwind's cool defaults so they read as part of the same family
+             rather than clashing against the warm palette, while staying visually distinct
+             from the three core signal hues above. */
+          --color-violet-50: #f7f3ec; --color-violet-100: #efe7d8; --color-violet-200: #ddd0b4;
+          --color-violet-300: #c4ac82; --color-violet-400: #a68a5f; --color-violet-500: #8a6f4a;
+          --color-violet-600: #705a3c; --color-violet-700: #5c4a32; --color-violet-800: #453828;
+          --color-violet-900: #332a1e;
+          --color-sky-50: #f4f4ee; --color-sky-100: #e9e8dc; --color-sky-200: #d5d2bd;
+          --color-sky-300: #b4ae8d; --color-sky-400: #928a68; --color-sky-500: #756d4f;
+          --color-sky-600: #5f5840; --color-sky-700: #4d4734; --color-sky-800: #3a3527;
+          --color-sky-900: #2c281e;
+          /* red is used interchangeably with rose throughout for the same destructive/alert
+             meaning — same values, so neither reads as a different, older red. */
+          --color-red-50: #fdf2f1; --color-red-100: #f8e5e2; --color-red-200: #f0c4bd;
+          --color-red-300: #e3968a; --color-red-400: #d16e5d; --color-red-500: #c94a3a;
+          --color-red-600: #c0362c; --color-red-700: #a02e25; --color-red-800: #7d251e;
+          --color-red-900: #5f1c17;
+          /* indigo/fuchsia round out the 9-color palette teachers pick from to tell subjects,
+             segments, and categories apart (benchmarks, points categories, day types) — warmed
+             to plum/wine and terracotta so a chosen color never looks like it escaped the theme. */
+          --color-indigo-50: #f6eef0; --color-indigo-100: #ecdde1; --color-indigo-200: #d9bcc4;
+          --color-indigo-300: #bf94a1; --color-indigo-400: #a06e7c; --color-indigo-500: #8a5763;
+          --color-indigo-600: #7c4a52; --color-indigo-700: #663d44; --color-indigo-800: #4d2e33;
+          --color-indigo-900: #382226;
+          --color-fuchsia-50: #fbf1e9; --color-fuchsia-100: #f6e2d0; --color-fuchsia-200: #eabf98;
+          --color-fuchsia-300: #dc9860; --color-fuchsia-400: #c97a3c; --color-fuchsia-500: #b5651d;
+          --color-fuchsia-600: #9c5519; --color-fuchsia-700: #7d4514; --color-fuchsia-800: #603510;
+          --color-fuchsia-900: #48280c;
+        }
+        body { line-height: 1.6; }
+        /* Shadows (warm-tinted, low, soft) — these set their own local value per-class
+           rather than reading a shared variable, so each is overridden directly. */
+        .shadow-sm { box-shadow: 0 1px 3px rgba(43,39,35,.07), 0 1px 2px rgba(43,39,35,.04) !important; }
+        .shadow { box-shadow: 0 6px 20px -6px rgba(43,39,35,.14) !important; }
+        .shadow-lg { box-shadow: 0 18px 40px -12px rgba(43,39,35,.20) !important; }
 
         /* The "smooth, modern" feel — applied once, globally, so every button and tappable
            card in the app gets the same tactile press feedback and smooth hover/color
@@ -861,19 +932,19 @@ function GlobalAppStyles() {
           .print-report {
             display: block;
             position: absolute; left: 0; top: 0; width: 100%;
-            font-family: 'Work Sans', sans-serif; color: #1c1917;
+            font-family: 'Inter', sans-serif; color: #2b2723;
           }
           .print-report h1 { font-family: 'Fraunces', serif; font-size: 22px; margin: 0 0 2px 0; }
-          .print-report .print-meta { font-size: 11px; color: #78716c; margin-bottom: 18px; }
+          .print-report .print-meta { font-size: 11px; color: #6f6659; margin-bottom: 18px; }
           .print-report h2 {
-            font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; color: #0f766e;
-            border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; margin: 20px 0 8px 0;
+            font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; color: #0e6e62;
+            border-bottom: 1px solid #d8cdb6; padding-bottom: 4px; margin: 20px 0 8px 0;
             break-after: avoid;
           }
           .print-report table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 4px; }
-          .print-report th { text-align: left; font-weight: 600; color: #57534e; padding: 4px 8px 4px 0; border-bottom: 1px solid #e7e5e4; }
-          .print-report td { padding: 4px 8px 4px 0; border-bottom: 1px solid #f5f5f4; vertical-align: top; }
-          .print-report .print-empty { font-size: 11px; color: #a8a29e; font-style: italic; margin-bottom: 4px; }
+          .print-report th { text-align: left; font-weight: 600; color: #5c5347; padding: 4px 8px 4px 0; border-bottom: 1px solid #e7dfcf; }
+          .print-report td { padding: 4px 8px 4px 0; border-bottom: 1px solid #efe9dc; vertical-align: top; }
+          .print-report .print-empty { font-size: 11px; color: #a89b7f; font-style: italic; margin-bottom: 4px; }
           .print-report .print-section { break-inside: avoid; }
           @page { margin: 0.6in; }
         }
@@ -933,7 +1004,7 @@ function getFlags(data, studentId, incidents, config) {
 
 // ---------- App ----------
 
-export default function App() {
+function AppInner() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [authChecked, setAuthChecked] = useState(false);
   const [useLegacyFlow, setUseLegacyFlow] = useState(false);
@@ -2767,7 +2838,7 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #F5F1E8 0%, #FAF8F3 100%)" }}>
+    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
       <GlobalAppStyles />
       <div className="max-w-sm w-full">
         <img src="/logo-transparent.png" alt="Classroom Tracker" className="w-48 mx-auto mb-5" />
@@ -2814,7 +2885,7 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
 
 function TeacherClassPicker({ teacherName, classes, onSelect, onSignOut }) {
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #F5F1E8 0%, #FAF8F3 100%)" }}>
+    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
       <GlobalAppStyles />
       <div className="max-w-sm w-full">
         <img src="/logo-transparent.png" alt="Classroom Tracker" className="w-48 mx-auto mb-5" />
@@ -2876,7 +2947,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #F5F1E8 0%, #FAF8F3 100%)" }}>
+    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
       <GlobalAppStyles />
       <div className="max-w-sm w-full">
         <img src="/logo-transparent.png" alt="Classroom Tracker" className="w-48 mx-auto mb-5" />
@@ -3499,6 +3570,9 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const updateIncident = (incidentId, fields) => {
     persistIncidents(incidents.map((i) => (i.id === incidentId ? { ...i, ...fields } : i)));
   };
+  const removeIncident = (incidentId) => {
+    persistIncidents(incidents.filter((i) => i.id !== incidentId));
+  };
 
   const addPeriodAttendance = (studentIds, entry) => {
     studentIds.forEach((sid) => {
@@ -3654,10 +3728,10 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
 
   return (
     <ClassContext.Provider value={{ className, onSwitchClass, switchLabel }}>
-    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Work Sans', sans-serif" }}>
+    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <div style={{
         height: "48px", width: "100%",
-        background: "linear-gradient(90deg, #2D3A4A 0%, #2D3A4A 55%, #EB464D 100%)",
+        background: "linear-gradient(90deg, #2b2723 0%, #2b2723 55%, #c0362c 100%)",
         WebkitMaskImage: "linear-gradient(180deg, black 0%, transparent 100%)",
         maskImage: "linear-gradient(180deg, black 0%, transparent 100%)",
       }} />
@@ -3851,7 +3925,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       )}
 
       {view === "print-report" && currentId && (
-        <PrintableStudentReport student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
+        <PrintableStudentReport student={roster.find((s) => s.id === currentId)} data={studentData[currentId] || emptyStudentData()}
           incidents={incidents} classAssessments={classAssessments} config={config} sections={reportSections}
           currentClassName={className} onBack={() => setView("print-report-options")} />
       )}
@@ -3861,7 +3935,8 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onBack={() => setView(currentId ? "detail" : "home")}
           onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(studentId, email) => updateStudentField(studentId, "parentEmail", email)}
-          onUpdateIncident={updateIncident} />
+          onUpdateIncident={updateIncident}
+          onRemoveIncident={(id) => { removeIncident(id); setView(currentId ? "detail" : "home"); }} />
       )}
 
       {view === "fluency-detail" && currentId && selectedFluencyEntry && (
@@ -4894,7 +4969,7 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
 
 // ---------- Points ----------
 
-const WHEEL_COLORS = ["#f43f5e", "#f59e0b", "#10b981", "#0ea5e9", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
+const WHEEL_COLORS = ["#0e6e62", "#c0362c", "#b7791f", "#2e7d5b", "#b5651d", "#8a5763", "#756d4f", "#8a6f4a"];
 
 // Deliberately a real, stable top-level component (not defined inline inside RaffleView) —
 // if it were recreated on every render, React would treat each render's version as a brand
@@ -4908,7 +4983,7 @@ function RaffleWheel({ size, wheelBackground, rotation, participants }) {
   return (
     <div className="relative" style={{ width: size, height: size }}>
       <div className="absolute left-1/2 -translate-x-1/2 z-10" style={{ top: -size * 0.04 }}>
-        <div style={{ width: 0, height: 0, borderLeft: `${size * 0.035}px solid transparent`, borderRight: `${size * 0.035}px solid transparent`, borderTop: `${size * 0.06}px solid #292524` }} />
+        <div style={{ width: 0, height: 0, borderLeft: `${size * 0.035}px solid transparent`, borderRight: `${size * 0.035}px solid transparent`, borderTop: `${size * 0.06}px solid #2b2723` }} />
       </div>
       <div className="rounded-full shadow-lg relative" style={{ width: size, height: size, background: wheelBackground, transform: `rotate(${rotation}deg)`, transition: "transform 5s cubic-bezier(0.33, 1, 0.68, 1)" }}>
         {participants.map((p, i) => {
@@ -4996,7 +5071,7 @@ function RaffleView({ roster }) {
     const color = WHEEL_COLORS[i % WHEEL_COLORS.length];
     return `${color} ${i * sliceDeg}deg ${(i + 1) * sliceDeg}deg`;
   }).join(", ");
-  const wheelBackground = participants.length > 0 ? `conic-gradient(${gradientStops})` : "#e7e5e4";
+  const wheelBackground = participants.length > 0 ? `conic-gradient(${gradientStops})` : "#e7dfcf";
 
   const spin = () => {
     if (participants.length === 0 || spinning) return;
@@ -7550,14 +7625,14 @@ function GrowthChart({ timeline, color }) {
   if (timeline.length < 2) {
     return <p className="text-xs text-stone-400 bg-stone-50 border border-stone-200 rounded-lg px-3 py-4 text-center mb-5">Needs at least 2 dated sessions to show a growth chart — only {timeline.length} so far.</p>;
   }
-  const colorHex = { emerald: "#10b981", amber: "#f59e0b", rose: "#f43f5e", indigo: "#6366f1", sky: "#0ea5e9", stone: "#78716c", violet: "#8b5cf6", teal: "#14b8a6", fuchsia: "#d946ef", slate: "#334155" }[color] || "#334155";
+  const colorHex = { emerald: "#2e7d5b", amber: "#b7791f", rose: "#c0362c", indigo: "#7c4a52", sky: "#5f5840", stone: "#6f6659", violet: "#705a3c", teal: "#0e6e62", fuchsia: "#9c5519", slate: "#453f36" }[color] || "#453f36";
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-3 mb-5 md:w-[28rem]" style={{ height: 220 }}>
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={timeline} margin={{ top: 5, right: 15, left: -15, bottom: 5 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
-          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#78716c" }} />
-          <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#78716c" }} />
+          <CartesianGrid strokeDasharray="3 3" stroke="#e7dfcf" />
+          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#6f6659" }} />
+          <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: "#6f6659" }} />
           <Tooltip formatter={(value, name) => [`${value}%`, "Score"]} labelFormatter={(l) => `Session: ${l}`} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
           <Line type="monotone" dataKey="score" stroke={colorHex} strokeWidth={2.5} dot={{ r: 4, fill: colorHex }} />
         </LineChart>
@@ -7736,6 +7811,15 @@ function PrintReportOptionsView({ student, onBack, onGenerate }) {
   const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const allSelected = selected.length === REPORT_SECTIONS.length;
 
+  if (!student) {
+    return (
+      <div className={PAGE}>
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+        <p className="text-sm text-stone-400">This student could not be found.</p>
+      </div>
+    );
+  }
+
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
@@ -7769,7 +7853,16 @@ function PrintReportOptionsView({ student, onBack, onGenerate }) {
 }
 
 function PrintableStudentReport({ student, data, incidents, classAssessments, config, sections, currentClassName, onBack }) {
-  useEffect(() => { document.title = `${student.name} — Report`; }, [student.name]); // becomes the suggested filename in most browsers' Save-as-PDF dialog
+  useEffect(() => { if (student) document.title = `${student.name} — Report`; }, [student]); // becomes the suggested filename in most browsers' Save-as-PDF dialog
+
+  if (!student) {
+    return (
+      <div className={PAGE}>
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+        <p className="text-sm text-stone-400">This student could not be found.</p>
+      </div>
+    );
+  }
 
   const attStatusMap = {}; (config.attendance?.statuses || []).forEach((s) => (attStatusMap[s.id] = s.label));
   const incCatMap = {}; (config.incidents?.categories || []).forEach((c) => (incCatMap[c.id] = c.label));
@@ -7906,7 +7999,7 @@ function PrintableStudentReport({ student, data, incidents, classAssessments, co
   );
 }
 
-function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident }) {
+function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
   const [editing, setEditing] = useState(false);
@@ -7948,8 +8041,16 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Incident</h1>
-      <p className="text-stone-500 text-sm mb-5">{incident.date}</p>
+      <div className="flex items-start justify-between mb-1 md:w-[28rem]">
+        <div>
+          <h1 className="display-font text-xl font-bold text-stone-900">Incident</h1>
+          <p className="text-stone-500 text-sm">{incident.date}</p>
+        </div>
+        <ConfirmDelete onConfirm={() => onRemoveIncident(incident.id)} label="Delete" size={13}
+          className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-1.5 hover:bg-red-50"
+          confirmText="Delete this incident?" armedClassName="text-xs font-semibold text-white bg-red-600 rounded-lg px-3 py-1.5" />
+      </div>
+      <p className="text-xs text-stone-400 mb-5">Deleting removes it from the student's record entirely — this can't be undone.</p>
 
       <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-[28rem]">
         <div className="flex items-center justify-between mb-3">
@@ -9108,7 +9209,7 @@ function SubstituteModeView({ className, roster, studentData, config, plannerDay
   const submitIncident = (fields) => { addIncident(fields); setShowIncidentForm(false); };
 
   return (
-    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Work Sans', sans-serif" }}>
+    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
       <div className="max-w-2xl mx-auto px-4 py-6">
         <div className="flex items-center justify-between mb-1">
@@ -11090,5 +11191,48 @@ function Section({ title, children }) {
       <h2 className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">{title}</h2>
       <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-hidden">{children}</div>
     </div>
+  );
+}
+
+// Catches any render-time error anywhere in the app and shows a recoverable message instead of a
+// blank white screen with no way back. A single bug in one screen (like a report crashing on
+// unexpected data) should never be able to strand someone with no path forward — reloading always
+// gets them back to a working app, even if the specific screen that crashed still has a bug in it.
+class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { hasError: false }; }
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(error) { console.error("Caught by ErrorBoundary:", error); }
+  handleReload = () => {
+    // Belt and suspenders — several different ways of forcing a fresh load, tried together.
+    // This matters more than it might seem: someone using this as an installed app (added to
+    // their home screen) has no browser bar, no visible refresh icon, nothing outside this
+    // button at all — so this has to be the one thing that reliably works, not just one option
+    // among several.
+    try { window.location.reload(); } catch (e) { /* fall through to the other attempts below */ }
+    try { window.location.href = window.location.origin + window.location.pathname; } catch (e) { /* href on this element is a last-resort fallback */ }
+  };
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4 py-10 text-center">
+          <div className="max-w-sm w-full">
+            <p className="text-sm font-semibold text-stone-800 mb-2">Something went wrong on this screen.</p>
+            <p className="text-xs text-stone-500 mb-4">Nothing was lost. Tap the button below to get back to a working screen.</p>
+            <a href="/" onClick={this.handleReload} className="inline-block text-sm font-semibold bg-teal-700 text-white rounded-lg px-4 py-2 hover:bg-teal-800">
+              Reload
+            </a>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <AppInner />
+    </ErrorBoundary>
   );
 }
