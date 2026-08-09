@@ -25,7 +25,7 @@ import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
-  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench
+  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -850,6 +850,33 @@ function GlobalAppStyles() {
           .lg\\:mr-\\[50\\%\\] { margin-right: 50%; }
           .lg\\:sticky { position: sticky; } .lg\\:top-6 { top: 1.5rem; }
         }
+
+        /* Printable reports — hidden everywhere except when actually printing (or "Save as PDF"
+           via the browser's print dialog, which is the same code path). The report content
+           itself lives off-screen normally so it never affects normal layout/scrolling. */
+        .print-report { display: none; }
+        @media print {
+          body * { visibility: hidden; }
+          .print-report, .print-report * { visibility: visible; }
+          .print-report {
+            display: block;
+            position: absolute; left: 0; top: 0; width: 100%;
+            font-family: 'Work Sans', sans-serif; color: #1c1917;
+          }
+          .print-report h1 { font-family: 'Fraunces', serif; font-size: 22px; margin: 0 0 2px 0; }
+          .print-report .print-meta { font-size: 11px; color: #78716c; margin-bottom: 18px; }
+          .print-report h2 {
+            font-size: 13px; text-transform: uppercase; letter-spacing: 0.03em; color: #0f766e;
+            border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; margin: 20px 0 8px 0;
+            break-after: avoid;
+          }
+          .print-report table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 4px; }
+          .print-report th { text-align: left; font-weight: 600; color: #57534e; padding: 4px 8px 4px 0; border-bottom: 1px solid #e7e5e4; }
+          .print-report td { padding: 4px 8px 4px 0; border-bottom: 1px solid #f5f5f4; vertical-align: top; }
+          .print-report .print-empty { font-size: 11px; color: #a8a29e; font-style: italic; margin-bottom: 4px; }
+          .print-report .print-section { break-inside: avoid; }
+          @page { margin: 0.6in; }
+        }
       `}</style>
   );
 }
@@ -921,6 +948,7 @@ export default function App() {
   const [classId, setClassId] = useState(null);
   const [className, setClassName] = useState("");
   const [isAdminSession, setIsAdminSession] = useState(false);
+  const [isSubstituteSession, setIsSubstituteSession] = useState(false);
 
   // Real Firebase sign-in state — now drives the app's main screens (see the routing at the
   // bottom of this component). authChecked exists so we don't flash the sign-in screen for a
@@ -1361,6 +1389,41 @@ export default function App() {
     await saveJSON("schoolClasses", next, true);
   };
 
+  // Substitute access — a separate code from the regular class password, generated on demand and
+  // regenerated/cleared entirely at the teacher's discretion (no auto-expiry). A class with no
+  // subCode set has substitute access turned off.
+  const generateSubCode = async () => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+    const next = reg.map((c) => (c.id === classId ? { ...c, subCode: code } : c));
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
+    return code;
+  };
+
+  const clearSubCode = async () => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const next = reg.map((c) => (c.id === classId ? { ...c, subCode: null } : c));
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
+  };
+
+  const enterSubstituteSession = async (code) => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const match = reg.find((c) => !c.archived && c.subCode && c.subCode.toUpperCase() === code.trim().toUpperCase());
+    if (!match) return { ok: false };
+    setClassId(match.id);
+    setClassName(match.name);
+    setIsSubstituteSession(true);
+    return { ok: true };
+  };
+
+  const exitSubstituteSession = () => {
+    setIsSubstituteSession(false);
+    setClassId(null);
+    setClassName("");
+  };
+
   const archiveClass = async () => {
     const reg = await loadJSON("schoolClasses", [], true);
     const next = reg.map((c) => (c.id === classId ? { ...c, archived: true } : c));
@@ -1565,6 +1628,16 @@ export default function App() {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-teal-700" size={28} /></div>;
   }
 
+  // Substitute session — a separate, code-based entry point that bypasses every other login
+  // path entirely. Checked first since it's a completely independent flow from a real teacher
+  // account, admin session, or the legacy class-password flow.
+  if (isSubstituteSession && classId) {
+    return (
+      <ClassApp classId={classId} className={className} isSubstituteSession
+        onSwitchClass={exitSubstituteSession} switchLabel="Exit substitute mode" />
+    );
+  }
+
   // Signed in with a real account — this is now the primary path.
   if (authUser && !useLegacyFlow) {
     if (!currentTeacher) {
@@ -1595,6 +1668,7 @@ export default function App() {
         <ClassApp classId={classId} className={className}
           onSwitchClass={backToTeacherClassPicker} switchLabel="Admin · Back to dashboard"
           onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
+          subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
           loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} />
       );
     }
@@ -1607,6 +1681,7 @@ export default function App() {
       <ClassApp classId={classId} className={className}
         onSwitchClass={backToTeacherClassPicker} switchLabel="Switch class"
         onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
+        subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
         loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} />
     );
   }
@@ -1615,7 +1690,7 @@ export default function App() {
   // original class-password flow available as an explicit fallback (useful until every
   // teacher has a real account set up, so nobody gets locked out mid-transition).
   if (!useLegacyFlow) {
-    return <TeacherSignInScreen onSignIn={signInTeacher} onUseLegacyFlow={() => setUseLegacyFlow(true)} />;
+    return <TeacherSignInScreen onSignIn={signInTeacher} onUseLegacyFlow={() => setUseLegacyFlow(true)} onEnterSubstitute={enterSubstituteSession} />;
   }
   if (!classId) {
     if (isAdminSession) {
@@ -1633,6 +1708,7 @@ export default function App() {
     <ClassApp classId={classId} className={className}
       onSwitchClass={isAdminSession ? backToAdminDashboard : switchClass}
       switchLabel={isAdminSession ? "Admin \u00b7 Back to dashboard" : "Switch class"}
+      subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
       onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently} />
   );
 }
@@ -2666,11 +2742,14 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   );
 }
 
-function TeacherSignInScreen({ onSignIn, onUseLegacyFlow }) {
+function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [signingIn, setSigningIn] = useState(false);
+  const [showSubEntry, setShowSubEntry] = useState(false);
+  const [subCode, setSubCode] = useState("");
+  const [subError, setSubError] = useState("");
 
   const trySignIn = async () => {
     if (!email.trim() || !password) return;
@@ -2679,6 +2758,12 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow }) {
     const result = await onSignIn(email.trim(), password);
     setSigningIn(false);
     if (!result.ok) setError(result.error);
+  };
+
+  const trySubEntry = async () => {
+    if (!subCode.trim()) return;
+    const result = await onEnterSubstitute(subCode);
+    if (!result.ok) setSubError("That code doesn't match a class. Double-check with the teacher.");
   };
 
   return (
@@ -2708,6 +2793,19 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow }) {
           <button onClick={onUseLegacyFlow} className="w-full text-xs font-semibold text-stone-400 hover:text-teal-700 text-center">
             Use class password instead
           </button>
+          {!showSubEntry ? (
+            <button onClick={() => setShowSubEntry(true)} className="w-full text-xs font-semibold text-stone-400 hover:text-teal-700 text-center mt-2">
+              Enter as a substitute
+            </button>
+          ) : (
+            <div className="mt-3 bg-white border border-stone-200 rounded-xl p-3">
+              <p className="text-xs font-semibold text-stone-700 mb-2">Substitute code</p>
+              <input value={subCode} onChange={(e) => setSubCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySubEntry()}
+                placeholder="Code from the teacher" autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2 uppercase" />
+              {subError && <p className="text-xs text-rose-600 mb-2">{subError}</p>}
+              <button onClick={trySubEntry} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Enter</button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -2847,7 +2945,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName }) {
+function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -2902,6 +3000,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
   const [initialAssessmentStudentId, setInitialAssessmentStudentId] = useState(null); // auto-opens a student's modal in the Assessments grid when navigating in from elsewhere
   const [detailReturnView, setDetailReturnView] = useState("detail"); // fluency-detail/skill-detail are reachable from both StudentDetailView and the Assessments grid modal — this tracks which one "Back" should return to
+  const [reportSections, setReportSections] = useState([]); // which sections were chosen for the current student's print/export report
   const [selectedSkillCat, setSelectedSkillCat] = useState(null);
   const [selectedSkillReportCat, setSelectedSkillReportCat] = useState(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState(null);
@@ -3545,6 +3644,14 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-teal-700" size={28} /></div>;
   }
 
+  if (isSubstituteSession) {
+    return (
+      <SubstituteModeView className={className} roster={roster} studentData={studentData} config={config}
+        plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
+        setAttendance={setAttendance} addIncident={addIncident} onExit={onSwitchClass} />
+    );
+  }
+
   return (
     <ClassContext.Provider value={{ className, onSwitchClass, switchLabel }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Work Sans', sans-serif" }}>
@@ -3727,6 +3834,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onBack={() => setView("home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
           onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")}
           onGoToAssessments={() => { setInitialAssessmentStudentId(currentId); setView("assessments"); }}
+          onExportReport={() => setView("print-report-options")}
           onDraftMessage={openMessageDraft} onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onUpdateField={(field, value) => updateStudentField(currentId, field, value)}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
@@ -3734,6 +3842,18 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onOpenSkillDetail={(catId) => { setDetailReturnView("detail"); setSelectedSkillCat(catId); setView("skill-detail"); }}
           onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setView("incident-detail"); }}
           onFetchCrossClassHistory={fetchCrossClassHistory} currentClassName={className} />
+      )}
+
+      {view === "print-report-options" && currentId && (
+        <PrintReportOptionsView student={roster.find((s) => s.id === currentId)}
+          onBack={() => setView("detail")}
+          onGenerate={(sections) => { setReportSections(sections); setView("print-report"); }} />
+      )}
+
+      {view === "print-report" && currentId && (
+        <PrintableStudentReport student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
+          incidents={incidents} classAssessments={classAssessments} config={config} sections={reportSections}
+          currentClassName={className} onBack={() => setView("print-report-options")} />
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
@@ -3794,6 +3914,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
           loadSampleData={loadSampleData} clearAllData={clearAllData}
           className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
+          subCode={subCode} onGenerateSubCode={onGenerateSubCode} onClearSubCode={onClearSubCode}
           globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent}
           loggedInTeacher={loggedInTeacher} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)} />
       )}
@@ -6072,7 +6193,7 @@ function ContactInfoSection({ student, onUpdateField, onUpdateParentEmail }) {
   );
 }
 
-function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onDraftMessage, onUpdateParentEmail, onUpdateField, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail, onFetchCrossClassHistory, currentClassName }) {
+function StudentDetailView({ student, data, incidents, classAssessments, config, onBack, onAcknowledge, onLogIncident, onLogPeriodAttendance, onGoToAssessments, onExportReport, onDraftMessage, onUpdateParentEmail, onUpdateField, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, onOpenIncidentDetail, onFetchCrossClassHistory, currentClassName }) {
   const [showContact, setShowContact] = useState(false);
   const viewportHeight = useVisualViewportHeight();
   const [showCrossClass, setShowCrossClass] = useState(false);
@@ -6141,6 +6262,9 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
           </button>
           <button onClick={onLogPeriodAttendance} className="flex-1 flex items-center justify-center gap-2 bg-amber-50 text-amber-800 rounded-lg py-2.5 text-sm font-semibold hover:bg-amber-100">
             <Calendar size={16} /> Period attendance
+          </button>
+          <button onClick={onExportReport} className="flex-1 flex items-center justify-center gap-2 bg-stone-100 text-stone-700 rounded-lg py-2.5 text-sm font-semibold hover:bg-stone-200">
+            <Printer size={16} /> Export report
           </button>
         </div>
 
@@ -7597,6 +7721,191 @@ Write a short, clear announcement — 2-4 sentences. Output only the message tex
   return applyMessageDisclaimer(text, config);
 }
 
+const REPORT_SECTIONS = [
+  { id: "attendance", label: "Attendance history" },
+  { id: "homework", label: "Homework log" },
+  { id: "incidents", label: "Incidents" },
+  { id: "skills", label: "Skill assessments" },
+  { id: "classAssessments", label: "Class assessments" },
+  { id: "fluency", label: "Fluency checks" },
+  { id: "contact", label: "Parent & contact info" },
+];
+
+function PrintReportOptionsView({ student, onBack, onGenerate }) {
+  const [selected, setSelected] = useState(REPORT_SECTIONS.map((s) => s.id)); // everything, by default — "a full student report"
+  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const allSelected = selected.length === REPORT_SECTIONS.length;
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Export report</h1>
+      <p className="text-stone-500 text-sm mb-5">{student.name} — pick what to include, or leave everything checked for a full report.</p>
+      <div className="md:w-96">
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-sm font-semibold text-stone-700">Include</label>
+          <button onClick={() => setSelected(allSelected ? [] : REPORT_SECTIONS.map((s) => s.id))} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
+            {allSelected ? "Deselect all" : "Select all"}
+          </button>
+        </div>
+        <div className="space-y-1.5 mb-6">
+          {REPORT_SECTIONS.map((s) => (
+            <button key={s.id} onClick={() => toggle(s.id)}
+              className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left ${selected.includes(s.id) ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+              <span className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center ${selected.includes(s.id) ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
+                {selected.includes(s.id) && <Check size={11} className="text-white" />}
+              </span>
+              <span className={`text-sm font-medium ${selected.includes(s.id) ? "text-teal-800" : "text-stone-600"}`}>{s.label}</span>
+            </button>
+          ))}
+        </div>
+        <button onClick={() => onGenerate(selected)} disabled={selected.length === 0}
+          className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          <Printer size={16} /> Generate report
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PrintableStudentReport({ student, data, incidents, classAssessments, config, sections, currentClassName, onBack }) {
+  useEffect(() => { document.title = `${student.name} — Report`; }, [student.name]); // becomes the suggested filename in most browsers' Save-as-PDF dialog
+
+  const attStatusMap = {}; (config.attendance?.statuses || []).forEach((s) => (attStatusMap[s.id] = s.label));
+  const incCatMap = {}; (config.incidents?.categories || []).forEach((c) => (incCatMap[c.id] = c.label));
+  const myIncidents = (incidents || []).filter((i) => (i.studentIds || []).includes(student.id)).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const activeSkillCats = (config.categories || []).filter((c) => c.active !== false);
+  const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
+  const myClassAssessments = (classAssessments || []).filter((ca) => ca.results && ca.results[student.id] !== undefined);
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <div className="flex items-center gap-2 mb-5">
+        <button onClick={() => window.print()} className="flex items-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800">
+          <Printer size={16} /> Print / Save as PDF
+        </button>
+        <p className="text-xs text-stone-400">Opens your browser's print dialog — choose "Save as PDF" there for a file.</p>
+      </div>
+
+      {/* On-screen preview, roughly matching the printed layout */}
+      <div className="bg-white border border-stone-200 rounded-xl p-6 md:w-[40rem]">
+        <h2 className="display-font text-lg font-bold text-stone-900">{student.name}</h2>
+        <p className="text-xs text-stone-400 mb-4">{currentClassName ? `${currentClassName} · ` : ""}Generated {todayISO()}</p>
+        {sections.map((id) => <p key={id} className="text-xs text-stone-500 mb-1">✓ {REPORT_SECTIONS.find((s) => s.id === id)?.label}</p>)}
+        <p className="text-xs text-stone-400 mt-4">This is a quick preview — click "Print / Save as PDF" above to see the full formatted report.</p>
+      </div>
+
+      {/* The actual print output — invisible on screen, only rendered when printing */}
+      <div className="print-report">
+        <h1>{student.name}</h1>
+        <p className="print-meta">{currentClassName ? `${currentClassName} · ` : ""}Report generated {todayISO()}</p>
+
+        {sections.includes("attendance") && (
+          <div className="print-section">
+            <h2>Attendance history</h2>
+            {(data.attendance || []).length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
+              <table><thead><tr><th>Date</th><th>Status</th><th>Time</th></tr></thead>
+                <tbody>{[...(data.attendance || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).map((a, i) => (
+                  <tr key={i}><td>{a.date}</td><td>{attStatusMap[a.status] || a.status}</td><td>{a.time || ""}</td></tr>
+                ))}</tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {sections.includes("homework") && (
+          <div className="print-section">
+            <h2>Homework log</h2>
+            {(data.homework || []).length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
+              <table><thead><tr><th>Date</th><th>Status</th></tr></thead>
+                <tbody>{[...(data.homework || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).map((h, i) => (
+                  <tr key={i}><td>{h.date}</td><td>{h.status}</td></tr>
+                ))}</tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {sections.includes("incidents") && (
+          <div className="print-section">
+            <h2>Incidents</h2>
+            {myIncidents.length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
+              <table><thead><tr><th>Date</th><th>Category</th><th>Description</th></tr></thead>
+                <tbody>{myIncidents.map((i) => (
+                  <tr key={i.id}><td>{i.date}</td><td>{incCatMap[i.category] || i.category || "Uncategorized"}{i.flaggedForAdmin ? " 🚩" : ""}</td><td>{i.description || ""}</td></tr>
+                ))}</tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {sections.includes("skills") && (
+          <div className="print-section">
+            <h2>Skill assessments</h2>
+            {activeSkillCats.length === 0 ? <p className="print-empty">No skill categories set up.</p> : activeSkillCats.map((cat) => {
+              const rows = (cat.items || []).map((item) => {
+                const entry = data.skills?.[skillKey(cat.id, item.id)];
+                if (!entry || !entry.history || entry.history.length === 0) return null;
+                const { status } = computeSkillStatus(entry.history, cat);
+                return { label: item.label, status, last: entry.history[entry.history.length - 1]?.date || "" };
+              }).filter(Boolean);
+              if (rows.length === 0) return null;
+              return (
+                <div key={cat.id}>
+                  <p style={{ fontWeight: 600, fontSize: "12px", margin: "8px 0 2px 0" }}>{cat.title}</p>
+                  <table><thead><tr><th>Item</th><th>Status</th><th>Last graded</th></tr></thead>
+                    <tbody>{rows.map((r, i) => <tr key={i}><td>{r.label}</td><td>{r.status}</td><td>{r.last}</td></tr>)}</tbody>
+                  </table>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {sections.includes("classAssessments") && (
+          <div className="print-section">
+            <h2>Class assessments</h2>
+            {myClassAssessments.length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
+              <table><thead><tr><th>Date</th><th>Subject</th><th>Assessment</th><th>Result</th><th>Note</th></tr></thead>
+                <tbody>{myClassAssessments.sort((a, b) => (a.date < b.date ? 1 : -1)).map((ca) => (
+                  <tr key={ca.id}><td>{ca.date}</td><td>{subjectLabel(ca.subjectId)}</td><td>{ca.title || ""}</td>
+                    <td>{getResultGrade(ca.results[student.id])}</td><td>{getResultNote(ca.results[student.id]) || ""}</td></tr>
+                ))}</tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {sections.includes("fluency") && (
+          <div className="print-section">
+            <h2>Fluency checks</h2>
+            {(data.fluency || []).length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
+              <table><thead><tr><th>Date</th><th>Detail</th></tr></thead>
+                <tbody>{[...(data.fluency || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).map((f, i) => (
+                  <tr key={i}><td>{f.date}</td><td>{f.summary || f.notes || ""}</td></tr>
+                ))}</tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {sections.includes("contact") && (
+          <div className="print-section">
+            <h2>Parent &amp; contact info</h2>
+            <table><tbody>
+              {student.parent1Name && <tr><td>Parent 1</td><td>{student.parent1Name}{student.parentPhone ? ` · ${student.parentPhone}` : ""}{student.parentEmail ? ` · ${student.parentEmail}` : ""}</td></tr>}
+              {student.parent2Name && <tr><td>Parent 2</td><td>{student.parent2Name}{student.parent2Phone ? ` · ${student.parent2Phone}` : ""}{student.parent2Email ? ` · ${student.parent2Email}` : ""}</td></tr>}
+              {student.homeAddress && <tr><td>Address</td><td>{student.homeAddress}</td></tr>}
+              {!student.parent1Name && !student.parent2Name && !student.homeAddress && <tr><td colSpan={2} className="print-empty">Nothing on file.</td></tr>}
+            </tbody></table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
@@ -8785,6 +9094,105 @@ function FluencyForm({ student, onCancel, onSave }) {
 
 // ---------- Incident form ----------
 
+function SubstituteModeView({ className, roster, studentData, config, plannerDays, plannerEvents, setAttendance, addIncident, onExit }) {
+  const [showIncidentForm, setShowIncidentForm] = useState(false);
+  const today = todayISO();
+  const dayTypeMap = {};
+  (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
+  const entry = plannerDays?.[today] || {};
+  const dayType = entry.dayType ? dayTypeMap[entry.dayType] : null;
+  const template = getScheduleForDate(today, dayType, config, plannerDays);
+  const todaysEvents = (plannerEvents || []).filter((e) => e.date === today);
+  const statuses = config.attendance?.statuses || [];
+
+  const submitIncident = (fields) => { addIncident(fields); setShowIncidentForm(false); };
+
+  return (
+    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Work Sans', sans-serif" }}>
+      <GlobalAppStyles />
+      <div className="max-w-2xl mx-auto px-4 py-6">
+        <div className="flex items-center justify-between mb-1">
+          <h1 className="display-font text-xl font-bold text-stone-900">Substitute Mode</h1>
+          <button onClick={onExit} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-1.5 hover:bg-stone-100">Exit substitute mode</button>
+        </div>
+        <p className="text-xs font-semibold text-amber-700 mb-1">Limited access</p>
+        <p className="text-sm text-stone-500 mb-6">{className}</p>
+
+        {showIncidentForm ? (
+          <div className="bg-white border border-stone-200 rounded-xl mb-6">
+            <IncidentForm roster={roster} config={config} onCancel={() => setShowIncidentForm(false)} onSave={submitIncident} />
+          </div>
+        ) : (
+          <>
+            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
+              <div className="flex items-center justify-between mb-1">
+                <p className="font-semibold text-stone-800 text-sm">Today's plan</p>
+                {dayType && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full bg-${dayType.color}-100 text-${dayType.color}-700`}>{dayType.label}</span>}
+              </div>
+              <p className="text-xs text-stone-400 mb-3">{today}</p>
+
+              {todaysEvents.length > 0 && (
+                <ul className="space-y-1 mb-3">
+                  {todaysEvents.map((e) => (
+                    <li key={e.id} className="text-xs bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 text-amber-800">
+                      <span className="font-semibold">{e.title}</span>{e.time ? ` · ${formatTime12h(e.time)}` : ""}{e.location ? ` · ${e.location}` : ""}
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {!dayType && <p className="text-xs text-stone-400 bg-stone-100 rounded-lg px-3 py-4 text-center">No day type set for today.</p>}
+              {dayType && !template && <p className="text-xs text-stone-400 bg-stone-100 rounded-lg px-3 py-4 text-center">No schedule template set for "{dayType.label}".</p>}
+              {template && template.length > 0 && (
+                <div className="space-y-2">
+                  {template.map((slot) => (
+                    <div key={slot.id} className="border border-stone-200 rounded-lg p-2.5">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-semibold text-stone-700">{slot.label}</span>
+                        <span className="text-[10px] text-stone-400">{slot.startTime}–{slot.endTime}</span>
+                      </div>
+                      <p className="text-xs text-stone-500">{entry.slotContent?.[slot.id] || <span className="text-stone-300">Nothing noted for this period.</span>}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between mb-2">
+              <p className="font-semibold text-stone-800 text-sm">Attendance — {today}</p>
+              <button onClick={() => setShowIncidentForm(true)} className="text-xs font-semibold text-rose-700 flex items-center gap-1">
+                <ClipboardList size={12} /> Log a behavior note
+              </button>
+            </div>
+            {roster.length === 0 && <p className="text-stone-400 text-sm text-center py-8">No students in this class yet.</p>}
+            <ul className="space-y-2">
+              {roster.map((s) => {
+                const todaysAttendance = (studentData[s.id]?.attendance || []).find((a) => a.date === today);
+                return (
+                  <li key={s.id} className="bg-white border border-stone-200 rounded-xl px-3 py-2.5 flex items-center justify-between flex-wrap gap-2">
+                    <span className="text-sm font-medium text-stone-800">{s.name}</span>
+                    <div className="flex gap-1.5 flex-wrap">
+                      {statuses.map((st) => {
+                        const active = todaysAttendance?.status === st.id;
+                        return (
+                          <button key={st.id} onClick={() => setAttendance(s.id, today, st.id)}
+                            className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${active ? `bg-${st.color}-600 text-white border-${st.color}-600` : "text-stone-600 border-stone-300"}`}>
+                            {st.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
   const [category, setCategory] = useState("");
   const [date, setDate] = useState(todayISO());
@@ -9672,7 +10080,7 @@ function OnboardingDoneStep({ config }) {
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onOpenMyAccount, onOpenOnboarding }) {
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onOpenMyAccount, onOpenOnboarding }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -9807,6 +10215,20 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               </div>
               {newPw1 && newPw2 && newPw1 !== newPw2 && <p className="text-xs text-red-500 mb-2">Passwords don't match.</p>}
               {pwSaved && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
+
+              <div className="mt-4 pt-4 border-t border-stone-200">
+                <label className="block text-xs font-medium text-stone-500 mb-1">Substitute access</label>
+                <p className="text-xs text-stone-400 mb-2">A separate code — not your class password — for a substitute to get in for the day with a stripped-down view (today's schedule, roster, attendance, and logging a behavior note only). Stays active until you change it here.</p>
+                {subCode ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-mono font-semibold bg-amber-50 text-amber-800 border border-amber-200 rounded-lg px-3 py-1.5 tracking-wider">{subCode}</span>
+                    <button onClick={onGenerateSubCode} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Generate a new code</button>
+                    <ConfirmDelete onConfirm={onClearSubCode} label="Turn off substitute access" className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50" confirmText="Turn it off?" armedClassName="text-xs font-semibold text-white bg-stone-600 rounded-lg px-3 py-2" />
+                  </div>
+                ) : (
+                  <button onClick={onGenerateSubCode} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Generate a substitute code</button>
+                )}
+              </div>
 
               <div className="mt-4 pt-4 border-t border-stone-200">
                 <p className="text-xs text-stone-400 mb-2">Archiving hides this class from the class picker — nothing is deleted, and an admin can restore it anytime from the Admin Dashboard. Deleting removes it for good.</p>
