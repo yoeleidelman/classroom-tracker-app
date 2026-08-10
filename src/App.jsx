@@ -564,13 +564,13 @@ function scheduleKindForDate(dateStr, plannerDays, dayTypes) {
 
 function computeSkillStatus(history, config) {
   if (!history || history.length === 0) return { status: "new", streak: 0 };
-  const weightOf = (id) => config.gradeOptions.find((o) => o.id === id)?.weight || "neutral";
+  const weightOf = (id) => (config?.gradeOptions || []).find((o) => o.id === id)?.weight || "neutral";
   let i = history.length - 1;
   const lastWeight = weightOf(history[i].result);
   let streak = 0;
   while (i >= 0 && weightOf(history[i].result) === lastWeight) { streak++; i--; }
-  if (lastWeight === "negative" && streak >= config.flagThreshold) return { status: "flagged", streak };
-  if (lastWeight === "positive" && streak >= config.masteryThreshold) return { status: "mastered", streak };
+  if (lastWeight === "negative" && streak >= (config?.flagThreshold ?? Infinity)) return { status: "flagged", streak };
+  if (lastWeight === "positive" && streak >= (config?.masteryThreshold ?? Infinity)) return { status: "mastered", streak };
   return { status: "practicing", streak };
 }
 
@@ -580,7 +580,7 @@ function computeSkillStatus(history, config) {
 // graded that day) — so two different administrations become two comparable points on a line.
 function computeSessionTimeline(data, category, config) {
   const weightScore = (id) => {
-    const w = config.gradeOptions.find((o) => o.id === id)?.weight;
+    const w = (config?.gradeOptions || []).find((o) => o.id === id)?.weight;
     return w === "positive" ? 100 : w === "negative" ? 0 : 50;
   };
   const byDate = {};
@@ -1146,7 +1146,10 @@ function AppInner() {
     for (const cls of allClasses) {
       if (cls.archived) continue;
       const clsEvents = await loadJSON(`class:${cls.id}:plannerEvents`, [], true);
-      clsEvents.filter((e) => e.date === dateStr).forEach((e) => results.events.push({ ...e, sourceClassName: cls.name }));
+      // "siyum" events are auto-created when a teacher schedules a benchmark-completion
+      // celebration for their own class — a personal planning follow-up, not a genuine
+      // school-wide happening, so admin's cross-class overview excludes them.
+      clsEvents.filter((e) => e.date === dateStr && e.category !== "siyum").forEach((e) => results.events.push({ ...e, sourceClassName: cls.name }));
 
       const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
       const relevant = clsIncidents.filter((i) => i.date === dateStr);
@@ -1307,7 +1310,7 @@ function AppInner() {
               (cat.items || []).forEach((item) => {
                 const entry = sd.skills?.[skillKey(cat.id, item.id)];
                 if (!entry || !entry.history || entry.history.length === 0) return;
-                const { status } = computeSkillStatus(entry.history, cat);
+                const { status } = computeSkillStatus(entry.history, { ...cat, gradeOptions: clsConfig.gradeOptions });
                 sheets.Assessments.push({ Student: student.name, Class: cls.name, Category: cat.title, Item: item.label, Status: status, "Last graded": entry.history[entry.history.length - 1]?.date || "" });
               });
             });
@@ -4810,7 +4813,7 @@ function ClassModeView({ roster, studentData, config, addPoints, openIncidentFor
       <div className="flex-1 flex flex-col gap-1.5 p-2 pb-16 overflow-hidden">
         {activeRoster.map((s) => (
           <div key={s.id} className="flex-1 min-h-0 bg-white rounded-xl border border-stone-200 flex items-center justify-between gap-3 px-4 overflow-hidden">
-            <p className={`font-bold text-stone-900 truncate ${nameSize}`}>{s.name}</p>
+            <p className={`font-bold text-stone-900 truncate flex-1 min-w-0 ${nameSize}`}>{s.name}</p>
             {individualPointCats.length > 0 && (
               <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
                 {individualPointCats.map((cat) => {
@@ -7940,7 +7943,7 @@ function PrintableStudentReport({ student, data, incidents, classAssessments, co
               const rows = (cat.items || []).map((item) => {
                 const entry = data.skills?.[skillKey(cat.id, item.id)];
                 if (!entry || !entry.history || entry.history.length === 0) return null;
-                const { status } = computeSkillStatus(entry.history, cat);
+                const { status } = computeSkillStatus(entry.history, { ...cat, gradeOptions: config.gradeOptions });
                 return { label: item.label, status, last: entry.history[entry.history.length - 1]?.date || "" };
               }).filter(Boolean);
               if (rows.length === 0) return null;
@@ -9542,6 +9545,7 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
   useEffect(() => { run(); }, [run]);
 
   const parentEmails = roster.map((s) => s.parentEmail).filter(Boolean);
+  const missingEmail = roster.filter((s) => !s.parentEmail);
   const subject = `${subjectLabel} — ${segmentLabel} complete!`;
 
   return (
@@ -9550,11 +9554,16 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Announce to the class</h1>
       <p className="text-stone-500 text-sm mb-5">{subjectLabel} — {segmentLabel}</p>
       <div className="md:w-[32rem]">
-        <p className="text-xs text-stone-400 mb-3">
+        <p className="text-xs text-stone-400 mb-1">
           {parentEmails.length > 0
-            ? `Goes out to ${parentEmails.length} parent email${parentEmails.length === 1 ? "" : "s"} on file, privately bcc'd — no one sees anyone else's address.`
+            ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
             : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
         </p>
+        {missingEmail.length > 0 && (
+          <p className="text-xs text-amber-700 mb-3">
+            No parent email on file for: {missingEmail.map((s) => s.name).join(", ")} — add it in Settings for them to receive this.
+          </p>
+        )}
         <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
         {loading ? (
           <div className="flex items-center justify-center py-16 bg-white border border-stone-200 rounded-lg mb-4"><Loader2 className="animate-spin text-teal-700" size={22} /></div>
@@ -9598,6 +9607,7 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
   };
 
   const parentEmails = roster.map((s) => s.parentEmail).filter(Boolean);
+  const missingEmail = roster.filter((s) => !s.parentEmail);
 
   return (
     <div className={PAGE}>
@@ -9621,11 +9631,16 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
 
         {draft !== null && !loading && (
           <>
-            <p className="text-xs text-stone-400 mb-3">
+            <p className="text-xs text-stone-400 mb-1">
               {parentEmails.length > 0
-                ? `Goes out to ${parentEmails.length} parent email${parentEmails.length === 1 ? "" : "s"} on file, privately bcc'd — no one sees anyone else's address.`
+                ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
                 : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
             </p>
+            {missingEmail.length > 0 && (
+              <p className="text-xs text-amber-700 mb-3">
+                No parent email on file for: {missingEmail.map((s) => s.name).join(", ")} — add it in Settings for them to receive this.
+              </p>
+            )}
             <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
             <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
             <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
@@ -10958,7 +10973,7 @@ function AdminStudentProfile({ student, profileData, onUpdateStudent, onArchiveS
                               {(cat.items || []).map((item) => {
                                 const entry = cls.skills[skillKey(cat.id, item.id)];
                                 if (!entry || !entry.history || entry.history.length === 0) return null;
-                                const { status } = computeSkillStatus(entry.history, cat);
+                                const { status } = computeSkillStatus(entry.history, { ...cat, gradeOptions: cls.config.gradeOptions });
                                 const statusColor = status === "flagged" ? "text-rose-600" : status === "mastered" ? "text-emerald-600" : "text-stone-500";
                                 return <p key={item.id} className="text-xs text-stone-600">{cat.title} — {item.label}: <span className={`font-semibold ${statusColor}`}>{status}</span></p>;
                               })}
@@ -11093,6 +11108,13 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
   const [copied, setCopied] = useState(false);
   const bccParam = bcc && bcc.length > 0 ? `&bcc=${encodeURIComponent(bcc.join(","))}` : "";
   const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email || "")}${bccParam}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  // Gmail's compose-link BCC field is a real, documented risk once a link gets long — recipients
+  // can silently go missing partway through the list, with no error shown anywhere. That's not
+  // something a URL can be made reliably safe against past a certain size, so past a conservative
+  // length, "Open in Gmail" is hidden entirely rather than risk it quietly dropping names — "Copy
+  // message" has no such limit at all, since it's just plain text pasted into a compose window
+  // the teacher opens themselves.
+  const riskyLength = gmailHref.length > 1800;
 
   const copyToClipboard = async () => {
     try {
@@ -11109,13 +11131,22 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
     : "flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2";
 
   return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <a href={gmailHref} target="_blank" rel="noopener noreferrer" className={`${btnClass} text-white bg-teal-700 hover:bg-teal-800`}>
-        <Mail size={13} /> Open in Gmail
-      </a>
-      <button onClick={copyToClipboard} className={`${btnClass} text-stone-600 border border-stone-300 hover:bg-stone-50`}>
-        <Copy size={13} /> {copied ? "Copied!" : "Copy message"}
-      </button>
+    <div>
+      <div className="flex items-center gap-2 flex-wrap">
+        {!riskyLength && (
+          <a href={gmailHref} target="_blank" rel="noopener noreferrer" className={`${btnClass} text-white bg-teal-700 hover:bg-teal-800`}>
+            <Mail size={13} /> Open in Gmail
+          </a>
+        )}
+        <button onClick={copyToClipboard} className={`${btnClass} text-stone-600 border border-stone-300 hover:bg-stone-50`}>
+          <Copy size={13} /> {copied ? "Copied!" : "Copy message"}
+        </button>
+      </div>
+      {riskyLength && (
+        <p className="text-xs text-amber-700 mt-1.5">
+          This list is long enough that Gmail's own link can silently drop names partway through — that's a real limitation on Gmail's end, not something a link can fully guard against. Use "Copy message" and paste it into Gmail yourself instead; every name will be there.
+        </p>
+      )}
     </div>
   );
 }
