@@ -227,22 +227,6 @@ const WEEKDAY_LABELS_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 const PAGE = "app-page";
 
 function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
-
-// Avatar circles for the student cards — initials from the name, and a color consistently
-// picked per student (by id, not position) so the same student always gets the same color
-// even as the roster is sorted, filtered, or added to.
-function getInitials(name) {
-  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0][0].toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-const AVATAR_COLORS = ["teal", "amber", "rose", "emerald", "indigo", "fuchsia", "sky", "violet"];
-function avatarColorFor(id) {
-  let hash = 0;
-  for (let i = 0; i < (id || "").length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
-}
 // A class-assessment result is stored as either a plain string (the grade, and how every
 // existing assessment already stores it) or, once a note is added, an object of
 // {grade, note} — these two helpers read either shape the same way so nothing needs migrating.
@@ -4363,7 +4347,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 {multiSelect && selectedIds.length > 0 && <span className="text-xs text-stone-400">{selectedIds.length} selected</span>}
               </div>
             )}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <ul className="space-y-2">
               {roster.map((s) => {
                 const entry = (studentData[s.id]?.attendance || []).find((a) => a.date === date);
                 const isLateType = entry?.status && statusMap[entry.status]?.flagType === "late";
@@ -4373,117 +4357,104 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 const showFullPicker = !entry || isExpanded;
                 const studentAttendanceApplies = morningAttendanceApplies(s, date, selectedDayType, config, plannerDays);
                 const homeworkEntry = (studentData[s.id]?.homework || []).find((h) => h.date === date);
-                const initials = getInitials(s.name);
-                const avatarColor = avatarColorFor(s.id);
                 return (
-                  <div key={s.id} className={`bg-white rounded-xl border p-3 ${isSelected ? "border-teal-400 ring-1 ring-teal-200" : "border-stone-200"}`}>
-                    <div className="flex items-start gap-2 mb-3">
+                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 overflow-x-auto no-scrollbar ${isSelected ? "border-teal-400 ring-1 ring-teal-200" : "border-stone-200"}`}>
+                    <div className="flex flex-nowrap items-center gap-x-2 w-max min-w-full">
                       {multiSelect && (
                         <input type="checkbox" checked={isSelected}
                           onChange={() => setSelectedIds((prev) => (isSelected ? prev.filter((id) => id !== s.id) : [...prev, s.id]))}
-                          className="w-4 h-4 mt-2.5 shrink-0" />
+                          className="w-4 h-4 shrink-0" />
                       )}
-                      <span className={`w-9 h-9 rounded-full bg-${avatarColor}-100 text-${avatarColor}-700 flex items-center justify-center font-bold text-sm shrink-0`}>{initials}</span>
-                      <div className="flex-1 min-w-0 pt-0.5">
-                        <button onClick={() => openDetail(s.id)} className="font-semibold text-stone-900 text-sm hover:text-teal-700 text-left block truncate w-full">{s.name}</button>
-                        {flags.length > 0 ? (
-                          <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 text-[10px] font-semibold px-1.5 py-0.5 rounded-full mt-0.5">
-                            <AlertTriangle size={9} /> {flags[0].label}{flags.length > 1 ? ` +${flags.length - 1} more` : ""}
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-stone-400 mt-0.5 block">In good standing</span>
-                        )}
-                      </div>
-                    </div>
-
-                    {!showAttendanceCollapsed && (
-                      <div className="mb-2">
-                        {!attendanceHidden && studentAttendanceApplies && showFullPicker && (
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            {config.attendance.statuses.map((st) => {
-                              const selected = entry?.status === st.id;
-                              return (
-                                <button key={st.id} onClick={() => { setAttendance(s.id, date, st.id); setExpandedAttendance((prev) => prev.filter((id) => id !== s.id)); }}
-                                  className={`text-xs font-semibold px-2.5 py-1 rounded-full border whitespace-nowrap ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : `text-stone-500 border-stone-200`}`}>
-                                  {st.label}
-                                </button>
-                              );
-                            })}
-                            {isLateType && (
-                              <span className="flex items-center gap-1">
-                                <label className="text-xs text-stone-500">at</label>
-                                <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        {!attendanceHidden && studentAttendanceApplies && !showFullPicker && (
-                          <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
-                            className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
-                            {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${formatTime12h(entry.time)}` : ""}
-                          </button>
-                        )}
-                        {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
-                        {!attendanceHidden && !studentAttendanceApplies && (
-                          <span className="text-xs text-stone-400 italic">
-                            {s.enrollmentScope === "part-time" ? "Part time — no morning attendance" : "Not scheduled first period"}
+                      <button onClick={() => openDetail(s.id)} className="font-medium text-stone-800 text-sm hover:text-teal-700 flex items-center gap-1.5 shrink-0 text-left whitespace-nowrap w-36">
+                        <span className="truncate">{s.name}</span>
+                        {flags.length > 0 && (
+                          <span className="flex items-center gap-0.5 text-amber-700 bg-amber-50 text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0">
+                            <AlertTriangle size={10} /> {flags.length}
                           </span>
                         )}
-                      </div>
-                    )}
+                      </button>
 
-                    {homeworkActiveToday && !showHomeworkCollapsed && (
-                      <div className="mb-2">
-                        {homeworkEntry?.status === "n/a" ? (
-                          <span className="text-xs text-stone-400 italic">No homework</span>
-                        ) : homeworkEntry?.status ? (
-                          <button onClick={() => setHomework(s.id, date, homeworkEntry.status === "completed" ? "missed" : "completed")}
-                            className={`text-xs font-semibold px-2.5 py-1 rounded-full ${homeworkEntry.status === "completed" ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"}`}>
-                            {homeworkEntry.status === "completed" ? "✅ Done" : "❌ Missing"}
-                          </button>
-                        ) : (
-                          <div className="flex gap-1">
-                            <button onClick={() => setHomework(s.id, date, "completed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-emerald-300 text-emerald-700 hover:bg-emerald-50">✅ Homework done</button>
-                            <button onClick={() => setHomework(s.id, date, "missed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-rose-300 text-rose-700 hover:bg-rose-50">❌ Missing</button>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                      {!showAttendanceCollapsed && (
+                        <div className="shrink-0 w-72">
+                          {!attendanceHidden && studentAttendanceApplies && showFullPicker && (
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {config.attendance.statuses.map((st) => {
+                                const selected = entry?.status === st.id;
+                                return (
+                                  <button key={st.id} onClick={() => { setAttendance(s.id, date, st.id); setExpandedAttendance((prev) => prev.filter((id) => id !== s.id)); }}
+                                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border whitespace-nowrap ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : `text-stone-500 border-stone-200`}`}>
+                                    {st.label}
+                                  </button>
+                                );
+                              })}
+                              {isLateType && (
+                                <span className="flex items-center gap-1">
+                                  <label className="text-xs text-stone-500">at</label>
+                                  <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {!attendanceHidden && studentAttendanceApplies && !showFullPicker && (
+                            <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
+                              {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${formatTime12h(entry.time)}` : ""}
+                            </button>
+                          )}
+                          {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
+                          {!attendanceHidden && !studentAttendanceApplies && (
+                            <span className="text-xs text-stone-400 italic">
+                              {s.enrollmentScope === "part-time" ? "Part time — no morning attendance" : "Not scheduled first period"}
+                            </span>
+                          )}
+                        </div>
+                      )}
 
-                    {participatesInPoints(s) && individualPointCats.length > 0 && (
-                      <div className="pt-2 border-t border-stone-100 space-y-2">
-                        {individualPointCats.map((cat) => {
-                          if (cat.displayMode === "checkx") {
-                            const checks = studentData[s.id]?.points?.[`${cat.id}:check`] || 0;
-                            const xs = studentData[s.id]?.points?.[`${cat.id}:x`] || 0;
-                            return (
-                              <div key={cat.id} className="flex items-center justify-between">
-                                <span className="text-xs font-semibold text-stone-600">{cat.label}</span>
-                                <div className="flex items-center gap-1.5">
-                                  <button onClick={() => addPoints(s.id, `${cat.id}:check`, 1)} className="flex items-center gap-1 text-sm font-bold text-emerald-700 hover:bg-emerald-50 rounded-full px-2 py-1">{checks} ✓</button>
-                                  <button onClick={() => addPoints(s.id, `${cat.id}:x`, 1)} className="flex items-center gap-1 text-sm font-bold text-rose-700 hover:bg-rose-50 rounded-full px-2 py-1">{xs} ✗</button>
-                                </div>
-                              </div>
-                            );
-                          }
-                          const pts = studentData[s.id]?.points?.[cat.id] || 0;
+                      {homeworkActiveToday && !showHomeworkCollapsed && (
+                        <div className="shrink-0">
+                          {homeworkEntry?.status === "n/a" ? (
+                            <span className="text-xs text-stone-400 italic whitespace-nowrap">No homework</span>
+                          ) : homeworkEntry?.status ? (
+                            <button onClick={() => setHomework(s.id, date, homeworkEntry.status === "completed" ? "missed" : "completed")}
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${homeworkEntry.status === "completed" ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"}`}>
+                              {homeworkEntry.status === "completed" ? "✅ Done" : "❌ Missing"}
+                            </button>
+                          ) : (
+                            <div className="flex gap-1">
+                              <button onClick={() => setHomework(s.id, date, "completed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-emerald-300 text-emerald-700 hover:bg-emerald-50 whitespace-nowrap">✅</button>
+                              <button onClick={() => setHomework(s.id, date, "missed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-rose-300 text-rose-700 hover:bg-rose-50 whitespace-nowrap">❌</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {participatesInPoints(s) && individualPointCats.map((cat) => {
+                        if (cat.displayMode === "checkx") {
+                          const checks = studentData[s.id]?.points?.[`${cat.id}:check`] || 0;
+                          const xs = studentData[s.id]?.points?.[`${cat.id}:x`] || 0;
                           return (
-                            <div key={cat.id} className="flex items-center justify-between">
-                              <span className={`text-xs font-semibold text-${cat.color}-700`}>{cat.label}</span>
-                              <div className="flex items-center gap-2">
-                                <button onClick={() => addPoints(s.id, cat.id, -(cat.increment || 1))} className="w-7 h-7 flex items-center justify-center rounded-full border border-stone-300 text-stone-500 hover:bg-stone-100"><Minus size={13} /></button>
-                                <span className="text-sm font-bold text-stone-800 w-5 text-center">{pts}</span>
-                                <button onClick={() => addPoints(s.id, cat.id, cat.increment || 1)} className={`w-7 h-7 flex items-center justify-center rounded-full bg-${cat.color}-500 text-white hover:opacity-90`}><Plus size={13} /></button>
-                              </div>
+                            <div key={cat.id} className="flex items-center gap-1 bg-stone-50 rounded-full pl-2 pr-1 py-0.5 shrink-0">
+                              <span className="text-[10px] font-semibold text-stone-500 whitespace-nowrap">{cat.label}</span>
+                              <button onClick={() => addPoints(s.id, `${cat.id}:check`, 1)} className="flex items-center gap-0.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100 rounded-full px-1.5">{checks} ✓</button>
+                              <button onClick={() => addPoints(s.id, `${cat.id}:x`, 1)} className="flex items-center gap-0.5 text-xs font-bold text-rose-700 hover:bg-rose-100 rounded-full px-1.5">{xs} ✗</button>
                             </div>
                           );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                        }
+                        const pts = studentData[s.id]?.points?.[cat.id] || 0;
+                        return (
+                          <div key={cat.id} className="flex items-center gap-1 bg-stone-50 rounded-full pl-2 pr-1 py-0.5 shrink-0">
+                            <span className={`text-[10px] font-semibold text-${cat.color}-700 whitespace-nowrap`}>{cat.label}</span>
+                            <span className="text-xs font-bold text-stone-800 w-4 text-center">{pts}</span>
+                            <button onClick={() => addPoints(s.id, cat.id, -(cat.increment || 1))} className="w-5 h-5 flex items-center justify-center rounded-full border border-stone-300 text-stone-500 hover:bg-stone-100"><Minus size={10} /></button>
+                            <button onClick={() => addPoints(s.id, cat.id, cat.increment || 1)} className={`w-5 h-5 flex items-center justify-center rounded-full bg-${cat.color}-500 text-white hover:opacity-90`}><Plus size={10} /></button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
             {multiSelect && selectedIds.length > 0 && (
               <div className="sticky bottom-3 mt-3 bg-white border border-teal-200 shadow-lg rounded-xl p-3 flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold text-stone-700">Award to {selectedIds.length} selected:</span>
