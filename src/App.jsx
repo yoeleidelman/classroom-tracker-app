@@ -25,7 +25,7 @@ import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
-  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer
+  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, Clock, X
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -227,6 +227,22 @@ const WEEKDAY_LABELS_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 const PAGE = "app-page";
 
 function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
+
+// Avatar circles for the student cards — initials from the name, and a color consistently
+// picked per student (by id, not position) so the same student always gets the same color
+// even as the roster is sorted, filtered, or added to.
+function getInitials(name) {
+  const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0][0].toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+const AVATAR_COLORS = ["teal", "amber", "rose", "emerald", "indigo", "fuchsia", "sky", "violet"];
+function avatarColorFor(id) {
+  let hash = 0;
+  for (let i = 0; i < (id || "").length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+}
 // A class-assessment result is stored as either a plain string (the grade, and how every
 // existing assessment already stores it) or, once a note is added, an object of
 // {grade, note} — these two helpers read either shape the same way so nothing needs migrating.
@@ -957,40 +973,49 @@ function GlobalAppStyles() {
 function getFlags(data, studentId, incidents, config) {
   if (!data) return [];
   const flags = [];
-  for (const cat of config.categories) {
-    for (const item of cat.items) {
+  for (const cat of config.categories || []) {
+    for (const item of cat.items || []) {
       const key = skillKey(cat.id, item.id);
-      const skill = data.skills[key];
+      const skill = data.skills?.[key];
       if (skill && skill.status === "flagged") {
         const tier = Math.min(4, skill.flagCount);
-        flags.push({ key: `skill-${key}`, type: "skill", label: `${item.label} (${cat.title})`, tier, message: config.tierMessages[tier] || config.tierMessages[4] });
+        flags.push({ key: `skill-${key}`, type: "skill", label: `${item.label} (${cat.title})`, tier, message: config.tierMessages?.[tier] || config.tierMessages?.[4] || "Flagged" });
       }
     }
   }
   const statusMap = {};
-  config.attendance.statuses.forEach((s) => (statusMap[s.id] = s));
-  const lateCount = (data.attendance || []).filter((a) => statusMap[a.status]?.flagType === "late" && withinWindow(a.date, config.attendance.lateRule.windowDays)).length;
-  if (lateCount >= config.attendance.lateRule.threshold) {
-    const tier = tierFor(lateCount, config.attendance.lateRule.threshold);
-    flags.push({ key: "attendance-late", type: "late", label: `Lateness — ${lateCount} in last ${config.attendance.lateRule.windowDays} days`, tier, message: config.attendance.lateTierMessages[tier] });
+  (config.attendance?.statuses || []).forEach((s) => (statusMap[s.id] = s));
+  const lateRule = config.attendance?.lateRule;
+  if (lateRule) {
+    const lateCount = (data.attendance || []).filter((a) => statusMap[a.status]?.flagType === "late" && withinWindow(a.date, lateRule.windowDays)).length;
+    if (lateCount >= lateRule.threshold) {
+      const tier = tierFor(lateCount, lateRule.threshold);
+      flags.push({ key: "attendance-late", type: "late", label: `Lateness — ${lateCount} in last ${lateRule.windowDays} days`, tier, message: config.attendance.lateTierMessages?.[tier] || "Flagged for lateness" });
+    }
   }
-  const absentCount = (data.attendance || []).filter((a) => statusMap[a.status]?.flagType === "absent" && withinWindow(a.date, config.attendance.absentRule.windowDays)).length;
-  if (absentCount >= config.attendance.absentRule.threshold) {
-    const tier = tierFor(absentCount, config.attendance.absentRule.threshold);
-    flags.push({ key: "attendance-absent", type: "absent", label: `Absences — ${absentCount} in last ${config.attendance.absentRule.windowDays} days`, tier, message: config.attendance.absentTierMessages[tier] });
+  const absentRule = config.attendance?.absentRule;
+  if (absentRule) {
+    const absentCount = (data.attendance || []).filter((a) => statusMap[a.status]?.flagType === "absent" && withinWindow(a.date, absentRule.windowDays)).length;
+    if (absentCount >= absentRule.threshold) {
+      const tier = tierFor(absentCount, absentRule.threshold);
+      flags.push({ key: "attendance-absent", type: "absent", label: `Absences — ${absentCount} in last ${absentRule.windowDays} days`, tier, message: config.attendance.absentTierMessages?.[tier] || "Flagged for absences" });
+    }
   }
   if (config.homework?.enabled) {
     const missedCount = (data.homework || []).filter((h) => h.status === "missed" && withinWindow(h.date, config.homework.windowDays)).length;
     if (missedCount >= config.homework.missedThreshold) {
       const tier = tierFor(missedCount, config.homework.missedThreshold);
-      flags.push({ key: "homework-missed", type: "homework", label: `Missed homework — ${missedCount} in last ${config.homework.windowDays} days`, tier, message: config.homework.missedTierMessages[tier] });
+      flags.push({ key: "homework-missed", type: "homework", label: `Missed homework — ${missedCount} in last ${config.homework.windowDays} days`, tier, message: config.homework.missedTierMessages?.[tier] || "Flagged for missed homework" });
     }
   }
-  const myIncidents = (incidents || []).filter((i) => i.studentIds?.includes(studentId));
-  const incCount = myIncidents.filter((i) => withinWindow(i.date, config.incidents.flagRule.windowDays)).length;
-  if (incCount >= config.incidents.flagRule.threshold) {
-    const tier = tierFor(incCount, config.incidents.flagRule.threshold);
-    flags.push({ key: "incidents", type: "incident", label: `Incidents — ${incCount} in last ${config.incidents.flagRule.windowDays} days`, tier, message: config.incidents.tierMessages[tier] });
+  const flagRule = config.incidents?.flagRule;
+  if (flagRule) {
+    const myIncidents = (incidents || []).filter((i) => i.studentIds?.includes(studentId));
+    const incCount = myIncidents.filter((i) => withinWindow(i.date, flagRule.windowDays)).length;
+    if (incCount >= flagRule.threshold) {
+      const tier = tierFor(incCount, flagRule.threshold);
+      flags.push({ key: "incidents", type: "incident", label: `Incidents — ${incCount} in last ${flagRule.windowDays} days`, tier, message: config.incidents.tierMessages?.[tier] || "Flagged for incidents" });
+    }
   }
   for (const cat of config.points?.categories || []) {
     if (cat.scope !== "individual") continue;
@@ -4077,6 +4102,23 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
 
   const todayStr = todayISO();
 
+  // Today's at-a-glance counts — attendance is looked up per-student for the currently viewed
+  // date, matching the "for" date the rest of this page's attendance section uses. Points has no
+  // per-day breakdown in how it's tracked (each category is a running total, not a dated log), so
+  // this shows the class's current total instead of "given today" specifically.
+  let presentCount = 0, lateCount = 0, absentCount = 0, totalPoints = 0;
+  roster.forEach((s) => {
+    const sd = studentData[s.id];
+    const todaysEntry = (sd?.attendance || []).find((a) => a.date === date);
+    if (todaysEntry) {
+      const st = statusMap[todaysEntry.status];
+      if (todaysEntry.status === "present") presentCount++;
+      else if (st?.flagType === "late") lateCount++;
+      else if (st?.flagType === "absent") absentCount++;
+    }
+    Object.entries(sd?.points || {}).forEach(([, v]) => { if (typeof v === "number") totalPoints += v; });
+  });
+
   const BIRTHDAY_REMINDER_DAYS = 7;
   const upcomingBirthdays = roster
     .filter((s) => s.hebrewBirthdayMonth && s.hebrewBirthdayDay)
@@ -4152,6 +4194,27 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         className="fixed bottom-5 right-5 z-30 flex items-center gap-1.5 bg-rose-600 text-white rounded-full pl-3 pr-4 py-3 shadow-lg hover:bg-rose-700">
         <ClipboardList size={16} /> <span className="text-xs font-semibold">Record incident</span>
       </button>
+
+      {roster.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
+            <span className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"><Check size={16} /></span>
+            <div><p className="text-xl font-bold text-stone-900 leading-none">{presentCount}</p><p className="text-xs text-stone-400 mt-0.5">Present today</p></div>
+          </div>
+          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
+            <span className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0"><Clock size={16} /></span>
+            <div><p className="text-xl font-bold text-stone-900 leading-none">{lateCount}</p><p className="text-xs text-stone-400 mt-0.5">Late</p></div>
+          </div>
+          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
+            <span className="w-8 h-8 rounded-full bg-rose-100 text-rose-700 flex items-center justify-center shrink-0"><X size={16} /></span>
+            <div><p className="text-xl font-bold text-stone-900 leading-none">{absentCount}</p><p className="text-xs text-stone-400 mt-0.5">Absent</p></div>
+          </div>
+          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
+            <span className="w-8 h-8 rounded-full bg-teal-100 text-teal-700 flex items-center justify-center shrink-0"><Star size={16} /></span>
+            <div><p className="text-xl font-bold text-stone-900 leading-none">{totalPoints}</p><p className="text-xs text-stone-400 mt-0.5">Total points</p></div>
+          </div>
+        </div>
+      )}
 
       {alerts.filter((a) => !a.dismissed).length > 0 && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 mb-3">
@@ -4300,7 +4363,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 {multiSelect && selectedIds.length > 0 && <span className="text-xs text-stone-400">{selectedIds.length} selected</span>}
               </div>
             )}
-            <ul className="space-y-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {roster.map((s) => {
                 const entry = (studentData[s.id]?.attendance || []).find((a) => a.date === date);
                 const isLateType = entry?.status && statusMap[entry.status]?.flagType === "late";
@@ -4310,104 +4373,117 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 const showFullPicker = !entry || isExpanded;
                 const studentAttendanceApplies = morningAttendanceApplies(s, date, selectedDayType, config, plannerDays);
                 const homeworkEntry = (studentData[s.id]?.homework || []).find((h) => h.date === date);
+                const initials = getInitials(s.name);
+                const avatarColor = avatarColorFor(s.id);
                 return (
-                  <li key={s.id} className={`bg-white rounded-xl border px-3 py-2 overflow-x-auto no-scrollbar ${isSelected ? "border-teal-400 ring-1 ring-teal-200" : "border-stone-200"}`}>
-                    <div className="flex flex-nowrap items-center gap-x-2 w-max min-w-full">
+                  <div key={s.id} className={`bg-white rounded-xl border p-3 ${isSelected ? "border-teal-400 ring-1 ring-teal-200" : "border-stone-200"}`}>
+                    <div className="flex items-start gap-2 mb-3">
                       {multiSelect && (
                         <input type="checkbox" checked={isSelected}
                           onChange={() => setSelectedIds((prev) => (isSelected ? prev.filter((id) => id !== s.id) : [...prev, s.id]))}
-                          className="w-4 h-4 shrink-0" />
+                          className="w-4 h-4 mt-2.5 shrink-0" />
                       )}
-                      <button onClick={() => openDetail(s.id)} className="font-medium text-stone-800 text-sm hover:text-teal-700 flex items-center gap-1.5 shrink-0 text-left whitespace-nowrap w-36">
-                        <span className="truncate">{s.name}</span>
-                        {flags.length > 0 && (
-                          <span className="flex items-center gap-0.5 text-amber-700 bg-amber-50 text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0">
-                            <AlertTriangle size={10} /> {flags.length}
+                      <span className={`w-9 h-9 rounded-full bg-${avatarColor}-100 text-${avatarColor}-700 flex items-center justify-center font-bold text-sm shrink-0`}>{initials}</span>
+                      <div className="flex-1 min-w-0 pt-0.5">
+                        <button onClick={() => openDetail(s.id)} className="font-semibold text-stone-900 text-sm hover:text-teal-700 text-left block truncate w-full">{s.name}</button>
+                        {flags.length > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 text-[10px] font-semibold px-1.5 py-0.5 rounded-full mt-0.5">
+                            <AlertTriangle size={9} /> {flags[0].label}{flags.length > 1 ? ` +${flags.length - 1} more` : ""}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-stone-400 mt-0.5 block">In good standing</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {!showAttendanceCollapsed && (
+                      <div className="mb-2">
+                        {!attendanceHidden && studentAttendanceApplies && showFullPicker && (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {config.attendance.statuses.map((st) => {
+                              const selected = entry?.status === st.id;
+                              return (
+                                <button key={st.id} onClick={() => { setAttendance(s.id, date, st.id); setExpandedAttendance((prev) => prev.filter((id) => id !== s.id)); }}
+                                  className={`text-xs font-semibold px-2.5 py-1 rounded-full border whitespace-nowrap ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : `text-stone-500 border-stone-200`}`}>
+                                  {st.label}
+                                </button>
+                              );
+                            })}
+                            {isLateType && (
+                              <span className="flex items-center gap-1">
+                                <label className="text-xs text-stone-500">at</label>
+                                <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {!attendanceHidden && studentAttendanceApplies && !showFullPicker && (
+                          <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
+                            className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
+                            {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${formatTime12h(entry.time)}` : ""}
+                          </button>
+                        )}
+                        {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
+                        {!attendanceHidden && !studentAttendanceApplies && (
+                          <span className="text-xs text-stone-400 italic">
+                            {s.enrollmentScope === "part-time" ? "Part time — no morning attendance" : "Not scheduled first period"}
                           </span>
                         )}
-                      </button>
+                      </div>
+                    )}
 
-                      {!showAttendanceCollapsed && (
-                        <div className="shrink-0 w-72">
-                          {!attendanceHidden && studentAttendanceApplies && showFullPicker && (
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              {config.attendance.statuses.map((st) => {
-                                const selected = entry?.status === st.id;
-                                return (
-                                  <button key={st.id} onClick={() => { setAttendance(s.id, date, st.id); setExpandedAttendance((prev) => prev.filter((id) => id !== s.id)); }}
-                                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border whitespace-nowrap ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : `text-stone-500 border-stone-200`}`}>
-                                    {st.label}
-                                  </button>
-                                );
-                              })}
-                              {isLateType && (
-                                <span className="flex items-center gap-1">
-                                  <label className="text-xs text-stone-500">at</label>
-                                  <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
-                                </span>
-                              )}
-                            </div>
-                          )}
-                          {!attendanceHidden && studentAttendanceApplies && !showFullPicker && (
-                            <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
-                              className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
-                              {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${formatTime12h(entry.time)}` : ""}
-                            </button>
-                          )}
-                          {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
-                          {!attendanceHidden && !studentAttendanceApplies && (
-                            <span className="text-xs text-stone-400 italic">
-                              {s.enrollmentScope === "part-time" ? "Part time — no morning attendance" : "Not scheduled first period"}
-                            </span>
-                          )}
-                        </div>
-                      )}
+                    {homeworkActiveToday && !showHomeworkCollapsed && (
+                      <div className="mb-2">
+                        {homeworkEntry?.status === "n/a" ? (
+                          <span className="text-xs text-stone-400 italic">No homework</span>
+                        ) : homeworkEntry?.status ? (
+                          <button onClick={() => setHomework(s.id, date, homeworkEntry.status === "completed" ? "missed" : "completed")}
+                            className={`text-xs font-semibold px-2.5 py-1 rounded-full ${homeworkEntry.status === "completed" ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"}`}>
+                            {homeworkEntry.status === "completed" ? "✅ Done" : "❌ Missing"}
+                          </button>
+                        ) : (
+                          <div className="flex gap-1">
+                            <button onClick={() => setHomework(s.id, date, "completed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-emerald-300 text-emerald-700 hover:bg-emerald-50">✅ Homework done</button>
+                            <button onClick={() => setHomework(s.id, date, "missed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-rose-300 text-rose-700 hover:bg-rose-50">❌ Missing</button>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
-                      {homeworkActiveToday && !showHomeworkCollapsed && (
-                        <div className="shrink-0">
-                          {homeworkEntry?.status === "n/a" ? (
-                            <span className="text-xs text-stone-400 italic whitespace-nowrap">No homework</span>
-                          ) : homeworkEntry?.status ? (
-                            <button onClick={() => setHomework(s.id, date, homeworkEntry.status === "completed" ? "missed" : "completed")}
-                              className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${homeworkEntry.status === "completed" ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"}`}>
-                              {homeworkEntry.status === "completed" ? "✅ Done" : "❌ Missing"}
-                            </button>
-                          ) : (
-                            <div className="flex gap-1">
-                              <button onClick={() => setHomework(s.id, date, "completed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-emerald-300 text-emerald-700 hover:bg-emerald-50 whitespace-nowrap">✅</button>
-                              <button onClick={() => setHomework(s.id, date, "missed")} className="text-xs font-semibold px-2 py-1 rounded-full border border-rose-300 text-rose-700 hover:bg-rose-50 whitespace-nowrap">❌</button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {participatesInPoints(s) && individualPointCats.map((cat) => {
-                        if (cat.displayMode === "checkx") {
-                          const checks = studentData[s.id]?.points?.[`${cat.id}:check`] || 0;
-                          const xs = studentData[s.id]?.points?.[`${cat.id}:x`] || 0;
+                    {participatesInPoints(s) && individualPointCats.length > 0 && (
+                      <div className="pt-2 border-t border-stone-100 space-y-2">
+                        {individualPointCats.map((cat) => {
+                          if (cat.displayMode === "checkx") {
+                            const checks = studentData[s.id]?.points?.[`${cat.id}:check`] || 0;
+                            const xs = studentData[s.id]?.points?.[`${cat.id}:x`] || 0;
+                            return (
+                              <div key={cat.id} className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-stone-600">{cat.label}</span>
+                                <div className="flex items-center gap-1.5">
+                                  <button onClick={() => addPoints(s.id, `${cat.id}:check`, 1)} className="flex items-center gap-1 text-sm font-bold text-emerald-700 hover:bg-emerald-50 rounded-full px-2 py-1">{checks} ✓</button>
+                                  <button onClick={() => addPoints(s.id, `${cat.id}:x`, 1)} className="flex items-center gap-1 text-sm font-bold text-rose-700 hover:bg-rose-50 rounded-full px-2 py-1">{xs} ✗</button>
+                                </div>
+                              </div>
+                            );
+                          }
+                          const pts = studentData[s.id]?.points?.[cat.id] || 0;
                           return (
-                            <div key={cat.id} className="flex items-center gap-1 bg-stone-50 rounded-full pl-2 pr-1 py-0.5 shrink-0">
-                              <span className="text-[10px] font-semibold text-stone-500 whitespace-nowrap">{cat.label}</span>
-                              <button onClick={() => addPoints(s.id, `${cat.id}:check`, 1)} className="flex items-center gap-0.5 text-xs font-bold text-emerald-700 hover:bg-emerald-100 rounded-full px-1.5">{checks} ✓</button>
-                              <button onClick={() => addPoints(s.id, `${cat.id}:x`, 1)} className="flex items-center gap-0.5 text-xs font-bold text-rose-700 hover:bg-rose-100 rounded-full px-1.5">{xs} ✗</button>
+                            <div key={cat.id} className="flex items-center justify-between">
+                              <span className={`text-xs font-semibold text-${cat.color}-700`}>{cat.label}</span>
+                              <div className="flex items-center gap-2">
+                                <button onClick={() => addPoints(s.id, cat.id, -(cat.increment || 1))} className="w-7 h-7 flex items-center justify-center rounded-full border border-stone-300 text-stone-500 hover:bg-stone-100"><Minus size={13} /></button>
+                                <span className="text-sm font-bold text-stone-800 w-5 text-center">{pts}</span>
+                                <button onClick={() => addPoints(s.id, cat.id, cat.increment || 1)} className={`w-7 h-7 flex items-center justify-center rounded-full bg-${cat.color}-500 text-white hover:opacity-90`}><Plus size={13} /></button>
+                              </div>
                             </div>
                           );
-                        }
-                        const pts = studentData[s.id]?.points?.[cat.id] || 0;
-                        return (
-                          <div key={cat.id} className="flex items-center gap-1 bg-stone-50 rounded-full pl-2 pr-1 py-0.5 shrink-0">
-                            <span className={`text-[10px] font-semibold text-${cat.color}-700 whitespace-nowrap`}>{cat.label}</span>
-                            <span className="text-xs font-bold text-stone-800 w-4 text-center">{pts}</span>
-                            <button onClick={() => addPoints(s.id, cat.id, -(cat.increment || 1))} className="w-5 h-5 flex items-center justify-center rounded-full border border-stone-300 text-stone-500 hover:bg-stone-100"><Minus size={10} /></button>
-                            <button onClick={() => addPoints(s.id, cat.id, cat.increment || 1)} className={`w-5 h-5 flex items-center justify-center rounded-full bg-${cat.color}-500 text-white hover:opacity-90`}><Plus size={10} /></button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </li>
+                        })}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
-            </ul>
+            </div>
             {multiSelect && selectedIds.length > 0 && (
               <div className="sticky bottom-3 mt-3 bg-white border border-teal-200 shadow-lg rounded-xl p-3 flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold text-stone-700">Award to {selectedIds.length} selected:</span>
