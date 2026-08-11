@@ -25,7 +25,7 @@ import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
-  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, Clock, X
+  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -273,19 +273,35 @@ function buildStyleInstructions(config, teacherName) {
 // classroom system — not a spontaneous personal message — and understand other parents likely
 // received something similar. Applied in code after generation, not left to the AI, since it
 // needs to be exact and consistent every time.
-function applyMessageDisclaimer(draftText, config, schoolLabel) {
+// Converts plain a-z/A-Z letters to their Unicode "Mathematical Italic" equivalents — visually
+// italic in any plain-text context (Gmail's compose link, WhatsApp, anywhere), since these are
+// genuinely different characters rather than a formatting instruction that a plain-text channel
+// could silently drop. Unicode has one gap in this block (lowercase h uses the pre-existing Planck
+// constant character by convention) which is handled as a special case below.
+function toItalicUnicode(str) {
+  return (str || "").replace(/[a-zA-Z]/g, (ch) => {
+    if (ch === "h") return "\u210E";
+    const isUpper = ch >= "A" && ch <= "Z";
+    const base = isUpper ? 0x1D434 : 0x1D44E;
+    return String.fromCodePoint(base + (ch.toLowerCase().charCodeAt(0) - 97));
+  });
+}
+
+function applyMessageDisclaimer(draftText, config, schoolLabel, teacherSignOff) {
   const style = config.messageStyle || {};
   if (style.showDisclaimer === false) return draftText;
   const term = (style.schoolTerm || "school").trim() || "school";
   const label = schoolLabel || `Sent via your child's ${term} classroom system`;
-  const note = `— ${label}, an automated update. No reply needed unless you have a question. —`;
+  const noteText = (teacherSignOff || "").trim() || `— ${label}, an automated update. No reply needed unless you have a question. —`;
+  const note = toItalicUnicode(noteText);
   return style.disclaimerPosition === "top" ? `${note}\n\n${draftText}` : `${draftText}\n\n${note}`;
 }
 
 // Lets a teacher see exactly what their current style settings actually sound like — using
 // clearly-fake sample data — without needing to log a real incident or wait for a real event
 // to test it. Purely a preview: nothing here is saved or sent anywhere.
-async function generatePreviewMessage(config, teacherName) {
+async function generatePreviewMessage(config, teacher) {
+  const teacherName = teacher?.name;
   const prompt = `${buildStyleInstructions(config, teacherName)}
 
 This is a PREVIEW using made-up sample data, just to demonstrate the writing style — not a real student or a real situation.
@@ -301,7 +317,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 function uid() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
@@ -1116,6 +1132,12 @@ function AppInner() {
     setCurrentTeacher((prev) => ({ ...prev, name: newName }));
   };
 
+  const changeMySignOff = async (newSignOff) => {
+    if (!currentTeacher) return;
+    await updateTeacherRecord(currentTeacher.uid, { messageSignOff: newSignOff });
+    setCurrentTeacher((prev) => ({ ...prev, messageSignOff: newSignOff }));
+  };
+
   const enterAssignedClass = (cls) => { setClassId(cls.id); setClassName(cls.name); };
 
   const signOutStaff = async () => {
@@ -1739,7 +1761,7 @@ function AppInner() {
     if (currentTeacher.role === "admin") {
       if (!classId) {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
-          currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName}
+          currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
           globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
@@ -1752,7 +1774,7 @@ function AppInner() {
           onSwitchClass={backToTeacherClassPicker} switchLabel="Admin · Back to dashboard"
           onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
           subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
-          loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} />
+          loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff} />
       );
     }
     // Real teacher — only ever sees classes they're actually assigned to.
@@ -1765,7 +1787,7 @@ function AppInner() {
         onSwitchClass={backToTeacherClassPicker} switchLabel="Switch class"
         onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
         subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
-        loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} />
+        loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff} />
     );
   }
 
@@ -2220,7 +2242,7 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -2819,7 +2841,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       )}
 
       {showMyAccount && currentTeacher && (
-        <MyAccountPanel teacher={currentTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
+        <MyAccountPanel teacher={currentTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onUpdateSignOff={onChangeMySignOff} onClose={() => setShowMyAccount(false)} />
       )}
     </div>
   );
@@ -3028,7 +3050,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode }) {
+function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -3824,6 +3846,11 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
         <ClassAnnouncementView roster={roster} config={config} loggedInTeacher={loggedInTeacher} onBack={() => setView("communication")} />
       )}
 
+      {view === "student-message-generator" && (
+        <StudentMessageGeneratorView roster={roster} config={config} loggedInTeacher={loggedInTeacher} onBack={() => setView("communication")}
+          onLogSent={(studentId, entry) => addCommunication(studentId, entry)} />
+      )}
+
       {view === "monthly-reports" && (
         <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
           onBack={() => setView("home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
@@ -4007,7 +4034,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
       )}
 
       {showMyAccount && loggedInTeacher && (
-        <MyAccountPanel teacher={loggedInTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
+        <MyAccountPanel teacher={loggedInTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onUpdateSignOff={onChangeMySignOff} onClose={() => setShowMyAccount(false)} />
       )}
 
       {showOnboarding && (
@@ -4086,23 +4113,6 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
 
   const todayStr = todayISO();
 
-  // Today's at-a-glance counts — attendance is looked up per-student for the currently viewed
-  // date, matching the "for" date the rest of this page's attendance section uses. Points has no
-  // per-day breakdown in how it's tracked (each category is a running total, not a dated log), so
-  // this shows the class's current total instead of "given today" specifically.
-  let presentCount = 0, lateCount = 0, absentCount = 0, totalPoints = 0;
-  roster.forEach((s) => {
-    const sd = studentData[s.id];
-    const todaysEntry = (sd?.attendance || []).find((a) => a.date === date);
-    if (todaysEntry) {
-      const st = statusMap[todaysEntry.status];
-      if (todaysEntry.status === "present") presentCount++;
-      else if (st?.flagType === "late") lateCount++;
-      else if (st?.flagType === "absent") absentCount++;
-    }
-    Object.entries(sd?.points || {}).forEach(([, v]) => { if (typeof v === "number") totalPoints += v; });
-  });
-
   const BIRTHDAY_REMINDER_DAYS = 7;
   const upcomingBirthdays = roster
     .filter((s) => s.hebrewBirthdayMonth && s.hebrewBirthdayDay)
@@ -4178,27 +4188,6 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         className="fixed bottom-5 right-5 z-30 flex items-center gap-1.5 bg-rose-600 text-white rounded-full pl-3 pr-4 py-3 shadow-lg hover:bg-rose-700">
         <ClipboardList size={16} /> <span className="text-xs font-semibold">Record incident</span>
       </button>
-
-      {roster.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
-            <span className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"><Check size={16} /></span>
-            <div><p className="text-xl font-bold text-stone-900 leading-none">{presentCount}</p><p className="text-xs text-stone-400 mt-0.5">Present today</p></div>
-          </div>
-          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
-            <span className="w-8 h-8 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0"><Clock size={16} /></span>
-            <div><p className="text-xl font-bold text-stone-900 leading-none">{lateCount}</p><p className="text-xs text-stone-400 mt-0.5">Late</p></div>
-          </div>
-          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
-            <span className="w-8 h-8 rounded-full bg-rose-100 text-rose-700 flex items-center justify-center shrink-0"><X size={16} /></span>
-            <div><p className="text-xl font-bold text-stone-900 leading-none">{absentCount}</p><p className="text-xs text-stone-400 mt-0.5">Absent</p></div>
-          </div>
-          <div className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center gap-3">
-            <span className="w-8 h-8 rounded-full bg-teal-100 text-teal-700 flex items-center justify-center shrink-0"><Star size={16} /></span>
-            <div><p className="text-xl font-bold text-stone-900 leading-none">{totalPoints}</p><p className="text-xs text-stone-400 mt-0.5">Total points</p></div>
-          </div>
-        </div>
-      )}
 
       {alerts.filter((a) => !a.dismissed).length > 0 && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 mb-3">
@@ -6806,6 +6795,9 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
       <button onClick={() => navigate("class-announcement")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
         <Mail size={16} /> Message the whole class
       </button>
+      <button onClick={() => navigate("student-message-generator")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+        <MessageCircle size={16} /> Generate a parent message
+      </button>
 
       <div className="flex flex-col md:flex-row gap-2 mb-5">
         <button onClick={() => navigate("monthly-reports")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
@@ -7105,7 +7097,8 @@ function factsToPlainText(student, label, facts) {
   return lines.join("\n").trim();
 }
 
-async function generateHybridReport(student, label, facts, config, teacherName) {
+async function generateHybridReport(student, label, facts, config, teacher) {
+  const teacherName = teacher?.name;
   const sections = [];
   if (facts.attendanceLines) sections.push(`ATTENDANCE (${label}):\n${facts.attendanceLines.map((l) => `- ${l}`).join("\n")}`);
   if (facts.incidentLines) sections.push(`INCIDENTS (${label}):\n${facts.incidentLines.map((l) => `- ${l}`).join("\n")}`);
@@ -7152,7 +7145,7 @@ Write 2-3 short paragraphs weaving the exact figures above into natural sentence
     console.error(`[generateHybridReport] Empty text in successful response for ${student.name}. Raw response:`, JSON.stringify(data));
     console.error("[generateHybridReport] full prompt that produced an empty response:", prompt);
   }
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
@@ -7172,7 +7165,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
     const facts = buildMonthlyFacts(student, data, incidents, classAssessments, config, year, monthIdx, opts);
     const dataUsed = factsToPlainText(student, label, facts);
     try {
-      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher?.name);
+      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
     } catch (err) {
       console.error("Monthly report generation failed:", err);
@@ -7238,8 +7231,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
                   {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <MailActionButtons email={r.email} subject={`Monthly report — ${label}`} body={r.draft} size="small" />
-                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
+                    <ParentSendActions student={s} subject={`Monthly report — ${label}`} body={r.draft} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -7273,7 +7265,7 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
     const facts = buildRangeFacts(student, data, incidents, classAssessments, config, startDate, endDate, opts);
     const dataUsed = factsToPlainText(student, label, facts);
     try {
-      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher?.name);
+      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
     } catch (err) {
       console.error("Custom date range report generation failed:", err);
@@ -7341,8 +7333,7 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
                   {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <MailActionButtons email={r.email} subject={`Report — ${label}`} body={r.draft} size="small" />
-                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
+                    <ParentSendActions student={s} subject={`Report — ${label}`} body={r.draft} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -7361,7 +7352,8 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
 
 // ---------- Per-assessment reports (one-off, tied to a single class assessment) ----------
 
-async function generateAssessmentReport(student, assessment, grade, config, teacherName) {
+async function generateAssessmentReport(student, assessment, grade, config, teacher) {
+  const teacherName = teacher?.name;
   const subjLabel = (config?.subjects || []).find((s) => s.id === assessment.subjectId)?.label;
   const assessmentLabel = subjLabel && assessment.title ? `${subjLabel} — ${assessment.title}` : subjLabel || assessment.title || "Untitled assessment";
   const prompt = `${buildStyleInstructions(config, teacherName)}
@@ -7385,7 +7377,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
@@ -7398,7 +7390,7 @@ function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onB
     const grade = assessment.results[student.id];
     setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
     try {
-      const text = await generateAssessmentReport(student, assessment, grade, config, loggedInTeacher?.name);
+      const text = await generateAssessmentReport(student, assessment, grade, config, loggedInTeacher);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, email: student.parentEmail || "", logged: false } }));
     } catch {
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: `${assessmentLabel} (${assessment.date}): ${grade}`, email: student.parentEmail || "", logged: false } }));
@@ -7443,8 +7435,7 @@ function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onB
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <MailActionButtons email={r.email} subject={`${assessmentLabel} — Report`} body={r.draft} size="small" />
-                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
+                    <ParentSendActions student={s} subject={`${assessmentLabel} — Report`} body={r.draft} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -7485,7 +7476,7 @@ function SkillCategoryReportView({ category, roster, studentData, config, logged
     const { summaryLines } = summaryFor(student);
     setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
     try {
-      const text = await generateSkillReport(student, category, summaryLines, config, loggedInTeacher?.name);
+      const text = await generateSkillReport(student, category, summaryLines, config, loggedInTeacher);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, email: student.parentEmail || "", logged: false } }));
     } catch {
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: `Could not generate — write manually.`, email: student.parentEmail || "", logged: false } }));
@@ -7542,8 +7533,7 @@ function SkillCategoryReportView({ category, roster, studentData, config, logged
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <MailActionButtons email={r.email} subject={`${category.title} — Progress note`} body={r.draft} size="small" />
-                    <WhatsAppButton phone={s.parentPhone} message={r.draft} className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700" />
+                    <ParentSendActions student={s} subject={`${category.title} — Progress note`} body={r.draft} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -7561,7 +7551,8 @@ function SkillCategoryReportView({ category, roster, studentData, config, logged
 
 // ---------- Fluency & Skill detail (clickable, with report generation) ----------
 
-async function generateFluencyReport(student, entry, config, teacherName) {
+async function generateFluencyReport(student, entry, config, teacher) {
+  const teacherName = teacher?.name;
   const prompt = `${buildStyleInstructions(config, teacherName)}
 
 This one is about one specific reading fluency check.
@@ -7584,7 +7575,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
@@ -7592,10 +7583,12 @@ function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, on
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(student?.parentEmail || "");
   const [logged, setLogged] = useState(false);
+  const hasP2 = Boolean(student?.parent2Email || student?.parent2Phone);
+  const [recipientMode, setRecipientMode] = useState("p1");
 
   const generate = async () => {
     setLoading(true);
-    try { setDraft(await generateFluencyReport(student, entry, config, loggedInTeacher?.name)); }
+    try { setDraft(await generateFluencyReport(student, entry, config, loggedInTeacher)); }
     catch { setDraft("Could not generate — write manually."); }
     finally { setLoading(false); }
   };
@@ -7604,6 +7597,15 @@ function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, on
     onLogSent({ date: todayISO(), channel: "email", type: "automated", source: "fluency-report", subject: `Fluency check — ${entry.date}`, body: draft });
     setLogged(true);
   };
+
+  const sendEmails = [
+    (recipientMode === "p1" || recipientMode === "both") && email,
+    (recipientMode === "p2" || recipientMode === "both") && student?.parent2Email,
+  ].filter(Boolean).join(", ");
+  const sendPhones = [
+    (recipientMode === "p1" || recipientMode === "both") && student?.parentPhone && { phone: student.parentPhone, label: student?.parent1Name || "Parent 1" },
+    (recipientMode === "p2" || recipientMode === "both") && student?.parent2Phone && { phone: student.parent2Phone, label: student?.parent2Name || "Parent 2" },
+  ].filter(Boolean);
 
   return (
     <div className={PAGE}>
@@ -7629,14 +7631,27 @@ function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, on
           <label className="block text-xs font-medium text-stone-500 mb-1">Parent email</label>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onBlur={() => onUpdateParentEmail(email)}
             placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+          {hasP2 && (
+            <>
+              <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+              <div className="flex gap-1.5 mb-3">
+                {[["p1", student?.parent1Name || "Parent 1"], ["p2", student?.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+                  <button key={val} onClick={() => setRecipientMode(val)}
+                    className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <div className="flex items-start gap-1.5 mb-3">
             <textarea value={draft} onChange={(e) => { setDraft(e.target.value); setLogged(false); }} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
             <MicButton onResult={(spoken) => { setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken)); setLogged(false); }} />
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
-            <MailActionButtons email={email} subject={`Fluency check — ${entry.date}`} body={draft} />
-            <WhatsAppButton phone={student?.parentPhone} message={draft} />
+            {sendEmails && <MailActionButtons email={sendEmails} subject={`Fluency check — ${entry.date}`} body={draft} />}
+            {sendPhones.map((p) => <WhatsAppButton key={p.phone} phone={p.phone} message={draft} />)}
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -7647,7 +7662,8 @@ function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, on
   );
 }
 
-async function generateSkillReport(student, category, summaryLines, config, teacherName) {
+async function generateSkillReport(student, category, summaryLines, config, teacher) {
+  const teacherName = teacher?.name;
   const prompt = `${buildStyleInstructions(config, teacherName)}
 
 This one is about a specific skill area.
@@ -7668,7 +7684,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 function GrowthChart({ timeline, color }) {
@@ -7696,6 +7712,8 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(student?.parentEmail || "");
   const [logged, setLogged] = useState(false);
+  const hasP2 = Boolean(student?.parent2Email || student?.parent2Phone);
+  const [recipientMode, setRecipientMode] = useState("p1");
 
   const gradeLabel = {};
   (config.gradeOptions || []).forEach((g) => (gradeLabel[g.id] = g.label));
@@ -7713,7 +7731,7 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
 
   const generate = async () => {
     setLoading(true);
-    try { setDraft(await generateSkillReport(student, category, summaryLines, config, loggedInTeacher?.name)); }
+    try { setDraft(await generateSkillReport(student, category, summaryLines, config, loggedInTeacher)); }
     catch { setDraft("Could not generate — write manually."); }
     finally { setLoading(false); }
   };
@@ -7722,6 +7740,15 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
     onLogSent({ date: todayISO(), channel: "email", type: "automated", source: "skill-report", subject: `${category.title} — Progress note`, body: draft });
     setLogged(true);
   };
+
+  const sendEmails = [
+    (recipientMode === "p1" || recipientMode === "both") && email,
+    (recipientMode === "p2" || recipientMode === "both") && student?.parent2Email,
+  ].filter(Boolean).join(", ");
+  const sendPhones = [
+    (recipientMode === "p1" || recipientMode === "both") && student?.parentPhone && { phone: student.parentPhone, label: student?.parent1Name || "Parent 1" },
+    (recipientMode === "p2" || recipientMode === "both") && student?.parent2Phone && { phone: student.parent2Phone, label: student?.parent2Name || "Parent 2" },
+  ].filter(Boolean);
 
   return (
     <div className={PAGE}>
@@ -7748,14 +7775,27 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
           <label className="block text-xs font-medium text-stone-500 mb-1">Parent email</label>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onBlur={() => onUpdateParentEmail(email)}
             placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+          {hasP2 && (
+            <>
+              <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+              <div className="flex gap-1.5 mb-3">
+                {[["p1", student?.parent1Name || "Parent 1"], ["p2", student?.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+                  <button key={val} onClick={() => setRecipientMode(val)}
+                    className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <div className="flex items-start gap-1.5 mb-3">
             <textarea value={draft} onChange={(e) => { setDraft(e.target.value); setLogged(false); }} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
             <MicButton onResult={(spoken) => { setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken)); setLogged(false); }} />
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
-            <MailActionButtons email={email} subject={`${category.title} — Progress note`} body={draft} />
-            <WhatsAppButton phone={student?.parentPhone} message={draft} />
+            {sendEmails && <MailActionButtons email={sendEmails} subject={`${category.title} — Progress note`} body={draft} />}
+            {sendPhones.map((p) => <WhatsAppButton key={p.phone} phone={p.phone} message={draft} />)}
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -7768,7 +7808,8 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
 
 // ---------- Incident detail (named students, per-student message drafting) ----------
 
-async function generateIncidentMessage(student, incident, categoryLabel, othersInvolved, config, teacherName) {
+async function generateIncidentMessage(student, incident, categoryLabel, othersInvolved, config, teacher) {
+  const teacherName = teacher?.name;
   const prompt = `${buildStyleInstructions(config, teacherName)}
 
 This one is about a specific classroom incident — keep it non-alarming regardless of tone.
@@ -7791,12 +7832,13 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 // A class-wide announcement — not addressed to one student's parent, but to every parent in the
 // class at once — for celebrating a benchmark segment the whole class just finished together.
-async function generateSegmentCelebrationMessage(subjectLabel, segmentLabel, config, teacherName) {
+async function generateSegmentCelebrationMessage(subjectLabel, segmentLabel, config, teacher) {
+  const teacherName = teacher?.name;
   const prompt = `${buildStyleInstructions(config, teacherName)}
 
 This one is a class-wide announcement to every parent at once, not about one specific student — the whole class just finished something together.
@@ -7816,7 +7858,7 @@ Write 2-3 sentences announcing this accomplishment to the class's families. Outp
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 // A general-purpose class-wide announcement — the teacher gives a rough topic in their own
@@ -7824,7 +7866,8 @@ Write 2-3 sentences announcing this accomplishment to the class's families. Outp
 // pushes toward a more formal register than buildStyleInstructions' usual tone setting, since a
 // broadcast announcement to the whole class reads differently than a warm note about one child —
 // while still keeping the class's school-term wording and sign-off consistent with everything else.
-async function generateClassAnnouncementMessage(topic, config, teacherName) {
+async function generateClassAnnouncementMessage(topic, config, teacher) {
+  const teacherName = teacher?.name;
   const prompt = `${buildStyleInstructions(config, teacherName)}
 
 This one is a class-wide announcement going out to every parent at once — not about any one student. Regardless of the tone described above, write this specific message in a formal, official register appropriate for a broadcast notice — clear, businesslike, no casual phrasing — since this is what parents expect from an official class-wide notice.
@@ -7843,7 +7886,32 @@ Write a short, clear announcement — 2-4 sentences. Output only the message tex
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+}
+
+async function generateStudentTopicMessage(topic, studentNames, config, teacher) {
+  const teacherName = teacher?.name;
+  const who = studentNames.length === 1 ? studentNames[0] : `${studentNames.slice(0, -1).join(", ")} and ${studentNames[studentNames.length - 1]}`;
+  const prompt = `${buildStyleInstructions(config, teacherName)}
+
+This is a message to the parent(s) of ${studentNames.length === 1 ? "one specific student" : "specific students (siblings or otherwise grouped together)"}: ${who}. The teacher is starting from a rough topic, not a specific logged event like an incident or assessment — write it as a genuine personal note to this family.
+
+STRICT RULES:
+- Use ONLY the information given below. Do not invent specifics that weren't stated.
+- If the topic is vague or missing a detail, write around it naturally rather than inventing one.
+- Do not fabricate any events, dates, or details about the student(s) beyond what the teacher wrote.
+
+What this is about, in the teacher's own words: ${topic}
+
+Write a short, warm, clear message — 2-4 sentences. Output only the message text, nothing else.`;
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+  });
+  const data = await response.json();
+  const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 const REPORT_SECTIONS = [
@@ -8052,6 +8120,7 @@ function PrintableStudentReport({ student, data, incidents, classAssessments, co
 function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
+  const [recipientModes, setRecipientModes] = useState({}); // studentId -> "p1" | "p2" | "both"
   const [editing, setEditing] = useState(false);
   const [editCategory, setEditCategory] = useState(incident?.category || "");
   const [editDescription, setEditDescription] = useState(incident?.description || "");
@@ -8073,7 +8142,7 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
   const generateFor = async (student) => {
     setDrafts((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
     try {
-      const text = await generateIncidentMessage(student, incident, cat?.label || incident.category || "Uncategorized", involvedStudents.length - 1, config, loggedInTeacher?.name);
+      const text = await generateIncidentMessage(student, incident, cat?.label || incident.category || "Uncategorized", involvedStudents.length - 1, config, loggedInTeacher);
       setDrafts((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, email: student.parentEmail || "", logged: false } }));
     } catch {
       setDrafts((prev) => ({ ...prev, [student.id]: { loading: false, draft: "Could not generate — write manually.", email: student.parentEmail || "", logged: false } }));
@@ -8166,6 +8235,19 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
                     <input type="email" value={d.email} onChange={(e) => setDrafts((prev) => ({ ...prev, [s.id]: { ...prev[s.id], email: e.target.value } }))}
                       onBlur={(e) => onUpdateParentEmail(s.id, e.target.value)} placeholder="parent@example.com"
                       className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-2" />
+                    {Boolean(s.parent2Email || s.parent2Phone) && (
+                      <div className="flex gap-1 mb-2">
+                        {[["p1", s.parent1Name || "Parent 1"], ["p2", s.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => {
+                          const active = (recipientModes[s.id] || "p1") === val;
+                          return (
+                            <button key={val} onClick={() => setRecipientModes((prev) => ({ ...prev, [s.id]: val }))}
+                              className={`text-[10px] font-semibold px-2 py-1 rounded-full border ${active ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                     <div className="flex items-start gap-1.5 mb-2">
                       <textarea value={d.draft} onChange={(e) => setDrafts((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: e.target.value, logged: false } }))}
                         rows={4} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
@@ -8173,8 +8255,25 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       <button onClick={() => generateFor(s)} className="flex items-center gap-1 text-[10px] font-semibold text-stone-600 border border-stone-300 rounded-lg px-2 py-1 hover:bg-stone-50"><RefreshCw size={11} /> Regenerate</button>
-                      <MailActionButtons email={d.email} subject={`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`} body={d.draft} size="small" />
-                      <WhatsAppButton phone={s.parentPhone} message={d.draft} className="flex items-center gap-1 text-[10px] font-semibold text-white bg-emerald-600 rounded-lg px-2 py-1 hover:bg-emerald-700" />
+                      {(() => {
+                        const mode = recipientModes[s.id] || "p1";
+                        const sendEmails = [
+                          (mode === "p1" || mode === "both") && d.email,
+                          (mode === "p2" || mode === "both") && s.parent2Email,
+                        ].filter(Boolean).join(", ");
+                        const sendPhones = [
+                          (mode === "p1" || mode === "both") && s.parentPhone && { phone: s.parentPhone, label: s.parent1Name || "Parent 1" },
+                          (mode === "p2" || mode === "both") && s.parent2Phone && { phone: s.parent2Phone, label: s.parent2Name || "Parent 2" },
+                        ].filter(Boolean);
+                        return (
+                          <>
+                            {sendEmails && <MailActionButtons email={sendEmails} subject={`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`} body={d.draft} size="small" />}
+                            {sendPhones.map((p) => (
+                              <WhatsAppButton key={p.phone} phone={p.phone} message={d.draft} className="flex items-center gap-1 text-[10px] font-semibold text-white bg-emerald-600 rounded-lg px-2 py-1 hover:bg-emerald-700" />
+                            ))}
+                          </>
+                        );
+                      })()}
                       <button onClick={() => logSent(s)} disabled={d.logged}
                         className={`flex items-center gap-1 text-[10px] font-semibold rounded-lg px-2 py-1 ${d.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                         {d.logged ? "Logged as sent" : "Log as sent"}
@@ -9499,7 +9598,8 @@ function PeriodAttendanceForm({ roster, config, presetId, todaysPeriods, onCance
 
 // ---------- Message draft (AI-generated, never auto-sent) ----------
 
-async function generateMessage(student, flag, config, teacherName) {
+async function generateMessage(student, flag, config, teacher) {
+  const teacherName = teacher?.name;
   const prompt = `${buildStyleInstructions(config, teacherName)}
 
 Situation: ${flag.label}
@@ -9514,7 +9614,7 @@ Keep it under 120 words, friendly but direct, no exaggeration. Output only the m
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config);
+  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
 function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSaveParentEmail, onLogSent }) {
@@ -9523,11 +9623,13 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
   const [error, setError] = useState(false);
   const [email, setEmail] = useState(student?.parentEmail || "");
   const [logged, setLogged] = useState(false);
+  const hasP2 = Boolean(student?.parent2Email || student?.parent2Phone);
+  const [recipientMode, setRecipientMode] = useState("p1");
 
   const run = useCallback(async () => {
     setLoading(true); setError(false); setLogged(false);
     try {
-      const text = await generateMessage(student, flag, config, loggedInTeacher?.name);
+      const text = await generateMessage(student, flag, config, loggedInTeacher);
       setDraft(text || "Could not generate a draft — please write one manually.");
     } catch { setError(true); } finally { setLoading(false); }
   }, [student, flag]);
@@ -9541,6 +9643,15 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
     setLogged(true);
   };
 
+  const sendEmails = [
+    (recipientMode === "p1" || recipientMode === "both") && email,
+    (recipientMode === "p2" || recipientMode === "both") && student?.parent2Email,
+  ].filter(Boolean).join(", ");
+  const sendPhones = [
+    (recipientMode === "p1" || recipientMode === "both") && student?.parentPhone && { phone: student.parentPhone, label: student?.parent1Name || "Parent 1" },
+    (recipientMode === "p2" || recipientMode === "both") && student?.parent2Phone && { phone: student.parent2Phone, label: student?.parent2Name || "Parent 2" },
+  ].filter(Boolean);
+
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
@@ -9550,6 +9661,19 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
         <label className="block text-xs font-medium text-stone-500 mb-1">Parent email</label>
         <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onBlur={() => onSaveParentEmail(email)}
           placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
+        {hasP2 && (
+          <>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+            <div className="flex gap-1.5 mb-4">
+              {[["p1", student?.parent1Name || "Parent 1"], ["p2", student?.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+                <button key={val} onClick={() => setRecipientMode(val)}
+                  className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
         {loading ? (
           <div className="flex items-center justify-center py-16 bg-white border border-stone-200 rounded-lg mb-4"><Loader2 className="animate-spin text-teal-700" size={22} /></div>
@@ -9564,7 +9688,8 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
         )}
         <div className="flex flex-wrap gap-2 mb-2">
           <button onClick={run} className="flex items-center gap-1.5 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
-          <MailActionButtons email={email} subject={subject} body={draft} />
+          {sendEmails && <MailActionButtons email={sendEmails} subject={subject} body={draft} />}
+          {sendPhones.map((p) => <WhatsAppButton key={p.phone} phone={p.phone} message={draft} />)}
           <button onClick={logSent} disabled={logged}
             className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
             {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -9584,15 +9709,23 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
   const run = useCallback(async () => {
     setLoading(true); setError(false);
     try {
-      const text = await generateSegmentCelebrationMessage(subjectLabel, segmentLabel, config, loggedInTeacher?.name);
+      const text = await generateSegmentCelebrationMessage(subjectLabel, segmentLabel, config, loggedInTeacher);
       setDraft(text || "Could not generate a draft — please write one manually.");
     } catch { setError(true); } finally { setLoading(false); }
   }, [subjectLabel, segmentLabel]);
 
   useEffect(() => { run(); }, [run]);
 
-  const parentEmails = roster.map((s) => s.parentEmail).filter(Boolean);
-  const missingEmail = roster.filter((s) => !s.parentEmail);
+  const [recipientMode, setRecipientMode] = useState("p1"); // "p1" | "p2" | "both" — which parent(s) get this class-wide send
+  const parentEmails = roster.flatMap((s) => [
+    (recipientMode === "p1" || recipientMode === "both") && s.parentEmail,
+    (recipientMode === "p2" || recipientMode === "both") && s.parent2Email,
+  ]).filter(Boolean);
+  const missingEmail = roster.filter((s) => {
+    if (recipientMode === "p1") return !s.parentEmail;
+    if (recipientMode === "p2") return !s.parent2Email;
+    return !s.parentEmail && !s.parent2Email;
+  });
   const subject = `${subjectLabel} — ${segmentLabel} complete!`;
 
   return (
@@ -9601,6 +9734,15 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Announce to the class</h1>
       <p className="text-stone-500 text-sm mb-5">{subjectLabel} — {segmentLabel}</p>
       <div className="md:w-[32rem]">
+        <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+        <div className="flex gap-1.5 mb-2">
+          {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+            <button key={val} onClick={() => setRecipientMode(val)}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
         <p className="text-xs text-stone-400 mb-1">
           {parentEmails.length > 0
             ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
@@ -9645,7 +9787,7 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
     if (!topic.trim()) return;
     setLoading(true); setError(false); setDraft(null);
     try {
-      const text = await generateClassAnnouncementMessage(topic.trim(), config, loggedInTeacher?.name);
+      const text = await generateClassAnnouncementMessage(topic.trim(), config, loggedInTeacher);
       setDraft(text || "");
     } catch {
       setError(true);
@@ -9653,8 +9795,16 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
     } finally { setLoading(false); }
   };
 
-  const parentEmails = roster.map((s) => s.parentEmail).filter(Boolean);
-  const missingEmail = roster.filter((s) => !s.parentEmail);
+  const [recipientMode, setRecipientMode] = useState("p1"); // "p1" | "p2" | "both" — which parent(s) get this class-wide send
+  const parentEmails = roster.flatMap((s) => [
+    (recipientMode === "p1" || recipientMode === "both") && s.parentEmail,
+    (recipientMode === "p2" || recipientMode === "both") && s.parent2Email,
+  ]).filter(Boolean);
+  const missingEmail = roster.filter((s) => {
+    if (recipientMode === "p1") return !s.parentEmail;
+    if (recipientMode === "p2") return !s.parent2Email;
+    return !s.parentEmail && !s.parent2Email;
+  });
 
   return (
     <div className={PAGE}>
@@ -9678,6 +9828,15 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
 
         {draft !== null && !loading && (
           <>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+            <div className="flex gap-1.5 mb-2">
+              {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+                <button key={val} onClick={() => setRecipientMode(val)}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
             <p className="text-xs text-stone-400 mb-1">
               {parentEmails.length > 0
                 ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
@@ -9697,6 +9856,128 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
             </div>
             <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
             <p className="text-xs text-stone-400 mt-3">Nothing sends automatically — review the message, then send it yourself.</p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StudentMessageGeneratorView({ roster, config, loggedInTeacher, onBack, onLogSent }) {
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [topic, setTopic] = useState("");
+  const [subject, setSubject] = useState("");
+  const [draft, setDraft] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const [logged, setLogged] = useState(false);
+  const [recipientMode, setRecipientMode] = useState("p1"); // "p1" | "p2" | "both"
+
+  const selectedStudents = roster.filter((s) => selectedIds.includes(s.id));
+  const toggleStudent = (id) => { setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])); setDraft(null); setLogged(false); };
+  const anyHasParent2 = selectedStudents.some((s) => s.parent2Email || s.parent2Phone);
+
+  const run = async () => {
+    if (!topic.trim() || selectedStudents.length === 0) return;
+    setLoading(true); setError(false); setDraft(null); setLogged(false);
+    try {
+      const text = await generateStudentTopicMessage(topic.trim(), selectedStudents.map((s) => s.name), config, loggedInTeacher);
+      setDraft(text || "");
+    } catch {
+      setError(true);
+      setDraft(""); // generation failed, but the teacher can still write and send it manually
+    } finally { setLoading(false); }
+  };
+
+  const logSent = () => {
+    const entrySubject = subject || topic.slice(0, 60);
+    selectedStudents.forEach((s) => onLogSent(s.id, { date: todayISO(), channel: "email", type: "automated", source: "custom-message", subject: entrySubject, body: draft }));
+    setLogged(true);
+  };
+
+  const emails = selectedStudents.flatMap((s) => [
+    (recipientMode === "p1" || recipientMode === "both") && s.parentEmail,
+    (recipientMode === "p2" || recipientMode === "both") && s.parent2Email,
+  ]).filter(Boolean);
+  const phones = selectedStudents.flatMap((s) => [
+    (recipientMode === "p1" || recipientMode === "both") && s.parentPhone && { phone: s.parentPhone, label: `${s.name} (${s.parent1Name || "Parent 1"})` },
+    (recipientMode === "p2" || recipientMode === "both") && s.parent2Phone && { phone: s.parent2Phone, label: `${s.name} (${s.parent2Name || "Parent 2"})` },
+  ]).filter(Boolean);
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Generate a parent message</h1>
+      <p className="text-stone-500 text-sm mb-5">Build a message about anything — not tied to a specific incident or report — for one student or a few at once.</p>
+      <div className="md:w-[32rem]">
+        <label className="block text-xs font-medium text-stone-500 mb-1">Student(s)</label>
+        {roster.length === 0 ? (
+          <p className="text-xs text-stone-400 mb-4">Add students from Settings first.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5 mb-4">
+            {roster.map((s) => {
+              const isSelected = selectedIds.includes(s.id);
+              return (
+                <button key={s.id} onClick={() => toggleStudent(s.id)}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${isSelected ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                  {s.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
+        <div className="flex items-start gap-1.5 mb-3">
+          <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
+            placeholder="e.g. Wanted to check in about how the week has been going since the move."
+            className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+          <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+        </div>
+        <button onClick={run} disabled={!topic.trim() || selectedStudents.length === 0 || loading}
+          className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft !== null ? "Regenerate" : "Generate message"}
+        </button>
+
+        {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
+
+        {draft !== null && !loading && (
+          <>
+            {anyHasParent2 && (
+              <>
+                <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+                <div className="flex gap-1.5 mb-3">
+                  {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+                    <button key={val} onClick={() => setRecipientMode(val)}
+                      className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+            <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
+            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. Checking in" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+            <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
+            <div className="flex items-start gap-1.5 mb-4">
+              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+              <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+            </div>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {emails.length > 0 && <MailActionButtons bcc={emails} subject={subject || `About ${selectedStudents.map((s) => s.name).join(", ")}`} body={draft} />}
+              {phones.map((p) => (
+                <WhatsAppButton key={p.phone} phone={p.phone} message={draft}
+                  className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-3 py-2 hover:bg-emerald-700" />
+              ))}
+            </div>
+            {emails.length === 0 && phones.length === 0 && (
+              <p className="text-xs text-amber-700 mb-2">No contact info on file for the selected student(s) yet — add it in Settings, or copy the message below to send your own way.</p>
+            )}
+            <button onClick={logSent} disabled={logged}
+              className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
+              {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
+            </button>
+            <p className="text-xs text-stone-400 mt-3">Nothing sends automatically — review the message, then send it yourself. Logging records it under each selected student's communication history.</p>
           </>
         )}
       </div>
@@ -10259,7 +10540,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
     setPreviewLoading(true);
     setPreviewText(null);
     try {
-      const text = await generatePreviewMessage(config, loggedInTeacher?.name);
+      const text = await generatePreviewMessage(config, loggedInTeacher);
       setPreviewText(text);
     } catch {
       setPreviewText("Couldn't generate a preview right now — try again in a moment.");
@@ -11081,9 +11362,11 @@ function AdminStudentProfile({ student, profileData, onUpdateStudent, onArchiveS
   );
 }
 
-function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
+function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onUpdateSignOff, onClose }) {
   const [name, setName] = useState(teacher?.name || "");
   const [nameSaved, setNameSaved] = useState(false);
+  const [signOff, setSignOff] = useState(teacher?.messageSignOff || "");
+  const [signOffSaved, setSignOffSaved] = useState(false);
   const [currentPw, setCurrentPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
@@ -11096,6 +11379,12 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
     await onUpdateName(name.trim());
     setNameSaved(true);
     setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  const saveSignOff = async () => {
+    await onUpdateSignOff(signOff.trim());
+    setSignOffSaved(true);
+    setTimeout(() => setSignOffSaved(false), 2000);
   };
 
   const submitPasswordChange = async () => {
@@ -11127,6 +11416,16 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
               <button onClick={saveName} className="bg-teal-700 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
             </div>
             {nameSaved && <p className="text-xs text-emerald-600 mt-1">Saved.</p>}
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Message sign-off</label>
+            <p className="text-xs text-stone-400 mb-1.5">Appears at the end of every message you generate through the app. Shown in italics — leave blank to use the default note.</p>
+            <textarea value={signOff} onChange={(e) => setSignOff(e.target.value)} rows={2}
+              placeholder="— Sent via your child's classroom system, an automated update. No reply needed unless you have a question. —"
+              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <button onClick={saveSignOff} className="bg-teal-700 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
+            {signOffSaved && <p className="text-xs text-emerald-600 mt-1">Saved.</p>}
           </div>
 
           <div className="pt-4 border-t border-stone-200">
@@ -11194,6 +11493,48 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
           This list is long enough that Gmail's own link can silently drop names partway through — that's a real limitation on Gmail's end, not something a link can fully guard against. Use "Copy message" and paste it into Gmail yourself instead; every name will be there.
         </p>
       )}
+    </div>
+  );
+}
+
+// Recipient toggle for a single student's parent(s) — Parent 1 selected by default, with Parent 2
+// available as an add-on if that parent's own contact info is on file. Selecting both sends one
+// email to both at once (a single "to" can hold multiple addresses); WhatsApp can't combine two
+// numbers into one link, so each selected parent with a phone on file gets their own button.
+function ParentSendActions({ student, subject, body, size = "normal" }) {
+  const hasP2 = Boolean(student.parent2Email || student.parent2Phone);
+  const [selected, setSelected] = useState(["p1"]);
+  const toggle = (p) => setSelected((prev) => {
+    const next = prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p];
+    return next.length === 0 ? prev : next; // never allow zero recipients selected
+  });
+  const p1Label = student.parent1Name || "Parent 1";
+  const p2Label = student.parent2Name || "Parent 2";
+  const emails = [
+    selected.includes("p1") && student.parentEmail,
+    selected.includes("p2") && student.parent2Email,
+  ].filter(Boolean).join(", ");
+  const phones = [
+    selected.includes("p1") && student.parentPhone && { phone: student.parentPhone, label: p1Label },
+    selected.includes("p2") && student.parent2Phone && { phone: student.parent2Phone, label: p2Label },
+  ].filter(Boolean);
+
+  return (
+    <div>
+      {hasP2 && (
+        <div className="flex items-center gap-1.5 mb-2">
+          <span className="text-[10px] text-stone-400 mr-0.5">Send to:</span>
+          <button onClick={() => toggle("p1")} className={`text-xs font-semibold px-2 py-1 rounded-full border ${selected.includes("p1") ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{p1Label}</button>
+          <button onClick={() => toggle("p2")} className={`text-xs font-semibold px-2 py-1 rounded-full border ${selected.includes("p2") ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{p2Label}</button>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {emails && <MailActionButtons email={emails} subject={subject} body={body} size={size} />}
+        {phones.map((p) => (
+          <WhatsAppButton key={p.phone} phone={p.phone} message={body}
+            className={`flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 ${size === "small" ? "px-2.5 py-1.5" : "px-3 py-2"}`} />
+        ))}
+      </div>
     </div>
   );
 }
