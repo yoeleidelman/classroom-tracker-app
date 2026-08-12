@@ -21,6 +21,8 @@ import { useState, useEffect, useCallback, useMemo, useRef, createContext, useCo
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
+import QRCode from "qrcode";
+import jsQR from "jsqr";
 import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
@@ -616,7 +618,29 @@ function computeSessionTimeline(data, category, config) {
   });
 }
 
-function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [] }; }
+function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], checkIns: [] }; }
+
+// QR check-in — one shared, pure function so the teacher-side toggle and the parent-side scan
+// (which reads and writes Firestore directly, with no React state involved) both produce exactly
+// the same result. Supports more than one in/out cycle per day on purpose — a child picked up
+// early for an appointment and brought back later is a real, normal case, not an edge case to
+// prevent. Looks at the most recent entry for today: if it's still "open" (checked in, not yet
+// checked out), this scan closes it out; otherwise this scan opens a new one.
+function computeToggledCheckIn(existingCheckIns, date, byLabel) {
+  const list = existingCheckIns || [];
+  const todaysEntries = list.filter((c) => c.date === date);
+  const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
+  const nowTime = new Date().toTimeString().slice(0, 5);
+  if (openEntry) {
+    const updated = list.map((c) => (c.id === openEntry.id ? { ...c, checkOutTime: nowTime, checkOutBy: byLabel } : c));
+    return { checkIns: updated, action: "checked-out", entry: { ...openEntry, checkOutTime: nowTime, checkOutBy: byLabel } };
+  }
+  const entry = { id: uid(), date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null };
+  return { checkIns: [...list, entry], action: "checked-in", entry };
+}
+function isCheckedInNow(checkIns, date) {
+  return (checkIns || []).some((c) => c.date === date && c.checkInTime && !c.checkOutTime);
+}
 
 function buildSampleData() {
   const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
@@ -1619,6 +1643,15 @@ function AppInner() {
     switchClass();
   };
 
+  // Same as archiveClass, but for admin managing any class by id, not necessarily the one
+  // currently entered — archiving a class from outside it doesn't need to navigate anywhere after.
+  const archiveClassById = async (id) => {
+    const reg = await loadJSON("schoolClasses", [], true);
+    const next = reg.map((c) => (c.id === id ? { ...c, archived: true } : c));
+    setRegistry(next);
+    await saveJSON("schoolClasses", next, true);
+  };
+
   const restoreClass = async (id) => {
     const reg = await loadJSON("schoolClasses", [], true);
     const next = reg.map((c) => (c.id === id ? { ...c, archived: false } : c));
@@ -1852,7 +1885,7 @@ function AppInner() {
     }
     if (currentTeacher.role === "admin") {
       if (!classId) {
-        return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
+        return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
           currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
           globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
@@ -1892,7 +1925,7 @@ function AppInner() {
   }
   if (!classId) {
     if (isAdminSession) {
-      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onChangePassword={changeAdminPassword}
+      return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
         globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
@@ -2415,7 +2448,7 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -2650,11 +2683,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         {activeClasses.length === 0 && <p className="text-stone-400 text-sm text-center py-10 bg-white rounded-xl border border-stone-200">No classes yet.</p>}
         <ul className="space-y-2 mb-6">
           {activeClasses.map((cls) => (
-            <li key={cls.id}>
-              <button onClick={() => onEnterClass(cls)} className="w-full text-left bg-white border border-stone-200 rounded-xl px-4 py-3 text-sm font-semibold text-stone-800 hover:border-teal-300 flex items-center justify-between">
-                {cls.name}
-                <ArrowRight size={14} className="text-stone-300" />
+            <li key={cls.id} className="bg-white border border-stone-200 rounded-xl px-4 py-3 flex items-center justify-between gap-2">
+              <button onClick={() => onEnterClass(cls)} className="flex-1 text-left text-sm font-semibold text-stone-800 hover:text-teal-700 flex items-center justify-between gap-2 min-w-0">
+                <span className="truncate">{cls.name}</span>
+                <ArrowRight size={14} className="text-stone-300 shrink-0" />
               </button>
+              <ArchiveOrDeleteMenu onArchive={() => onArchiveClassById(cls.id)} onDeletePermanently={() => onDeleteClass(cls.id)} size={14} />
             </li>
           ))}
         </ul>
@@ -3209,8 +3243,132 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
   );
 }
 
+// The camera piece — genuinely the part of this feature most dependent on the specific phone and
+// browser it's running on, which is exactly why the manual "Check in"/"Check out" buttons on each
+// child's own card exist as a real, equally-valid way to do this, not just a backup. Scans a video
+// frame roughly ten times a second, looking for a QR code; stops and reports back the moment one
+// decodes successfully.
+function ParentQRScanner({ onResult, onClose }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const [error, setError] = useState(null);
+  const [scanning, setScanning] = useState(true);
+
+  useEffect(() => {
+    let rafId;
+    let cancelled = false;
+
+    const start = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        tick();
+      } catch (e) {
+        setError(e.name === "NotAllowedError" ? "Camera access was denied. You can still use the Check in / Check out buttons below instead." : "Couldn't reach the camera. You can still use the Check in / Check out buttons below instead.");
+      }
+    };
+
+    const tick = () => {
+      if (cancelled) return;
+      const video = videoRef.current, canvas = canvasRef.current;
+      if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code?.data) {
+          setScanning(false);
+          onResult(code.data);
+          return;
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+
+    start();
+    return () => {
+      cancelled = true;
+      if (rafId) cancelAnimationFrame(rafId);
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, [onResult]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center">
+      <button onClick={onClose} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2 z-10"><X size={22} /></button>
+      {error ? (
+        <div className="max-w-xs text-center px-4">
+          <p className="text-white text-sm mb-4">{error}</p>
+          <button onClick={onClose} className="bg-white text-stone-900 rounded-lg px-4 py-2 text-sm font-semibold">Close</button>
+        </div>
+      ) : (
+        <>
+          <video ref={videoRef} className="w-full max-w-md" playsInline muted />
+          <p className="text-white text-sm mt-4">{scanning ? "Point the camera at the code" : "Got it…"}</p>
+        </>
+      )}
+      <canvas ref={canvasRef} className="hidden" />
+    </div>
+  );
+}
+
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }) {
   const [showAccount, setShowAccount] = useState(false);
+  const [showScanner, setShowScanner] = useState(false);
+  const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
+  const [scanFeedback, setScanFeedback] = useState(null); // { ok, message }
+
+  const refreshCheckInStatus = useCallback(async () => {
+    const today = todayISO();
+    const next = {};
+    for (const link of family?.studentLinks || []) {
+      const data = await loadJSON(`class:${link.classId}:kriya:${link.studentId}`, null, true);
+      const checkIns = data?.checkIns || [];
+      const open = checkIns.find((c) => c.date === today && c.checkInTime && !c.checkOutTime);
+      next[link.studentId] = open ? { isIn: true, sinceTime: open.checkInTime } : { isIn: false, sinceTime: null };
+    }
+    setCheckInStatus(next);
+  }, [family]);
+
+  useEffect(() => { refreshCheckInStatus(); }, [refreshCheckInStatus]);
+
+  // Same shared logic the teacher-side toggle uses — reads the live document directly rather than
+  // relying on any cached state, since the parent portal doesn't keep a running copy of it.
+  const toggleCheckInByFamily = async (link) => {
+    const key = `class:${link.classId}:kriya:${link.studentId}`;
+    const data = (await loadJSON(key, null, true)) || emptyStudentData();
+    const byLabel = `Parent: ${family?.name || "Family"}`;
+    const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel);
+    await saveJSON(key, { ...data, checkIns: result.checkIns }, true);
+    await refreshCheckInStatus();
+    return result;
+  };
+
+  const handleScanResult = async (decoded) => {
+    const match = decoded.match(/^checkin:(.+):(.+)$/);
+    if (!match) {
+      setScanFeedback({ ok: false, message: "That doesn't look like a check-in code." });
+      return;
+    }
+    const [, classId, studentId] = match;
+    const link = (family?.studentLinks || []).find((l) => l.classId === classId && l.studentId === studentId);
+    if (!link) {
+      setScanFeedback({ ok: false, message: "That code isn't for one of your children." });
+      return;
+    }
+    const result = await toggleCheckInByFamily(link);
+    setScanFeedback({ ok: true, message: `${link.studentName} ${result.action === "checked-in" ? "checked in" : "checked out"} at ${formatTime12h(result.action === "checked-in" ? result.entry.checkInTime : result.entry.checkOutTime)}.` });
+    setShowScanner(false);
+  };
+
   const [name, setName] = useState(family?.name || "");
   const [nameSaved, setNameSaved] = useState(false);
   const [currentPw, setCurrentPw] = useState("");
@@ -3278,6 +3436,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }
           </div>
         ) : (
           <>
+            {scanFeedback && (
+              <div className={`rounded-xl p-3 mb-3 text-sm font-semibold ${scanFeedback.ok ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-rose-50 text-rose-800 border border-rose-200"}`}>
+                {scanFeedback.message}
+                <button onClick={() => setScanFeedback(null)} className="block text-xs font-normal underline mt-1">Dismiss</button>
+              </div>
+            )}
+            <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold mb-4 hover:bg-teal-800">
+              Scan QR code to check in or out
+            </button>
             <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Your children</p>
             {(family?.studentLinks || []).length === 0 ? (
               <div className="bg-white border border-stone-200 rounded-xl p-5 text-center">
@@ -3285,17 +3452,35 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }
               </div>
             ) : (
               <div className="space-y-2">
-                {family.studentLinks.map((link, i) => (
-                  <div key={i} className="bg-white border border-stone-200 rounded-xl p-4">
-                    <p className="font-semibold text-stone-900">{link.studentName}</p>
-                    <p className="text-xs text-stone-400">{link.className}</p>
-                  </div>
-                ))}
+                {family.studentLinks.map((link, i) => {
+                  const status = checkInStatus[link.studentId];
+                  const isIn = status?.isIn;
+                  return (
+                    <div key={i} className={`rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="font-semibold text-stone-900">{link.studentName}</p>
+                          <p className="text-xs text-stone-400">{link.className}</p>
+                          <p className={`text-xs font-semibold mt-0.5 ${isIn ? "text-emerald-700" : "text-stone-400"}`}>
+                            {isIn ? `Checked in since ${formatTime12h(status.sinceTime)}` : "Not checked in"}
+                          </p>
+                        </div>
+                        <button onClick={() => toggleCheckInByFamily(link)}
+                          className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                          {isIn ? "Check out" : "Check in"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </>
         )}
       </div>
+      {showScanner && (
+        <ParentQRScanner onResult={handleScanResult} onClose={() => setShowScanner(false)} />
+      )}
     </div>
   );
 }
@@ -4083,6 +4268,16 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       persistStudent(studentId, { ...data, diapers: [...(data.diapers || []), entry] });
     });
   };
+  // studentTypes: { studentId: type } — same shape as setMealBulk, since diaper time now works the
+  // same way meals do: one shared time, everyone defaults to the same type, exceptions get their
+  // own value, one action logs everyone at once.
+  const logDiaperBulkWithDefaults = (date, time, studentTypes) => {
+    Object.entries(studentTypes).forEach(([studentId, type]) => {
+      const data = studentData[studentId];
+      const entry = withLogger({ id: uid(), date, time, type });
+      persistStudent(studentId, { ...data, diapers: [...(data.diapers || []), entry] });
+    });
+  };
   const removeDiaperLog = (studentId, entryId) => {
     const data = studentData[studentId];
     persistStudent(studentId, { ...data, diapers: (data.diapers || []).filter((d) => d.id !== entryId) });
@@ -4098,6 +4293,17 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const removeBathroomLog = (studentId, entryId) => {
     const data = studentData[studentId];
     persistStudent(studentId, { ...data, bathroom: (data.bathroom || []).filter((b) => b.id !== entryId) });
+  };
+
+  // Teacher-side toggle for QR check-in — same shared logic as the parent-side scan, just working
+  // against already-loaded React state instead of a fresh Firestore read, and attributed to the
+  // signed-in teacher instead of a family.
+  const toggleCheckInByTeacher = (studentId) => {
+    const data = studentData[studentId] || emptyStudentData();
+    const byLabel = loggedByName ? `Teacher: ${loggedByName}` : "Teacher";
+    const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel);
+    persistStudent(studentId, { ...data, checkIns: result.checkIns });
+    return result;
   };
 
   const markNoHomeworkToday = (date) => {
@@ -4234,15 +4440,15 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "attendance" && (
-        <PreschoolAttendanceView roster={roster} studentData={studentData} config={config}
-          setAttendance={setAttendance} setAttendanceTime={setAttendanceTime} navigate={setView} />
+        <PreschoolAttendanceView roster={roster} studentData={studentData}
+          toggleCheckInByTeacher={toggleCheckInByTeacher} navigate={setView} />
       )}
 
       {view === "daily-log" && (
         <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} config={config}
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
-          logDiaperBulk={logDiaperBulk} removeDiaperLog={removeDiaperLog}
+          logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
           logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
           openIncidentForm={() => openIncidentForm(null, "daily-log")} navigate={setView} />
@@ -4482,7 +4688,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         <SettingsView config={config} setConfig={persistConfig} onBack={() => setView(classType === "preschool" ? "daily-log" : "home")}
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
           loadSampleData={loadSampleData} clearAllData={clearAllData}
-          className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
+          className={className} classId={classId} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
           subCode={subCode} onGenerateSubCode={onGenerateSubCode} onClearSubCode={onClearSubCode}
           globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent}
           loggedInTeacher={loggedInTeacher} onChangeMySignOff={onChangeMySignOff} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)} />
@@ -5398,11 +5604,10 @@ const TILE_STYLES = {
 // is pre-selected (used everywhere a whole-room default would be guessing, not saving time).
 const PRESCHOOL_TILES = [
   { id: "mood", label: "Mood", icon: Smile, color: "orange", bulkDefault: "none" },
-  { id: "breakfast", label: "Breakfast", icon: Coffee, color: "amber", bulkDefault: "all", mealType: "breakfast" },
   { id: "lunch", label: "Lunch", icon: Sandwich, color: "emerald", bulkDefault: "all", mealType: "lunch" },
   { id: "snack", label: "Snack", icon: Apple, color: "fuchsia", bulkDefault: "all", mealType: "snack" },
   { id: "nap", label: "Nap", icon: Moon, color: "indigo", bulkDefault: "all" },
-  { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "none" },
+  { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "all" },
   { id: "bathroom", label: "Bathroom", icon: Droplets, color: "teal", bulkDefault: "none" },
   { id: "health", label: "Health note", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
 ];
@@ -5411,42 +5616,34 @@ const PRESCHOOL_TILES = [
 // elementary Home screen, but presented on its own, without the homework/points/flags clutter
 // that doesn't apply to a preschool room, and with bigger, simpler touch targets to match the
 // same fast-glance philosophy as the rest of the preschool screens.
-function PreschoolAttendanceView({ roster, studentData, config, setAttendance, setAttendanceTime, navigate }) {
-  const [date, setDate] = useState(todayISO());
-  const statusMap = {};
-  (config.attendance?.statuses || []).forEach((s) => (statusMap[s.id] = s));
+function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, navigate }) {
+  const date = todayISO();
 
   return (
-    <div className="w-full">
+    <div className="app-page-wide">
       <Header navigate={navigate} />
       <MainTabs active="attendance" navigate={navigate} />
-      <label className="block text-xs font-medium text-stone-500 mb-1">Attendance for</label>
-      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-lg border border-stone-300 px-3 py-2 text-sm mb-5" />
+      <p className="text-xs text-stone-400 mb-5">Who's actually here right now — not a daily record of late or excused, just in or not. Families can also check their own child in or out from their end.</p>
 
       {roster.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No students in this class yet.</p>}
 
       <div className="space-y-2">
         {roster.map((s) => {
-          const entry = (studentData[s.id]?.attendance || []).find((a) => a.date === date);
-          const isLateType = entry?.status && statusMap[entry.status]?.flagType === "late";
+          const checkIns = studentData[s.id]?.checkIns || [];
+          const openEntry = checkIns.find((c) => c.date === date && c.checkInTime && !c.checkOutTime);
+          const isIn = Boolean(openEntry);
           return (
-            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
-              <span className="font-semibold text-stone-900 text-lg">{s.name}</span>
-              <div className="flex flex-wrap items-center gap-2">
-                {(config.attendance?.statuses || []).map((st) => {
-                  const selected = entry?.status === st.id;
-                  return (
-                    <button key={st.id} onClick={() => setAttendance(s.id, date, st.id)}
-                      className={`text-sm font-bold px-4 py-2.5 rounded-full border-2 ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : "text-stone-500 border-stone-300"}`}>
-                      {st.label}
-                    </button>
-                  );
-                })}
-                {isLateType && (
-                  <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)}
-                    className="rounded-lg border border-stone-300 px-2 py-2 text-sm" />
-                )}
+            <div key={s.id} className={`rounded-xl border-2 p-4 flex flex-wrap items-center justify-between gap-3 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
+              <div>
+                <span className="font-semibold text-stone-900 text-lg block">{s.name}</span>
+                <span className={`text-xs font-semibold ${isIn ? "text-emerald-700" : "text-stone-400"}`}>
+                  {isIn ? `In since ${formatTime12h(openEntry.checkInTime)}${openEntry.checkInBy ? ` — ${openEntry.checkInBy}` : ""}` : "Not checked in"}
+                </span>
               </div>
+              <button onClick={() => toggleCheckInByTeacher(s.id)}
+                className={`text-sm font-bold px-5 py-3 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                {isIn ? "Check out" : "Check in"}
+              </button>
             </div>
           );
         })}
@@ -5484,7 +5681,7 @@ function PreschoolScheduleSidebar({ periods, events, navigate }) {
   );
 }
 
-function PreschoolDashboardView({ roster, studentData, incidents, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm, navigate }) {
+function PreschoolDashboardView({ roster, studentData, incidents, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm, navigate }) {
   const [screen, setScreen] = useState(null); // null = dashboard grid
   const [date] = useState(todayISO());
 
@@ -5506,7 +5703,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, planne
 
   if (screen === null) {
     return (
-      <div className="w-full">
+      <div className="app-page-wide">
         <Header navigate={navigate} />
         <MainTabs active="daily-log" navigate={navigate} />
         <div className="flex gap-3 items-start">
@@ -5545,8 +5742,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, planne
     return <MoodScreen date={date} roster={roster} studentData={studentData} setMood={setMood} onBack={() => setScreen(null)} />;
   }
   if (screen === "diapers") {
-    return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} dataKey="diapers" typeOptions={DIAPER_TYPES}
-      logBulk={logDiaperBulk} removeLog={removeDiaperLog} onBack={() => setScreen(null)} />;
+    return <DiaperBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} onBack={() => setScreen(null)} />;
   }
   if (screen === "bathroom") {
     return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
@@ -5583,7 +5779,7 @@ function MealBulkScreen({ tile, date, roster, studentData, setMealBulk, onBack }
   };
 
   return (
-    <div className="w-full md:w-[28rem]">
+    <div className="app-page">
       <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
       <p className="text-xs text-stone-400 mb-4">Everyone starts on "All" — tap a name to change just that student.</p>
       <div className="space-y-2 mb-5">
@@ -5602,6 +5798,59 @@ function MealBulkScreen({ tile, date, roster, studentData, setMealBulk, onBack }
                     <button key={a.id} onClick={() => { setAmounts((prev) => ({ ...prev, [s.id]: a.id })); setExpanded(null); }}
                       className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${amounts[s.id] === a.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
                       {a.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <button onClick={submit} className={`w-full text-white rounded-xl py-4 text-base font-bold ${st.solid} ${st.solidHover}`}>
+        {saved ? "Logged ✓" : `Log ${tile.label} for ${roster.length} students`}
+      </button>
+    </div>
+  );
+}
+
+// Diapers — unlike bathroom trips, this genuinely does happen for the whole room in one sitting,
+// so it gets the same default-everyone treatment as meals, just with a shared time up top since a
+// diaper change is a specific moment, not an all-day category.
+function DiaperBulkScreen({ tile, date, roster, studentData, logDiaperBulkWithDefaults, onBack }) {
+  const st = TILE_STYLES[tile.color];
+  const [time, setTime] = useState(() => new Date().toTimeString().slice(0, 5));
+  const [types, setTypes] = useState(() => Object.fromEntries(roster.map((s) => [s.id, DIAPER_TYPES[0].id])));
+  const [expanded, setExpanded] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  const submit = () => {
+    logDiaperBulkWithDefaults(date, time, types);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="app-page">
+      <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
+      <label className="block text-xs font-medium text-stone-500 mb-1">Time</label>
+      <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
+      <p className="text-xs text-stone-400 mb-4">Everyone starts on "{DIAPER_TYPES[0].label}" — tap a name to change just that student.</p>
+      <div className="space-y-2 mb-5">
+        {roster.map((s) => {
+          const isOpen = expanded === s.id;
+          const current = DIAPER_TYPES.find((d) => d.id === types[s.id]) || DIAPER_TYPES[0];
+          return (
+            <div key={s.id} className={`rounded-xl border ${types[s.id] === DIAPER_TYPES[0].id ? "border-stone-200 bg-white" : st.rowActive}`}>
+              <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
+                <span className="font-semibold text-stone-800">{s.name}</span>
+                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{current.label}</span>
+              </button>
+              {isOpen && (
+                <div className="flex flex-wrap gap-1.5 px-4 pb-3">
+                  {DIAPER_TYPES.map((d) => (
+                    <button key={d.id} onClick={() => { setTypes((prev) => ({ ...prev, [s.id]: d.id })); setExpanded(null); }}
+                      className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${types[s.id] === d.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+                      {d.label}
                     </button>
                   ))}
                 </div>
@@ -5641,7 +5890,7 @@ function NapBulkScreen({ date, roster, studentData, setNapBulk, onBack }) {
   };
 
   return (
-    <div className="w-full md:w-[28rem]">
+    <div className="app-page">
       <PreschoolScreenHeader tile={tile} title="Nap" onBack={onBack} />
       <p className="text-xs text-stone-400 mb-2">Shared nap time for the room — applies to everyone unless you change a student below.</p>
       <div className="flex items-center gap-2 mb-5 bg-white border border-stone-200 rounded-xl p-3">
@@ -5694,7 +5943,7 @@ function MoodScreen({ date, roster, studentData, setMood, onBack }) {
   const tile = PRESCHOOL_TILES.find((t) => t.id === "mood");
   const st = TILE_STYLES[tile.color];
   return (
-    <div className="w-full md:w-[28rem]">
+    <div className="app-page">
       <PreschoolScreenHeader tile={tile} title="Mood" onBack={onBack} />
       <div className="space-y-2">
         {roster.map((s) => {
@@ -5743,7 +5992,7 @@ function TapLogScreen({ tile, date, roster, studentData, dataKey, typeOptions, l
     .sort((a, b) => (a.time < b.time ? 1 : -1));
 
   return (
-    <div className="w-full md:w-[28rem]">
+    <div className="app-page">
       <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
       <div className="flex items-center gap-2 mb-3">
         <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
@@ -9263,6 +9512,8 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerDay, clearPlannerDayType, bulkSetByWeekday, bulkSetByRange, addPlannerEvent, removePlannerEvent, importSchoolCalendar, benchmarkSubjects, addBenchmarkSubject, removeBenchmarkSubject, addBenchmarkSegment, addBenchmarkSegmentBySubjectLabel, updateBenchmarkSegment, removeBenchmarkSegment, toggleSubjectHiddenFromPlanner }) {
+  const { classType } = useContext(ClassContext);
+  const isPreschool = classType === "preschool";
   const [subTab, setSubTab] = useState("calendar");
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -9306,10 +9557,12 @@ function PlannerView({ config, plannerDays, plannerEvents, navigate, setPlannerD
 
       <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-96">
         <button onClick={() => setSubTab("calendar")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "calendar" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Calendar</button>
-        <button onClick={() => setSubTab("benchmarks")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "benchmarks" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Benchmarks</button>
+        {!isPreschool && (
+          <button onClick={() => setSubTab("benchmarks")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "benchmarks" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Benchmarks</button>
+        )}
       </div>
 
-      {subTab === "benchmarks" ? (
+      {subTab === "benchmarks" && !isPreschool ? (
         <BenchmarksView subjects={benchmarkSubjects} addSubject={addBenchmarkSubject} removeSubject={removeBenchmarkSubject}
           addSegment={addBenchmarkSegment} addSegmentBySubjectLabel={addBenchmarkSegmentBySubjectLabel}
           updateSegment={updateBenchmarkSegment} removeSegment={removeBenchmarkSegment}
@@ -11494,7 +11747,32 @@ function OnboardingDoneStep({ config }) {
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding }) {
+// One QR code per student — encodes a fixed, recognizable format (checkin:classId:studentId) so
+// the scanner can tell a genuine check-in code apart from a random unrelated QR code someone might
+// point the camera at by accident, and just say so clearly instead of misbehaving.
+function StudentQRCode({ student, classId }) {
+  const [dataUrl, setDataUrl] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    QRCode.toDataURL(`checkin:${classId}:${student.id}`, { width: 220, margin: 1 })
+      .then((url) => { if (!cancelled) setDataUrl(url); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [student.id, classId]);
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3 flex flex-col items-center text-center">
+      {dataUrl ? (
+        <img src={dataUrl} alt={`QR check-in code for ${student.name}`} className="w-32 h-32" />
+      ) : (
+        <div className="w-32 h-32 flex items-center justify-center text-xs text-stone-400">Generating…</div>
+      )}
+      <p className="text-sm font-semibold text-stone-800 mt-2">{student.name}</p>
+    </div>
+  );
+}
+
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, classId, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
   const [expandedCats, setExpandedCats] = useState({});
@@ -11657,13 +11935,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                 )}
               </div>
 
-              <div className="mt-4 pt-4 border-t border-stone-200">
-                <p className="text-xs text-stone-400 mb-2">Archiving hides this class from the class picker — nothing is deleted, and an admin can restore it anytime from the Admin Dashboard. Deleting removes it for good.</p>
-                <div className="flex gap-2">
-                  <ConfirmDelete onConfirm={onArchiveClass} label="Archive this class" className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50" confirmText="Archive it?" armedClassName="text-xs font-semibold text-white bg-stone-600 rounded-lg px-3 py-2" />
-                  <ConfirmDelete onConfirm={onDeleteClass} label="Delete permanently" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" confirmText="Delete forever?" armedClassName="text-xs font-semibold text-white bg-red-600 rounded-lg px-3 py-2" />
-                </div>
-              </div>
+              <p className="text-xs text-stone-400 mt-4 pt-4 border-t border-stone-200">Archiving or deleting a class is an admin action now — from the Admin Dashboard's class list.</p>
             </Section>
           )}
 
@@ -11721,6 +11993,18 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             </div>
           </Section>
         </div>
+
+        {isPreschool && (
+        <div className="md:col-span-2">
+          <Section title="QR check-in codes">
+            <p className="text-xs text-stone-400 mb-3">One code per student. Print these and post them somewhere both families and staff can reach — scanning checks a student in, scanning again checks them out. Each code only ever works for that one student.</p>
+            {roster.length === 0 && <p className="text-xs text-stone-400">Add students first.</p>}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {roster.map((s) => <StudentQRCode key={s.id} student={s} classId={classId} />)}
+            </div>
+          </Section>
+        </div>
+        )}
 
         <Section title="Planner day types">
           {(config.planner?.dayTypes || []).map((t, i) => (
@@ -11867,6 +12151,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
         </Section>
         )}
 
+        {!isPreschool && (
         <Section title="Monthly reports">
           <label className="block text-xs font-medium text-stone-500 mb-1">Remind me around day of the month</label>
           <input type="number" min={1} max={28} value={config.monthlyReports?.dayOfMonth ?? 25}
@@ -11879,6 +12164,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           </label>
           <p className="text-[11px] text-stone-400">If the day lands on Saturday, the reminder always shifts to Sunday. This is a simple calendar rule, not a zmanim calculation.</p>
         </Section>
+        )}
 
         {!isPreschool && (
         <>
@@ -11916,6 +12202,8 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
         </>
         )}
 
+        {!isPreschool && (
+        <>
         <Section title="Attendance statuses">
           <label className="block text-xs font-medium text-stone-500 mb-1">Class start time (optional — used to calculate minutes late in monthly reports)</label>
           <input type="time" value={config.attendance.classStartTime || ""} onChange={(e) => update((c) => { c.attendance.classStartTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
@@ -11963,6 +12251,8 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             </div>
           ))}
         </Section>
+        </>
+        )}
 
         {!isPreschool && (
         <Section title="Homework tracking">
