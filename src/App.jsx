@@ -432,6 +432,16 @@ function getScheduleForDate(dateStr, dayType, config, plannerDays) {
   if (override) return override;
   if (!dayType || dayType.scheduleTemplate === "none") return null;
   const weekday = new Date(`${dateStr}T00:00:00`).getDay();
+  // New model: every existing consumer of this function keeps working unchanged, since blocks
+  // are mapped back into the same {id, label, startTime, endTime} shape schedules always returned
+  // — only the underlying source of truth changes, once a class has been migrated to it.
+  if (config.planner?.scheduleBlocks) {
+    const dayIdx = weekday - 1; // getDay(): 0=Sun..6=Sat -> blocks use 0=Mon..4=Fri
+    return config.planner.scheduleBlocks
+      .filter((b) => b.day === dayIdx)
+      .sort((a, b) => a.start - b.start)
+      .map((b) => ({ id: b.id, label: b.label, startTime: minutesToTime(b.start), endTime: minutesToTime(b.end), subjectId: b.subjectId || null, color: b.color }));
+  }
   const scheduleId = config.planner?.weekdaySchedule?.[weekday];
   const schedules = config.planner?.schedules || [];
   const matched = schedules.find((s) => s.id === scheduleId);
@@ -5523,7 +5533,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
-        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} config={config} loggedInTeacher={loggedInTeacher}
+        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher}
           onBack={() => setView(currentId ? "detail" : "home")}
           onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(studentId, email) => updateStudentField(studentId, "parentEmail", email)}
@@ -6046,7 +6056,10 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
     <div className="bg-white border border-stone-200 rounded-xl p-4 lg:sticky lg:top-6">
       <div className="flex items-center justify-between mb-1">
         <p className="font-semibold text-stone-800 text-sm">Today's Plan</p>
-        {dayType && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full bg-${dayType.color}-100 text-${dayType.color}-700`}>{dayType.label}</span>}
+        <div className="flex items-center gap-2">
+          {dayType && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full bg-${dayType.color}-100 text-${dayType.color}-700`}>{dayType.label}</span>}
+          {template && template.length > 0 && <button onClick={() => navigate("settings")} className="text-[10px] font-semibold text-teal-700">Adjust</button>}
+        </div>
       </div>
       <p className="text-xs text-stone-400 mb-3">{today}</p>
 
@@ -6062,11 +6075,13 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
       )}
       {template && template.length > 0 && (
         <div className="space-y-2 max-h-[28rem] overflow-y-auto pr-1">
-          {template.map((slot) => (
-            <div key={slot.id} className="border border-stone-200 rounded-lg p-2">
+          {template.map((slot) => {
+            const st = TILE_STYLES[slot.color] || null;
+            return (
+            <div key={slot.id} className={`rounded-lg p-2 border ${st ? `${st.tileBorder} ${st.tileBg}` : "border-stone-200"}`}>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-semibold text-stone-700">{slot.label}</span>
-                <span className="text-[10px] text-stone-400">{slot.startTime}–{slot.endTime}</span>
+                <span className={`text-xs font-semibold ${st ? st.labelText : "text-stone-700"}`}>{slot.label}</span>
+                <span className={`text-[10px] ${st ? `${st.labelText} opacity-70` : "text-stone-400"}`}>{formatTime12h(slot.startTime)}–{formatTime12h(slot.endTime)}</span>
               </div>
               <div className="flex items-start gap-1.5">
                 <textarea
@@ -6082,7 +6097,8 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
                 }} />
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
       <button onClick={() => navigate("planner")} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-3">
@@ -6598,12 +6614,15 @@ function PreschoolScheduleSidebar({ periods, events, navigate }) {
         <p className="text-[10px] text-stone-400 text-center md:text-left leading-snug">Nothing planned</p>
       )}
       <div className="space-y-1.5">
-        {periods.map((p) => (
-          <div key={p.id} className="border-l-2 border-indigo-300 pl-1.5">
-            <p className="text-[9px] text-stone-400 leading-none mb-0.5">{formatTime12h(p.startTime)}</p>
-            <p className="text-[10px] font-semibold text-stone-700 leading-snug">{p.label}</p>
-          </div>
-        ))}
+        {periods.map((p) => {
+          const st = TILE_STYLES[p.color] || TILE_STYLES.indigo;
+          return (
+            <div key={p.id} className={`border-l-2 ${st.tileBorder} pl-1.5`}>
+              <p className="text-[9px] text-stone-400 leading-none mb-0.5">{formatTime12h(p.startTime)}</p>
+              <p className={`text-[10px] font-semibold leading-snug ${st.labelText}`}>{p.label}</p>
+            </div>
+          );
+        })}
         {events.map((e) => (
           <div key={e.id} className="border-l-2 border-amber-400 pl-1.5">
             <p className="text-[10px] font-semibold text-amber-800 leading-snug">{e.title}</p>
@@ -9480,6 +9499,82 @@ function timeToMinutes(hhmm) {
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return h * 60 + m;
 }
+function minutesToTime(mins) {
+  return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+}
+// Reused across every rendering of a schedule block — teacher-side editor, "today's schedule"
+// summaries, and the incident/health-note context lookup — so a period's color stays the same
+// wherever it shows up. Deliberately avoids violet/sky/stone/red, which were remapped to muted
+// tones in an earlier design pass and would look flat here.
+// Deliberately excludes indigo and fuchsia — despite their names, this app's theme renders indigo
+// as a dusty rose/mauve and fuchsia as orange/rust, confirmed directly against the actual hex
+// values in GlobalAppStyles, not assumed. Using either would make two "different" schedule colors
+// look confusingly similar to rose or amber. Every color below was individually checked against
+// its real rendered ramp, not just assumed safe because it wasn't on the earlier known-muted list.
+const SCHEDULE_BLOCK_COLORS = ["teal", "emerald", "amber", "rose", "cyan", "orange"];
+// One flat array of day-instance blocks, replacing the older "named templates + weekday mapping"
+// model — each day's copy of a period is its own independent object, since that's what lets a
+// teacher drag or resize just one day without disturbing the rest of the week. Migrated from the
+// old model exactly once, automatically, the first time a class loads under the new system, so
+// nothing already configured gets lost in the switch.
+function migrateSchedulesToBlocks(config) {
+  const schedules = config.planner?.schedules || [];
+  const weekdaySchedule = config.planner?.weekdaySchedule || {};
+  const blocks = [];
+  let colorIdx = 0;
+  const colorForLabel = {};
+  for (let weekday = 1; weekday <= 5; weekday++) {
+    const schedule = schedules.find((s) => s.id === weekdaySchedule[weekday]);
+    if (!schedule) continue;
+    (schedule.periods || []).forEach((p) => {
+      const start = timeToMinutes(p.startTime);
+      const end = timeToMinutes(p.endTime);
+      if (start == null || end == null) return;
+      const key = (p.label || "").toLowerCase().trim();
+      if (!(key in colorForLabel)) colorForLabel[key] = SCHEDULE_BLOCK_COLORS[colorIdx++ % SCHEDULE_BLOCK_COLORS.length];
+      blocks.push({ id: uid(), day: weekday - 1, label: p.label || "Period", start, end, subjectId: null, color: colorForLabel[key] });
+    });
+  }
+  return blocks;
+}
+// Elementary only — decides what a newly-typed period label does to config.subjects: link to an
+// existing subject with a matching label, create a new one, or (lunch, recess, and the like) do
+// neither, since those aren't academic subjects worth tracking benchmarks against. The teacher's
+// own "track as a subject" checkbox is the final word — this list is just a sensible default,
+// not something they're stuck with if a real subject happens to share a name with it.
+function resolveSubjectForLabel(label, subjects, trackAsSubject) {
+  const trimmed = (label || "").trim();
+  if (!trimmed || !trackAsSubject) return { subjectId: null, nextSubjects: subjects };
+  if (SCHEDULE_BLOCK_LIBRARY.some((b) => b.toLowerCase() === trimmed.toLowerCase())) {
+    return { subjectId: null, nextSubjects: subjects };
+  }
+  const existing = subjects.find((s) => s.label.toLowerCase() === trimmed.toLowerCase());
+  if (existing) return { subjectId: existing.id, nextSubjects: subjects };
+  const created = { id: uid(), label: trimmed };
+  return { subjectId: created.id, nextSubjects: [...subjects, created] };
+}
+// Given when something was logged, finds which scheduled period was actually happening at that
+// moment — so an incident or health note can show real context ("2:15 PM · during Recess")
+// instead of leaving a teacher to reconstruct it from memory later. Matches the exact same day-
+// type resolution every other schedule lookup in the app already uses, so this shows the same
+// schedule a teacher would see if they opened the planner for that date themselves. Returns null
+// if there's no schedule for that date, or the time falls between periods.
+function findPeriodAtTime(dateStr, timeStr, config, plannerDays) {
+  if (!dateStr || !timeStr) return null;
+  const dayTypeMap = {};
+  (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
+  const dayType = plannerDays?.[dateStr]?.dayType ? dayTypeMap[plannerDays[dateStr].dayType] : null;
+  const periods = getScheduleForDate(dateStr, dayType, config, plannerDays);
+  if (!periods) return null;
+  const mins = timeToMinutes(timeStr);
+  if (mins == null) return null;
+  const match = periods.find((p) => {
+    const start = timeToMinutes(p.startTime);
+    const end = timeToMinutes(p.endTime);
+    return start != null && end != null && mins >= start && mins < end;
+  });
+  return match ? match.label : null;
+}
 function formatTime12h(hhmm) {
   if (!hhmm || !hhmm.includes(":")) return hhmm || "";
   const [h, m] = hhmm.split(":").map(Number);
@@ -10638,7 +10733,7 @@ function PrintableStudentReport({ student, data, incidents, classAssessments, co
   );
 }
 
-function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
+function IncidentDetailView({ incident, roster, config, plannerDays, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
   const [recipientModes, setRecipientModes] = useState({}); // studentId -> "p1" | "p2" | "both"
@@ -10697,7 +10792,15 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
           <span className={`inline-block text-xs font-semibold px-2 py-1 rounded-full bg-${cat?.color || "stone"}-100 text-${cat?.color || "stone"}-700`}>
             {cat?.label || incident.category || "Uncategorized"}
           </span>
-          {incident.time && <span className="text-xs text-stone-400">Logged at {incident.time}</span>}
+          {incident.time && (
+            <span className="text-xs text-stone-400">
+              Logged at {incident.time}
+              {(() => {
+                const period = findPeriodAtTime(incident.date, incident.time, config, plannerDays);
+                return period ? ` · during ${period}` : "";
+              })()}
+            </span>
+          )}
         </div>
         <button onClick={() => onUpdateIncident(incident.id, { flaggedForAdmin: !incident.flaggedForAdmin })}
           className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2 mb-3 text-left ${incident.flaggedForAdmin ? "bg-rose-50 border-rose-300" : "bg-white border-stone-300"}`}>
@@ -11628,6 +11731,261 @@ function BulkDayTypeForm({ dayTypes, bulkSetByWeekday, bulkSetByRange }) {
       </select>
 
       <button onClick={apply} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Apply</button>
+    </div>
+  );
+}
+
+// Replaces the old "named templates + weekday mapping" schedule system with a direct, visual
+// weekly grid — drag a block to shift it, drag its bottom edge to resize it, tap to rename it. A
+// form adds a period once and stamps it across whichever days it applies to; dragging afterward
+// is how an individual day gets fine-tuned. Used by both class types — only elementary links a
+// period's label to a real, trackable subject.
+const SCHEDULE_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+const SCHED_DAY_START = 7 * 60;
+const SCHED_DAY_END = 16 * 60;
+const SCHED_SLOT_MIN = 5;
+const SCHED_PX_PER_MIN = 2;
+const SCHED_HOURS = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+const SCHED_MIN_DURATION = 10;
+
+function WeeklyScheduleEditor({ config, persistConfig, classType }) {
+  const isElementary = classType !== "preschool";
+  const [blocks, setBlocks] = useState(() => config.planner?.scheduleBlocks || migrateSchedulesToBlocks(config));
+  const migratedRef = useRef(false);
+
+  // Persist a freshly-migrated result immediately, once — otherwise reloading before the first
+  // edit would silently re-run the migration from the old, now-stale schedules data instead of
+  // picking up from where the migration already left off.
+  useEffect(() => {
+    if (!config.planner?.scheduleBlocks && !migratedRef.current) {
+      migratedRef.current = true;
+      persistConfig({ ...config, planner: { ...config.planner, scheduleBlocks: blocks } });
+    }
+  }, []); // eslint-disable-line
+
+  const persistBlocks = (next, subjectsPatch) => {
+    setBlocks(next);
+    const nextConfig = { ...config, planner: { ...config.planner, scheduleBlocks: next } };
+    if (subjectsPatch) nextConfig.subjects = subjectsPatch;
+    persistConfig(nextConfig);
+  };
+  const updateBlockLocal = (id, patch) => setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+  const deleteBlock = (id) => { persistBlocks(blocks.filter((b) => b.id !== id)); setEditingId(null); };
+
+  const [draggingId, setDraggingId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editValue, setEditValue] = useState("");
+  const dragState = useRef(null);
+
+  const onPointerDown = (e, block) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragState.current = { id: block.id, pointerId: e.pointerId, mode: "move", startY: e.clientY, originalStart: block.start, duration: block.end - block.start, moved: false };
+    setDraggingId(block.id);
+  };
+  const onResizePointerDown = (e, block) => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragState.current = { id: block.id, pointerId: e.pointerId, mode: "resize", startY: e.clientY, originalStart: block.start, originalEnd: block.end, moved: false };
+    setDraggingId(block.id);
+  };
+  const computePatch = (ds, clientY) => {
+    const deltaY = clientY - ds.startY;
+    const snappedDelta = Math.round((deltaY / SCHED_PX_PER_MIN) / SCHED_SLOT_MIN) * SCHED_SLOT_MIN;
+    if (ds.mode === "resize") {
+      let newEnd = ds.originalEnd + snappedDelta;
+      newEnd = Math.max(ds.originalStart + SCHED_MIN_DURATION, Math.min(SCHED_DAY_END, newEnd));
+      return { end: newEnd };
+    }
+    let newStart = ds.originalStart + snappedDelta;
+    newStart = Math.max(SCHED_DAY_START, Math.min(SCHED_DAY_END - ds.duration, newStart));
+    return { start: newStart, end: newStart + ds.duration };
+  };
+  const onPointerMove = (e) => {
+    const ds = dragState.current;
+    if (!ds || e.pointerId !== ds.pointerId) return;
+    if (Math.abs(e.clientY - ds.startY) > 4) ds.moved = true;
+    updateBlockLocal(ds.id, computePatch(ds, e.clientY));
+  };
+  const onPointerUp = (e) => {
+    const ds = dragState.current;
+    if (!ds || e.pointerId !== ds.pointerId) return;
+    if (!ds.moved) {
+      const block = blocks.find((b) => b.id === ds.id);
+      setEditingId(ds.id);
+      setEditValue(block.label);
+    } else {
+      const patch = computePatch(ds, e.clientY);
+      persistBlocks(blocks.map((b) => (b.id === ds.id ? { ...b, ...patch } : b)));
+    }
+    dragState.current = null;
+    setDraggingId(null);
+  };
+  const commitLabel = () => {
+    if (editingId && editValue.trim()) {
+      if (isElementary) {
+        const block = blocks.find((b) => b.id === editingId);
+        const { subjectId, nextSubjects } = resolveSubjectForLabel(editValue, config.subjects || [], block.trackAsSubject !== false);
+        persistBlocks(blocks.map((b) => (b.id === editingId ? { ...b, label: editValue.trim(), subjectId } : b)), nextSubjects);
+      } else {
+        persistBlocks(blocks.map((b) => (b.id === editingId ? { ...b, label: editValue.trim() } : b)));
+      }
+    }
+    setEditingId(null);
+  };
+
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newLabel, setNewLabel] = useState("");
+  const [newStart, setNewStart] = useState("09:00");
+  const [newEnd, setNewEnd] = useState("09:30");
+  const [newDays, setNewDays] = useState([false, false, false, false, false]);
+  const [newTrackAsSubject, setNewTrackAsSubject] = useState(true);
+  const [addError, setAddError] = useState("");
+
+  const openAddForm = () => {
+    const latestEnd = blocks.length ? Math.max(...blocks.map((b) => b.end)) : SCHED_DAY_START;
+    setNewStart(minutesToTime(latestEnd));
+    setNewEnd(minutesToTime(Math.min(latestEnd + 30, SCHED_DAY_END)));
+    setNewLabel(""); setNewDays([false, false, false, false, false]); setNewTrackAsSubject(true); setAddError("");
+    setShowAddForm(true);
+  };
+  const submitNewPeriod = () => {
+    if (!newLabel.trim()) { setAddError("Give this period a name first."); return; }
+    const s = timeToMinutes(newStart), e = timeToMinutes(newEnd);
+    if (e == null || s == null || e <= s) { setAddError("End time has to be after the start time."); return; }
+    if (!newDays.some(Boolean)) { setAddError("Pick at least one day."); return; }
+    let subjectId = null;
+    let nextSubjects = config.subjects || [];
+    if (isElementary) {
+      const resolved = resolveSubjectForLabel(newLabel, nextSubjects, newTrackAsSubject);
+      subjectId = resolved.subjectId;
+      nextSubjects = resolved.nextSubjects;
+    }
+    const usedColors = new Set(blocks.map((b) => b.color));
+    const color = SCHEDULE_BLOCK_COLORS.find((c) => !usedColors.has(c)) || SCHEDULE_BLOCK_COLORS[blocks.length % SCHEDULE_BLOCK_COLORS.length];
+    const additions = newDays
+      .map((on, dayIdx) => (on ? { id: uid(), day: dayIdx, label: newLabel.trim(), color, start: s, end: e, subjectId, trackAsSubject: newTrackAsSubject } : null))
+      .filter(Boolean);
+    persistBlocks([...blocks, ...additions], isElementary ? nextSubjects : undefined);
+    setShowAddForm(false);
+  };
+
+  const allNewDaysOn = newDays.every(Boolean);
+  const totalMin = SCHED_DAY_END - SCHED_DAY_START;
+
+  return (
+    <div>
+      <p className="text-xs text-stone-400 mb-2">Drag a block to shift its time, or drag its bottom edge to resize it. Tap a block to rename it.</p>
+
+      {!showAddForm ? (
+        <button onClick={openAddForm} className="w-full mb-3 text-sm font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">
+          + Add period
+        </button>
+      ) : (
+        <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3 space-y-2">
+          <input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder={isElementary ? "Subject / period (e.g. Reading, Lunch)" : "Period (e.g. Snack, Circle Time)"}
+            list={isElementary ? "sched-label-options" : undefined}
+            className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          {isElementary && (
+            <datalist id="sched-label-options">
+              {(config.subjects || []).map((s) => <option key={s.id} value={s.label} />)}
+              {SCHEDULE_BLOCK_LIBRARY.map((b) => <option key={b} value={b} />)}
+            </datalist>
+          )}
+          <div className="flex gap-2 items-center">
+            <input type="time" value={newStart} onChange={(e) => setNewStart(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            <span className="text-xs text-stone-400">to</span>
+            <input type="time" value={newEnd} onChange={(e) => setNewEnd(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <button onClick={() => setNewDays(newDays.map(() => !allNewDaysOn))} className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border ${allNewDaysOn ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>
+              Every day
+            </button>
+            {SCHEDULE_DAYS.map((d, i) => (
+              <button key={d} onClick={() => setNewDays((prev) => prev.map((v, idx) => (idx === i ? !v : v)))}
+                className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border ${newDays[i] ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>
+                {d}
+              </button>
+            ))}
+          </div>
+          {isElementary && (
+            <label className="flex items-center gap-1.5 text-xs text-stone-500">
+              <input type="checkbox" checked={newTrackAsSubject} onChange={(e) => setNewTrackAsSubject(e.target.checked)} />
+              Track as a subject (links to benchmarks — turn off for things like lunch or recess)
+            </label>
+          )}
+          {addError && <p className="text-xs text-rose-600">{addError}</p>}
+          <div className="flex gap-2 pt-1">
+            <button onClick={submitNewPeriod} className="text-xs font-bold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Add</button>
+            <button onClick={() => setShowAddForm(false)} className="text-xs font-semibold text-stone-500 px-3 py-1.5">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">
+        <div className="grid" style={{ gridTemplateColumns: "34px repeat(5, 1fr)" }}>
+          <div />
+          {SCHEDULE_DAYS.map((d) => (
+            <div key={d} className="text-center text-[11px] font-semibold text-stone-500 py-1.5 border-b border-stone-100">{d}</div>
+          ))}
+        </div>
+        <div className="relative grid" style={{ gridTemplateColumns: "34px repeat(5, 1fr)", height: totalMin * SCHED_PX_PER_MIN }}>
+          <div className="relative border-r border-stone-100">
+            {SCHED_HOURS.map((h) => (
+              <div key={h} className="absolute text-[9px] text-stone-400 -translate-y-1/2" style={{ top: (h * 60 - SCHED_DAY_START) * SCHED_PX_PER_MIN, right: 3 }}>
+                {h > 12 ? h - 12 : h}
+              </div>
+            ))}
+          </div>
+          {SCHEDULE_DAYS.map((_, dayIdx) => (
+            <div key={dayIdx} className="relative border-r border-stone-100 last:border-r-0">
+              {SCHED_HOURS.map((h) => (
+                <div key={h} className="absolute w-full border-t border-stone-100" style={{ top: (h * 60 - SCHED_DAY_START) * SCHED_PX_PER_MIN }} />
+              ))}
+              {blocks.filter((b) => b.day === dayIdx).map((b) => {
+                const st = TILE_STYLES[b.color] || TILE_STYLES.teal;
+                const isDragging = draggingId === b.id;
+                const isEditing = editingId === b.id;
+                return (
+                  <div key={b.id}
+                    onPointerDown={(e) => onPointerDown(e, b)}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={onPointerUp}
+                    style={{
+                      position: "absolute", top: (b.start - SCHED_DAY_START) * SCHED_PX_PER_MIN,
+                      height: Math.max((b.end - b.start) * SCHED_PX_PER_MIN, 22), left: 2, right: 2,
+                      touchAction: "none", cursor: "grab", zIndex: isDragging ? 20 : 1,
+                    }}
+                    className={`rounded-md border ${st.tileBorder} ${st.tileBg} px-1.5 py-0.5 select-none ${isDragging ? "shadow-md" : ""}`}
+                  >
+                    {isEditing ? (
+                      <div>
+                        <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)}
+                          onBlur={commitLabel} onKeyDown={(e) => e.key === "Enter" && commitLabel()}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          className={`w-full bg-transparent text-[11px] font-semibold ${st.labelText} outline-none`} />
+                        <button onPointerDown={(e) => e.stopPropagation()} onClick={() => deleteBlock(b.id)}
+                          className="text-[9px] text-rose-500 underline">Delete</button>
+                      </div>
+                    ) : (
+                      <p className={`text-[11px] font-semibold ${st.labelText} leading-tight truncate`}>{b.label}</p>
+                    )}
+                    {!isEditing && (
+                      <p className={`text-[10px] ${st.labelText} opacity-70 leading-tight`}>
+                        {formatTime12h(minutesToTime(b.start))}{isDragging ? "" : ` – ${formatTime12h(minutesToTime(b.end))}`}
+                      </p>
+                    )}
+                    <div onPointerDown={(e) => onResizePointerDown(e, b)}
+                      style={{ position: "absolute", left: 0, right: 0, bottom: -4, height: 12, cursor: "ns-resize", touchAction: "none" }}
+                      className="flex items-end justify-center pb-0.5">
+                      <div className={`w-6 h-[3px] rounded-full ${st.tileBorder.replace("border-", "bg-")}`} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -13461,61 +13819,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
         <div className="md:col-span-2">
           <Section title="Weekly schedules">
-            <p className="text-xs text-stone-400 mb-3">Create as many named schedules as you need — a regular schedule, a shortened Half Day schedule, a different one for Wednesdays, whatever fits — then assign which one applies to each weekday below. If Friday is always a half day, for example, just create a "Half Day" schedule here and assign it to Friday.</p>
-            <datalist id="settings-period-label-options">
-              {(config.subjects || []).map((s) => <option key={s.id} value={s.label} />)}
-              {SCHEDULE_BLOCK_LIBRARY.map((b) => <option key={b} value={b} />)}
-            </datalist>
-            {(config.planner?.schedules || []).map((sched, si) => (
-              <div key={sched.id} className="border border-stone-200 rounded-lg mb-2">
-                <div className="flex items-center gap-2 px-3 py-2">
-                  <input value={sched.name} onChange={(e) => update((c) => { c.planner.schedules[si].name = e.target.value; return c; })}
-                    className="flex-1 text-sm font-semibold text-stone-800 border-none focus:outline-none bg-transparent" placeholder="Schedule name" />
-                  <button onClick={() => setExpandedSchedules((p) => ({ ...p, [sched.id]: !p[sched.id] }))} className="text-stone-400 p-1">
-                    {expandedSchedules[sched.id] ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                  </button>
-                  <ConfirmDelete onConfirm={() => update((c) => {
-                    c.planner.schedules.splice(si, 1);
-                    Object.keys(c.planner.weekdaySchedule || {}).forEach((wd) => { if (c.planner.weekdaySchedule[wd] === sched.id) delete c.planner.weekdaySchedule[wd]; });
-                    return c;
-                  })} size={14} />
-                </div>
-                {expandedSchedules[sched.id] && (
-                  <div className="px-3 pb-3 border-t border-stone-100 pt-2">
-                    {(sched.periods || []).map((slot, i) => (
-                      <div key={slot.id} className="flex items-center gap-1.5 mb-1.5">
-                        <input value={slot.label} onChange={(e) => update((c) => { c.planner.schedules[si].periods[i].label = e.target.value; return c; })} placeholder="Subject / period" list="settings-period-label-options" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                        <input type="time" value={slot.startTime} onChange={(e) => update((c) => { c.planner.schedules[si].periods[i].startTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
-                        <span className="text-stone-400 text-xs">–</span>
-                        <input type="time" value={slot.endTime} onChange={(e) => update((c) => { c.planner.schedules[si].periods[i].endTime = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
-                        <button disabled={i === 0} onClick={() => update((c) => { const arr = c.planner.schedules[si].periods; [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronUp size={13} /></button>
-                        <button disabled={i === (sched.periods || []).length - 1} onClick={() => update((c) => { const arr = c.planner.schedules[si].periods; [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]]; return c; })} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronDown size={13} /></button>
-                        <ConfirmDelete onConfirm={() => update((c) => { c.planner.schedules[si].periods.splice(i, 1); return c; })} size={13} />
-                      </div>
-                    ))}
-                    <button onClick={() => update((c) => { c.planner.schedules[si].periods = c.planner.schedules[si].periods || []; c.planner.schedules[si].periods.push({ id: uid(), label: "New period", startTime: "09:00", endTime: "09:45" }); return c; })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add period</button>
-                  </div>
-                )}
-              </div>
-            ))}
-            <button onClick={() => update((c) => {
-              c.planner.schedules = c.planner.schedules || [];
-              c.planner.schedules.push({ id: uid(), name: `Schedule ${c.planner.schedules.length + 1}`, periods: [] });
-              return c;
-            })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1 mb-4"><Plus size={12} /> Add schedule</button>
-
-            <p className="text-sm font-semibold text-stone-700 mb-2 pt-2 border-t border-stone-100">Assign to weekdays</p>
-            <p className="text-xs text-stone-400 mb-2">Which schedule applies on a "Full day schedule" day, by weekday.</p>
-            {WEEKDAY_LABELS_FULL.map((label, wd) => (
-              <div key={wd} className="flex items-center gap-2 mb-1.5">
-                <span className="text-xs text-stone-600 w-20 shrink-0">{label}</span>
-                <select value={config.planner?.weekdaySchedule?.[wd] || ""} onChange={(e) => update((c) => { c.planner.weekdaySchedule = c.planner.weekdaySchedule || {}; if (e.target.value) c.planner.weekdaySchedule[wd] = e.target.value; else delete c.planner.weekdaySchedule[wd]; return c; })}
-                  className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
-                  <option value="">Not set</option>
-                  {(config.planner?.schedules || []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
-            ))}
+            <WeeklyScheduleEditor config={config} persistConfig={setConfig} classType={classType} />
           </Section>
         </div>
 
