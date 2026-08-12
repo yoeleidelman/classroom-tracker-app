@@ -25,7 +25,8 @@ import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
-  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer
+  Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -755,7 +756,7 @@ async function loadAllWithPrefix(prefix) {
   }
 }
 
-const ClassContext = createContext({ className: "", onSwitchClass: () => {} });
+const ClassContext = createContext({ className: "", onSwitchClass: () => {}, classType: "elementary" });
 
 // Fonts, button press/hover feedback, and hand-written layout utilities — extracted into its
 // own component so every screen can render it, not just the ones inside an open class. It used
@@ -1040,6 +1041,12 @@ function AppInner() {
   const [teachers, setTeachers] = useState([]);
   const [programs, setPrograms] = useState([]);
   const [currentTeacher, setCurrentTeacher] = useState(null); // the signed-in teacher's own record, once real login exists
+  const [currentFamily, setCurrentFamily] = useState(null); // the signed-in family's own record, for the parent portal
+  const [families, setFamilies] = useState([]); // every family account, for admin's management screen
+  // The parent portal is a genuinely separate entry point, not a mode switch inside the teacher
+  // app — reached only via its own link (?portal=parent), checked once and never re-derived from
+  // anything a teacher session could touch, so there's no path from the teacher UI into this one.
+  const [isParentPortal] = useState(() => new URLSearchParams(window.location.search).get("portal") === "parent");
   const [authUser, setAuthUser] = useState(null); // the raw Firebase Auth user object
   const [classId, setClassId] = useState(null);
   const [className, setClassName] = useState("");
@@ -1059,8 +1066,15 @@ function AppInner() {
         if (user) {
           const mine = await loadJSON(`teacher:${user.uid}`, null, true);
           setCurrentTeacher(mine);
+          if (!mine) {
+            const myFamily = await loadJSON(`family:${user.uid}`, null, true);
+            setCurrentFamily(myFamily);
+          } else {
+            setCurrentFamily(null);
+          }
         } else {
           setCurrentTeacher(null);
+          setCurrentFamily(null);
         }
         setAuthChecked(true);
       });
@@ -1097,6 +1111,54 @@ function AppInner() {
     setTeachers((prev) => prev.filter((t) => t.uid !== uid));
   };
 
+  // Families mirror the teacher-account pattern exactly — one document per family (family:{uid}),
+  // not a single array, for the same Firestore-security-rule reason: a rule can check "is this
+  // document's ID my own uid" precisely, but can't safely search inside an array for "the one
+  // that's mine." studentLinks points directly at {classId, studentId} pairs rather than requiring
+  // every child to have a global cross-class ID first, since today many students only ever exist
+  // as a single class's own roster entry.
+  const refreshFamilies = async () => {
+    const list = await loadAllWithPrefix("family:");
+    setFamilies(list);
+  };
+
+  const updateFamilyRecord = async (uid, fields) => {
+    const existing = await loadJSON(`family:${uid}`, {}, true);
+    const next = { ...existing, ...fields };
+    await saveJSON(`family:${uid}`, next, true);
+    setFamilies((prev) => prev.map((f) => (f.uid === uid ? next : f)));
+  };
+
+  const deactivateFamilyRecord = async (uid) => {
+    await updateFamilyRecord(uid, { active: false });
+  };
+
+  const deleteFamilyPermanently = async (uid) => {
+    await deleteJSON(`family:${uid}`);
+    setFamilies((prev) => prev.filter((f) => f.uid !== uid));
+  };
+
+  // Actually creating the login itself — a brand-new Firebase Auth user with a real password —
+  // needs the same kind of privileged, server-side call used for teacher accounts (a plain client
+  // can sign itself in, but can't create arbitrary new accounts for other people). This calls a
+  // matching endpoint, /api/create-family, mirroring /api/create-teacher's exact shape — that
+  // endpoint needs to exist on the server for this to actually work end to end.
+  const createFamilyAccount = async (name, email, tempPassword, studentLinks) => {
+    try {
+      const response = await fetch("/api/create-family", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, password: tempPassword, studentLinks }),
+      });
+      const data = await response.json();
+      if (!response.ok) return { ok: false, error: data.error || "Couldn't create the account." };
+      await refreshFamilies();
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "Couldn't reach the server — try again." };
+    }
+  };
+
   const signInTeacher = async (email, password) => {
     try {
       await signInWithEmailAndPassword(auth, email, password);
@@ -1130,6 +1192,12 @@ function AppInner() {
     if (!currentTeacher) return;
     await updateTeacherRecord(currentTeacher.uid, { name: newName });
     setCurrentTeacher((prev) => ({ ...prev, name: newName }));
+  };
+
+  const changeMyFamilyName = async (newName) => {
+    if (!currentFamily) return;
+    await updateFamilyRecord(currentFamily.uid, { name: newName });
+    setCurrentFamily((prev) => ({ ...prev, name: newName }));
   };
 
   const changeMySignOff = async (newSignOff) => {
@@ -1395,6 +1463,20 @@ function AppInner() {
     return map;
   };
 
+  // A flat, school-wide list of every student across every active class, each tagged with which
+  // class they're in — exactly what admin needs to search/browse when linking a family account to
+  // their child(ren), since a family's studentLinks point directly at {classId, studentId} pairs.
+  const fetchAllStudentsForLinking = async () => {
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const flat = [];
+    for (const cls of allClasses) {
+      if (cls.archived) continue;
+      const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      clsRoster.forEach((s) => flat.push({ classId: cls.id, className: cls.name, studentId: s.id, studentName: s.name }));
+    }
+    return flat;
+  };
+
   const refreshPrograms = async () => {
     const list = await loadJSON("programs", [], true);
     setPrograms(list);
@@ -1470,9 +1552,9 @@ function AppInner() {
     setClassName("");
   };
 
-  const createClass = async (name, password) => {
+  const createClass = async (name, password, classType) => {
     const id = uid();
-    const cls = { id, name, password };
+    const cls = { id, name, password, classType: classType || "elementary" };
     const next = [...registry, cls];
     setRegistry(next);
     await saveJSON("schoolClasses", next, true);
@@ -1733,6 +1815,16 @@ function AppInner() {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-teal-700" size={28} /></div>;
   }
 
+  // The parent portal — a genuinely separate entry point (reached only via its own link), never
+  // reachable from anywhere inside the teacher app, and never showing any teacher UI. Checked
+  // before every other login path, since it's completely independent of them.
+  if (isParentPortal) {
+    if (!authUser || !currentFamily) {
+      return <ParentSignInScreen onSignIn={signInTeacher} isSignedInAsSomethingElse={Boolean(authUser && !currentFamily)} />;
+    }
+    return <ParentPortalApp family={currentFamily} onSignOut={() => signOut(auth)} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword} />;
+  }
+
   // Substitute session — a separate, code-based entry point that bypasses every other login
   // path entirely. Checked first since it's a completely independent flow from a real teacher
   // account, admin session, or the legacy class-password flow.
@@ -1766,11 +1858,12 @@ function AppInner() {
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+          families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
       }
       return (
-        <ClassApp classId={classId} className={className}
+        <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
           onSwitchClass={backToTeacherClassPicker} switchLabel="Admin · Back to dashboard"
           onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
           subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
@@ -1783,7 +1876,7 @@ function AppInner() {
       return <TeacherClassPicker teacherName={currentTeacher.name} classes={myClasses} onSelect={enterAssignedClass} onSignOut={signOutStaff} />;
     }
     return (
-      <ClassApp classId={classId} className={className}
+      <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
         onSwitchClass={backToTeacherClassPicker} switchLabel="Switch class"
         onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
         subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
@@ -1804,13 +1897,14 @@ function AppInner() {
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+        families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
         programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
     }
     return <ClassGateScreen registry={registry} onSelect={selectClass} onCreate={createClass} onRefresh={refreshRegistry} onLoginAdmin={loginAdmin} />;
   }
   return (
-    <ClassApp classId={classId} className={className}
+    <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
       onSwitchClass={isAdminSession ? backToAdminDashboard : switchClass}
       switchLabel={isAdminSession ? "Admin \u00b7 Back to dashboard" : "Switch class"}
       subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
@@ -1985,6 +2079,85 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
           </div>
         </>
       )}
+
+      {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
+
+      <div className="flex gap-2">
+        <button onClick={save} disabled={saving} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {saving ? "Creating..." : "Create account"}
+        </button>
+        <button onClick={onCancel} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function FamilyAccountForm({ allStudents, onSave, onCancel }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [tempPassword, setTempPassword] = useState("");
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState([]); // [{classId, studentId, studentName, className}]
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const toggleStudent = (s) => setSelected((prev) =>
+    prev.some((x) => x.classId === s.classId && x.studentId === s.studentId)
+      ? prev.filter((x) => !(x.classId === s.classId && x.studentId === s.studentId))
+      : [...prev, s]
+  );
+  const isSelected = (s) => selected.some((x) => x.classId === s.classId && x.studentId === s.studentId);
+
+  const filtered = search.trim()
+    ? allStudents.filter((s) => s.studentName.toLowerCase().includes(search.toLowerCase()))
+    : allStudents;
+
+  const save = async () => {
+    setError("");
+    if (!name.trim() || !email.trim() || tempPassword.length < 6) {
+      setError("Family name, email, and a temporary password of at least 6 characters are all required.");
+      return;
+    }
+    if (selected.length === 0) {
+      setError("Link at least one child — a family account with no children linked has nothing to show.");
+      return;
+    }
+    setSaving(true);
+    const result = await onSave(name.trim(), email.trim(), tempPassword, selected);
+    setSaving(false);
+    if (!result.ok) setError(result.error);
+  };
+
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Family name (e.g. The Levi Family)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (this is their username)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <input type="text" value={tempPassword} onChange={(e) => setTempPassword(e.target.value)} placeholder="Temporary password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <p className="text-[10px] text-stone-400 mb-3">Share this password with them directly — there's no reset-email flow yet, so for now they'll sign in with exactly what you set here.</p>
+
+      <label className="block text-xs font-semibold text-stone-700 mb-1">Link their child(ren)</label>
+      {selected.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {selected.map((s) => (
+            <span key={`${s.classId}-${s.studentId}`} className="flex items-center gap-1 text-xs font-semibold bg-teal-700 text-white px-2.5 py-1 rounded-full">
+              {s.studentName} <span className="opacity-75 font-normal">({s.className})</span>
+              <button onClick={() => toggleStudent(s)} className="ml-0.5 hover:opacity-70"><X size={11} /></button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search students by name..."
+        className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <div className="max-h-40 overflow-y-auto border border-stone-200 rounded-lg bg-white mb-3">
+        {filtered.length === 0 && <p className="text-xs text-stone-400 p-2">No students found.</p>}
+        {filtered.map((s) => (
+          <button key={`${s.classId}-${s.studentId}`} onClick={() => toggleStudent(s)}
+            className={`w-full flex items-center justify-between text-left px-2.5 py-1.5 text-sm border-b border-stone-100 last:border-b-0 ${isSelected(s) ? "bg-teal-50" : "hover:bg-stone-50"}`}>
+            <span className="text-stone-800">{s.studentName}</span>
+            <span className="text-xs text-stone-400">{s.className}</span>
+          </button>
+        ))}
+      </div>
 
       {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
 
@@ -2242,10 +2415,11 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
+  const [newClassType, setNewClassType] = useState("elementary");
   const [showPwChange, setShowPwChange] = useState(false);
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
@@ -2332,6 +2506,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const archivedStudents = (globalStudents || []).filter((s) => s.archived);
   const activeTeachers = (teachers || []).filter((t) => t.active);
   const inactiveTeachers = (teachers || []).filter((t) => !t.active);
+  const [showFamilyForm, setShowFamilyForm] = useState(false);
+  const [showArchivedFamilies, setShowArchivedFamilies] = useState(false);
+  const activeFamilies = (families || []).filter((f) => f.active !== false);
+  const inactiveFamilies = (families || []).filter((f) => f.active === false);
+  const [allStudentsForLinking, setAllStudentsForLinking] = useState([]);
+  useEffect(() => { onFetchAllStudentsForLinking().then(setAllStudentsForLinking); }, [registry]); // eslint-disable-line
 
   const loadOverview = async (dateStr) => {
     setOverviewLoading(true);
@@ -2350,12 +2530,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
     setStudentHistoryLoading(false);
   };
 
-  useEffect(() => { onRefresh(); onRefreshStudents(); onRefreshEvents(); onRefreshTools(); onRefreshTeachers(); onRefreshPrograms(); }, []); // eslint-disable-line
+  useEffect(() => { onRefresh(); onRefreshStudents(); onRefreshEvents(); onRefreshTools(); onRefreshTeachers(); onRefreshFamilies(); onRefreshPrograms(); }, []); // eslint-disable-line
 
   const submitCreate = async () => {
     if (!newName.trim() || !newPw.trim()) return;
-    await onCreate(newName.trim(), newPw.trim());
-    setNewName(""); setNewPw(""); setShowCreate(false);
+    await onCreate(newName.trim(), newPw.trim(), newClassType);
+    setNewName(""); setNewPw(""); setNewClassType("elementary"); setShowCreate(false);
     onRefresh();
   };
 
@@ -2505,6 +2685,15 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             <p className="text-sm font-semibold text-stone-800 mb-3">Create a new class</p>
             <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Class name" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
             <input value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="Set a password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+            <label className="block text-xs font-medium text-stone-500 mb-1">Class type</label>
+            <div className="flex gap-1.5 mb-3">
+              {[["elementary", "Elementary"], ["preschool", "Preschool"]].map(([val, label]) => (
+                <button key={val} onClick={() => setNewClassType(val)}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${newClassType === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="flex gap-2">
               <button onClick={submitCreate} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Create class</button>
               <button onClick={() => setShowCreate(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
@@ -2791,6 +2980,62 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         </div>
 
         <div className="mt-6 pt-6 border-t border-stone-200">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Family accounts</p>
+          <p className="text-xs text-stone-400 mb-3">A separate portal, not the class app — a family signs in on their own link and only ever sees their own linked child(ren).</p>
+
+          {!showFamilyForm && (
+            <button onClick={() => setShowFamilyForm(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Create family account
+            </button>
+          )}
+
+          {showFamilyForm && (
+            <FamilyAccountForm allStudents={allStudentsForLinking}
+              onSave={async (name, email, tempPassword, studentLinks) => {
+                const result = await onCreateFamily(name, email, tempPassword, studentLinks);
+                if (result.ok) setShowFamilyForm(false);
+                return result;
+              }} onCancel={() => setShowFamilyForm(false)} />
+          )}
+
+          {activeFamilies.length === 0 && !showFamilyForm && <p className="text-xs text-stone-400">No family accounts yet.</p>}
+          <ul className="space-y-2">
+            {activeFamilies.map((f) => (
+              <li key={f.uid} className="bg-white border border-stone-200 rounded-lg p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-stone-800">{f.name}</span>
+                  <ArchiveOrDeleteMenu onArchive={() => onDeactivateFamily(f.uid)} onDeletePermanently={() => onDeleteFamily(f.uid)} size={14} />
+                </div>
+                <p className="text-xs text-stone-400 mt-0.5">
+                  {f.email} · {(f.studentLinks || []).length === 0 ? "No children linked" : (f.studentLinks || []).map((l) => l.studentName).join(", ")}
+                </p>
+              </li>
+            ))}
+          </ul>
+
+          {inactiveFamilies.length > 0 && (
+            <div className="mt-3">
+              <button onClick={() => setShowArchivedFamilies((v) => !v)} className="text-xs font-semibold text-stone-500 hover:text-stone-800 flex items-center gap-1 mb-2">
+                {showArchivedFamilies ? <ChevronUp size={12} /> : <ChevronDown size={12} />} {showArchivedFamilies ? "Hide" : "Show"} archived families ({inactiveFamilies.length})
+              </button>
+              {showArchivedFamilies && (
+                <ul className="space-y-2">
+                  {inactiveFamilies.map((f) => (
+                    <li key={f.uid} className="flex items-center justify-between bg-stone-100 rounded-xl px-4 py-2.5">
+                      <span className="text-sm text-stone-500">{f.name} — {f.email}</span>
+                      <div className="flex items-center gap-3">
+                        <button onClick={() => onUpdateFamily(f.uid, { active: true })} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Restore</button>
+                        <ConfirmDelete onConfirm={() => onDeleteFamily(f.uid)} size={13} label="Delete forever" confirmText="Really delete forever?" className="text-xs text-stone-400 hover:text-red-500" />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
           {!showPwChange ? (
             <button onClick={() => setShowPwChange(true)} className="w-full text-xs font-semibold text-stone-500 hover:text-teal-700 text-center">
               Change admin password
@@ -2841,7 +3086,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       )}
 
       {showMyAccount && currentTeacher && (
-        <MyAccountPanel teacher={currentTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onUpdateSignOff={onChangeMySignOff} onClose={() => setShowMyAccount(false)} />
+        <MyAccountPanel teacher={currentTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
       )}
     </div>
   );
@@ -2916,6 +3161,145 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
     </div>
   );
 }
+
+function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [signingIn, setSigningIn] = useState(false);
+
+  const trySignIn = async () => {
+    if (!email.trim() || !password) return;
+    setError("");
+    setSigningIn(true);
+    const result = await onSignIn(email.trim(), password);
+    setSigningIn(false);
+    if (!result.ok) setError(result.error);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
+      <GlobalAppStyles />
+      <div className="max-w-sm w-full">
+        <img src="/logo-transparent.png" alt="Family Portal" className="w-48 mx-auto mb-5" />
+        <h1 className="display-font text-2xl font-bold text-stone-900 text-center mb-1">Family sign in</h1>
+        <p className="text-stone-500 text-sm text-center mb-7">See updates for your child, right here.</p>
+
+        {isSignedInAsSomethingElse && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
+            <p className="text-xs text-amber-800">This device is currently signed in with a staff account. Signing in below with a family account will switch to that instead.</p>
+          </div>
+        )}
+
+        <div className="bg-white border border-stone-200 rounded-2xl p-5 mb-4 shadow-sm">
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
+            placeholder="Email" autoComplete="username" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none" />
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
+            placeholder="Password" autoComplete="current-password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-3 focus:border-teal-500 focus:outline-none" />
+          {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
+          <button onClick={trySignIn} disabled={signingIn} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
+            {signingIn ? "Signing in..." : "Sign in"}
+          </button>
+        </div>
+        <p className="text-[10px] text-stone-400 text-center leading-relaxed">
+          Don't have an account yet? Ask your child's school to set one up for you.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }) {
+  const [showAccount, setShowAccount] = useState(false);
+  const [name, setName] = useState(family?.name || "");
+  const [nameSaved, setNameSaved] = useState(false);
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwSuccess, setPwSuccess] = useState(false);
+
+  const saveName = async () => {
+    if (!name.trim()) return;
+    await onUpdateName(name.trim());
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  const submitPasswordChange = async () => {
+    setPwError("");
+    if (newPw.length < 6) { setPwError("New password needs to be at least 6 characters."); return; }
+    if (newPw !== confirmPw) { setPwError("New passwords don't match."); return; }
+    setPwSaving(true);
+    const result = await onChangeMyPassword(currentPw, newPw);
+    setPwSaving(false);
+    if (!result.ok) { setPwError(result.error); return; }
+    setPwSuccess(true);
+    setCurrentPw(""); setNewPw(""); setConfirmPw("");
+    setTimeout(() => setPwSuccess(false), 3000);
+  };
+
+  return (
+    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
+      <GlobalAppStyles />
+      <div className="max-w-lg mx-auto px-4 py-6">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h1 className="display-font text-xl font-bold text-stone-900">{family?.name || "Your family"}</h1>
+            <p className="text-xs text-stone-400">Family portal</p>
+          </div>
+          <button onClick={() => setShowAccount((v) => !v)} className="text-stone-400 hover:text-stone-700 p-1.5"><SettingsIcon size={20} /></button>
+        </div>
+
+        {showAccount ? (
+          <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
+            <p className="font-semibold text-stone-800 text-sm mb-3">My account</p>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Family name</label>
+            <div className="flex gap-2 mb-4">
+              <input value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+              <button onClick={saveName} className="bg-teal-700 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
+            </div>
+            {nameSaved && <p className="text-xs text-emerald-600 -mt-3 mb-4">Saved.</p>}
+
+            <p className="text-sm font-semibold text-stone-800 mb-2 pt-3 border-t border-stone-200">Change password</p>
+            <input type="password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} placeholder="Current password"
+              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="New password (6+ characters)"
+              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <input type="password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} placeholder="Confirm new password"
+              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            {pwError && <p className="text-xs text-rose-600 mb-2">{pwError}</p>}
+            {pwSuccess && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
+            <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50 mb-3">
+              {pwSaving ? "Updating..." : "Change password"}
+            </button>
+            <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
+          </div>
+        ) : (
+          <>
+            <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Your children</p>
+            {(family?.studentLinks || []).length === 0 ? (
+              <div className="bg-white border border-stone-200 rounded-xl p-5 text-center">
+                <p className="text-sm text-stone-400">No children linked to this account yet — check with the school if this doesn't look right.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {family.studentLinks.map((link, i) => (
+                  <div key={i} className="bg-white border border-stone-200 rounded-xl p-4">
+                    <p className="font-semibold text-stone-900">{link.studentName}</p>
+                    <p className="text-xs text-stone-400">{link.className}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function TeacherClassPicker({ teacherName, classes, onSelect, onSignOut }) {
   return (
@@ -3050,7 +3434,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode }) {
+function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -3660,6 +4044,62 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
     }
   };
 
+  // Preschool daily log — built for speed, not detail. Meals and nap assume the whole class did
+  // the same thing (food is served to the room at once; most rooms share one nap block), so those
+  // take a bulk update and the teacher only touches the exceptions. Diapers and bathroom trips are
+  // NOT defaulted to "everyone" — that's not something that happens to the whole room at once, and
+  // assuming it would be actively wrong, not just unnecessary — so those stay tap-the-specific-kid,
+  // append-only logs, same as mood and health notes.
+  const setMood = (studentId, date, mood) => {
+    const data = studentData[studentId];
+    const without = (data.mood || []).filter((m) => m.date !== date);
+    persistStudent(studentId, { ...data, mood: [...without, withLogger({ date, mood })] });
+  };
+
+  // studentAmounts: { studentId: amount } — applied to every included student in one action.
+  const setMealBulk = (date, mealType, studentAmounts) => {
+    Object.entries(studentAmounts).forEach(([studentId, amount]) => {
+      const data = studentData[studentId];
+      const without = (data.meals || []).filter((m) => !(m.date === date && m.mealType === mealType));
+      persistStudent(studentId, { ...data, meals: [...without, withLogger({ date, mealType, amount })] });
+    });
+  };
+
+  // studentTimes: { studentId: {start, end} | null } — null means that student is excluded (didn't nap).
+  const setNapBulk = (date, studentTimes) => {
+    Object.entries(studentTimes).forEach(([studentId, times]) => {
+      const data = studentData[studentId];
+      const without = (data.naps || []).filter((n) => n.date !== date);
+      const entry = times ? withLogger({ date, start: times.start, end: times.end }) : withLogger({ date, skipped: true });
+      persistStudent(studentId, { ...data, naps: [...without, entry] });
+    });
+  };
+
+  // studentIds: array — the same type applied to every selected student in one action.
+  const logDiaperBulk = (date, time, type, studentIds) => {
+    studentIds.forEach((studentId) => {
+      const data = studentData[studentId];
+      const entry = withLogger({ id: uid(), date, time, type });
+      persistStudent(studentId, { ...data, diapers: [...(data.diapers || []), entry] });
+    });
+  };
+  const removeDiaperLog = (studentId, entryId) => {
+    const data = studentData[studentId];
+    persistStudent(studentId, { ...data, diapers: (data.diapers || []).filter((d) => d.id !== entryId) });
+  };
+
+  const logBathroomBulk = (date, time, type, studentIds) => {
+    studentIds.forEach((studentId) => {
+      const data = studentData[studentId];
+      const entry = withLogger({ id: uid(), date, time, type });
+      persistStudent(studentId, { ...data, bathroom: [...(data.bathroom || []), entry] });
+    });
+  };
+  const removeBathroomLog = (studentId, entryId) => {
+    const data = studentData[studentId];
+    persistStudent(studentId, { ...data, bathroom: (data.bathroom || []).filter((b) => b.id !== entryId) });
+  };
+
   const markNoHomeworkToday = (date) => {
     roster.forEach((s) => {
       const data = studentData[s.id] || emptyStudentData();
@@ -3761,7 +4201,7 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
   }
 
   return (
-    <ClassContext.Provider value={{ className, onSwitchClass, switchLabel }}>
+    <ClassContext.Provider value={{ className, onSwitchClass, switchLabel, classType }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <div style={{
         height: "48px", width: "100%",
@@ -3791,6 +4231,15 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           onAddPlannerEvent={addPlannerEvent}
           randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
           alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan} />
+      )}
+
+      {view === "daily-log" && (
+        <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} config={config}
+          setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
+          logDiaperBulk={logDiaperBulk} removeDiaperLog={removeDiaperLog}
+          logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
+          openDetail={(id) => { setCurrentId(id); setView("detail"); }}
+          openIncidentForm={() => openIncidentForm(null, "daily-log")} />
       )}
 
       {view === "segment-celebration-message" && celebratingSegment && (
@@ -4030,11 +4479,11 @@ function ClassApp({ classId, className, onSwitchClass, switchLabel, onRenameClas
           className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
           subCode={subCode} onGenerateSubCode={onGenerateSubCode} onClearSubCode={onClearSubCode}
           globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent}
-          loggedInTeacher={loggedInTeacher} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)} />
+          loggedInTeacher={loggedInTeacher} onChangeMySignOff={onChangeMySignOff} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)} />
       )}
 
       {showMyAccount && loggedInTeacher && (
-        <MyAccountPanel teacher={loggedInTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onUpdateSignOff={onChangeMySignOff} onClose={() => setShowMyAccount(false)} />
+        <MyAccountPanel teacher={loggedInTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
       )}
 
       {showOnboarding && (
@@ -4068,14 +4517,24 @@ function Header({ navigate }) {
 }
 
 function MainTabs({ active, navigate }) {
-  const tabs = [
-    { id: "home", label: "Home", icon: HomeIcon },
-    { id: "assessments", label: "Assessments", icon: BookOpen },
-    { id: "points", label: "Points", icon: Star },
-    { id: "communication", label: "Comm", icon: Mail },
-    { id: "planner", label: "Planner", icon: Calendar },
-    { id: "tools", label: "Tools", icon: Wrench },
-  ];
+  const { classType } = useContext(ClassContext);
+  const tabs = classType === "preschool"
+    ? [
+        { id: "home", label: "Home", icon: HomeIcon },
+        { id: "daily-log", label: "Daily Log", icon: ClipboardList },
+        { id: "points", label: "Points", icon: Star },
+        { id: "communication", label: "Comm", icon: Mail },
+        { id: "planner", label: "Planner", icon: Calendar },
+        { id: "tools", label: "Tools", icon: Wrench },
+      ]
+    : [
+        { id: "home", label: "Home", icon: HomeIcon },
+        { id: "assessments", label: "Assessments", icon: BookOpen },
+        { id: "points", label: "Points", icon: Star },
+        { id: "communication", label: "Comm", icon: Mail },
+        { id: "planner", label: "Planner", icon: Calendar },
+        { id: "tools", label: "Tools", icon: Wrench },
+      ];
   return (
     <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-[36rem] overflow-x-auto no-scrollbar">
       {tabs.map((t) => {
@@ -4828,6 +5287,402 @@ function classModeNameSize(count) {
   if (count <= 20) return "text-2xl";
   if (count <= 30) return "text-xl";
   return "text-base";
+}
+
+const PRESCHOOL_MOOD_OPTIONS = [
+  { id: "happy", label: "Happy", emoji: "😊" },
+  { id: "calm", label: "Calm", emoji: "😌" },
+  { id: "fussy", label: "Fussy", emoji: "😣" },
+  { id: "sleepy", label: "Sleepy", emoji: "😴" },
+  { id: "sad", label: "Sad", emoji: "😢" },
+];
+const MEAL_AMOUNTS = [
+  { id: "all", label: "All" },
+  { id: "most", label: "Most" },
+  { id: "some", label: "Some" },
+  { id: "none", label: "None" },
+  { id: "refused", label: "Refused" },
+];
+const DIAPER_TYPES = [
+  { id: "wet", label: "Wet" },
+  { id: "bm", label: "BM" },
+  { id: "both", label: "Both" },
+  { id: "dry", label: "Dry check" },
+];
+const BATHROOM_TRIP_TYPES = [
+  { id: "success", label: "Success" },
+  { id: "accident", label: "Accident" },
+  { id: "no-result", label: "No result" },
+];
+
+// Tailwind's compiler needs every class name to appear as a literal string somewhere in the
+// source — a template literal like `bg-${tile.color}-50` only works "by accident" for colors that
+// happen to already be spelled out elsewhere in the file, which is exactly the kind of silent,
+// fragile bug that's easy to ship without noticing (it did happen once while building this very
+// screen). Spelling every class out literally here means every one of them is guaranteed to exist.
+const TILE_STYLES = {
+  violet: {
+    tileBg: "bg-violet-50", tileBorder: "border-violet-200", tileBorderHover: "hover:border-violet-400",
+    iconText: "text-violet-700", labelText: "text-violet-900", countText: "text-violet-600",
+    solid: "bg-violet-600", solidHover: "hover:bg-violet-700", solidBorder: "border-violet-600",
+    rowActive: "border-violet-300 bg-violet-50", iconBg: "bg-violet-100",
+  },
+  amber: {
+    tileBg: "bg-amber-50", tileBorder: "border-amber-200", tileBorderHover: "hover:border-amber-400",
+    iconText: "text-amber-700", labelText: "text-amber-900", countText: "text-amber-600",
+    solid: "bg-amber-600", solidHover: "hover:bg-amber-700", solidBorder: "border-amber-600",
+    rowActive: "border-amber-300 bg-amber-50", iconBg: "bg-amber-100",
+  },
+  emerald: {
+    tileBg: "bg-emerald-50", tileBorder: "border-emerald-200", tileBorderHover: "hover:border-emerald-400",
+    iconText: "text-emerald-700", labelText: "text-emerald-900", countText: "text-emerald-600",
+    solid: "bg-emerald-600", solidHover: "hover:bg-emerald-700", solidBorder: "border-emerald-600",
+    rowActive: "border-emerald-300 bg-emerald-50", iconBg: "bg-emerald-100",
+  },
+  fuchsia: {
+    tileBg: "bg-fuchsia-50", tileBorder: "border-fuchsia-200", tileBorderHover: "hover:border-fuchsia-400",
+    iconText: "text-fuchsia-700", labelText: "text-fuchsia-900", countText: "text-fuchsia-600",
+    solid: "bg-fuchsia-600", solidHover: "hover:bg-fuchsia-700", solidBorder: "border-fuchsia-600",
+    rowActive: "border-fuchsia-300 bg-fuchsia-50", iconBg: "bg-fuchsia-100",
+  },
+  indigo: {
+    tileBg: "bg-indigo-50", tileBorder: "border-indigo-200", tileBorderHover: "hover:border-indigo-400",
+    iconText: "text-indigo-700", labelText: "text-indigo-900", countText: "text-indigo-600",
+    solid: "bg-indigo-600", solidHover: "hover:bg-indigo-700", solidBorder: "border-indigo-600",
+    rowActive: "border-indigo-300 bg-indigo-50", iconBg: "bg-indigo-100",
+  },
+  rose: {
+    tileBg: "bg-rose-50", tileBorder: "border-rose-200", tileBorderHover: "hover:border-rose-400",
+    iconText: "text-rose-700", labelText: "text-rose-900", countText: "text-rose-600",
+    solid: "bg-rose-600", solidHover: "hover:bg-rose-700", solidBorder: "border-rose-600",
+    rowActive: "border-rose-300 bg-rose-50", iconBg: "bg-rose-100",
+  },
+  teal: {
+    tileBg: "bg-teal-50", tileBorder: "border-teal-200", tileBorderHover: "hover:border-teal-400",
+    iconText: "text-teal-700", labelText: "text-teal-900", countText: "text-teal-600",
+    solid: "bg-teal-600", solidHover: "hover:bg-teal-700", solidBorder: "border-teal-600",
+    rowActive: "border-teal-300 bg-teal-50", iconBg: "bg-teal-100",
+  },
+  sky: {
+    tileBg: "bg-sky-50", tileBorder: "border-sky-200", tileBorderHover: "hover:border-sky-400",
+    iconText: "text-sky-700", labelText: "text-sky-900", countText: "text-sky-600",
+    solid: "bg-sky-600", solidHover: "hover:bg-sky-700", solidBorder: "border-sky-600",
+    rowActive: "border-sky-300 bg-sky-50", iconBg: "bg-sky-100",
+  },
+};
+
+// Every tile on the preschool dashboard — one shared config drives both the dashboard grid and
+// which sub-screen a tap opens, so adding a category later means adding one entry here, not
+// touching the dashboard layout itself. bulkDefault: "all" means every student starts selected
+// with the everyday value (used for meals, where that's a safe assumption); "none" means nothing
+// is pre-selected (used everywhere a whole-room default would be guessing, not saving time).
+const PRESCHOOL_TILES = [
+  { id: "mood", label: "Mood", icon: Smile, color: "violet", bulkDefault: "none" },
+  { id: "breakfast", label: "Breakfast", icon: Coffee, color: "amber", bulkDefault: "all", mealType: "breakfast" },
+  { id: "lunch", label: "Lunch", icon: Sandwich, color: "emerald", bulkDefault: "all", mealType: "lunch" },
+  { id: "snack", label: "Snack", icon: Apple, color: "fuchsia", bulkDefault: "all", mealType: "snack" },
+  { id: "nap", label: "Nap", icon: Moon, color: "indigo", bulkDefault: "all" },
+  { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "none" },
+  { id: "bathroom", label: "Bathroom", icon: Droplets, color: "teal", bulkDefault: "none" },
+  { id: "health", label: "Health note", icon: HeartPulse, color: "sky", bulkDefault: "none" },
+];
+
+function PreschoolDashboardView({ roster, studentData, incidents, config, setMood, setMealBulk, setNapBulk, logDiaperBulk, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm }) {
+  const [screen, setScreen] = useState(null); // null = dashboard grid
+  const [date] = useState(todayISO());
+
+  const loggedCountFor = (tileId) => {
+    if (tileId === "mood") return roster.filter((s) => (studentData[s.id]?.mood || []).some((m) => m.date === date)).length;
+    if (tileId === "nap") return roster.filter((s) => (studentData[s.id]?.naps || []).some((n) => n.date === date)).length;
+    const tile = PRESCHOOL_TILES.find((t) => t.id === tileId);
+    if (tile?.mealType) return roster.filter((s) => (studentData[s.id]?.meals || []).some((m) => m.date === date && m.mealType === tile.mealType)).length;
+    if (tileId === "diapers") return roster.filter((s) => (studentData[s.id]?.diapers || []).some((d) => d.date === date)).length;
+    if (tileId === "bathroom") return roster.filter((s) => (studentData[s.id]?.bathroom || []).some((b) => b.date === date)).length;
+    return 0;
+  };
+
+  if (screen === "health") {
+    openIncidentForm();
+    return null;
+  }
+
+  if (screen === null) {
+    return (
+      <div className="w-full">
+        <MainTabs active="daily-log" navigate={() => {}} />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {PRESCHOOL_TILES.map((tile) => {
+            const Icon = tile.icon;
+            const st = TILE_STYLES[tile.color];
+            const logged = tile.id === "health" ? null : loggedCountFor(tile.id);
+            return (
+              <button key={tile.id} onClick={() => setScreen(tile.id)}
+                className={`hover-lift flex flex-col items-center justify-center gap-2 rounded-2xl border-2 py-8 px-3 ${st.tileBg} ${st.tileBorder} ${st.tileBorderHover}`}>
+                <Icon size={40} className={st.iconText} />
+                <span className={`text-base font-bold ${st.labelText}`}>{tile.label}</span>
+                {logged !== null && roster.length > 0 && (
+                  <span className={`text-xs font-semibold ${st.countText}`}>{logged} of {roster.length} logged</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  const tile = PRESCHOOL_TILES.find((t) => t.id === screen);
+
+  if (tile?.mealType) {
+    return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} setMealBulk={setMealBulk} onBack={() => setScreen(null)} />;
+  }
+  if (screen === "nap") {
+    return <NapBulkScreen date={date} roster={roster} studentData={studentData} setNapBulk={setNapBulk} onBack={() => setScreen(null)} />;
+  }
+  if (screen === "mood") {
+    return <MoodScreen date={date} roster={roster} studentData={studentData} setMood={setMood} onBack={() => setScreen(null)} />;
+  }
+  if (screen === "diapers") {
+    return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} dataKey="diapers" typeOptions={DIAPER_TYPES}
+      logBulk={logDiaperBulk} removeLog={removeDiaperLog} onBack={() => setScreen(null)} />;
+  }
+  if (screen === "bathroom") {
+    return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
+      logBulk={logBathroomBulk} removeLog={removeBathroomLog} onBack={() => setScreen(null)} />;
+  }
+  return null;
+}
+
+function PreschoolScreenHeader({ tile, title, onBack }) {
+  const Icon = tile?.icon;
+  const st = tile ? TILE_STYLES[tile.color] : null;
+  return (
+    <div className="flex items-center gap-2 mb-5">
+      <button onClick={onBack} className="text-stone-500 hover:text-stone-800 p-1"><ChevronLeft size={22} /></button>
+      {Icon && <span className={`w-9 h-9 rounded-full flex items-center justify-center ${st.iconBg}`}><Icon size={18} className={st.iconText} /></span>}
+      <h1 className="display-font text-xl font-bold text-stone-900">{title}</h1>
+    </div>
+  );
+}
+
+// Meals — the one category where "everyone did the same thing" is a safe default. Every student
+// starts on "All"; tapping a row reveals the other options right there so an exception takes one
+// tap, not a trip to a separate screen.
+function MealBulkScreen({ tile, date, roster, studentData, setMealBulk, onBack }) {
+  const st = TILE_STYLES[tile.color];
+  const [amounts, setAmounts] = useState(() => Object.fromEntries(roster.map((s) => [s.id, "all"])));
+  const [expanded, setExpanded] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  const submit = () => {
+    setMealBulk(date, tile.mealType, amounts);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="w-full md:w-[28rem]">
+      <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
+      <p className="text-xs text-stone-400 mb-4">Everyone starts on "All" — tap a name to change just that student.</p>
+      <div className="space-y-2 mb-5">
+        {roster.map((s) => {
+          const isOpen = expanded === s.id;
+          const current = MEAL_AMOUNTS.find((a) => a.id === amounts[s.id]) || MEAL_AMOUNTS[0];
+          return (
+            <div key={s.id} className={`rounded-xl border ${amounts[s.id] === "all" ? "border-stone-200 bg-white" : st.rowActive}`}>
+              <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
+                <span className="font-semibold text-stone-800">{s.name}</span>
+                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{current.label}</span>
+              </button>
+              {isOpen && (
+                <div className="flex flex-wrap gap-1.5 px-4 pb-3">
+                  {MEAL_AMOUNTS.map((a) => (
+                    <button key={a.id} onClick={() => { setAmounts((prev) => ({ ...prev, [s.id]: a.id })); setExpanded(null); }}
+                      className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${amounts[s.id] === a.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+                      {a.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <button onClick={submit} className={`w-full text-white rounded-xl py-4 text-base font-bold ${st.solid} ${st.solidHover}`}>
+        {saved ? "Logged ✓" : `Log ${tile.label} for ${roster.length} students`}
+      </button>
+    </div>
+  );
+}
+
+// Nap — most rooms share one nap block, so that's the default for everyone; the teacher only
+// touches a student who didn't nap or napped on a different schedule.
+function NapBulkScreen({ date, roster, studentData, setNapBulk, onBack }) {
+  const tile = PRESCHOOL_TILES.find((t) => t.id === "nap");
+  const st = TILE_STYLES[tile.color];
+  const [sharedStart, setSharedStart] = useState("13:00");
+  const [sharedEnd, setSharedEnd] = useState("14:30");
+  const [excluded, setExcluded] = useState({}); // studentId -> true if skipped
+  const [customTimes, setCustomTimes] = useState({}); // studentId -> {start, end}
+  const [expanded, setExpanded] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  const submit = () => {
+    const studentTimes = {};
+    roster.forEach((s) => {
+      if (excluded[s.id]) { studentTimes[s.id] = null; return; }
+      studentTimes[s.id] = customTimes[s.id] || { start: sharedStart, end: sharedEnd };
+    });
+    setNapBulk(date, studentTimes);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="w-full md:w-[28rem]">
+      <PreschoolScreenHeader tile={tile} title="Nap" onBack={onBack} />
+      <p className="text-xs text-stone-400 mb-2">Shared nap time for the room — applies to everyone unless you change a student below.</p>
+      <div className="flex items-center gap-2 mb-5 bg-white border border-stone-200 rounded-xl p-3">
+        <input type="time" value={sharedStart} onChange={(e) => setSharedStart(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        <span className="text-xs text-stone-400">to</span>
+        <input type="time" value={sharedEnd} onChange={(e) => setSharedEnd(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+      </div>
+      <div className="space-y-2 mb-5">
+        {roster.map((s) => {
+          const isOpen = expanded === s.id;
+          const isExcluded = Boolean(excluded[s.id]);
+          const custom = customTimes[s.id];
+          return (
+            <div key={s.id} className={`rounded-xl border ${isExcluded ? "border-stone-200 bg-stone-50" : custom ? st.rowActive : "border-stone-200 bg-white"}`}>
+              <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
+                <span className={`font-semibold ${isExcluded ? "text-stone-400 line-through" : "text-stone-800"}`}>{s.name}</span>
+                <span className="text-xs text-stone-500">{isExcluded ? "Didn't nap" : custom ? `${custom.start}–${custom.end}` : "Shared time"}</span>
+              </button>
+              {isOpen && (
+                <div className="px-4 pb-3 flex flex-wrap items-center gap-2">
+                  <button onClick={() => { setExcluded((prev) => ({ ...prev, [s.id]: !prev[s.id] })); setCustomTimes((prev) => ({ ...prev, [s.id]: null })); }}
+                    className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${isExcluded ? "bg-stone-600 text-white border-stone-600" : "text-stone-600 border-stone-300"}`}>
+                    Didn't nap
+                  </button>
+                  {!isExcluded && (
+                    <>
+                      <input type="time" value={custom?.start || sharedStart} onChange={(e) => setCustomTimes((prev) => ({ ...prev, [s.id]: { start: e.target.value, end: custom?.end || sharedEnd } }))}
+                        className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                      <span className="text-xs text-stone-400">to</span>
+                      <input type="time" value={custom?.end || sharedEnd} onChange={(e) => setCustomTimes((prev) => ({ ...prev, [s.id]: { start: custom?.start || sharedStart, end: e.target.value } }))}
+                        className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <button onClick={submit} className={`w-full text-white rounded-xl py-4 text-base font-bold ${st.solid} ${st.solidHover}`}>
+        {saved ? "Logged ✓" : `Log nap for ${roster.length} students`}
+      </button>
+    </div>
+  );
+}
+
+// Mood — deliberately not defaulted. Assuming a mood is a guess, not a time-saver, so this stays a
+// plain tap-each-student-you-have-something-to-say-about screen.
+function MoodScreen({ date, roster, studentData, setMood, onBack }) {
+  const tile = PRESCHOOL_TILES.find((t) => t.id === "mood");
+  const st = TILE_STYLES[tile.color];
+  return (
+    <div className="w-full md:w-[28rem]">
+      <PreschoolScreenHeader tile={tile} title="Mood" onBack={onBack} />
+      <div className="space-y-2">
+        {roster.map((s) => {
+          const today = (studentData[s.id]?.mood || []).find((m) => m.date === date);
+          return (
+            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
+              <p className="font-semibold text-stone-800 mb-2">{s.name}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {PRESCHOOL_MOOD_OPTIONS.map((m) => (
+                  <button key={m.id} onClick={() => setMood(s.id, date, m.id)}
+                    className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${today?.mood === m.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+                    {m.emoji} {m.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Diapers and bathroom trips — genuinely not a whole-room action, so nothing is pre-selected.
+// Teacher picks a time and type once, taps whichever kids it applies to right now, logs them all
+// in one action, and can keep coming back to this same screen through the day since it's append-
+// only — today's entries stay visible below so anything can be reviewed or undone.
+function TapLogScreen({ tile, date, roster, studentData, dataKey, typeOptions, logBulk, removeLog, onBack }) {
+  const st = TILE_STYLES[tile.color];
+  const [time, setTime] = useState(() => new Date().toTimeString().slice(0, 5));
+  const [type, setType] = useState(typeOptions[0].id);
+  const [selected, setSelected] = useState([]);
+  const [saved, setSaved] = useState(false);
+
+  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const submit = () => {
+    if (selected.length === 0) return;
+    logBulk(date, time, type, selected);
+    setSelected([]);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const todaysEntries = roster.flatMap((s) => (studentData[s.id]?.[dataKey] || []).filter((e) => e.date === date).map((e) => ({ ...e, studentId: s.id, studentName: s.name })))
+    .sort((a, b) => (a.time < b.time ? 1 : -1));
+
+  return (
+    <div className="w-full md:w-[28rem]">
+      <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
+      <div className="flex items-center gap-2 mb-3">
+        <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        <div className="flex flex-wrap gap-1.5">
+          {typeOptions.map((t) => (
+            <button key={t.id} onClick={() => setType(t.id)}
+              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${type === t.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="text-xs text-stone-400 mb-2">Tap everyone this applies to, then log them together.</p>
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {roster.map((s) => (
+          <button key={s.id} onClick={() => toggle(s.id)}
+            className={`text-sm font-semibold px-3 py-2 rounded-full border ${selected.includes(s.id) ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300 bg-white"}`}>
+            {s.name}
+          </button>
+        ))}
+      </div>
+      <button onClick={submit} disabled={selected.length === 0}
+        className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 mb-5 ${st.solid} ${st.solidHover}`}>
+        {saved ? "Logged ✓" : selected.length > 0 ? `Log for ${selected.length} selected` : "Select students above"}
+      </button>
+
+      {todaysEntries.length > 0 && (
+        <>
+          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-1.5">Today so far</p>
+          <ul className="space-y-1.5">
+            {todaysEntries.map((e) => (
+              <li key={e.id} className="flex items-center justify-between text-sm bg-white border border-stone-200 rounded-lg px-3 py-2">
+                <span className="text-stone-700">{formatTime12h(e.time)} — {e.studentName} — {typeOptions.find((t) => t.id === e.type)?.label || e.type}</span>
+                <button onClick={() => removeLog(e.studentId, e.id)} className="text-stone-400 hover:text-rose-600"><X size={14} /></button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
 }
 
 function ClassModeView({ roster, studentData, config, addPoints, openIncidentForm, onExit, onOpenClassTools }) {
@@ -7634,7 +8489,7 @@ function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, on
           {hasP2 && (
             <>
               <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
-              <div className="flex gap-1.5 mb-3">
+              <div className="flex gap-1.5 mb-1">
                 {[["p1", student?.parent1Name || "Parent 1"], ["p2", student?.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => (
                   <button key={val} onClick={() => setRecipientMode(val)}
                     className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
@@ -7642,6 +8497,7 @@ function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, on
                   </button>
                 ))}
               </div>
+              <p className="text-[10px] text-stone-400 mb-3">{sendEmails ? `Includes: ${sendEmails}` : "No email on file for the parent(s) selected."}</p>
             </>
           )}
           <div className="flex items-start gap-1.5 mb-3">
@@ -7778,7 +8634,7 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
           {hasP2 && (
             <>
               <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
-              <div className="flex gap-1.5 mb-3">
+              <div className="flex gap-1.5 mb-1">
                 {[["p1", student?.parent1Name || "Parent 1"], ["p2", student?.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => (
                   <button key={val} onClick={() => setRecipientMode(val)}
                     className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
@@ -7786,6 +8642,7 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
                   </button>
                 ))}
               </div>
+              <p className="text-[10px] text-stone-400 mb-3">{sendEmails ? `Includes: ${sendEmails}` : "No email on file for the parent(s) selected."}</p>
             </>
           )}
           <div className="flex items-start gap-1.5 mb-3">
@@ -8236,16 +9093,25 @@ function IncidentDetailView({ incident, roster, config, loggedInTeacher, onBack,
                       onBlur={(e) => onUpdateParentEmail(s.id, e.target.value)} placeholder="parent@example.com"
                       className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-2" />
                     {Boolean(s.parent2Email || s.parent2Phone) && (
-                      <div className="flex gap-1 mb-2">
-                        {[["p1", s.parent1Name || "Parent 1"], ["p2", s.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => {
-                          const active = (recipientModes[s.id] || "p1") === val;
-                          return (
-                            <button key={val} onClick={() => setRecipientModes((prev) => ({ ...prev, [s.id]: val }))}
-                              className={`text-[10px] font-semibold px-2 py-1 rounded-full border ${active ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
-                              {label}
-                            </button>
-                          );
-                        })}
+                      <div className="mb-2">
+                        <div className="flex gap-1 mb-1">
+                          {[["p1", s.parent1Name || "Parent 1"], ["p2", s.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => {
+                            const active = (recipientModes[s.id] || "p1") === val;
+                            return (
+                              <button key={val} onClick={() => setRecipientModes((prev) => ({ ...prev, [s.id]: val }))}
+                                className={`text-[10px] font-semibold px-2 py-1 rounded-full border ${active ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] text-stone-400">
+                          {(() => {
+                            const mode = recipientModes[s.id] || "p1";
+                            const incl = [(mode === "p1" || mode === "both") && d.email, (mode === "p2" || mode === "both") && s.parent2Email].filter(Boolean).join(", ");
+                            return incl ? `Includes: ${incl}` : "No email on file for the parent(s) selected.";
+                          })()}
+                        </p>
                       </div>
                     )}
                     <div className="flex items-start gap-1.5 mb-2">
@@ -9664,7 +10530,7 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
         {hasP2 && (
           <>
             <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
-            <div className="flex gap-1.5 mb-4">
+            <div className="flex gap-1.5 mb-1">
               {[["p1", student?.parent1Name || "Parent 1"], ["p2", student?.parent2Name || "Parent 2"], ["both", "Both"]].map(([val, label]) => (
                 <button key={val} onClick={() => setRecipientMode(val)}
                   className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
@@ -9672,6 +10538,7 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
                 </button>
               ))}
             </div>
+            <p className="text-[10px] text-stone-400 mb-3">{sendEmails ? `Includes: ${sendEmails}` : "No email on file for the parent(s) selected."}</p>
           </>
         )}
         <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
@@ -9946,7 +10813,7 @@ function StudentMessageGeneratorView({ roster, config, loggedInTeacher, onBack, 
             {anyHasParent2 && (
               <>
                 <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
-                <div className="flex gap-1.5 mb-3">
+                <div className="flex gap-1.5 mb-1">
                   {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
                     <button key={val} onClick={() => setRecipientMode(val)}
                       className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
@@ -9954,6 +10821,7 @@ function StudentMessageGeneratorView({ roster, config, loggedInTeacher, onBack, 
                     </button>
                   ))}
                 </div>
+                <p className="text-[10px] text-stone-400 mb-3">{emails.length > 0 ? `Includes: ${emails.join(", ")}` : "No email on file for the parent(s) selected."}</p>
               </>
             )}
             <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
@@ -10524,7 +11392,7 @@ function OnboardingDoneStep({ config }) {
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onOpenMyAccount, onOpenOnboarding }) {
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding }) {
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -10536,6 +11404,13 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
   const [newSubjectInput, setNewSubjectInput] = useState("");
   const [previewText, setPreviewText] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [signOff, setSignOff] = useState(loggedInTeacher?.messageSignOff || "");
+  const [signOffSaved, setSignOffSaved] = useState(false);
+  const saveSignOff = async () => {
+    await onChangeMySignOff(signOff.trim());
+    setSignOffSaved(true);
+    setTimeout(() => setSignOffSaved(false), 2000);
+  };
   const runStylePreview = async () => {
     setPreviewLoading(true);
     setPreviewText(null);
@@ -11054,10 +11929,17 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           {config.messageStyle?.showDisclaimer !== false && (
             <>
               <p className="text-xs text-stone-400 mb-2 pl-6">Helps parents recognize this came from the classroom system, not a spontaneous note — so they know a reply isn't expected.</p>
-              <select value={config.messageStyle?.disclaimerPosition ?? "bottom"} onChange={(e) => update((c) => { c.messageStyle.disclaimerPosition = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+              <select value={config.messageStyle?.disclaimerPosition ?? "bottom"} onChange={(e) => update((c) => { c.messageStyle.disclaimerPosition = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-3">
                 <option value="bottom">Show it at the end of the message</option>
                 <option value="top">Show it at the start of the message</option>
               </select>
+              <label className="block text-xs font-medium text-stone-500 mb-1">The exact text of that note</label>
+              <p className="text-xs text-stone-400 mb-1.5">This is yours specifically — it follows you across every class you teach, not just this one. Shown in italics so it's visibly distinct from your own words, even in plain-text email or WhatsApp. Leave blank to use the default wording.</p>
+              <textarea value={signOff} onChange={(e) => setSignOff(e.target.value)} rows={2}
+                placeholder="— Sent via your child's classroom system, an automated update. No reply needed unless you have a question. —"
+                className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+              <button onClick={saveSignOff} className="text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-2 hover:bg-teal-800">Save</button>
+              {signOffSaved && <p className="text-xs text-emerald-600 mt-1">Saved.</p>}
             </>
           )}
 
@@ -11362,11 +12244,9 @@ function AdminStudentProfile({ student, profileData, onUpdateStudent, onArchiveS
   );
 }
 
-function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onUpdateSignOff, onClose }) {
+function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
   const [name, setName] = useState(teacher?.name || "");
   const [nameSaved, setNameSaved] = useState(false);
-  const [signOff, setSignOff] = useState(teacher?.messageSignOff || "");
-  const [signOffSaved, setSignOffSaved] = useState(false);
   const [currentPw, setCurrentPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
@@ -11379,12 +12259,6 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onUpdateSignO
     await onUpdateName(name.trim());
     setNameSaved(true);
     setTimeout(() => setNameSaved(false), 2000);
-  };
-
-  const saveSignOff = async () => {
-    await onUpdateSignOff(signOff.trim());
-    setSignOffSaved(true);
-    setTimeout(() => setSignOffSaved(false), 2000);
   };
 
   const submitPasswordChange = async () => {
@@ -11418,16 +12292,6 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onUpdateSignO
             {nameSaved && <p className="text-xs text-emerald-600 mt-1">Saved.</p>}
           </div>
 
-          <div>
-            <label className="block text-xs font-medium text-stone-500 mb-1">Message sign-off</label>
-            <p className="text-xs text-stone-400 mb-1.5">Appears at the end of every message you generate through the app. Shown in italics — leave blank to use the default note.</p>
-            <textarea value={signOff} onChange={(e) => setSignOff(e.target.value)} rows={2}
-              placeholder="— Sent via your child's classroom system, an automated update. No reply needed unless you have a question. —"
-              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
-            <button onClick={saveSignOff} className="bg-teal-700 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
-            {signOffSaved && <p className="text-xs text-emerald-600 mt-1">Saved.</p>}
-          </div>
-
           <div className="pt-4 border-t border-stone-200">
             <p className="text-sm font-semibold text-stone-800 mb-2">Change password</p>
             <input type="password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} placeholder="Current password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
@@ -11454,12 +12318,10 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
   const [copied, setCopied] = useState(false);
   const bccParam = bcc && bcc.length > 0 ? `&bcc=${encodeURIComponent(bcc.join(","))}` : "";
   const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email || "")}${bccParam}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  // Gmail's compose-link BCC field is a real, documented risk once a link gets long — recipients
-  // can silently go missing partway through the list, with no error shown anywhere. That's not
-  // something a URL can be made reliably safe against past a certain size, so past a conservative
-  // length, "Open in Gmail" is hidden entirely rather than risk it quietly dropping names — "Copy
-  // message" has no such limit at all, since it's just plain text pasted into a compose window
-  // the teacher opens themselves.
+  // Gmail's compose-link BCC field can occasionally drop a name partway through once a link gets
+  // very long — a real limitation on Gmail's end. That's worth flagging, but the choice of how to
+  // handle it belongs to the teacher, not this component — "Open in Gmail" always stays available,
+  // and anything missing can be fixed by hand right there in the compose window it opens.
   const riskyLength = gmailHref.length > 1800;
 
   const copyToClipboard = async () => {
@@ -11479,18 +12341,16 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
   return (
     <div>
       <div className="flex items-center gap-2 flex-wrap">
-        {!riskyLength && (
-          <a href={gmailHref} target="_blank" rel="noopener noreferrer" className={`${btnClass} text-white bg-teal-700 hover:bg-teal-800`}>
-            <Mail size={13} /> Open in Gmail
-          </a>
-        )}
+        <a href={gmailHref} target="_blank" rel="noopener noreferrer" className={`${btnClass} text-white bg-teal-700 hover:bg-teal-800`}>
+          <Mail size={13} /> Open in Gmail
+        </a>
         <button onClick={copyToClipboard} className={`${btnClass} text-stone-600 border border-stone-300 hover:bg-stone-50`}>
           <Copy size={13} /> {copied ? "Copied!" : "Copy message"}
         </button>
       </div>
       {riskyLength && (
         <p className="text-xs text-amber-700 mt-1.5">
-          This list is long enough that Gmail's own link can silently drop names partway through — that's a real limitation on Gmail's end, not something a link can fully guard against. Use "Copy message" and paste it into Gmail yourself instead; every name will be there.
+          This list is long enough that Gmail can occasionally drop a name partway through — worth a quick check in the compose window before sending. Add anyone missing right there, or use "Copy message" if you'd rather be certain.
         </p>
       )}
     </div>
@@ -11522,10 +12382,15 @@ function ParentSendActions({ student, subject, body, size = "normal" }) {
   return (
     <div>
       {hasP2 && (
-        <div className="flex items-center gap-1.5 mb-2">
-          <span className="text-[10px] text-stone-400 mr-0.5">Send to:</span>
-          <button onClick={() => toggle("p1")} className={`text-xs font-semibold px-2 py-1 rounded-full border ${selected.includes("p1") ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{p1Label}</button>
-          <button onClick={() => toggle("p2")} className={`text-xs font-semibold px-2 py-1 rounded-full border ${selected.includes("p2") ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{p2Label}</button>
+        <div className="mb-2">
+          <div className="flex items-center gap-1.5 mb-1">
+            <span className="text-[10px] text-stone-400 mr-0.5">Send to:</span>
+            <button onClick={() => toggle("p1")} className={`text-xs font-semibold px-2 py-1 rounded-full border ${selected.includes("p1") ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{p1Label}</button>
+            <button onClick={() => toggle("p2")} className={`text-xs font-semibold px-2 py-1 rounded-full border ${selected.includes("p2") ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{p2Label}</button>
+          </div>
+          <p className="text-[10px] text-stone-400">
+            {emails ? `Includes: ${emails}` : "No email on file for the parent(s) selected — add one in Settings, or use a WhatsApp number below if there is one."}
+          </p>
         </div>
       )}
       <div className="flex flex-wrap gap-2">
