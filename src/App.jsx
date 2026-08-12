@@ -616,7 +616,7 @@ function computeSessionTimeline(data, category, config) {
   });
 }
 
-function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [] }; }
+function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [] }; }
 
 function buildSampleData() {
   const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
@@ -5369,6 +5369,22 @@ const TILE_STYLES = {
     solid: "bg-sky-600", solidHover: "hover:bg-sky-700", solidBorder: "border-sky-600",
     rowActive: "border-sky-300 bg-sky-50", iconBg: "bg-sky-100",
   },
+  // orange and cyan specifically (not any of the families above) — those were remapped to muted,
+  // low-contrast taupe/olive tones during an earlier design pass for use as subtle secondary UI,
+  // which is exactly wrong for a dashboard tile that needs to read as vividly distinct at a
+  // glance. orange/cyan were never touched by that remapping, so they render as genuine color.
+  orange: {
+    tileBg: "bg-orange-50", tileBorder: "border-orange-200", tileBorderHover: "hover:border-orange-400",
+    iconText: "text-orange-700", labelText: "text-orange-900", countText: "text-orange-600",
+    solid: "bg-orange-600", solidHover: "hover:bg-orange-700", solidBorder: "border-orange-600",
+    rowActive: "border-orange-300 bg-orange-50", iconBg: "bg-orange-100",
+  },
+  cyan: {
+    tileBg: "bg-cyan-50", tileBorder: "border-cyan-200", tileBorderHover: "hover:border-cyan-400",
+    iconText: "text-cyan-700", labelText: "text-cyan-900", countText: "text-cyan-600",
+    solid: "bg-cyan-600", solidHover: "hover:bg-cyan-700", solidBorder: "border-cyan-600",
+    rowActive: "border-cyan-300 bg-cyan-50", iconBg: "bg-cyan-100",
+  },
 };
 
 // Every tile on the preschool dashboard — one shared config drives both the dashboard grid and
@@ -5377,14 +5393,14 @@ const TILE_STYLES = {
 // with the everyday value (used for meals, where that's a safe assumption); "none" means nothing
 // is pre-selected (used everywhere a whole-room default would be guessing, not saving time).
 const PRESCHOOL_TILES = [
-  { id: "mood", label: "Mood", icon: Smile, color: "violet", bulkDefault: "none" },
+  { id: "mood", label: "Mood", icon: Smile, color: "orange", bulkDefault: "none" },
   { id: "breakfast", label: "Breakfast", icon: Coffee, color: "amber", bulkDefault: "all", mealType: "breakfast" },
   { id: "lunch", label: "Lunch", icon: Sandwich, color: "emerald", bulkDefault: "all", mealType: "lunch" },
   { id: "snack", label: "Snack", icon: Apple, color: "fuchsia", bulkDefault: "all", mealType: "snack" },
   { id: "nap", label: "Nap", icon: Moon, color: "indigo", bulkDefault: "all" },
   { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "none" },
   { id: "bathroom", label: "Bathroom", icon: Droplets, color: "teal", bulkDefault: "none" },
-  { id: "health", label: "Health note", icon: HeartPulse, color: "sky", bulkDefault: "none" },
+  { id: "health", label: "Health note", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
 ];
 
 function PreschoolDashboardView({ roster, studentData, incidents, config, setMood, setMealBulk, setNapBulk, logDiaperBulk, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm }) {
@@ -5401,11 +5417,6 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, setMoo
     return 0;
   };
 
-  if (screen === "health") {
-    openIncidentForm();
-    return null;
-  }
-
   if (screen === null) {
     return (
       <div className="w-full">
@@ -5416,7 +5427,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, setMoo
             const st = TILE_STYLES[tile.color];
             const logged = tile.id === "health" ? null : loggedCountFor(tile.id);
             return (
-              <button key={tile.id} onClick={() => setScreen(tile.id)}
+              <button key={tile.id} onClick={() => (tile.id === "health" ? openIncidentForm() : setScreen(tile.id))}
                 className={`hover-lift flex flex-col items-center justify-center gap-2 rounded-2xl border-2 py-8 px-3 ${st.tileBg} ${st.tileBorder} ${st.tileBorderHover}`}>
                 <Icon size={40} className={st.iconText} />
                 <span className={`text-base font-bold ${st.labelText}`}>{tile.label}</span>
