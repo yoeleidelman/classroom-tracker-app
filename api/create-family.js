@@ -11,6 +11,11 @@
 // email already belongs to an existing account (most commonly a teacher's), this doesn't try to
 // create a second one and fail — it attaches the new family record onto that same, existing
 // login instead. The person keeps signing in with the password they already have.
+//
+// Second guardians work the same way conceptually: a genuinely separate login (own email, own
+// password), but tagged with the same familyGroupId as the first guardian, plus a copy of their
+// studentLinks/linkedClassIds — so both logins resolve to the exact same children and the exact
+// same conversations, without needing to re-pick students for the second parent.
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
@@ -24,7 +29,7 @@ if (!getApps().length) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
  
-  const { name, email, password, studentLinks } = req.body || {};
+  const { name, email, password, studentLinks, familyGroupId } = req.body || {};
   if (!name || !email || !password || password.length < 6) {
     return res.status(400).json({ error: "Family name, email, and a password of at least 6 characters are required." });
   }
@@ -45,10 +50,19 @@ export default async function handler(req, res) {
  
     const db = getFirestore();
     const ref = db.collection("data").doc(`family:${userRecord.uid}`);
+    const links = studentLinks || [];
+    // A flat, security-rule-friendly list alongside the richer studentLinks — a rule can check
+    // "is this class id in this array" reliably, but can't safely search inside an array of
+    // {classId, studentId, ...} objects for a matching field the same way.
+    const linkedClassIds = [...new Set(links.map((l) => l.classId))];
+    // A brand-new family (no familyGroupId passed in) is its own group of one, identified by its
+    // own uid — a second guardian added later passes the first guardian's uid here explicitly, so
+    // both end up pointing at the same group without needing a separate id generator.
+    const resolvedGroupId = familyGroupId || userRecord.uid;
     await ref.set({
       value: {
         uid: userRecord.uid, name, email,
-        studentLinks: studentLinks || [], active: true,
+        studentLinks: links, linkedClassIds, familyGroupId: resolvedGroupId, active: true,
       },
     });
  

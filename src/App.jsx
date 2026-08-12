@@ -14,7 +14,7 @@
 // bg-fuchsia-100 bg-fuchsia-200 bg-fuchsia-400 bg-fuchsia-500 bg-fuchsia-600 text-fuchsia-700 text-fuchsia-800 border-fuchsia-500
 // bg-teal-100 bg-teal-200 bg-teal-400 bg-teal-500 bg-teal-600 bg-teal-900 text-teal-700 text-teal-800 text-teal-900 border-teal-500
 
-import { db, auth } from "./firebase";
+import { db, auth, storage } from "./firebase";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
@@ -23,12 +23,13 @@ import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
+import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -646,6 +647,86 @@ function computeToggledCheckIn(existingCheckIns, date, byLabel) {
 function isCheckedInNow(checkIns, date) {
   return (checkIns || []).some((c) => c.date === date && c.checkInTime && !c.checkOutTime);
 }
+// Reuses the exact same day-type resolution Planner already uses to decide whether to hide
+// attendance on a given date — rather than a separate "school days" calendar, a day is a school
+// day unless it's explicitly marked as a type that hides attendance (e.g. "No School"). This
+// means marking Saturdays or a holiday closed, once, via Planner's existing bulk-by-weekday tool
+// or by editing that one date, is the same action that also gates check-in — nothing new to
+// maintain in two places.
+function isSchoolDay(date, config, plannerDays) {
+  const dayTypeMap = {};
+  (config?.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
+  const selectedDayType = plannerDays?.[date]?.dayType ? dayTypeMap[plannerDays[date].dayType] : null;
+  return !selectedDayType?.hidesAttendance;
+}
+// Whether the NEXT check-in (not check-out — that only ever closes an already-open cycle, never
+// starts a new one) would be a second or later cycle for today. A genuine early-pickup-and-return
+// is real and shouldn't be blocked outright, but it's rare enough that it's worth a deliberate
+// "are you sure" rather than letting a slipped double-tap silently log a fake extra visit.
+function wouldBeRepeatCheckIn(checkIns, date) {
+  const todaysCompleted = (checkIns || []).filter((c) => c.date === date && c.checkInTime && c.checkOutTime);
+  const openNow = (checkIns || []).some((c) => c.date === date && c.checkInTime && !c.checkOutTime);
+  return !openNow && todaysCompleted.length > 0;
+}
+
+// Rich enough to actually exercise the parent-facing daily log end to end — every category that
+// shows up as its own card there (mood, meals, nap, diapers, bathroom, attendance, a health note,
+// a photo), spread across today and a couple of past days so the date picker has somewhere to go.
+// Parent emails are obviously-fake test addresses, never real ones, since this data (and the
+// parent accounts it can seed) is for internal preview only.
+function buildPreschoolSampleData() {
+  const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
+  const roster = [
+    { id: s1, name: "Chana G.", studentType: "preschool", parent1Name: "Test Parent One", parentEmail: "testparent1@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
+    { id: s2, name: "Mendel S.", studentType: "preschool", parent1Name: "Test Parent Two", parentEmail: "testparent2@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
+    { id: s3, name: "Yossi B.", studentType: "preschool", parent1Name: "Test Parent Three", parentEmail: "testparent3@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
+    { id: s4, name: "Rivka L.", studentType: "preschool", parent1Name: "Test Parent Four", parentEmail: "testparent4@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
+  ];
+  const today = todayISO();
+  const d = (n) => addDaysISO(today, -n);
+  // A small, self-contained placeholder image — stands in for a real Storage upload so the parent
+  // Photos card has something real to render without needing an actual file.
+  const placeholderPhoto = "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#d4a843"/><text x="100" y="105" font-size="18" fill="white" text-anchor="middle" font-family="sans-serif">Sample Photo</text></svg>');
+
+  const mkDay = (checkedIn, mood, lunchAmt, napTimes, diaper) => ({
+    checkIns: checkedIn ? [{ id: uid(), date: checkedIn, checkInTime: "08:00", checkInBy: "Teacher", checkOutTime: checkedIn === today ? null : "15:30", checkOutBy: checkedIn === today ? null : "Teacher" }] : [],
+    mood: mood ? [{ date: checkedIn, mood }] : [],
+    meals: checkedIn ? [{ date: checkedIn, mealType: "lunch", amount: lunchAmt }, { date: checkedIn, mealType: "snack", amount: "all" }] : [],
+    naps: napTimes ? [{ date: checkedIn, start: napTimes[0], end: napTimes[1] }] : [],
+    diapers: diaper ? [{ id: uid(), date: checkedIn, time: "10:15", type: diaper }] : [],
+    bathroom: [],
+  });
+
+  const studentData = {
+    [s1]: { ...mkDay(today, "happy", "most", ["13:00", "14:15"], "wet"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+    [s2]: { ...mkDay(today, "tired", "some", ["13:15", "14:00"], null), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+    [s3]: { checkIns: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], skills: {}, fluency: [], attendance: [], points: {}, communications: [] }, // absent today, on purpose
+    [s4]: { ...mkDay(today, "happy", "all", ["13:00", "14:30"], "dry"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+  };
+  // A couple of past days for the date picker to have somewhere to go
+  const pastDayFor = (sid, dayOffset) => {
+    const date = d(dayOffset);
+    const entry = mkDay(date, "happy", "most", ["13:00", "14:15"], "wet");
+    studentData[sid].checkIns.push(...entry.checkIns);
+    studentData[sid].mood.push(...entry.mood);
+    studentData[sid].meals.push(...entry.meals);
+    studentData[sid].naps.push(...entry.naps);
+    if (entry.diapers.length) studentData[sid].diapers.push(...entry.diapers);
+  };
+  pastDayFor(s1, 1);
+  pastDayFor(s2, 2);
+
+  const incidents = [
+    { id: uid(), date: today, category: "health", description: "Small scrape on the knee during outdoor play, cleaned and bandaged.", studentIds: [s1] },
+  ];
+  const photos = [
+    { id: uid(), date: today, url: placeholderPhoto, storagePath: "", studentIds: [s1, s2, s4], caption: "Morning circle time" },
+  ];
+  const plannerDays = {};
+  const plannerEvents = [];
+
+  return { roster, studentData, incidents, photos, plannerDays, plannerEvents };
+}
 
 function buildSampleData() {
   const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
@@ -1106,8 +1187,19 @@ function AppInner() {
             loadJSON(`teacher:${user.uid}`, null, true),
             loadJSON(`family:${user.uid}`, null, true),
           ]);
+          // Backfill for any family account created before linkedClassIds/familyGroupId existed —
+          // happens once, right when they actually sign in, rather than needing an admin to
+          // manually re-save every existing family. A family with no familyGroupId is, by
+          // definition, its own group of one — its own uid IS the correct group id for it.
+          let effectiveFamily = myFamily;
+          if (myFamily && (!myFamily.linkedClassIds || !myFamily.familyGroupId)) {
+            const linkedClassIds = myFamily.linkedClassIds || [...new Set((myFamily.studentLinks || []).map((l) => l.classId))];
+            const familyGroupId = myFamily.familyGroupId || user.uid;
+            effectiveFamily = { ...myFamily, linkedClassIds, familyGroupId };
+            saveJSON(`family:${user.uid}`, effectiveFamily, true);
+          }
           setCurrentTeacher(mine);
-          setCurrentFamily(myFamily);
+          setCurrentFamily(effectiveFamily);
           // Auto-resolve when there's only one possible side; a genuinely dual-role account keeps
           // whatever mode it's already in (its ?portal=parent seed, or a choice already made this
           // session) — it only falls through to "unresolved" the very first time both exist and
@@ -1165,9 +1257,15 @@ function AppInner() {
     setFamilies(list);
   };
 
+  // linkedClassIds is a flat array of just the class ids (not the richer {classId, studentId, ...}
+  // shape studentLinks uses) — kept in sync automatically whenever studentLinks changes, since a
+  // security rule can check "is this value in this array" reliably, but can't safely search inside
+  // an array of objects for one whose classId field matches. Recomputed here rather than trusted to
+  // whatever caller passes in, so it can never quietly drift out of sync with the real links.
   const updateFamilyRecord = async (uid, fields) => {
     const existing = await loadJSON(`family:${uid}`, {}, true);
     const next = { ...existing, ...fields };
+    if (fields.studentLinks) next.linkedClassIds = [...new Set(fields.studentLinks.map((l) => l.classId))];
     await saveJSON(`family:${uid}`, next, true);
     setFamilies((prev) => prev.map((f) => (f.uid === uid ? next : f)));
   };
@@ -1186,12 +1284,12 @@ function AppInner() {
   // can sign itself in, but can't create arbitrary new accounts for other people). This calls a
   // matching endpoint, /api/create-family, mirroring /api/create-teacher's exact shape — that
   // endpoint needs to exist on the server for this to actually work end to end.
-  const createFamilyAccount = async (name, email, tempPassword, studentLinks) => {
+  const createFamilyAccount = async (name, email, tempPassword, studentLinks, familyGroupId) => {
     try {
       const response = await fetch("/api/create-family", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password: tempPassword, studentLinks }),
+        body: JSON.stringify({ name, email, password: tempPassword, studentLinks, familyGroupId }),
       });
       const data = await response.json();
       if (!response.ok) return { ok: false, error: data.error || "Couldn't create the account." };
@@ -1200,6 +1298,13 @@ function AppInner() {
     } catch {
       return { ok: false, error: "Couldn't reach the server — try again." };
     }
+  };
+  // A second (or third) guardian on an existing family — same real, separate login as the first
+  // guardian got, just pre-filled with that family's own children and tagged with the same
+  // familyGroupId, so both accounts end up sharing the same kids and the same conversations
+  // without re-picking students for every additional parent.
+  const addGuardianToFamily = async (existingFamily, name, email, tempPassword) => {
+    return createFamilyAccount(name, email, tempPassword, existingFamily.studentLinks, existingFamily.familyGroupId || existingFamily.uid);
   };
 
   const signInTeacher = async (email, password) => {
@@ -1923,7 +2028,7 @@ function AppInner() {
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
-          families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
+          families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin}
           canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />;
@@ -1934,7 +2039,8 @@ function AppInner() {
           onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
           subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
           loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
-          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />
+          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
+          createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} />
       );
     }
     // Real teacher — only ever sees classes they're actually assigned to.
@@ -1948,7 +2054,8 @@ function AppInner() {
         onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
         subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
         loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
-        canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />
+        canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
+        createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} />
     );
   }
 
@@ -1965,7 +2072,7 @@ function AppInner() {
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
-        families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
+        families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
         programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
     }
@@ -2155,6 +2262,44 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
           {saving ? "Creating..." : "Create account"}
         </button>
         <button onClick={onCancel} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// Much simpler than the first guardian's form — no student picker needed, since a second guardian
+// automatically inherits exactly the same children the first guardian already has linked.
+function AddGuardianForm({ existingFamily, onSave, onCancel }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [tempPassword, setTempPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const save = async () => {
+    setError("");
+    if (!name.trim() || !email.trim() || tempPassword.length < 6) {
+      setError("Name, email, and a temporary password of at least 6 characters are all required.");
+      return;
+    }
+    setSaving(true);
+    const result = await onSave(name.trim(), email.trim(), tempPassword);
+    setSaving(false);
+    if (!result.ok) setError(result.error);
+  };
+
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mt-2">
+      <p className="text-xs text-stone-500 mb-2">Will automatically see the same children as {existingFamily.name}: {(existingFamily.studentLinks || []).map((l) => l.studentName).join(", ") || "none yet"}.</p>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="This guardian's name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Their own email (their username)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <input type="text" value={tempPassword} onChange={(e) => setTempPassword(e.target.value)} placeholder="Temporary password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
+      <div className="flex gap-2">
+        <button onClick={save} disabled={saving} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800 disabled:opacity-50">
+          {saving ? "Adding…" : "Add guardian"}
+        </button>
+        <button onClick={onCancel} className="text-xs font-semibold text-stone-500 hover:text-stone-800 px-3 py-1.5">Cancel</button>
       </div>
     </div>
   );
@@ -2483,7 +2628,7 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -2575,11 +2720,25 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const activeTeachers = (teachers || []).filter((t) => t.active);
   const inactiveTeachers = (teachers || []).filter((t) => !t.active);
   const [showFamilyForm, setShowFamilyForm] = useState(false);
+  const [defaultParentPassword, setDefaultParentPassword] = useState("Welcome123");
+  const [defaultPwSaved, setDefaultPwSaved] = useState(false);
+  useEffect(() => { loadJSON("defaultParentPassword", "Welcome123", true).then(setDefaultParentPassword); }, []);
   const [showAdminMessages, setShowAdminMessages] = useState(false);
   const [familyCreatedNote, setFamilyCreatedNote] = useState("");
   const [showArchivedFamilies, setShowArchivedFamilies] = useState(false);
+  const [addingGuardianTo, setAddingGuardianTo] = useState(null); // the family group currently getting a second guardian, or null
   const activeFamilies = (families || []).filter((f) => f.active !== false);
   const inactiveFamilies = (families || []).filter((f) => f.active === false);
+  // Grouped for display so two logins for the same household read as one family with two
+  // guardians, not two unrelated entries that happen to share children — falls back to each
+  // family's own uid for any record that predates familyGroupId existing.
+  const activeFamilyGroups = Object.values(
+    activeFamilies.reduce((groups, f) => {
+      const groupId = f.familyGroupId || f.uid;
+      (groups[groupId] = groups[groupId] || []).push(f);
+      return groups;
+    }, {})
+  );
   const [allStudentsForLinking, setAllStudentsForLinking] = useState([]);
   useEffect(() => { onFetchAllStudentsForLinking().then(setAllStudentsForLinking); }, [registry]); // eslint-disable-line
 
@@ -3069,6 +3228,21 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <p className="text-sm font-semibold text-stone-800 mb-1">Family accounts</p>
           <p className="text-xs text-stone-400 mb-3">A separate portal, not the class app — a family signs in on their own link and only ever sees their own linked child(ren).</p>
 
+          <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5 mb-3">
+            <label className="block text-xs font-semibold text-stone-700 mb-1">Default password for auto-created parent accounts</label>
+            <div className="flex gap-2 items-center">
+              <input value={defaultParentPassword} onChange={(e) => setDefaultParentPassword(e.target.value)}
+                className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+              <button onClick={async () => {
+                await saveJSON("defaultParentPassword", defaultParentPassword || "Welcome123", true);
+                setDefaultPwSaved(true);
+                setTimeout(() => setDefaultPwSaved(false), 2000);
+              }} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Save</button>
+              {defaultPwSaved && <span className="text-xs text-emerald-700">Saved</span>}
+            </div>
+            <p className="text-[10px] text-stone-400 mt-1">Used whenever a parent account is created automatically from a student's parent email — parents can change it once they sign in.</p>
+          </div>
+
           {!showFamilyForm && (
             <button onClick={() => setShowFamilyForm(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
               <Plus size={12} /> Create family account
@@ -3095,17 +3269,42 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
           {activeFamilies.length === 0 && !showFamilyForm && <p className="text-xs text-stone-400">No family accounts yet.</p>}
           <ul className="space-y-2">
-            {activeFamilies.map((f) => (
-              <li key={f.uid} className="bg-white border border-stone-200 rounded-lg p-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-semibold text-stone-800">{f.name}</span>
-                  <ArchiveOrDeleteMenu onArchive={() => onDeactivateFamily(f.uid)} onDeletePermanently={() => onDeleteFamily(f.uid)} size={14} />
-                </div>
-                <p className="text-xs text-stone-400 mt-0.5">
-                  {f.email} · {(f.studentLinks || []).length === 0 ? "No children linked" : (f.studentLinks || []).map((l) => l.studentName).join(", ")}
-                </p>
-              </li>
-            ))}
+            {activeFamilyGroups.map((group) => {
+              const [primary, ...others] = group;
+              return (
+                <li key={primary.uid} className="bg-white border border-stone-200 rounded-lg p-2.5">
+                  {group.map((f) => (
+                    <div key={f.uid} className={f !== primary ? "mt-2 pt-2 border-t border-stone-100" : ""}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-stone-800">{f.name}</span>
+                        <ArchiveOrDeleteMenu onArchive={() => onDeactivateFamily(f.uid)} onDeletePermanently={() => onDeleteFamily(f.uid)} size={14} />
+                      </div>
+                      <p className="text-xs text-stone-400 mt-0.5">{f.email}</p>
+                    </div>
+                  ))}
+                  <p className="text-xs text-stone-400 mt-1.5">
+                    {(primary.studentLinks || []).length === 0 ? "No children linked" : (primary.studentLinks || []).map((l) => l.studentName).join(", ")}
+                  </p>
+                  <button onClick={() => setAddingGuardianTo(primary)} className="text-xs font-semibold text-teal-700 hover:text-teal-900 mt-1.5">
+                    + Add another guardian to this family
+                  </button>
+                  {addingGuardianTo?.uid === primary.uid && (
+                    <AddGuardianForm existingFamily={primary}
+                      onSave={async (name, email, tempPassword) => {
+                        const result = await onAddGuardianToFamily(primary, name, email, tempPassword);
+                        if (result.ok) {
+                          setAddingGuardianTo(null);
+                          setFamilyCreatedNote(result.linkedExisting
+                            ? `${name} was linked to ${email}'s existing teacher login, and can now also see ${primary.name}'s children.`
+                            : `${name} added as a second guardian for ${primary.name}'s family.`);
+                          setTimeout(() => setFamilyCreatedNote(""), 8000);
+                        }
+                        return result;
+                      }} onCancel={() => setAddingGuardianTo(null)} />
+                  )}
+                </li>
+              );
+            })}
           </ul>
 
           {inactiveFamilies.length > 0 && (
@@ -3414,6 +3613,33 @@ function ParentQRScanner({ onResult, onClose }) {
 // and a compose box don't need to look different depending on who's viewing them. What differs is
 // which side a bubble is aligned to (myRole), which is the only thing that actually depends on who's
 // looking at it.
+// A small, dismissible callout anchored directly to the real feature it's explaining — not a
+// separate wizard screen, so a parent sees it while actually looking at the thing it describes.
+// Positioned relative to its own wrapper (not the viewport), so no scroll- or resize-tracking is
+// needed — it just sits below whatever it wraps, the same way on every screen size.
+function TourHint({ active, step, total, text, align = "left", onNext, onSkip, children }) {
+  return (
+    <div className="relative">
+      {children}
+      {active && (
+        <div className={`absolute z-40 top-full mt-2 w-64 ${align === "right" ? "right-0" : "left-0"}`}>
+          <div className={`absolute -top-1.5 w-3 h-3 bg-teal-800 rotate-45 ${align === "right" ? "right-6" : "left-6"}`} />
+          <div className="bg-teal-800 text-white rounded-xl p-3 shadow-lg">
+            <p className="text-sm mb-2.5 leading-snug">{text}</p>
+            <div className="flex items-center justify-between">
+              <button onClick={onSkip} className="text-[11px] text-teal-300 hover:text-white">Skip tour</button>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-teal-300">{step} of {total}</span>
+                <button onClick={onNext} className="text-xs font-bold bg-white text-teal-800 rounded-lg px-2.5 py-1 hover:bg-teal-50">{step === total ? "Got it" : "Next"}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConversationThreadView({ title, subtitle, messages, onSend, myRole, onBack }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -3446,7 +3672,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, onB
           return (
             <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[80%] rounded-2xl px-3.5 py-2.5 ${mine ? "bg-teal-700 text-white" : "bg-white border border-stone-200 text-stone-800"}`}>
-                {!mine && <p className="text-[10px] font-semibold text-stone-400 mb-0.5">{m.senderName}</p>}
+                <p className={`text-[10px] font-semibold mb-0.5 ${mine ? "text-teal-100" : "text-stone-400"}`}>{m.senderName}</p>
                 <p className="text-sm whitespace-pre-wrap">{m.text}</p>
                 <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
                   {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
@@ -3475,6 +3701,8 @@ function ChildDailyLogView({ link, onBack }) {
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
   const [incidents, setIncidents] = useState([]);
+  const [photos, setPhotos] = useState([]);
+  const [viewingPhoto, setViewingPhoto] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -3482,10 +3710,12 @@ function ChildDailyLogView({ link, onBack }) {
     Promise.all([
       loadJSON(`class:${link.classId}:kriya:${link.studentId}`, null, true),
       loadJSON(`class:${link.classId}:incidents`, [], true),
-    ]).then(([studentData, classIncidents]) => {
+      loadJSON(`class:${link.classId}:photos`, [], true),
+    ]).then(([studentData, classIncidents, classPhotos]) => {
       if (cancelled) return;
       setData(studentData || {});
       setIncidents((classIncidents || []).filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId)));
+      setPhotos((classPhotos || []).filter((p) => p.date === date && (p.studentIds || []).includes(link.studentId)));
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -3504,7 +3734,7 @@ function ChildDailyLogView({ link, onBack }) {
   const bathroomTrips = (data?.bathroom || []).filter((b) => b.date === date).sort((a, b) => (a.time < b.time ? -1 : 1));
   const checkIns = (data?.checkIns || []).filter((c) => c.date === date).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
 
-  const hasAnything = Boolean(mood) || meals.length > 0 || naps.length > 0 || diapers.length > 0 || bathroomTrips.length > 0 || checkIns.length > 0 || incidents.length > 0;
+  const hasAnything = Boolean(mood) || meals.length > 0 || naps.length > 0 || diapers.length > 0 || bathroomTrips.length > 0 || checkIns.length > 0 || incidents.length > 0 || photos.length > 0;
 
   const Card = ({ color, title, children }) => {
     const st = TILE_STYLES[color];
@@ -3575,6 +3805,24 @@ function ChildDailyLogView({ link, onBack }) {
               {inc.description}
             </Card>
           ))}
+          {photos.length > 0 && (
+            <Card color="amber" title="Photos">
+              <div className="grid grid-cols-3 gap-2 mt-1">
+                {photos.map((p) => (
+                  <button key={p.id} onClick={() => setViewingPhoto(p)} className="aspect-square rounded-lg overflow-hidden bg-white">
+                    <img src={p.url} alt={p.caption || "Class photo"} className="w-full h-full object-cover" />
+                  </button>
+                ))}
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
+      {viewingPhoto && (
+        <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={() => setViewingPhoto(null)}>
+          <button onClick={() => setViewingPhoto(null)} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2"><X size={22} /></button>
+          <img src={viewingPhoto.url} alt={viewingPhoto.caption || "Class photo"} className="max-w-full max-h-[80vh] rounded-lg" onClick={(e) => e.stopPropagation()} />
+          {viewingPhoto.caption && <p className="text-white text-sm mt-3 text-center">{viewingPhoto.caption}</p>}
         </div>
       )}
     </div>
@@ -3584,6 +3832,22 @@ function ChildDailyLogView({ link, onBack }) {
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
   const [showAccount, setShowAccount] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
+  const [showMessagePicker, setShowMessagePicker] = useState(false);
+  // Starts active on this account's first-ever login (no separate wizard, no explicit "start
+  // tour" step) and never again once dismissed — tracked per individual guardian login, not
+  // shared across a family group, since a newly-added second guardian should still get their own
+  // first-time walkthrough even if the first guardian already saw and dismissed theirs.
+  const [tourStep, setTourStep] = useState(() => (family?.onboardingSeen ? null : 0));
+  const TOUR_TOTAL_STEPS = 3;
+  const dismissTour = () => {
+    setTourStep(null);
+    saveJSON(`family:${family.uid}`, { ...family, onboardingSeen: true }, true);
+  };
+  const advanceTour = () => {
+    if (tourStep === 1 && (family?.studentLinks || []).length === 0) { dismissTour(); return; } // nothing to point step 3 at
+    if (tourStep >= TOUR_TOTAL_STEPS - 1) dismissTour();
+    else setTourStep((s) => s + 1);
+  };
   const [viewingChild, setViewingChild] = useState(null); // the studentLink currently open in the daily log view, or null
   const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
   // A scan doesn't perform anything by itself — it only unlocks the ability to act, which then
@@ -3591,14 +3855,49 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // getting back to it always means scanning again, not something that stays open in the
   // background after they've actually left the school.
   const [actionUnlocked, setActionUnlocked] = useState(false);
+  const [confirmingRepeatChild, setConfirmingRepeatChild] = useState(null);
   const [messagingClassId, setMessagingClassId] = useState(null); // classId of the conversation currently open, or null
   const [messagingThread, setMessagingThread] = useState({ messages: [] });
   const [messagingAdmin, setMessagingAdmin] = useState(false);
   const [adminThread, setAdminThread] = useState({ messages: [] });
+  const [teachersByClass, setTeachersByClass] = useState({}); // classId -> [teacher, ...]
+  const [messagingTeacher, setMessagingTeacher] = useState(null); // the teacher currently open, or null
+  const [teacherThread, setTeacherThread] = useState({ messages: [] });
+
+  useEffect(() => {
+    const classIds = [...new Set((family?.studentLinks || []).map((l) => l.classId))];
+    if (classIds.length === 0) return;
+    loadAllWithPrefix("teacher:").then((all) => {
+      const byClass = {};
+      classIds.forEach((cid) => { byClass[cid] = all.filter((t) => (t.assignedClassIds || []).includes(cid) && t.active !== false); });
+      setTeachersByClass(byClass);
+    });
+  }, [family]);
+
+  // Every conversation key below uses the family GROUP id, not this specific login's own uid —
+  // so a second guardian, signed in under their own separate account, lands on the exact same
+  // threads as the first guardian, rather than starting empty ones nobody else can see. Falls
+  // back to this account's own uid for the (very common) case of a family that's never added a
+  // second guardian, where the group id and the individual uid are the same thing anyway.
+  const myGroupId = family.familyGroupId || family.uid;
+
+  const openIndividualMessagesFor = async (teacher) => {
+    setMessagingTeacher(teacher);
+    const thread = await loadJSON(`teacher-messages:${teacher.uid}:${myGroupId}`, { messages: [] }, true);
+    setTeacherThread(thread || { messages: [] });
+  };
+  const sendIndividualMessageToTeacher = async (teacherUid, text) => {
+    const key = `teacher-messages:${teacherUid}:${myGroupId}`;
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString() };
+    const next = { messages: [...existing.messages, entry] };
+    await saveJSON(key, next, true);
+    return next;
+  };
 
   const openMessagesFor = async (classId) => {
     setMessagingClassId(classId);
-    const thread = await loadJSON(`class:${classId}:messages:${family.uid}`, { messages: [] }, true);
+    const thread = await loadJSON(`class:${classId}:messages:${myGroupId}`, { messages: [] }, true);
     setMessagingThread(thread || { messages: [] });
   };
 
@@ -3607,11 +3906,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // across. Key deliberately has no "class:" prefix, since it isn't one.
   const openAdminMessages = async () => {
     setMessagingAdmin(true);
-    const thread = await loadJSON(`admin-messages:${family.uid}`, { messages: [] }, true);
+    const thread = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
     setAdminThread(thread || { messages: [] });
   };
   const sendMessageToAdmin = async (text) => {
-    const key = `admin-messages:${family.uid}`;
+    const key = `admin-messages:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString() };
     const next = { messages: [...existing.messages, entry] };
@@ -3624,12 +3923,20 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const refreshCheckInStatus = useCallback(async () => {
     const today = todayISO();
     const next = {};
+    const classSchoolDayCache = {}; // classId -> boolean, deduped so shared classes aren't fetched twice
     for (const link of family?.studentLinks || []) {
       const data = await loadJSON(`class:${link.classId}:kriya:${link.studentId}`, null, true);
       const checkIns = data?.checkIns || [];
       const todaysEntries = checkIns.filter((c) => c.date === today).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
       const open = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
-      next[link.studentId] = { isIn: Boolean(open), entries: todaysEntries };
+      if (!(link.classId in classSchoolDayCache)) {
+        const [classConfig, classPlannerDays] = await Promise.all([
+          loadJSON(`class:${link.classId}:config`, null, true),
+          loadJSON(`class:${link.classId}:plannerDays`, {}, true),
+        ]);
+        classSchoolDayCache[link.classId] = isSchoolDay(today, classConfig, classPlannerDays);
+      }
+      next[link.studentId] = { isIn: Boolean(open), entries: todaysEntries, schoolDayToday: classSchoolDayCache[link.classId] };
     }
     setCheckInStatus(next);
   }, [family]);
@@ -3654,7 +3961,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // child, so two kids in the same room share one conversation with it rather than splitting an
   // otherwise identical exchange in two.
   const sendMessageToTeacher = async (classId, text) => {
-    const key = `class:${classId}:messages:${family.uid}`;
+    const key = `class:${classId}:messages:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString() };
     const next = { messages: [...existing.messages, entry] };
@@ -3735,19 +4042,87 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     );
   }
 
+  if (messagingTeacher) {
+    return (
+      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
+        <GlobalAppStyles />
+        <ConversationThreadView title={messagingTeacher.name} subtitle="Individual — not shared with anyone else in the classroom" messages={teacherThread.messages} myRole="family"
+          onBack={() => setMessagingTeacher(null)}
+          onSend={async (text) => { await sendIndividualMessageToTeacher(messagingTeacher.uid, text); await openIndividualMessagesFor(messagingTeacher); }} />
+      </div>
+    );
+  }
+
+  if (showMessagePicker) {
+    return (
+      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
+        <GlobalAppStyles />
+        <div className="app-page">
+          <button onClick={() => setShowMessagePicker(false)} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+          <h1 className="display-font text-lg font-bold text-stone-900 mb-4">Messages</h1>
+
+          {(family?.studentLinks || []).length > 0 && (
+            <div className="space-y-3 mb-3">
+              {[...new Map(family.studentLinks.map((l) => [l.classId, l])).values()].map((l) => (
+                <div key={l.classId} className="bg-white border border-stone-200 rounded-xl overflow-hidden">
+                  <button onClick={() => { setShowMessagePicker(false); openMessagesFor(l.classId); }}
+                    className="w-full text-left p-4 flex items-center justify-between hover:bg-stone-50">
+                    <div>
+                      <p className="font-semibold text-stone-900">{l.className}</p>
+                      <p className="text-xs text-stone-400">Message the classroom</p>
+                    </div>
+                    <ChevronRight size={16} className="text-stone-300" />
+                  </button>
+                  {(teachersByClass[l.classId] || []).map((t) => (
+                    <button key={t.uid} onClick={() => { setShowMessagePicker(false); openIndividualMessagesFor(t); }}
+                      className="w-full text-left px-4 py-3 flex items-center justify-between border-t border-stone-100 hover:bg-stone-50">
+                      <p className="text-sm text-stone-700">Message {t.name} individually</p>
+                      <ChevronRight size={14} className="text-stone-300" />
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <button onClick={() => { setShowMessagePicker(false); openAdminMessages(); }}
+            className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
+            <div>
+              <p className="font-semibold text-stone-900">School Office</p>
+              <p className="text-xs text-stone-400">For anything not specific to one classroom</p>
+            </div>
+            <ChevronRight size={16} className="text-stone-300" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
       <div className="max-w-lg mx-auto px-4 py-6">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="display-font text-xl font-bold text-stone-900">{family?.name || "Your family"}</h1>
-            <p className="text-xs text-stone-400">Family portal</p>
-            {canSwitchToTeacher && (
-              <button onClick={onSwitchToTeacher} className="text-xs text-stone-400 hover:text-teal-700">Switch to Teacher view</button>
-            )}
+        <div className="flex items-center justify-between mb-6 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img src="/logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
+            <div className="min-w-0">
+              <h1 className="display-font text-base font-bold text-stone-900 truncate">{family?.name || "Your family"}</h1>
+              <p className="text-[11px] text-stone-400">Family Portal</p>
+              {canSwitchToTeacher && (
+                <button onClick={onSwitchToTeacher} className="text-[11px] text-stone-400 hover:text-teal-700">Switch to Teacher view</button>
+              )}
+            </div>
           </div>
-          <button onClick={() => setShowAccount((v) => !v)} className="text-stone-400 hover:text-stone-700 p-1.5"><SettingsIcon size={20} /></button>
+          <div className="flex items-center gap-0.5 shrink-0">
+            <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="right"
+              text="Tap here anytime to message your child's classroom, a specific teacher, or the school office."
+              onNext={advanceTour} onSkip={dismissTour}>
+              <button onClick={() => setShowMessagePicker(true)} className="text-stone-400 hover:text-teal-700 p-2 rounded-lg hover:bg-stone-100">
+                <MessageCircle size={19} />
+              </button>
+            </TourHint>
+            <button onClick={() => setShowAccount((v) => !v)} className="text-stone-400 hover:text-stone-700 p-2 rounded-lg hover:bg-stone-100"><SettingsIcon size={19} /></button>
+          </div>
         </div>
 
         {showAccount ? (
@@ -3785,13 +4160,17 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 const status = checkInStatus[link.studentId];
                 const isIn = status?.isIn;
                 const entries = status?.entries || [];
+                const schoolDayToday = status?.schoolDayToday !== false; // default to allowed until status has loaded
+                const confirming = confirmingRepeatChild === link.studentId;
                 return (
                   <div key={i} className={`rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <p className="font-semibold text-stone-900">{link.studentName}</p>
                         <p className="text-xs text-stone-400">{link.className}</p>
-                        {entries.length === 0 ? (
+                        {!schoolDayToday ? (
+                          <p className="text-xs font-semibold text-amber-700 mt-0.5">Not marked as a school day today</p>
+                        ) : entries.length === 0 ? (
                           <p className="text-xs font-semibold text-stone-400 mt-0.5">Not checked in yet today</p>
                         ) : (
                           <div className="mt-0.5 space-y-0.5">
@@ -3803,10 +4182,25 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                           </div>
                         )}
                       </div>
-                      <button onClick={() => toggleCheckInByFamily(link)}
-                        className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
-                        {isIn ? "Check out" : "Check in"}
-                      </button>
+                      {!schoolDayToday ? null : confirming ? (
+                        <div className="flex flex-col items-end gap-1.5 shrink-0">
+                          <span className="text-[10px] text-stone-500">Log another visit today?</span>
+                          <div className="flex gap-1.5">
+                            <button onClick={() => { toggleCheckInByFamily(link); setConfirmingRepeatChild(null); }}
+                              className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes</button>
+                            <button onClick={() => setConfirmingRepeatChild(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={() => {
+                          const hasCompletedToday = entries.filter((e) => e.checkInTime && e.checkOutTime).length > 0;
+                          if (!isIn && hasCompletedToday) { setConfirmingRepeatChild(link.studentId); return; }
+                          toggleCheckInByFamily(link);
+                        }}
+                          className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                          {isIn ? "Check out" : "Check in"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -3822,68 +4216,49 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 <button onClick={() => setScanError(null)} className="block text-xs font-normal underline mt-1">Dismiss</button>
               </div>
             )}
-            <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold mb-4 hover:bg-teal-800">
-              Scan QR code to check in or out
-            </button>
+            <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
+              text="Scan the QR code posted at school to check your child in and out yourself."
+              onNext={advanceTour} onSkip={dismissTour}>
+              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold mb-4 hover:bg-teal-800">
+                Scan QR code to check in or out
+              </button>
+            </TourHint>
             <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Your children</p>
             {(family?.studentLinks || []).length === 0 ? (
               <div className="bg-white border border-stone-200 rounded-xl p-5 text-center">
                 <p className="text-sm text-stone-400">No children linked to this account yet — check with the school if this doesn't look right.</p>
               </div>
             ) : (
-              <div className="space-y-2">
-                {family.studentLinks.map((link, i) => {
-                  const status = checkInStatus[link.studentId];
-                  const isIn = status?.isIn;
-                  const entries = status?.entries || [];
-                  return (
-                    <button key={i} onClick={() => setViewingChild(link)}
-                      className={`w-full text-left rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
-                      <p className="font-semibold text-stone-900">{link.studentName}</p>
-                      <p className="text-xs text-stone-400">{link.className}</p>
-                      {entries.length === 0 ? (
-                        <p className="text-xs font-semibold text-stone-400 mt-0.5">Not checked in yet today</p>
-                      ) : (
-                        <div className="mt-0.5 space-y-0.5">
-                          {entries.map((e) => (
-                            <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
-                              In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
-                            </p>
-                          ))}
-                        </div>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            {(family?.studentLinks || []).length > 0 && (
-              <>
-                <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2 mt-5">Messages</p>
+              <TourHint active={tourStep === 2} step={3} total={TOUR_TOTAL_STEPS} align="left"
+                text={`Tap on ${family.studentLinks[0]?.studentName || "your child"} to see their day — mood, meals, naps, and more, as their teacher logs it.`}
+                onNext={advanceTour} onSkip={dismissTour}>
                 <div className="space-y-2">
-                  {[...new Map(family.studentLinks.map((l) => [l.classId, l])).values()].map((l) => (
-                    <button key={l.classId} onClick={() => openMessagesFor(l.classId)}
-                      className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
-                      <div>
-                        <p className="font-semibold text-stone-900">{l.className}</p>
-                        <p className="text-xs text-stone-400">Message the classroom</p>
-                      </div>
-                      <ChevronRight size={16} className="text-stone-300" />
-                    </button>
-                  ))}
+                  {family.studentLinks.map((link, i) => {
+                    const status = checkInStatus[link.studentId];
+                    const isIn = status?.isIn;
+                    const entries = status?.entries || [];
+                    return (
+                      <button key={i} onClick={() => setViewingChild(link)}
+                        className={`w-full text-left rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
+                        <p className="font-semibold text-stone-900">{link.studentName}</p>
+                        <p className="text-xs text-stone-400">{link.className}</p>
+                        {entries.length === 0 ? (
+                          <p className="text-xs font-semibold text-stone-400 mt-0.5">Not checked in yet today</p>
+                        ) : (
+                          <div className="mt-0.5 space-y-0.5">
+                            {entries.map((e) => (
+                              <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
+                                In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
-              </>
+              </TourHint>
             )}
-
-            <button onClick={openAdminMessages}
-              className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300 mt-2">
-              <div>
-                <p className="font-semibold text-stone-900">School Office</p>
-                <p className="text-xs text-stone-400">For anything not specific to one classroom</p>
-              </div>
-              <ChevronRight size={16} className="text-stone-300" />
-            </button>
           </>
         )}
       </div>
@@ -4028,7 +4403,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent }) {
+function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -4045,6 +4420,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [schoolTools, setSchoolToolsInClass] = useState([]);
   const [programsInClass, setProgramsInClass] = useState([]);
   const [incidents, setIncidents] = useState([]);
+  const [photos, setPhotos] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
   const [classPoints, setClassPoints] = useState({});
   const [monthlyReportState, setMonthlyReportState] = useState({ dismissedMonth: null });
@@ -4095,6 +4471,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const r = await loadC("roster", []);
       const c = await loadC("config", DEFAULT_CONFIG);
       const inc = await loadC("incidents", []);
+      const ph = await loadC("photos", []);
       const ca = await loadC("classAssessments", []);
       const cp = await loadC("classPoints", {});
       const mrs = await loadC("monthlyReportState", { dismissedMonth: null });
@@ -4168,6 +4545,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       }
       setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: mergedPlanner });
       setIncidents(finalIncidents);
+      setPhotos(ph);
       setClassAssessments(finalCA);
       setClassPoints(finalCP);
       setMonthlyReportState(mrs);
@@ -4204,6 +4582,25 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const persistConfig = (next) => { setConfig(next); saveC("config", next); };
   const persistStudent = (id, newData) => { setStudentData((prev) => ({ ...prev, [id]: newData })); saveC(`kriya:${id}`, newData); };
   const persistIncidents = (next) => { setIncidents(next); saveC("incidents", next); };
+  const persistPhotos = (next) => { setPhotos(next); saveC("photos", next); };
+  // Photos live in Storage (the actual image), not Firestore — Firestore only ever holds a
+  // reference to it (the download URL) plus who it's tagged to, mirroring how incidents already
+  // work: one shared array per class, filtered per student when a specific child's log is shown.
+  // Access is scoped to "has a child in this class," not to which specific children appear in a
+  // given photo, since a security rule trying to check that would need to search inside an array
+  // of tagged student ids — exactly the kind of check that's fragile to get right without being
+  // able to test real rule execution, the same tradeoff made earlier for check-ins.
+  const uploadClassPhoto = async (file, studentIds, caption, photoDate) => {
+    const photoId = uid();
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+    const path = `photos/${classId}/${photoId}.${ext}`;
+    const fileRef = storageRef(storage, path);
+    await uploadBytes(fileRef, file);
+    const url = await getDownloadURL(fileRef);
+    const entry = withLogger({ id: photoId, date: photoDate || todayISO(), url, storagePath: path, studentIds, caption: caption || "" });
+    persistPhotos([entry, ...photos]);
+    return entry;
+  };
   const persistClassAssessments = (next) => { setClassAssessments(next); saveC("classAssessments", next); };
   const persistClassPoints = (next) => { setClassPoints(next); saveC("classPoints", next); };
   const persistMonthlyReportState = (next) => { setMonthlyReportState(next); saveC("monthlyReportState", next); };
@@ -4357,6 +4754,25 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   };
 
   const loadSampleData = () => {
+    if (classType === "preschool") {
+      const sample = buildPreschoolSampleData();
+      persistRoster(sample.roster);
+      setStudentData(sample.studentData);
+      for (const [sid, sd] of Object.entries(sample.studentData)) saveC(`kriya:${sid}`, sd);
+      persistIncidents(sample.incidents);
+      persistPhotos(sample.photos);
+      persistPlannerDays(sample.plannerDays);
+      persistPlannerEvents(sample.plannerEvents);
+      // Sample students need a matching entry in the school-wide registry too, same as any
+      // student added normally, or "add existing student from another class" wouldn't find them.
+      loadJSON("globalStudents", [], true).then((gs) => {
+        const withoutOldSamples = gs.filter((g) => !sample.roster.some((r) => r.id === g.id));
+        const nextGs = [...withoutOldSamples, ...sample.roster.map((r) => ({ ...r, parent2Name: "", parent2Email: "", parent2Phone: "", homeAddress: "" }))];
+        saveJSON("globalStudents", nextGs, true);
+        setGlobalStudentsInClass(nextGs);
+      });
+      return;
+    }
     const sample = buildSampleData();
     persistRoster(sample.roster);
     setStudentData(sample.studentData);
@@ -4402,18 +4818,52 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistStudent(studentId, { ...data, communications: [{ id: uid(), ...entry }, ...(data.communications || [])] });
   };
 
-  const addStudent = async (name) => {
+  // Creates a real family login for a parent the moment a student is added, if their email was
+  // given — the whole point being an admin never has to separately go create the account
+  // afterward. The one thing this has to get right: a parent might already have an account from
+  // an older sibling, and calling the create-account endpoint again would silently overwrite
+  // their existing studentLinks with just this one new child, losing the sibling. So this checks
+  // for an existing account by email first, and if one exists, appends to it instead of
+  // recreating it.
+  const autoCreateOrLinkParentAccount = async (parentName, parentEmail, newLink) => {
+    const email = (parentEmail || "").trim().toLowerCase();
+    if (!email) return;
+    const allFamilies = await loadAllWithPrefix("family:");
+    const existing = allFamilies.find((f) => (f.email || "").toLowerCase() === email);
+    if (existing) {
+      const already = (existing.studentLinks || []).some((l) => l.classId === newLink.classId && l.studentId === newLink.studentId);
+      if (!already) {
+        const nextLinks = [...(existing.studentLinks || []), newLink];
+        await updateFamilyRecord(existing.uid, { studentLinks: nextLinks });
+      }
+      return;
+    }
+    const defaultPassword = await loadJSON("defaultParentPassword", "Welcome123", true);
+    await createFamilyAccount(parentName || newLink.studentName, parentEmail.trim(), defaultPassword, [newLink]);
+  };
+
+  const addStudent = async (name, studentType, parent1Name, parentEmail, parent2Name, parent2Email) => {
     const trimmed = (name || "").trim();
     if (!trimmed) return;
     const id = uid();
-    persistRoster([...roster, { id, name: trimmed, parentEmail: "", parentPhone: "", notes: "", enrollmentScope: "full-time" }]);
+    const resolvedType = studentType || classType;
+    persistRoster([...roster, { id, name: trimmed, studentType: resolvedType, parentEmail: parentEmail || "", parentPhone: "", notes: "", enrollmentScope: "full-time" }]);
     setStudentData((prev) => ({ ...prev, [id]: emptyStudentData() }));
     // New students are shared school-wide by default from here on, so any teacher can find and add them later.
     const gs = await loadJSON("globalStudents", [], true);
-    const globalRecord = { id, name: trimmed, parent1Name: "", parentEmail: "", parentPhone: "", parent2Name: "", parent2Email: "", parent2Phone: "", homeAddress: "", notes: "" };
+    const globalRecord = {
+      id, name: trimmed, studentType: resolvedType,
+      parent1Name: parent1Name || "", parentEmail: parentEmail || "", parentPhone: "",
+      parent2Name: parent2Name || "", parent2Email: parent2Email || "", parent2Phone: "",
+      homeAddress: "", notes: "",
+    };
     const nextGs = [...gs, globalRecord];
     await saveJSON("globalStudents", nextGs, true);
     setGlobalStudentsInClass(nextGs);
+
+    const link = { classId, studentId: id, studentName: trimmed, className };
+    if (parentEmail) await autoCreateOrLinkParentAccount(parent1Name, parentEmail, link);
+    if (parent2Email) await autoCreateOrLinkParentAccount(parent2Name, parent2Email, link);
   };
 
   const refreshGlobalStudentsInClass = async () => {
@@ -4727,6 +5177,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     return next;
   };
 
+  // A second, separate line alongside the class-wide one — this teacher's own personal thread with
+  // a family, not shared with any co-teacher or aide in the same room. Keyed by this teacher's own
+  // uid, not the class, since it's their individual line regardless of which class it's about.
+  const sendIndividualMessageToFamily = async (familyUid, text) => {
+    const key = `teacher-messages:${loggedInTeacher.uid}:${familyUid}`;
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString() };
+    const next = { messages: [...existing.messages, entry] };
+    await saveJSON(key, next, true);
+    return next;
+  };
+
   const markNoHomeworkToday = (date) => {
     roster.forEach((s) => {
       const data = studentData[s.id] || emptyStudentData();
@@ -4863,15 +5325,15 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
       {view === "attendance" && (
         <PreschoolAttendanceView roster={roster} studentData={studentData}
-          toggleCheckInByTeacher={toggleCheckInByTeacher} navigate={setView} />
+          toggleCheckInByTeacher={toggleCheckInByTeacher} config={config} plannerDays={plannerDays} navigate={setView} />
       )}
 
       {view === "daily-log" && (
-        <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} config={config}
+        <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} photos={photos} config={config}
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
           logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
-          logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
+          logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog} uploadClassPhoto={uploadClassPhoto}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
           openIncidentForm={() => openIncidentForm(null, "daily-log")} navigate={setView} />
       )}
@@ -4913,6 +5375,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
       {view === "messages" && (
         <TeacherMessagesView classId={classId} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} />
+      )}
+
+      {view === "individual-messages" && (
+        <TeacherIndividualMessagesView classId={classId} teacherUid={loggedInTeacher?.uid} sendIndividualMessageToFamily={sendIndividualMessageToFamily} navigate={setView} />
       )}
 
       {view === "communication" && (
@@ -5117,7 +5583,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           className={className} classId={classId} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
           subCode={subCode} onGenerateSubCode={onGenerateSubCode} onClearSubCode={onClearSubCode}
           globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent}
-          loggedInTeacher={loggedInTeacher} onChangeMySignOff={onChangeMySignOff} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)} />
+          loggedInTeacher={loggedInTeacher} onChangeMySignOff={onChangeMySignOff} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)}
+          createFamilyAccount={createFamilyAccount} />
       )}
 
       {showMyAccount && loggedInTeacher && (
@@ -6041,20 +6508,36 @@ const PRESCHOOL_TILES = [
   { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "all" },
   { id: "bathroom", label: "Bathroom", icon: Droplets, color: "teal", bulkDefault: "none" },
   { id: "health", label: "Health note", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
+  { id: "photos", label: "Photos", icon: Camera, color: "amber", bulkDefault: "none" },
 ];
 
 // Preschool attendance — same underlying data (setAttendance, config.attendance.statuses) as the
 // elementary Home screen, but presented on its own, without the homework/points/flags clutter
 // that doesn't apply to a preschool room, and with bigger, simpler touch targets to match the
 // same fast-glance philosophy as the rest of the preschool screens.
-function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, navigate }) {
+function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, config, plannerDays, navigate }) {
   const date = todayISO();
+  const schoolDay = isSchoolDay(date, config, plannerDays);
+  const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
+
+  const handleTap = (studentId, isIn, checkIns) => {
+    if (!isIn && wouldBeRepeatCheckIn(checkIns, date)) {
+      setConfirmingRepeatFor(studentId);
+      return;
+    }
+    toggleCheckInByTeacher(studentId);
+  };
 
   return (
     <div className="app-page-wide">
       <Header navigate={navigate} />
       <MainTabs active="attendance" navigate={navigate} />
-      <p className="text-xs text-stone-400 mb-5">Who's actually here right now — not a daily record of late or excused, just in or not. Families can also check their own child in or out from their end.</p>
+      <p className="text-xs text-stone-400 mb-3">Who's actually here right now — not a daily record of late or excused, just in or not. Families can also check their own child in or out from their end.</p>
+      {!schoolDay && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
+          <p className="text-xs font-semibold text-amber-800">Today isn't marked as a school day in Planner. You can still check students in below if this is a genuine exception.</p>
+        </div>
+      )}
 
       {roster.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No students in this class yet.</p>}
 
@@ -6064,6 +6547,7 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
           const todaysEntries = checkIns.filter((c) => c.date === date).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
           const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
           const isIn = Boolean(openEntry);
+          const confirming = confirmingRepeatFor === s.id;
           return (
             <div key={s.id} className={`rounded-xl border-2 p-4 flex flex-wrap items-center justify-between gap-3 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
               <div>
@@ -6081,10 +6565,19 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
                   </div>
                 )}
               </div>
-              <button onClick={() => toggleCheckInByTeacher(s.id)}
-                className={`text-sm font-bold px-5 py-3 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
-                {isIn ? "Check out" : "Check in"}
-              </button>
+              {confirming ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-stone-500">Log another visit today?</span>
+                  <button onClick={() => { toggleCheckInByTeacher(s.id); setConfirmingRepeatFor(null); }}
+                    className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes, check in</button>
+                  <button onClick={() => setConfirmingRepeatFor(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => handleTap(s.id, isIn, checkIns)}
+                  className={`text-sm font-bold px-5 py-3 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                  {isIn ? "Check out" : "Check in"}
+                </button>
+              )}
             </div>
           );
         })}
@@ -6122,7 +6615,7 @@ function PreschoolScheduleSidebar({ periods, events, navigate }) {
   );
 }
 
-function PreschoolDashboardView({ roster, studentData, incidents, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm, navigate }) {
+function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, navigate }) {
   const [screen, setScreen] = useState(null); // null = dashboard grid
   const [date] = useState(todayISO());
   // Students not checked in today shouldn't be swept into a bulk "everyone ate lunch" action, or
@@ -6155,7 +6648,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, planne
             {PRESCHOOL_TILES.map((tile) => {
               const Icon = tile.icon;
               const st = TILE_STYLES[tile.color];
-              const logged = tile.id === "health" ? null : loggedCountFor(tile.id);
+              const logged = (tile.id === "health" || tile.id === "photos") ? null : loggedCountFor(tile.id);
               return (
                 <button key={tile.id} onClick={() => (tile.id === "health" ? openIncidentForm() : setScreen(tile.id))}
                   className={`hover-lift flex flex-col items-center justify-center gap-1.5 rounded-2xl border-2 py-6 px-2 ${st.tileBg} ${st.tileBorder} ${st.tileBorderHover}`}>
@@ -6191,6 +6684,9 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, planne
   if (screen === "bathroom") {
     return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
       logBulk={logBathroomBulk} removeLog={removeBathroomLog} onBack={() => setScreen(null)} />;
+  }
+  if (screen === "photos") {
+    return <PhotoUploadScreen tile={tile} date={date} roster={roster} photos={photos} uploadClassPhoto={uploadClassPhoto} onBack={() => setScreen(null)} />;
   }
   return null;
 }
@@ -6448,6 +6944,94 @@ function MoodScreen({ date, roster, studentData, checkedInIds, setMood, onBack }
 // Teacher picks a time and type once, taps whichever kids it applies to right now, logs them all
 // in one action, and can keep coming back to this same screen through the day since it's append-
 // only — today's entries stay visible below so anything can be reviewed or undone.
+// Tap-to-select who's actually in the photo (never a default-everyone tile — a photo is of
+// specific kids, not the whole room by assumption), then pick or take the picture itself. The
+// actual upload happens after the file is chosen, not before, so there's nothing to clean up if
+// a teacher picks students and then changes their mind about the photo.
+function PhotoUploadScreen({ tile, date, roster, photos, uploadClassPhoto, onBack }) {
+  const st = TILE_STYLES[tile.color];
+  const [selected, setSelected] = useState([]);
+  const [caption, setCaption] = useState("");
+  const [photoDate, setPhotoDate] = useState(date);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // lets the same file be picked again later without needing a different one first
+    if (!file) return;
+    if (selected.length === 0) {
+      setError("Tap who's in the photo first.");
+      return;
+    }
+    setError(null);
+    setUploading(true);
+    try {
+      await uploadClassPhoto(file, selected, caption.trim(), photoDate);
+      setSelected([]);
+      setCaption("");
+    } catch (err) {
+      setError("Couldn't upload — check your connection and try again.");
+    }
+    setUploading(false);
+  };
+
+  const photosForDate = photos.filter((p) => p.date === photoDate);
+
+  return (
+    <div className="app-page">
+      <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
+      <p className="text-xs text-stone-400 mb-2">
+        Not tied to who's checked in today — a class photo or a post from earlier in the week still goes to every family, whether or not their child happened to be here.
+      </p>
+      <label className="block text-xs font-medium text-stone-500 mb-1">Date</label>
+      <input type="date" value={photoDate} onChange={(e) => setPhotoDate(e.target.value)} max={todayISO()}
+        className="rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+
+      <button onClick={() => setSelected(roster.map((s) => s.id))}
+        className={`w-full text-sm font-bold px-3 py-2.5 rounded-lg border-2 mb-2 ${st.solid} ${st.solidBorder} text-white`}>
+        Whole class ({roster.length})
+      </button>
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {roster.map((s) => (
+          <button key={s.id} onClick={() => toggle(s.id)}
+            className={`text-sm font-semibold px-3 py-2 rounded-full border ${selected.includes(s.id) ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300 bg-white"}`}>
+            {s.name}
+          </button>
+        ))}
+        {roster.length === 0 && <p className="text-xs text-stone-400">No students in this class yet.</p>}
+      </div>
+
+      <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Caption (optional)"
+        className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+
+      {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
+
+      <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleFile} className="hidden" />
+      <button onClick={() => fileInputRef.current?.click()} disabled={uploading}
+        className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 flex items-center justify-center gap-2 ${st.solid} ${st.solidHover}`}>
+        <Camera size={18} /> {uploading ? "Uploading…" : "Take or choose a photo"}
+      </button>
+
+      {photosForDate.length > 0 && (
+        <>
+          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mt-6 mb-2">Already posted for this date</p>
+          <div className="grid grid-cols-3 gap-2">
+            {photosForDate.map((p) => (
+              <div key={p.id} className="aspect-square rounded-lg overflow-hidden bg-stone-100">
+                <img src={p.url} alt={p.caption || "Class photo"} className="w-full h-full object-cover" />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TapLogScreen({ tile, date, roster, studentData, checkedInIds, dataKey, typeOptions, logBulk, removeLog, onBack }) {
   const st = TILE_STYLES[tile.color];
   const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
@@ -8479,19 +9063,31 @@ function ReflectionHistoryView({ reflections, onOpenMonth, onBack, navigate }) {
 // The school-office inbox — not scoped to any class, since it's a shared line to admin, and
 // deliberately not attributed to whichever specific admin happens to reply (families shouldn't
 // need to track which staff member said what; it's the office, not a person).
+// Grouped by family the same way as the teacher's own message list, for the same reason — two
+// guardians on one family should read as one office conversation, not two.
 function AdminMessagesView({ families, navigate }) {
   const [threads, setThreads] = useState({});
-  const [openFamily, setOpenFamily] = useState(null);
+  const [openGroup, setOpenGroup] = useState(null);
+
+  const groups = useMemo(() => {
+    const byGroup = {};
+    (families || []).forEach((f) => {
+      const groupId = f.familyGroupId || f.uid;
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [] };
+      byGroup[groupId].guardians.push(f);
+    });
+    return Object.values(byGroup);
+  }, [families]);
 
   const refresh = useCallback(async () => {
-    const entries = await Promise.all((families || []).map(async (f) => [f.uid, await loadJSON(`admin-messages:${f.uid}`, { messages: [] }, true)]));
+    const entries = await Promise.all(groups.map(async (g) => [g.groupId, await loadJSON(`admin-messages:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
-  }, [families]);
+  }, [groups]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const sendToFamily = async (familyUid, text) => {
-    const key = `admin-messages:${familyUid}`;
+  const sendToFamily = async (groupId, text) => {
+    const key = `admin-messages:${groupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString() };
     const next = { messages: [...existing.messages, entry] };
@@ -8499,15 +9095,16 @@ function AdminMessagesView({ families, navigate }) {
     return next;
   };
 
-  const withThreads = (families || []).filter((f) => (threads[f.uid]?.messages || []).length > 0);
-  const withoutThreads = (families || []).filter((f) => !(threads[f.uid]?.messages || []).length);
+  const withThreads = groups.filter((g) => (threads[g.groupId]?.messages || []).length > 0);
+  const withoutThreads = groups.filter((g) => !(threads[g.groupId]?.messages || []).length);
 
-  if (openFamily) {
-    const thread = threads[openFamily.uid] || { messages: [] };
+  if (openGroup) {
+    const thread = threads[openGroup.groupId] || { messages: [] };
+    const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
     return (
-      <ConversationThreadView title={openFamily.name} myRole="admin" messages={thread.messages}
-        onBack={() => { setOpenFamily(null); refresh(); }}
-        onSend={async (text) => { await sendToFamily(openFamily.uid, text); await refresh(); }} />
+      <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages}
+        onBack={() => { setOpenGroup(null); refresh(); }}
+        onSend={async (text) => { await sendToFamily(openGroup.groupId, text); await refresh(); }} />
     );
   }
 
@@ -8520,13 +9117,14 @@ function AdminMessagesView({ families, navigate }) {
 
         {withThreads.length > 0 && (
           <div className="space-y-2 mb-5">
-            {withThreads.map((f) => {
-              const thread = threads[f.uid];
+            {withThreads.map((g) => {
+              const thread = threads[g.groupId];
               const last = thread.messages[thread.messages.length - 1];
+              const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
               return (
-                <button key={f.uid} onClick={() => setOpenFamily(f)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="font-semibold text-stone-900">{f.name}</p>
+                    <p className="font-semibold text-stone-900">{guardianNames}</p>
                     <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>
                   </div>
                   <p className="text-xs text-stone-500 truncate">{last.senderType === "admin" ? "You: " : ""}{last.text}</p>
@@ -8540,16 +9138,85 @@ function AdminMessagesView({ families, navigate }) {
           <>
             <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Start a conversation</p>
             <div className="space-y-2">
-              {withoutThreads.map((f) => (
-                <button key={f.uid} onClick={() => setOpenFamily(f)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-3 text-sm font-semibold text-stone-700 hover:border-teal-300">
-                  {f.name}
+              {withoutThreads.map((g) => (
+                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-3 text-sm font-semibold text-stone-700 hover:border-teal-300">
+                  {g.guardians.map((gu) => gu.name).join(" & ")}
                 </button>
               ))}
             </div>
           </>
         )}
 
-        {(families || []).length === 0 && <p className="text-sm text-stone-400 text-center py-8">No family accounts yet.</p>}
+        {groups.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No family accounts yet.</p>}
+      </div>
+    </div>
+  );
+}
+
+// Same idea as TeacherMessagesView, but keyed to this teacher's own uid rather than the class —
+// a separate, personal line that doesn't get seen by any co-teacher or aide sharing the room.
+// Same grouping as the class-wide list — a second guardian shares this personal line with the
+// teacher too, since it's a private line between "this family" and "this teacher," not between
+// one specific login and the teacher.
+function TeacherIndividualMessagesView({ classId, teacherUid, sendIndividualMessageToFamily, navigate }) {
+  const [groups, setGroups] = useState(null);
+  const [threads, setThreads] = useState({});
+  const [openGroup, setOpenGroup] = useState(null);
+
+  const refresh = useCallback(async () => {
+    const all = await loadAllWithPrefix("family:");
+    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+    const byGroup = {};
+    relevant.forEach((f) => {
+      const groupId = f.familyGroupId || f.uid;
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
+      byGroup[groupId].guardians.push(f);
+    });
+    const groupList = Object.values(byGroup);
+    setGroups(groupList);
+    const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${teacherUid}:${g.groupId}`, { messages: [] }, true)]));
+    setThreads(Object.fromEntries(entries));
+  }, [classId, teacherUid]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  if (openGroup) {
+    const thread = threads[openGroup.groupId] || { messages: [] };
+    const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+    const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
+    return (
+      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher"
+        onBack={() => { setOpenGroup(null); refresh(); }}
+        onSend={async (text) => { await sendIndividualMessageToFamily(openGroup.groupId, text); await refresh(); }} />
+    );
+  }
+
+  return (
+    <div className={PAGE}>
+      <button onClick={() => navigate("communication")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-lg font-bold text-stone-900 mb-1">My individual messages</h1>
+      <p className="text-xs text-stone-400 mb-4">Your own personal line with each family — separate from the shared class conversation.</p>
+
+      {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+      {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
+
+      <div className="space-y-2">
+        {(groups || []).map((g) => {
+          const thread = threads[g.groupId];
+          const last = thread?.messages?.[thread.messages.length - 1];
+          const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+          const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+          return (
+            <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-stone-900">{guardianNames}</p>
+                {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+              </div>
+              <p className="text-xs text-stone-400 mb-1">{childNames}</p>
+              <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -8558,28 +9225,39 @@ function AdminMessagesView({ families, navigate }) {
 // Conversation list — one row per family that actually has a child in this class, found by
 // scanning family records rather than keeping a separate index, since a small preschool's family
 // list is short enough that this is simpler and less to keep in sync than a denormalized list.
+// Grouped by family, not by individual login — two guardians on the same family share one row
+// and one conversation here, the same way they share it on their own side, rather than showing up
+// as two disconnected families that happen to have the same kids.
 function TeacherMessagesView({ classId, sendMessageToFamily, loggedByName, navigate }) {
-  const [families, setFamilies] = useState(null); // null = loading
-  const [threads, setThreads] = useState({}); // familyUid -> {messages}
-  const [openFamily, setOpenFamily] = useState(null);
+  const [groups, setGroups] = useState(null); // null = loading
+  const [threads, setThreads] = useState({}); // groupId -> {messages}
+  const [openGroup, setOpenGroup] = useState(null);
 
   const refresh = useCallback(async () => {
     const all = await loadAllWithPrefix("family:");
     const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
-    setFamilies(relevant);
-    const entries = await Promise.all(relevant.map(async (f) => [f.uid, await loadJSON(`class:${classId}:messages:${f.uid}`, { messages: [] }, true)]));
+    const byGroup = {};
+    relevant.forEach((f) => {
+      const groupId = f.familyGroupId || f.uid;
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
+      byGroup[groupId].guardians.push(f);
+    });
+    const groupList = Object.values(byGroup);
+    setGroups(groupList);
+    const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`class:${classId}:messages:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
   }, [classId]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  if (openFamily) {
-    const thread = threads[openFamily.uid] || { messages: [] };
-    const childNames = (openFamily.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+  if (openGroup) {
+    const thread = threads[openGroup.groupId] || { messages: [] };
+    const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+    const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
     return (
-      <ConversationThreadView title={openFamily.name} subtitle={childNames} messages={thread.messages} myRole="teacher"
-        onBack={() => { setOpenFamily(null); refresh(); }}
-        onSend={async (text) => { await sendMessageToFamily(openFamily.uid, text); await refresh(); }} />
+      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher"
+        onBack={() => { setOpenGroup(null); refresh(); }}
+        onSend={async (text) => { await sendMessageToFamily(openGroup.groupId, text); await refresh(); }} />
     );
   }
 
@@ -8590,18 +9268,19 @@ function TeacherMessagesView({ classId, sendMessageToFamily, loggedByName, navig
       <button onClick={() => navigate("communication")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-lg font-bold text-stone-900 mb-4">Message families</h1>
 
-      {families === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-      {families?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
+      {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+      {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
 
       <div className="space-y-2">
-        {(families || []).map((f) => {
-          const thread = threads[f.uid];
+        {(groups || []).map((g) => {
+          const thread = threads[g.groupId];
           const last = thread?.messages?.[thread.messages.length - 1];
-          const childNames = (f.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+          const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+          const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
           return (
-            <button key={f.uid} onClick={() => setOpenFamily(f)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+            <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
               <div className="flex items-center justify-between gap-2">
-                <p className="font-semibold text-stone-900">{f.name}</p>
+                <p className="font-semibold text-stone-900">{guardianNames}</p>
                 {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
               </div>
               <p className="text-xs text-stone-400 mb-1">{childNames}</p>
@@ -8625,6 +9304,11 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
       {isPreschool && (
         <button onClick={() => navigate("messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
           <MessageCircle size={16} /> Message families
+        </button>
+      )}
+      {isPreschool && (
+        <button onClick={() => navigate("individual-messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+          <MessageCircle size={16} /> My individual messages
         </button>
       )}
       <button onClick={() => navigate("class-announcement")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
@@ -11867,7 +12551,53 @@ function nextHebrewOccurrence(monthId, day, fromDate) {
   return null;
 }
 
+// Fixed content, not AI-generated — login credentials need to be exact, not paraphrased, and the
+// feature list is the same for every family of a given type, so there's nothing here that
+// benefits from being written fresh each time. Preschool and elementary get genuinely different
+// feature descriptions, not just a relabeled list — elementary doesn't have check-in or a daily
+// log built for it yet, so the email doesn't promise those to an elementary parent.
+function buildParentLoginEmail(parentName, studentName, studentType, parentEmail, defaultPassword) {
+  const portalUrl = `${window.location.origin}${window.location.pathname}?portal=parent`;
+  const isPreschool = studentType === "preschool";
+  const featureList = isPreschool
+    ? `- Check ${studentName} in and out yourself by scanning the QR code posted at school\n- See a daily log of ${studentName}'s day — mood, meals, naps, diapers, and photos\n- Message ${studentName}'s classroom, a specific teacher, or the school office directly`
+    : `- Message ${studentName}'s classroom, a specific teacher, or the school office directly, right from your phone`;
+
+  const subject = `Your account for ${studentName}'s school app`;
+  const body = `Hi ${parentName || "there"},
+
+You now have a parent account for ${studentName} on our school's app. Here's everything you need to get started.
+
+GETTING STARTED
+Open this link on your phone: ${portalUrl}
+
+On iPhone: open it in Safari, tap the Share button, then "Add to Home Screen." This lets it work like a regular app, including notifications.
+On Android: open it in Chrome, tap the menu (⋮), then "Add to Home Screen" or "Install app."
+
+YOUR LOGIN
+Email: ${parentEmail}
+Password: ${defaultPassword}
+You can change this password anytime after signing in, under the settings icon.
+
+WHAT YOU CAN DO
+${featureList}
+
+If anything doesn't work or you have questions, just reach out to the school office.`;
+
+  return { subject, body };
+}
+
 function StudentContactFields({ student, onUpdateField }) {
+  const [defaultPassword, setDefaultPassword] = useState("Welcome123");
+  useEffect(() => { loadJSON("defaultParentPassword", "Welcome123", true).then(setDefaultPassword); }, []);
+
+  const emailParent = (parentName, parentEmail) => {
+    const { subject, body } = buildParentLoginEmail(parentName, student.name, student.studentType, parentEmail, defaultPassword);
+    const link = document.createElement("a");
+    link.href = `mailto:${encodeURIComponent(parentEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    link.click();
+  };
+
   return (
     <div className="px-3 pb-3 border-t border-stone-100 pt-2 md:grid md:grid-cols-2 md:gap-2">
       <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 1</p>
@@ -11881,7 +12611,14 @@ function StudentContactFields({ student, onUpdateField }) {
       </div>
       <div className="md:col-span-2">
         <label className="block text-[10px] text-stone-400 mb-0.5">Email (primary contact)</label>
-        <input type="email" value={student.parentEmail || ""} onChange={(e) => onUpdateField(student.id, "parentEmail", e.target.value)} placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+        <div className="flex gap-1.5">
+          <input type="email" value={student.parentEmail || ""} onChange={(e) => onUpdateField(student.id, "parentEmail", e.target.value)} placeholder="parent@example.com" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          {student.parentEmail && (
+            <button onClick={() => emailParent(student.parent1Name, student.parentEmail)} className="shrink-0 h-fit text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 hover:bg-teal-50 whitespace-nowrap">
+              Email login info
+            </button>
+          )}
+        </div>
       </div>
 
       <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 2</p>
@@ -11895,7 +12632,14 @@ function StudentContactFields({ student, onUpdateField }) {
       </div>
       <div className="md:col-span-2">
         <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
-        <input type="email" value={student.parent2Email || ""} onChange={(e) => onUpdateField(student.id, "parent2Email", e.target.value)} placeholder="parent2@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+        <div className="flex gap-1.5">
+          <input type="email" value={student.parent2Email || ""} onChange={(e) => onUpdateField(student.id, "parent2Email", e.target.value)} placeholder="parent2@example.com" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          {student.parent2Email && (
+            <button onClick={() => emailParent(student.parent2Name, student.parent2Email)} className="shrink-0 h-fit text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 hover:bg-teal-50 whitespace-nowrap">
+              Email login info
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="md:col-span-2">
@@ -12402,13 +13146,19 @@ function SchoolwideQRCode() {
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, classId, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding }) {
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, classId, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding, createFamilyAccount }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
   const [newName, setNewName] = useState("");
+  const [newStudentType, setNewStudentType] = useState(classType);
+  const [newParent1Name, setNewParent1Name] = useState("");
+  const [newParent1Email, setNewParent1Email] = useState("");
+  const [newParent2Name, setNewParent2Name] = useState("");
+  const [newParent2Email, setNewParent2Email] = useState("");
+  const [showAddStudentDetails, setShowAddStudentDetails] = useState(false);
   const [classNameInput, setClassNameInput] = useState(className || "");
   const [newPw1, setNewPw1] = useState("");
   const [newPw2, setNewPw2] = useState("");
@@ -12438,7 +13188,29 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
   const update = (mutator) => setConfig(mutator(structuredClone(config)));
   const toggleCat = (id) => setExpandedCats((p) => ({ ...p, [id]: !p[id] }));
   const toggleStudent = (id) => setExpandedStudents((p) => ({ ...p, [id]: !p[id] }));
-  const submitNewStudent = () => { addStudent(newName); setNewName(""); };
+  const submitNewStudent = () => {
+    addStudent(newName, newStudentType, newParent1Name, newParent1Email, newParent2Name, newParent2Email);
+    setNewName(""); setNewParent1Name(""); setNewParent1Email(""); setNewParent2Name(""); setNewParent2Email("");
+    setShowAddStudentDetails(false);
+  };
+
+  const [previewSettingUp, setPreviewSettingUp] = useState(false);
+  const [previewReady, setPreviewReady] = useState(false);
+  // Links the teacher's OWN existing login to the sample students as a family account too —
+  // reusing the exact same "already has a login, attach to it" path create-family.js already has
+  // for a teacher who's also a parent. Once that exists, the already-built "Switch to Parent
+  // view" link shows the real, live parent portal running against real (sample) data — not a
+  // separate mock rendering that could quietly drift from what parents actually see. Requires
+  // sample data to already be loaded (rather than triggering it here) since loadSampleData
+  // doesn't update this component's own roster prop synchronously — reading it right after
+  // calling loadSampleData would still see the old, empty roster.
+  const setUpParentPreview = async () => {
+    setPreviewSettingUp(true);
+    const links = roster.map((s) => ({ classId, studentId: s.id, studentName: s.name, className }));
+    await createFamilyAccount(loggedInTeacher?.name || "Preview", loggedInTeacher.email, "preview-not-used", links);
+    setPreviewSettingUp(false);
+    setPreviewReady(true);
+  };
 
   useEffect(() => { if (onRefreshGlobalStudents) onRefreshGlobalStudents(); }, []); // eslint-disable-line
 
@@ -12575,14 +13347,51 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <ConfirmDelete onConfirm={loadSampleData} label="Load sample data" className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50" />
               <ConfirmDelete onConfirm={clearAllData} label="Clear all data" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" />
             </div>
+            {isPreschool && (
+              <div className="mt-3 pt-3 border-t border-stone-200">
+                <p className="text-xs font-semibold text-stone-700 mb-1">Preview the parent experience</p>
+                <p className="text-[10px] text-stone-400 mb-2">Links your own login as a family account on the sample students, so "Switch to Parent view" shows the real, live parent portal — not a separate mockup. Needs sample data loaded first.</p>
+                {roster.length === 0 ? (
+                  <p className="text-xs text-stone-400">Load sample data above first.</p>
+                ) : previewReady ? (
+                  <p className="text-xs text-emerald-700 font-semibold">Ready — use "Switch to Parent view" up top to see it.</p>
+                ) : (
+                  <button onClick={setUpParentPreview} disabled={previewSettingUp} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 disabled:opacity-50">
+                    {previewSettingUp ? "Setting up…" : "Set up parent preview"}
+                  </button>
+                )}
+              </div>
+            )}
           </Section>
 
           <Section title="Students">
-            <div className="flex gap-2 mb-2">
-              <input value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitNewStudent()}
+            <div className="flex gap-2 mb-1">
+              <input value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !showAddStudentDetails && submitNewStudent()}
                 placeholder="Add a student's name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
               <button onClick={submitNewStudent} className="bg-teal-700 text-white rounded-lg px-3 py-1.5 flex items-center justify-center hover:bg-teal-800"><Plus size={16} /></button>
             </div>
+            <button onClick={() => setShowAddStudentDetails((v) => !v)} className="text-xs font-semibold text-teal-700 mb-2">
+              {showAddStudentDetails ? "Hide type & parent info" : "+ Add type & parent info (creates parent accounts automatically)"}
+            </button>
+            {showAddStudentDetails && (
+              <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3 space-y-2">
+                <div>
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Student type</label>
+                  <div className="flex gap-2">
+                    <button onClick={() => setNewStudentType("preschool")} className={`text-xs font-semibold px-3 py-1.5 rounded-lg border ${newStudentType === "preschool" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Preschool</button>
+                    <button onClick={() => setNewStudentType("elementary")} className={`text-xs font-semibold px-3 py-1.5 rounded-lg border ${newStudentType === "elementary" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Elementary / K–8</button>
+                  </div>
+                  <p className="text-[10px] text-stone-400 mt-1">Separate from this class's own type — used for features that depend on the student specifically, not the room they're in. Changeable later.</p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={newParent1Name} onChange={(e) => setNewParent1Name(e.target.value)} placeholder="Parent 1 name" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  <input type="email" value={newParent1Email} onChange={(e) => setNewParent1Email(e.target.value)} placeholder="Parent 1 email" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  <input value={newParent2Name} onChange={(e) => setNewParent2Name(e.target.value)} placeholder="Parent 2 name (optional)" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  <input type="email" value={newParent2Email} onChange={(e) => setNewParent2Email(e.target.value)} placeholder="Parent 2 email (optional)" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                </div>
+                <p className="text-[10px] text-stone-400">A parent account is created automatically for any email entered here — no separate step needed. If that email already has a family account (e.g. an older sibling), this child is just added to it.</p>
+              </div>
+            )}
             <button onClick={() => setShowAddExisting((v) => !v)} className="text-xs font-semibold text-teal-700 mb-3">
               {showAddExisting ? "Close" : "Or add an existing student from another class"}
             </button>
