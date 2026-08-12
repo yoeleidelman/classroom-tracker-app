@@ -626,6 +626,11 @@ function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], 
 // early for an appointment and brought back later is a real, normal case, not an edge case to
 // prevent. Looks at the most recent entry for today: if it's still "open" (checked in, not yet
 // checked out), this scan closes it out; otherwise this scan opens a new one.
+// One fixed code for the whole school — posted once, physically, wherever families actually pass
+// through. Deliberately not tied to any class or student, since who it checks in is determined by
+// which family is signed in when they scan it, not by anything encoded in the code itself.
+const SCHOOLWIDE_CHECKIN_CODE = "checkin:schoolwide";
+
 function computeToggledCheckIn(existingCheckIns, date, byLabel) {
   const list = existingCheckIns || [];
   const todaysEntries = list.filter((c) => c.date === date);
@@ -781,6 +786,10 @@ async function loadAllWithPrefix(prefix) {
 }
 
 const ClassContext = createContext({ className: "", onSwitchClass: () => {}, classType: "elementary" });
+// For an account that holds both a teacher and a family record — lets Header (rendered
+// independently by many different screens, not passed props from one shared parent) offer a
+// "switch to parent view" link without threading it through every one of those screens.
+const AppModeContext = createContext({ canSwitchToParent: false, switchToParent: () => {} });
 
 // Fonts, button press/hover feedback, and hand-written layout utilities — extracted into its
 // own component so every screen can render it, not just the ones inside an open class. It used
@@ -1067,10 +1076,15 @@ function AppInner() {
   const [currentTeacher, setCurrentTeacher] = useState(null); // the signed-in teacher's own record, once real login exists
   const [currentFamily, setCurrentFamily] = useState(null); // the signed-in family's own record, for the parent portal
   const [families, setFamilies] = useState([]); // every family account, for admin's management screen
-  // The parent portal is a genuinely separate entry point, not a mode switch inside the teacher
-  // app — reached only via its own link (?portal=parent), checked once and never re-derived from
-  // anything a teacher session could touch, so there's no path from the teacher UI into this one.
+  // The parent portal used to be a strictly separate entry point with zero path from the teacher
+  // app — that stays true for accounts that are ONLY a family or ONLY a teacher, since each side
+  // only ever loads if that record actually exists for the signed-in uid. The one thing this adds:
+  // an account that legitimately holds both records (a teacher who's also a parent here) can move
+  // between them after signing in once, rather than needing two separate logins. activeMode is the
+  // single source of truth for which side is currently showing; ?portal=parent still works as a
+  // direct link and just seeds the initial mode, it no longer hard-locks it.
   const [isParentPortal] = useState(() => new URLSearchParams(window.location.search).get("portal") === "parent");
+  const [activeMode, setActiveMode] = useState(() => (isParentPortal ? "parent" : null)); // "teacher" | "parent" | null (null = not yet resolved, or a dual-role account still choosing)
   const [authUser, setAuthUser] = useState(null); // the raw Firebase Auth user object
   const [classId, setClassId] = useState(null);
   const [className, setClassName] = useState("");
@@ -1088,23 +1102,28 @@ function AppInner() {
       unsubscribe = onAuthStateChanged(auth, async (user) => {
         setAuthUser(user);
         if (user) {
-          const mine = await loadJSON(`teacher:${user.uid}`, null, true);
+          const [mine, myFamily] = await Promise.all([
+            loadJSON(`teacher:${user.uid}`, null, true),
+            loadJSON(`family:${user.uid}`, null, true),
+          ]);
           setCurrentTeacher(mine);
-          if (!mine) {
-            const myFamily = await loadJSON(`family:${user.uid}`, null, true);
-            setCurrentFamily(myFamily);
-          } else {
-            setCurrentFamily(null);
-          }
+          setCurrentFamily(myFamily);
+          // Auto-resolve when there's only one possible side; a genuinely dual-role account keeps
+          // whatever mode it's already in (its ?portal=parent seed, or a choice already made this
+          // session) — it only falls through to "unresolved" the very first time both exist and
+          // neither has been picked yet, which is exactly when the chooser screen should show.
+          if (mine && !myFamily) setActiveMode("teacher");
+          else if (myFamily && !mine) setActiveMode("parent");
         } else {
           setCurrentTeacher(null);
           setCurrentFamily(null);
+          setActiveMode(isParentPortal ? "parent" : null);
         }
         setAuthChecked(true);
       });
     });
     return () => unsubscribe();
-  }, []);
+  }, [isParentPortal]);
 
   // Teachers are stored one document per teacher (data/teacher:{uid}), not as a single array
   // covering everyone — this is deliberate: Firestore security rules can't reliably search
@@ -1177,7 +1196,7 @@ function AppInner() {
       const data = await response.json();
       if (!response.ok) return { ok: false, error: data.error || "Couldn't create the account." };
       await refreshFamilies();
-      return { ok: true };
+      return { ok: true, linkedExisting: data.linkedExisting };
     } catch {
       return { ok: false, error: "Couldn't reach the server — try again." };
     }
@@ -1848,14 +1867,22 @@ function AppInner() {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-teal-700" size={28} /></div>;
   }
 
-  // The parent portal — a genuinely separate entry point (reached only via its own link), never
-  // reachable from anywhere inside the teacher app, and never showing any teacher UI. Checked
-  // before every other login path, since it's completely independent of them.
-  if (isParentPortal) {
+  const hasTeacherRole = Boolean(currentTeacher);
+  const hasFamilyRole = Boolean(currentFamily);
+  const canSwitchRoles = hasTeacherRole && hasFamilyRole;
+
+  // Parent mode — reached via the direct link, chosen from the role chooser below, switched into
+  // from the teacher side, or simply the only role this account has. A teacher-only account never
+  // lands here at all (hasFamilyRole is false, so activeMode can never become "parent" for them),
+  // and a family-only account still can't reach the teacher app (the reverse holds symmetrically
+  // in the teacher branch below) — the only account type this actually opens up is one that
+  // genuinely holds both records.
+  if (activeMode === "parent") {
     if (!authUser || !currentFamily) {
       return <ParentSignInScreen onSignIn={signInTeacher} isSignedInAsSomethingElse={Boolean(authUser && !currentFamily)} />;
     }
-    return <ParentPortalApp family={currentFamily} onSignOut={() => signOut(auth)} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword} />;
+    return <ParentPortalApp family={currentFamily} onSignOut={() => signOut(auth)} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword}
+      canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} />;
   }
 
   // Substitute session — a separate, code-based entry point that bypasses every other login
@@ -1870,6 +1897,11 @@ function AppInner() {
 
   // Signed in with a real account — this is now the primary path.
   if (authUser && !useLegacyFlow) {
+    // A dual-role account that hasn't picked a side yet this session — every other case (single
+    // role, or a role already chosen) skips straight past this.
+    if (canSwitchRoles && activeMode === null) {
+      return <RoleChooserScreen teacherName={currentTeacher.name} familyName={currentFamily.name} onChoose={setActiveMode} onSignOut={signOutStaff} />;
+    }
     if (!currentTeacher) {
       // A Firebase account exists but has no matching staff record (e.g. deactivated, or
       // something went wrong during creation) — never silently let them further into the app.
@@ -1893,14 +1925,16 @@ function AppInner() {
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
           families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
-          programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
+          programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin}
+          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />;
       }
       return (
         <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
           onSwitchClass={backToTeacherClassPicker} switchLabel="Admin · Back to dashboard"
           onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
           subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
-          loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff} />
+          loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
+          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />
       );
     }
     // Real teacher — only ever sees classes they're actually assigned to.
@@ -1913,7 +1947,8 @@ function AppInner() {
         onSwitchClass={backToTeacherClassPicker} switchLabel="Switch class"
         onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
         subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
-        loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff} />
+        loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
+        canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />
     );
   }
 
@@ -2448,7 +2483,7 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -2540,6 +2575,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const activeTeachers = (teachers || []).filter((t) => t.active);
   const inactiveTeachers = (teachers || []).filter((t) => !t.active);
   const [showFamilyForm, setShowFamilyForm] = useState(false);
+  const [familyCreatedNote, setFamilyCreatedNote] = useState("");
   const [showArchivedFamilies, setShowArchivedFamilies] = useState(false);
   const activeFamilies = (families || []).filter((f) => f.active !== false);
   const inactiveFamilies = (families || []).filter((f) => f.active === false);
@@ -2593,6 +2629,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         <div className="flex items-center justify-between mb-1">
           <h1 className="display-font text-2xl font-bold text-stone-900">Admin Dashboard</h1>
           <div className="flex items-center gap-3">
+            {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
             {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
             <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
           </div>
@@ -2742,6 +2779,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         <p className="text-[10px] text-stone-400 text-center mt-6 leading-relaxed">
           Entering a class here gives full access to that class's data, same as its teacher sees — this is a soft admin gate, not enforced security.
         </p>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
+          <p className="text-sm font-semibold text-stone-800 mb-1">QR check-in code</p>
+          <p className="text-xs text-stone-400 mb-3">One shared code for the whole school — the same code works for every family, every day. Print it and post it wherever families actually walk in.</p>
+          <SchoolwideQRCode />
+        </div>
 
         <div className="mt-6 pt-6 border-t border-stone-200">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
@@ -3022,12 +3065,21 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               <Plus size={12} /> Create family account
             </button>
           )}
+          {familyCreatedNote && (
+            <p className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">{familyCreatedNote}</p>
+          )}
 
           {showFamilyForm && (
             <FamilyAccountForm allStudents={allStudentsForLinking}
               onSave={async (name, email, tempPassword, studentLinks) => {
                 const result = await onCreateFamily(name, email, tempPassword, studentLinks);
-                if (result.ok) setShowFamilyForm(false);
+                if (result.ok) {
+                  setShowFamilyForm(false);
+                  setFamilyCreatedNote(result.linkedExisting
+                    ? `${name} was linked to ${email}'s existing teacher login — they'll sign in the same way as always, and can now switch between Teacher and Parent views.`
+                    : `${name}'s family account was created.`);
+                  setTimeout(() => setFamilyCreatedNote(""), 8000);
+                }
                 return result;
               }} onCancel={() => setShowFamilyForm(false)} />
           )}
@@ -3196,6 +3248,30 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
   );
 }
 
+// Shown once, only for an account that genuinely holds both a teacher record and a family
+// record, the first time it signs in without an already-established mode. After this, switching
+// is a small link inside either app — this screen doesn't come back on every login.
+function RoleChooserScreen({ teacherName, familyName, onChoose, onSignOut }) {
+  return (
+    <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4 py-10">
+      <GlobalAppStyles />
+      <div className="max-w-sm w-full text-center">
+        <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Welcome back</h1>
+        <p className="text-sm text-stone-500 mb-6">This account is set up as both a teacher and a family here — which would you like to open?</p>
+        <div className="space-y-3">
+          <button onClick={() => onChoose("teacher")} className="w-full bg-teal-700 text-white rounded-xl py-4 text-sm font-bold hover:bg-teal-800">
+            Continue as Teacher{teacherName ? ` — ${teacherName}` : ""}
+          </button>
+          <button onClick={() => onChoose("parent")} className="w-full bg-white border-2 border-teal-700 text-teal-700 rounded-xl py-4 text-sm font-bold hover:bg-teal-50">
+            Continue as Parent{familyName ? ` — ${familyName}` : ""}
+          </button>
+        </div>
+        <button onClick={onSignOut} className="text-xs font-semibold text-stone-400 hover:text-rose-600 mt-6">Sign out</button>
+      </div>
+    </div>
+  );
+}
+
 function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -3320,7 +3396,7 @@ function ParentQRScanner({ onResult, onClose }) {
   );
 }
 
-function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }) {
+function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
   const [showAccount, setShowAccount] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
@@ -3332,8 +3408,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }
     for (const link of family?.studentLinks || []) {
       const data = await loadJSON(`class:${link.classId}:kriya:${link.studentId}`, null, true);
       const checkIns = data?.checkIns || [];
-      const open = checkIns.find((c) => c.date === today && c.checkInTime && !c.checkOutTime);
-      next[link.studentId] = open ? { isIn: true, sinceTime: open.checkInTime } : { isIn: false, sinceTime: null };
+      const todaysEntries = checkIns.filter((c) => c.date === today).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
+      const open = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
+      next[link.studentId] = { isIn: Boolean(open), entries: todaysEntries };
     }
     setCheckInStatus(next);
   }, [family]);
@@ -3352,20 +3429,27 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }
     return result;
   };
 
+  // One shared code, posted at the school — not tied to any child or class. What determines who
+  // gets checked in is which family is actually signed in when the scan happens, not which code
+  // was scanned. Each linked child is toggled independently off their own current state, since a
+  // family might have one child already in and one not — the scan doesn't assume they're all in
+  // the same state, it just proves this parent is physically here right now.
   const handleScanResult = async (decoded) => {
-    const match = decoded.match(/^checkin:(.+):(.+)$/);
-    if (!match) {
-      setScanFeedback({ ok: false, message: "That doesn't look like a check-in code." });
+    if (decoded !== SCHOOLWIDE_CHECKIN_CODE) {
+      setScanFeedback({ ok: false, message: "That doesn't look like this school's check-in code." });
       return;
     }
-    const [, classId, studentId] = match;
-    const link = (family?.studentLinks || []).find((l) => l.classId === classId && l.studentId === studentId);
-    if (!link) {
-      setScanFeedback({ ok: false, message: "That code isn't for one of your children." });
+    const links = family?.studentLinks || [];
+    if (links.length === 0) {
+      setScanFeedback({ ok: false, message: "No children are linked to this account yet — check with the school." });
       return;
     }
-    const result = await toggleCheckInByFamily(link);
-    setScanFeedback({ ok: true, message: `${link.studentName} ${result.action === "checked-in" ? "checked in" : "checked out"} at ${formatTime12h(result.action === "checked-in" ? result.entry.checkInTime : result.entry.checkOutTime)}.` });
+    const results = [];
+    for (const link of links) {
+      const result = await toggleCheckInByFamily(link);
+      results.push(`${link.studentName} ${result.action === "checked-in" ? "checked in" : "checked out"} at ${formatTime12h(result.action === "checked-in" ? result.entry.checkInTime : result.entry.checkOutTime)}`);
+    }
+    setScanFeedback({ ok: true, message: results.join(". ") + "." });
     setShowScanner(false);
   };
 
@@ -3406,6 +3490,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }
           <div>
             <h1 className="display-font text-xl font-bold text-stone-900">{family?.name || "Your family"}</h1>
             <p className="text-xs text-stone-400">Family portal</p>
+            {canSwitchToTeacher && (
+              <button onClick={onSwitchToTeacher} className="text-xs text-stone-400 hover:text-teal-700">Switch to Teacher view</button>
+            )}
           </div>
           <button onClick={() => setShowAccount((v) => !v)} className="text-stone-400 hover:text-stone-700 p-1.5"><SettingsIcon size={20} /></button>
         </div>
@@ -3455,15 +3542,24 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword }
                 {family.studentLinks.map((link, i) => {
                   const status = checkInStatus[link.studentId];
                   const isIn = status?.isIn;
+                  const entries = status?.entries || [];
                   return (
                     <div key={i} className={`rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className="font-semibold text-stone-900">{link.studentName}</p>
                           <p className="text-xs text-stone-400">{link.className}</p>
-                          <p className={`text-xs font-semibold mt-0.5 ${isIn ? "text-emerald-700" : "text-stone-400"}`}>
-                            {isIn ? `Checked in since ${formatTime12h(status.sinceTime)}` : "Not checked in"}
-                          </p>
+                          {entries.length === 0 ? (
+                            <p className="text-xs font-semibold text-stone-400 mt-0.5">Not checked in yet today</p>
+                          ) : (
+                            <div className="mt-0.5 space-y-0.5">
+                              {entries.map((e) => (
+                                <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
+                                  In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
+                                </p>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         <button onClick={() => toggleCheckInByFamily(link)}
                           className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
@@ -3619,7 +3715,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode }) {
+function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -4408,6 +4504,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
   return (
     <ClassContext.Provider value={{ className, onSwitchClass, switchLabel, classType }}>
+    <AppModeContext.Provider value={{ canSwitchToParent: Boolean(canSwitchToParent), switchToParent: onSwitchToParent || (() => {}) }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <div style={{
         height: "48px", width: "100%",
@@ -4702,6 +4799,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         <OnboardingWizard config={config} setConfig={persistConfig} onClose={() => setShowOnboarding(false)} />
       )}
     </div>
+    </AppModeContext.Provider>
     </ClassContext.Provider>
   );
 }
@@ -4710,6 +4808,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
 function Header({ navigate }) {
   const { className, onSwitchClass, switchLabel } = useContext(ClassContext);
+  const { canSwitchToParent, switchToParent } = useContext(AppModeContext);
   return (
     <div className="flex items-center justify-between mb-2">
       <div className="flex items-center gap-2">
@@ -4718,6 +4817,9 @@ function Header({ navigate }) {
           <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
           {className && (
             <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-teal-700">{className} · {switchLabel || "Switch class"}</button>
+          )}
+          {canSwitchToParent && (
+            <button onClick={switchToParent} className="block text-xs text-stone-400 hover:text-teal-700">Switch to Parent view</button>
           )}
         </div>
       </div>
@@ -5630,15 +5732,25 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
       <div className="space-y-2">
         {roster.map((s) => {
           const checkIns = studentData[s.id]?.checkIns || [];
-          const openEntry = checkIns.find((c) => c.date === date && c.checkInTime && !c.checkOutTime);
+          const todaysEntries = checkIns.filter((c) => c.date === date).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
+          const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
           const isIn = Boolean(openEntry);
           return (
             <div key={s.id} className={`rounded-xl border-2 p-4 flex flex-wrap items-center justify-between gap-3 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
               <div>
                 <span className="font-semibold text-stone-900 text-lg block">{s.name}</span>
-                <span className={`text-xs font-semibold ${isIn ? "text-emerald-700" : "text-stone-400"}`}>
-                  {isIn ? `In since ${formatTime12h(openEntry.checkInTime)}${openEntry.checkInBy ? ` — ${openEntry.checkInBy}` : ""}` : "Not checked in"}
-                </span>
+                {todaysEntries.length === 0 ? (
+                  <span className="text-xs font-semibold text-stone-400">Not checked in yet today</span>
+                ) : (
+                  <div className="mt-0.5 space-y-0.5">
+                    {todaysEntries.map((e) => (
+                      <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
+                        In {formatTime12h(e.checkInTime)}{e.checkInBy ? ` (${e.checkInBy})` : ""}
+                        {e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}${e.checkOutBy ? ` (${e.checkOutBy})` : ""}` : " — still here"}
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
               <button onClick={() => toggleCheckInByTeacher(s.id)}
                 className={`text-sm font-bold px-5 py-3 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
@@ -5684,6 +5796,9 @@ function PreschoolScheduleSidebar({ periods, events, navigate }) {
 function PreschoolDashboardView({ roster, studentData, incidents, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm, navigate }) {
   const [screen, setScreen] = useState(null); // null = dashboard grid
   const [date] = useState(todayISO());
+  // Students not checked in today shouldn't be swept into a bulk "everyone ate lunch" action, or
+  // logged for at all — a student who never came in shouldn't end up with a meal or nap record.
+  const checkedInIds = new Set(roster.filter((s) => isCheckedInNow(studentData[s.id]?.checkIns, date)).map((s) => s.id));
 
   const dayTypeMap = {};
   (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
@@ -5717,8 +5832,8 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, planne
                   className={`hover-lift flex flex-col items-center justify-center gap-1.5 rounded-2xl border-2 py-6 px-2 ${st.tileBg} ${st.tileBorder} ${st.tileBorderHover}`}>
                   <Icon size={32} className={st.iconText} />
                   <span className={`text-sm font-bold text-center ${st.labelText}`}>{tile.label}</span>
-                  {logged !== null && roster.length > 0 && (
-                    <span className={`text-[10px] font-semibold ${st.countText}`}>{logged} of {roster.length}</span>
+                  {logged !== null && checkedInIds.size > 0 && (
+                    <span className={`text-[10px] font-semibold ${st.countText}`}>{logged} of {checkedInIds.size}</span>
                   )}
                 </button>
               );
@@ -5733,19 +5848,19 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, planne
   const tile = PRESCHOOL_TILES.find((t) => t.id === screen);
 
   if (tile?.mealType) {
-    return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} setMealBulk={setMealBulk} onBack={() => setScreen(null)} />;
+    return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMealBulk={setMealBulk} onBack={() => setScreen(null)} />;
   }
   if (screen === "nap") {
-    return <NapBulkScreen date={date} roster={roster} studentData={studentData} setNapBulk={setNapBulk} onBack={() => setScreen(null)} />;
+    return <NapBulkScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setNapBulk={setNapBulk} onBack={() => setScreen(null)} />;
   }
   if (screen === "mood") {
-    return <MoodScreen date={date} roster={roster} studentData={studentData} setMood={setMood} onBack={() => setScreen(null)} />;
+    return <MoodScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMood={setMood} onBack={() => setScreen(null)} />;
   }
   if (screen === "diapers") {
-    return <DiaperBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} onBack={() => setScreen(null)} />;
+    return <DiaperBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} onBack={() => setScreen(null)} />;
   }
   if (screen === "bathroom") {
-    return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
+    return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
       logBulk={logBathroomBulk} removeLog={removeBathroomLog} onBack={() => setScreen(null)} />;
   }
   return null;
@@ -5766,9 +5881,11 @@ function PreschoolScreenHeader({ tile, title, onBack }) {
 // Meals — the one category where "everyone did the same thing" is a safe default. Every student
 // starts on "All"; tapping a row reveals the other options right there so an exception takes one
 // tap, not a trip to a separate screen.
-function MealBulkScreen({ tile, date, roster, studentData, setMealBulk, onBack }) {
+function MealBulkScreen({ tile, date, roster, studentData, checkedInIds, setMealBulk, onBack }) {
   const st = TILE_STYLES[tile.color];
-  const [amounts, setAmounts] = useState(() => Object.fromEntries(roster.map((s) => [s.id, "all"])));
+  const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
+  const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
+  const [amounts, setAmounts] = useState(() => Object.fromEntries(checkedInRoster.map((s) => [s.id, "all"])));
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
 
@@ -5783,7 +5900,7 @@ function MealBulkScreen({ tile, date, roster, studentData, setMealBulk, onBack }
       <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
       <p className="text-xs text-stone-400 mb-4">Everyone starts on "All" — tap a name to change just that student.</p>
       <div className="space-y-2 mb-5">
-        {roster.map((s) => {
+        {checkedInRoster.map((s) => {
           const isOpen = expanded === s.id;
           const current = MEAL_AMOUNTS.find((a) => a.id === amounts[s.id]) || MEAL_AMOUNTS[0];
           return (
@@ -5805,9 +5922,15 @@ function MealBulkScreen({ tile, date, roster, studentData, setMealBulk, onBack }
             </div>
           );
         })}
+        {notInRoster.map((s) => (
+          <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between">
+            <span className="font-semibold text-stone-400">{s.name}</span>
+            <span className="text-xs text-stone-400">Not checked in today</span>
+          </div>
+        ))}
       </div>
-      <button onClick={submit} className={`w-full text-white rounded-xl py-4 text-base font-bold ${st.solid} ${st.solidHover}`}>
-        {saved ? "Logged ✓" : `Log ${tile.label} for ${roster.length} students`}
+      <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
+        {saved ? "Logged ✓" : `Log ${tile.label} for ${checkedInRoster.length} students`}
       </button>
     </div>
   );
@@ -5816,10 +5939,12 @@ function MealBulkScreen({ tile, date, roster, studentData, setMealBulk, onBack }
 // Diapers — unlike bathroom trips, this genuinely does happen for the whole room in one sitting,
 // so it gets the same default-everyone treatment as meals, just with a shared time up top since a
 // diaper change is a specific moment, not an all-day category.
-function DiaperBulkScreen({ tile, date, roster, studentData, logDiaperBulkWithDefaults, onBack }) {
+function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDiaperBulkWithDefaults, onBack }) {
   const st = TILE_STYLES[tile.color];
+  const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
+  const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
   const [time, setTime] = useState(() => new Date().toTimeString().slice(0, 5));
-  const [types, setTypes] = useState(() => Object.fromEntries(roster.map((s) => [s.id, DIAPER_TYPES[0].id])));
+  const [types, setTypes] = useState(() => Object.fromEntries(checkedInRoster.map((s) => [s.id, DIAPER_TYPES[0].id])));
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
 
@@ -5836,7 +5961,7 @@ function DiaperBulkScreen({ tile, date, roster, studentData, logDiaperBulkWithDe
       <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
       <p className="text-xs text-stone-400 mb-4">Everyone starts on "{DIAPER_TYPES[0].label}" — tap a name to change just that student.</p>
       <div className="space-y-2 mb-5">
-        {roster.map((s) => {
+        {checkedInRoster.map((s) => {
           const isOpen = expanded === s.id;
           const current = DIAPER_TYPES.find((d) => d.id === types[s.id]) || DIAPER_TYPES[0];
           return (
@@ -5858,9 +5983,15 @@ function DiaperBulkScreen({ tile, date, roster, studentData, logDiaperBulkWithDe
             </div>
           );
         })}
+        {notInRoster.map((s) => (
+          <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between">
+            <span className="font-semibold text-stone-400">{s.name}</span>
+            <span className="text-xs text-stone-400">Not checked in today</span>
+          </div>
+        ))}
       </div>
-      <button onClick={submit} className={`w-full text-white rounded-xl py-4 text-base font-bold ${st.solid} ${st.solidHover}`}>
-        {saved ? "Logged ✓" : `Log ${tile.label} for ${roster.length} students`}
+      <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
+        {saved ? "Logged ✓" : `Log ${tile.label} for ${checkedInRoster.length} students`}
       </button>
     </div>
   );
@@ -5868,9 +5999,11 @@ function DiaperBulkScreen({ tile, date, roster, studentData, logDiaperBulkWithDe
 
 // Nap — most rooms share one nap block, so that's the default for everyone; the teacher only
 // touches a student who didn't nap or napped on a different schedule.
-function NapBulkScreen({ date, roster, studentData, setNapBulk, onBack }) {
+function NapBulkScreen({ date, roster, studentData, checkedInIds, setNapBulk, onBack }) {
   const tile = PRESCHOOL_TILES.find((t) => t.id === "nap");
   const st = TILE_STYLES[tile.color];
+  const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
+  const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
   const [sharedStart, setSharedStart] = useState("13:00");
   const [sharedEnd, setSharedEnd] = useState("14:30");
   const [excluded, setExcluded] = useState({}); // studentId -> true if skipped
@@ -5880,7 +6013,7 @@ function NapBulkScreen({ date, roster, studentData, setNapBulk, onBack }) {
 
   const submit = () => {
     const studentTimes = {};
-    roster.forEach((s) => {
+    checkedInRoster.forEach((s) => {
       if (excluded[s.id]) { studentTimes[s.id] = null; return; }
       studentTimes[s.id] = customTimes[s.id] || { start: sharedStart, end: sharedEnd };
     });
@@ -5899,7 +6032,7 @@ function NapBulkScreen({ date, roster, studentData, setNapBulk, onBack }) {
         <input type="time" value={sharedEnd} onChange={(e) => setSharedEnd(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
       </div>
       <div className="space-y-2 mb-5">
-        {roster.map((s) => {
+        {checkedInRoster.map((s) => {
           const isOpen = expanded === s.id;
           const isExcluded = Boolean(excluded[s.id]);
           const custom = customTimes[s.id];
@@ -5929,9 +6062,15 @@ function NapBulkScreen({ date, roster, studentData, setNapBulk, onBack }) {
             </div>
           );
         })}
+        {notInRoster.map((s) => (
+          <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between">
+            <span className="font-semibold text-stone-400">{s.name}</span>
+            <span className="text-xs text-stone-400">Not checked in today</span>
+          </div>
+        ))}
       </div>
-      <button onClick={submit} className={`w-full text-white rounded-xl py-4 text-base font-bold ${st.solid} ${st.solidHover}`}>
-        {saved ? "Logged ✓" : `Log nap for ${roster.length} students`}
+      <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
+        {saved ? "Logged ✓" : `Log nap for ${checkedInRoster.length} students`}
       </button>
     </div>
   );
@@ -5939,7 +6078,7 @@ function NapBulkScreen({ date, roster, studentData, setNapBulk, onBack }) {
 
 // Mood — deliberately not defaulted. Assuming a mood is a guess, not a time-saver, so this stays a
 // plain tap-each-student-you-have-something-to-say-about screen.
-function MoodScreen({ date, roster, studentData, setMood, onBack }) {
+function MoodScreen({ date, roster, studentData, checkedInIds, setMood, onBack }) {
   const tile = PRESCHOOL_TILES.find((t) => t.id === "mood");
   const st = TILE_STYLES[tile.color];
   return (
@@ -5947,7 +6086,16 @@ function MoodScreen({ date, roster, studentData, setMood, onBack }) {
       <PreschoolScreenHeader tile={tile} title="Mood" onBack={onBack} />
       <div className="space-y-2">
         {roster.map((s) => {
+          const isIn = checkedInIds.has(s.id);
           const today = (studentData[s.id]?.mood || []).find((m) => m.date === date);
+          if (!isIn) {
+            return (
+              <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between">
+                <span className="font-semibold text-stone-400">{s.name}</span>
+                <span className="text-xs text-stone-400">Not checked in today</span>
+              </div>
+            );
+          }
           return (
             <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
               <p className="font-semibold text-stone-800 mb-2">{s.name}</p>
@@ -5971,8 +6119,10 @@ function MoodScreen({ date, roster, studentData, setMood, onBack }) {
 // Teacher picks a time and type once, taps whichever kids it applies to right now, logs them all
 // in one action, and can keep coming back to this same screen through the day since it's append-
 // only — today's entries stay visible below so anything can be reviewed or undone.
-function TapLogScreen({ tile, date, roster, studentData, dataKey, typeOptions, logBulk, removeLog, onBack }) {
+function TapLogScreen({ tile, date, roster, studentData, checkedInIds, dataKey, typeOptions, logBulk, removeLog, onBack }) {
   const st = TILE_STYLES[tile.color];
+  const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
+  const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
   const [time, setTime] = useState(() => new Date().toTimeString().slice(0, 5));
   const [type, setType] = useState(typeOptions[0].id);
   const [selected, setSelected] = useState([]);
@@ -6007,11 +6157,16 @@ function TapLogScreen({ tile, date, roster, studentData, dataKey, typeOptions, l
       </div>
       <p className="text-xs text-stone-400 mb-2">Tap everyone this applies to, then log them together.</p>
       <div className="flex flex-wrap gap-1.5 mb-4">
-        {roster.map((s) => (
+        {checkedInRoster.map((s) => (
           <button key={s.id} onClick={() => toggle(s.id)}
             className={`text-sm font-semibold px-3 py-2 rounded-full border ${selected.includes(s.id) ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300 bg-white"}`}>
             {s.name}
           </button>
+        ))}
+        {notInRoster.map((s) => (
+          <span key={s.id} className="text-sm font-semibold px-3 py-2 rounded-full border border-stone-200 bg-stone-50 text-stone-400">
+            {s.name} — not checked in
+          </span>
         ))}
       </div>
       <button onClick={submit} disabled={selected.length === 0}
@@ -11747,27 +11902,28 @@ function OnboardingDoneStep({ config }) {
   );
 }
 
-// One QR code per student — encodes a fixed, recognizable format (checkin:classId:studentId) so
-// the scanner can tell a genuine check-in code apart from a random unrelated QR code someone might
-// point the camera at by accident, and just say so clearly instead of misbehaving.
-function StudentQRCode({ student, classId }) {
+// The one shared code for the whole school — bigger than a per-student code would need to be,
+// since this is meant to be printed and posted somewhere families walk past, not viewed on a
+// phone screen up close.
+function SchoolwideQRCode() {
   const [dataUrl, setDataUrl] = useState(null);
   useEffect(() => {
     let cancelled = false;
-    QRCode.toDataURL(`checkin:${classId}:${student.id}`, { width: 220, margin: 1 })
+    QRCode.toDataURL(SCHOOLWIDE_CHECKIN_CODE, { width: 320, margin: 2 })
       .then((url) => { if (!cancelled) setDataUrl(url); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [student.id, classId]);
+  }, []);
 
   return (
-    <div className="bg-white border border-stone-200 rounded-xl p-3 flex flex-col items-center text-center">
+    <div className="bg-white border border-stone-200 rounded-xl p-4 flex flex-col items-center text-center max-w-xs">
       {dataUrl ? (
-        <img src={dataUrl} alt={`QR check-in code for ${student.name}`} className="w-32 h-32" />
+        <img src={dataUrl} alt="School-wide QR check-in code" className="w-56 h-56" />
       ) : (
-        <div className="w-32 h-32 flex items-center justify-center text-xs text-stone-400">Generating…</div>
+        <div className="w-56 h-56 flex items-center justify-center text-xs text-stone-400">Generating…</div>
       )}
-      <p className="text-sm font-semibold text-stone-800 mt-2">{student.name}</p>
+      <p className="text-sm font-semibold text-stone-800 mt-3">Check-in code</p>
+      <p className="text-xs text-stone-400 mt-1">Print this and post it wherever families come in — the same code works for every family, every day.</p>
     </div>
   );
 }
@@ -11995,15 +12151,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
         </div>
 
         {isPreschool && (
-        <div className="md:col-span-2">
-          <Section title="QR check-in codes">
-            <p className="text-xs text-stone-400 mb-3">One code per student. Print these and post them somewhere both families and staff can reach — scanning checks a student in, scanning again checks them out. Each code only ever works for that one student.</p>
-            {roster.length === 0 && <p className="text-xs text-stone-400">Add students first.</p>}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {roster.map((s) => <StudentQRCode key={s.id} student={s} classId={classId} />)}
-            </div>
-          </Section>
-        </div>
+        <p className="text-xs text-stone-400 -mt-2">This school's QR check-in code lives in the Admin Dashboard now — one shared code for everyone, not one per class.</p>
         )}
 
         <Section title="Planner day types">
