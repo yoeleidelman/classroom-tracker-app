@@ -3465,7 +3465,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
-  const [view, setView] = useState("home");
+  const [view, setView] = useState(classType === "preschool" ? "daily-log" : "home");
   const [showPlan, setShowPlan] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -3888,7 +3888,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
   const removeStudent = (id) => {
     persistRoster(roster.filter((s) => s.id !== id));
-    if (currentId === id) { setView("home"); setCurrentId(null); }
+    if (currentId === id) { setView(classType === "preschool" ? "daily-log" : "home"); setCurrentId(null); }
   };
 
   const updateStudentField = (id, field, value) => {
@@ -4233,30 +4233,36 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan} />
       )}
 
+      {view === "attendance" && (
+        <PreschoolAttendanceView roster={roster} studentData={studentData} config={config}
+          setAttendance={setAttendance} setAttendanceTime={setAttendanceTime} navigate={setView} />
+      )}
+
       {view === "daily-log" && (
         <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} config={config}
+          plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
           logDiaperBulk={logDiaperBulk} removeDiaperLog={removeDiaperLog}
           logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
-          openIncidentForm={() => openIncidentForm(null, "daily-log")} />
+          openIncidentForm={() => openIncidentForm(null, "daily-log")} navigate={setView} />
       )}
 
       {view === "segment-celebration-message" && celebratingSegment && (
         <SegmentCelebrationMessageView subjectLabel={celebratingSegment.subjectLabel} segmentLabel={celebratingSegment.segment.label}
           roster={roster} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView("home")}
-          onDone={() => { dismissSegmentCelebration(celebratingSegment.segment.id); setView("home"); }} />
+          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")}
+          onDone={() => { dismissSegmentCelebration(celebratingSegment.segment.id); setView(classType === "preschool" ? "daily-log" : "home"); }} />
       )}
 
       {view === "class-mode" && (
         <ClassModeView roster={roster} studentData={studentData} config={config} addPoints={addPoints}
-          openIncidentForm={(id) => openIncidentForm(id, "class-mode")} onExit={() => setView("home")} onOpenClassTools={() => setShowPlan(true)} />
+          openIncidentForm={(id) => openIncidentForm(id, "class-mode")} onExit={() => setView(classType === "preschool" ? "daily-log" : "home")} onOpenClassTools={() => setShowPlan(true)} />
       )}
 
       {view === "day-recap" && (
         <DayRecapView roster={roster} studentData={studentData} incidents={incidents} behaviorLogData={behaviorLogData}
-          plannerDays={plannerDays} config={config} onBack={() => setView("home")} />
+          plannerDays={plannerDays} config={config} onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} />
       )}
 
       {/* Class Tools drawer — slides in from the right and pushes the roster over to share the screen (like a Gmail side panel) — never dims or blocks it, at any width. Lives here (not inside any one view) so both Home and Class Mode can open it. Position/transform/transition are inline styles deliberately, so they never depend on utility-CSS generation timing. */}
@@ -4302,7 +4308,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
       {view === "monthly-reports" && (
         <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView("home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
+          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
@@ -4321,7 +4327,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       {view === "reflection-history" && (
         <ReflectionHistoryView reflections={reflections} navigate={setView}
           onOpenMonth={(mk) => { setSelectedReflectionMonth(mk); setView("reflection-form"); }}
-          onBack={() => setView("home")} />
+          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} />
       )}
 
       {view === "assessments" && (
@@ -4393,7 +4399,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       {view === "detail" && currentId && (
         <StudentDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           incidents={incidents} classAssessments={classAssessments} config={config}
-          onBack={() => setView("home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
+          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
           onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")}
           onGoToAssessments={() => { setInitialAssessmentStudentId(currentId); setView("assessments"); }}
           onExportReport={() => setView("print-report-options")}
@@ -4473,7 +4479,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "settings" && (
-        <SettingsView config={config} setConfig={persistConfig} onBack={() => setView("home")}
+        <SettingsView config={config} setConfig={persistConfig} onBack={() => setView(classType === "preschool" ? "daily-log" : "home")}
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
           loadSampleData={loadSampleData} clearAllData={clearAllData}
           className={className} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
@@ -4520,12 +4526,10 @@ function MainTabs({ active, navigate }) {
   const { classType } = useContext(ClassContext);
   const tabs = classType === "preschool"
     ? [
-        { id: "home", label: "Home", icon: HomeIcon },
+        { id: "attendance", label: "Attendance", icon: Check },
         { id: "daily-log", label: "Daily Log", icon: ClipboardList },
-        { id: "points", label: "Points", icon: Star },
         { id: "communication", label: "Comm", icon: Mail },
         { id: "planner", label: "Planner", icon: Calendar },
-        { id: "tools", label: "Tools", icon: Wrench },
       ]
     : [
         { id: "home", label: "Home", icon: HomeIcon },
@@ -5403,9 +5407,92 @@ const PRESCHOOL_TILES = [
   { id: "health", label: "Health note", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
 ];
 
-function PreschoolDashboardView({ roster, studentData, incidents, config, setMood, setMealBulk, setNapBulk, logDiaperBulk, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm }) {
+// Preschool attendance — same underlying data (setAttendance, config.attendance.statuses) as the
+// elementary Home screen, but presented on its own, without the homework/points/flags clutter
+// that doesn't apply to a preschool room, and with bigger, simpler touch targets to match the
+// same fast-glance philosophy as the rest of the preschool screens.
+function PreschoolAttendanceView({ roster, studentData, config, setAttendance, setAttendanceTime, navigate }) {
+  const [date, setDate] = useState(todayISO());
+  const statusMap = {};
+  (config.attendance?.statuses || []).forEach((s) => (statusMap[s.id] = s));
+
+  return (
+    <div className="w-full">
+      <Header navigate={navigate} />
+      <MainTabs active="attendance" navigate={navigate} />
+      <label className="block text-xs font-medium text-stone-500 mb-1">Attendance for</label>
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-lg border border-stone-300 px-3 py-2 text-sm mb-5" />
+
+      {roster.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No students in this class yet.</p>}
+
+      <div className="space-y-2">
+        {roster.map((s) => {
+          const entry = (studentData[s.id]?.attendance || []).find((a) => a.date === date);
+          const isLateType = entry?.status && statusMap[entry.status]?.flagType === "late";
+          return (
+            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+              <span className="font-semibold text-stone-900 text-lg">{s.name}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {(config.attendance?.statuses || []).map((st) => {
+                  const selected = entry?.status === st.id;
+                  return (
+                    <button key={st.id} onClick={() => setAttendance(s.id, date, st.id)}
+                      className={`text-sm font-bold px-4 py-2.5 rounded-full border-2 ${selected ? `bg-${st.color}-500 text-white border-${st.color}-500` : "text-stone-500 border-stone-300"}`}>
+                      {st.label}
+                    </button>
+                  );
+                })}
+                {isLateType && (
+                  <input type="time" value={entry?.time || ""} onChange={(e) => setAttendanceTime(s.id, date, e.target.value)}
+                    className="rounded-lg border border-stone-300 px-2 py-2 text-sm" />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// A narrow, read-only strip next to the dashboard tiles — just enough to see at a glance whether
+// anything's planned for today, not a place to edit it. Editing the actual schedule still happens
+// in Planner; tapping "Edit" here just jumps there.
+function PreschoolScheduleSidebar({ periods, events, navigate }) {
+  const hasAnything = periods.length > 0 || events.length > 0;
+  return (
+    <div className="w-24 md:w-36 shrink-0 bg-white border border-stone-200 rounded-2xl p-2 md:p-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-stone-400 mb-2 text-center md:text-left">Today</p>
+      {!hasAnything && (
+        <p className="text-[10px] text-stone-400 text-center md:text-left leading-snug">Nothing planned</p>
+      )}
+      <div className="space-y-1.5">
+        {periods.map((p) => (
+          <div key={p.id} className="border-l-2 border-indigo-300 pl-1.5">
+            <p className="text-[9px] text-stone-400 leading-none mb-0.5">{formatTime12h(p.startTime)}</p>
+            <p className="text-[10px] font-semibold text-stone-700 leading-snug">{p.label}</p>
+          </div>
+        ))}
+        {events.map((e) => (
+          <div key={e.id} className="border-l-2 border-amber-400 pl-1.5">
+            <p className="text-[10px] font-semibold text-amber-800 leading-snug">{e.title}</p>
+          </div>
+        ))}
+      </div>
+      <button onClick={() => navigate("planner")} className="text-[10px] font-semibold text-teal-700 mt-3 block w-full text-center md:text-left">Edit</button>
+    </div>
+  );
+}
+
+function PreschoolDashboardView({ roster, studentData, incidents, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, removeDiaperLog, logBathroomBulk, removeBathroomLog, openDetail, openIncidentForm, navigate }) {
   const [screen, setScreen] = useState(null); // null = dashboard grid
   const [date] = useState(todayISO());
+
+  const dayTypeMap = {};
+  (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
+  const selectedDayType = plannerDays?.[date]?.dayType ? dayTypeMap[plannerDays[date].dayType] : null;
+  const todaysPeriods = (getScheduleForDate(date, selectedDayType, config, plannerDays) || []).slice().sort((a, b) => (a.startTime < b.startTime ? -1 : 1));
+  const todaysEvents = (plannerEvents || []).filter((e) => e.date === date);
 
   const loggedCountFor = (tileId) => {
     if (tileId === "mood") return roster.filter((s) => (studentData[s.id]?.mood || []).some((m) => m.date === date)).length;
@@ -5420,23 +5507,27 @@ function PreschoolDashboardView({ roster, studentData, incidents, config, setMoo
   if (screen === null) {
     return (
       <div className="w-full">
-        <MainTabs active="daily-log" navigate={() => {}} />
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          {PRESCHOOL_TILES.map((tile) => {
-            const Icon = tile.icon;
-            const st = TILE_STYLES[tile.color];
-            const logged = tile.id === "health" ? null : loggedCountFor(tile.id);
-            return (
-              <button key={tile.id} onClick={() => (tile.id === "health" ? openIncidentForm() : setScreen(tile.id))}
-                className={`hover-lift flex flex-col items-center justify-center gap-2 rounded-2xl border-2 py-8 px-3 ${st.tileBg} ${st.tileBorder} ${st.tileBorderHover}`}>
-                <Icon size={40} className={st.iconText} />
-                <span className={`text-base font-bold ${st.labelText}`}>{tile.label}</span>
-                {logged !== null && roster.length > 0 && (
-                  <span className={`text-xs font-semibold ${st.countText}`}>{logged} of {roster.length} logged</span>
-                )}
-              </button>
-            );
-          })}
+        <Header navigate={navigate} />
+        <MainTabs active="daily-log" navigate={navigate} />
+        <div className="flex gap-3 items-start">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 flex-1 min-w-0">
+            {PRESCHOOL_TILES.map((tile) => {
+              const Icon = tile.icon;
+              const st = TILE_STYLES[tile.color];
+              const logged = tile.id === "health" ? null : loggedCountFor(tile.id);
+              return (
+                <button key={tile.id} onClick={() => (tile.id === "health" ? openIncidentForm() : setScreen(tile.id))}
+                  className={`hover-lift flex flex-col items-center justify-center gap-1.5 rounded-2xl border-2 py-6 px-2 ${st.tileBg} ${st.tileBorder} ${st.tileBorderHover}`}>
+                  <Icon size={32} className={st.iconText} />
+                  <span className={`text-sm font-bold text-center ${st.labelText}`}>{tile.label}</span>
+                  {logged !== null && roster.length > 0 && (
+                    <span className={`text-[10px] font-semibold ${st.countText}`}>{logged} of {roster.length}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <PreschoolScheduleSidebar periods={todaysPeriods} events={todaysEvents} navigate={navigate} />
         </div>
       </div>
     );
@@ -11404,6 +11495,8 @@ function OnboardingDoneStep({ config }) {
 }
 
 function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding }) {
+  const { classType } = useContext(ClassContext);
+  const isPreschool = classType === "preschool";
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -11465,35 +11558,38 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             </Section>
           )}
 
-          <Section title="Guided setup">
-            {(() => {
-              const ob = config.onboarding || { started: false, finished: false, completedSteps: [] };
-              const doneCount = ob.completedSteps.length;
-              if (ob.finished) {
+          {!isPreschool && (
+            <Section title="Guided setup">
+              {(() => {
+                const ob = config.onboarding || { started: false, finished: false, completedSteps: [] };
+                const doneCount = ob.completedSteps.length;
+                if (ob.finished) {
+                  return (
+                    <>
+                      <p className="text-xs text-stone-400 mb-3">You've been through guided setup — everything it touched is still adjustable below, any time.</p>
+                      <button onClick={onOpenOnboarding} className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">Go through it again</button>
+                    </>
+                  );
+                }
+                if (ob.started) {
+                  return (
+                    <>
+                      <p className="text-xs text-stone-400 mb-3">You're partway through — {doneCount} of {ONBOARDING_STEPS.length} sections done. Pick up right where you left off.</p>
+                      <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Continue setup</button>
+                    </>
+                  );
+                }
                 return (
                   <>
-                    <p className="text-xs text-stone-400 mb-3">You've been through guided setup — everything it touched is still adjustable below, any time.</p>
-                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">Go through it again</button>
+                    <p className="text-xs text-stone-400 mb-3">A short, skippable walkthrough to help set up your class — subjects, schedule, points, and more, one question at a time.</p>
+                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Start guided setup</button>
                   </>
                 );
-              }
-              if (ob.started) {
-                return (
-                  <>
-                    <p className="text-xs text-stone-400 mb-3">You're partway through — {doneCount} of {ONBOARDING_STEPS.length} sections done. Pick up right where you left off.</p>
-                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Continue setup</button>
-                  </>
-                );
-              }
-              return (
-                <>
-                  <p className="text-xs text-stone-400 mb-3">A short, skippable walkthrough to help set up your class — subjects, schedule, points, and more, one question at a time.</p>
-                  <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Start guided setup</button>
-                </>
-              );
-            })()}
-          </Section>
+              })()}
+            </Section>
+          )}
 
+          {!isPreschool && (
           <Section title="Subjects">
             <p className="text-xs text-stone-400 mb-3">What you teach this year — feeds Benchmarks, Assessments, and (where it makes sense) your weekly schedule, so a subject is named once and stays consistent everywhere. Things like recess or lunch don't belong here — those stay as plain schedule blocks.</p>
             {(config.subjects || []).length > 0 && (
@@ -11528,6 +11624,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               }} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Add</button>
             </div>
           </Section>
+          )}
 
           {onRenameClass && (
             <Section title="Class management">
@@ -11707,6 +11804,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           </Section>
         </div>
 
+        {!isPreschool && (
         <Section title="Class Log — mark types">
           <p className="text-xs text-stone-400 mb-3">The check/X (or whatever you define) system used in Points → Class Log, tallied per class period per day.</p>
           {(config.points?.behaviorLog?.markTypes || []).map((m, i) => (
@@ -11727,7 +11825,9 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             <option value="both">Both</option>
           </select>
         </Section>
+        )}
 
+        {!isPreschool && (
         <Section title="Points categories">
           {(config.points?.categories || []).map((cat, i) => (
             <div key={cat.id} className="border border-stone-200 rounded-lg p-2.5 mb-2">
@@ -11765,6 +11865,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           ))}
           {(config.points?.categories || []).length === 0 && <p className="text-xs text-stone-400">No categories yet — add one from the Points tab.</p>}
         </Section>
+        )}
 
         <Section title="Monthly reports">
           <label className="block text-xs font-medium text-stone-500 mb-1">Remind me around day of the month</label>
@@ -11779,6 +11880,8 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           <p className="text-[11px] text-stone-400">If the day lands on Saturday, the reminder always shifts to Sunday. This is a simple calendar rule, not a zmanim calculation.</p>
         </Section>
 
+        {!isPreschool && (
+        <>
         <Section title="Kriya grading scale">
           {config.gradeOptions.map((opt, i) => (
             <div key={opt.id} className="flex items-center gap-2 mb-2">
@@ -11810,6 +11913,8 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             </div>
           ))}
         </Section>
+        </>
+        )}
 
         <Section title="Attendance statuses">
           <label className="block text-xs font-medium text-stone-500 mb-1">Class start time (optional — used to calculate minutes late in monthly reports)</label>
@@ -11859,6 +11964,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           ))}
         </Section>
 
+        {!isPreschool && (
         <Section title="Homework tracking">
           <label className="flex items-center gap-2 text-sm text-stone-700 mb-3">
             <input type="checkbox" checked={config.homework?.enabled || false} onChange={(e) => update((c) => { c.homework.enabled = e.target.checked; return c; })} />
@@ -11899,6 +12005,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             </>
           )}
         </Section>
+        )}
 
         <Section title="Message style">
           <p className="text-xs text-stone-400 mb-3">Controls how the AI drafts parent messages for this class — the wording, tone, and how the school is described. Nothing here affects the facts included, only how they're phrased.</p>
@@ -11992,6 +12099,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           ))}
         </Section>
 
+        {!isPreschool && (
         <div className="md:col-span-2">
           <Section title="Assessment library">
             <p className="text-xs text-stone-400 mb-3">Every assessment ever created for this class, active or not. Create new ones from the Assessments tab — this is where you edit, hide, or permanently remove them.</p>
@@ -12039,6 +12147,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             ))}
           </Section>
         </div>
+        )}
       </div>
 
       <p className="text-xs text-stone-400 text-center mt-4">Changes save automatically.</p>
