@@ -3676,7 +3676,7 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
       <GlobalAppStyles />
       <div className="max-w-sm w-full">
-        <img src="/logo-transparent.png" alt="Family Portal" className="w-48 mx-auto mb-5" />
+        <img src="/parent-logo-transparent.png" alt="Family Portal" className="w-48 mx-auto mb-5" />
         <h1 className="display-font text-2xl font-bold text-stone-900 text-center mb-1">Family sign in</h1>
         <p className="text-stone-500 text-sm text-center mb-7">See updates for your child, right here.</p>
 
@@ -4345,7 +4345,7 @@ function ParentBlogView({ link, family, onBack }) {
     <div className="app-page">
       {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>}
       <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
-        <img src="/logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
+        <img src="/parent-logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
         <div className="min-w-0">
           <h1 className="display-font text-base font-bold text-stone-900 truncate">{link.className}</h1>
           <p className="text-[11px] text-stone-400">Class Blog</p>
@@ -4628,7 +4628,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       <div className="sticky top-0 z-10 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #a8562f 0%, #c17847 100%)" }}>
         <div className="max-w-lg mx-auto px-4 pt-3.5 pb-3 flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
-            <img src="/logo-transparent.png" alt="" className="w-12 h-12 object-contain shrink-0 bg-white rounded-xl p-1 shadow-sm" />
+            <img src="/parent-logo-transparent.png" alt="" className="w-12 h-12 object-contain shrink-0 bg-white rounded-xl p-1 shadow-sm" />
             <div className="min-w-0">
               <p className="text-[11px] font-semibold text-white/60 uppercase tracking-wide leading-tight">Welcome back</p>
               <h1 className="display-font text-lg font-bold text-white truncate leading-tight">{family?.name || "Your family"}</h1>
