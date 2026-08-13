@@ -4810,47 +4810,23 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                   const status = checkInStatus[link.studentId];
                   const isIn = status?.isIn;
                   const entries = status?.entries || [];
-                  const confirming = confirmingRepeatChild === link.studentId;
                   return (
                     <TourHint active={tourStep === 2} step={3} total={TOUR_TOTAL_STEPS} align="left"
                       text={`Your child's day shows right here — mood, meals, naps, and more, as their teacher logs it.`}
                       onNext={advanceTour} onSkip={dismissTour}>
                       <div>
                         <div className={`rounded-xl p-4 border-2 mb-4 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex-1 min-w-0">
-                              {entries.length === 0 ? (
-                                <p className="text-xs font-semibold text-stone-400">Not checked in yet today</p>
-                              ) : (
-                                <div className="space-y-0.5">
-                                  {entries.map((e) => (
-                                    <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
-                                      In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
-                                    </p>
-                                  ))}
-                                </div>
-                              )}
+                          {entries.length === 0 ? (
+                            <p className="text-xs font-semibold text-stone-400">Not checked in yet today — scan the QR code above to check in.</p>
+                          ) : (
+                            <div className="space-y-0.5">
+                              {entries.map((e) => (
+                                <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
+                                  In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
+                                </p>
+                              ))}
                             </div>
-                            {confirming ? (
-                              <div className="flex flex-col items-end gap-1.5 shrink-0">
-                                <span className="text-[10px] text-stone-500">Log another visit today?</span>
-                                <div className="flex gap-1.5">
-                                  <button onClick={() => { toggleCheckInByFamily(link); setConfirmingRepeatChild(null); }}
-                                    className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes</button>
-                                  <button onClick={() => setConfirmingRepeatChild(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
-                                </div>
-                              </div>
-                            ) : (
-                              <button onClick={() => {
-                                const hasCompletedToday = entries.filter((e) => e.checkInTime && e.checkOutTime).length > 0;
-                                if (!isIn && hasCompletedToday) { setConfirmingRepeatChild(link.studentId); return; }
-                                toggleCheckInByFamily(link);
-                              }}
-                                className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
-                                {isIn ? "Check out" : "Check in"}
-                              </button>
-                            )}
-                          </div>
+                          )}
                         </div>
                         <ChildDailyLogView link={link} onOpenBlog={() => setParentTab("blog")} />
                       </div>
@@ -5054,6 +5030,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [incidentPreset, setIncidentPreset] = useState(null);
   const [incidentCategoryPreset, setIncidentCategoryPreset] = useState(null);
   const [incidentReturn, setIncidentReturn] = useState("home");
+  const [cameraReturn, setCameraReturn] = useState("home");
+  const openCameraCapture = (returnTo) => { setCameraReturn(returnTo || "home"); setView("camera-capture"); };
   const [periodAttPreset, setPeriodAttPreset] = useState(null);
   const [periodAttReturn, setPeriodAttReturn] = useState("home");
   const [messageFlag, setMessageFlag] = useState(null);
@@ -5943,7 +5921,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onCelebrateSegment={(subjectLabel, segment) => { setCelebratingSegment({ subjectLabel, segment }); setView("segment-celebration-message"); }}
           onAddPlannerEvent={addPlannerEvent}
           randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
-          alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan} />
+          alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan}
+          openCameraCapture={() => openCameraCapture("home")} />
       )}
 
       {view === "attendance" && (
@@ -6191,6 +6170,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onSave={(entry) => { addIncident(entry); setView(incidentReturn); }} />
       )}
 
+      {view === "camera-capture" && (
+        <CameraCaptureView roster={roster} classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily}
+          onDone={() => setView(cameraReturn)} />
+      )}
+
       {view === "period-attendance" && (
         <PeriodAttendanceForm roster={roster} config={config} presetId={periodAttPreset} todaysPeriods={todaysScheduleForForm}
           onCancel={() => setView(periodAttReturn)}
@@ -6290,7 +6274,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture }) {
   const [date, setDate] = useState(todayISO());
   const [multiSelect, setMultiSelect] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -6383,6 +6367,10 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
       <button onClick={() => openIncidentForm(null)} title="Record an incident"
         className="fixed bottom-5 right-5 z-30 flex items-center gap-1.5 bg-rose-600 text-white rounded-full pl-3 pr-4 py-3 shadow-lg hover:bg-rose-700">
         <ClipboardList size={16} /> <span className="text-xs font-semibold">Record incident</span>
+      </button>
+      <button onClick={openCameraCapture} title="Take a photo"
+        className="fixed bottom-20 right-5 z-30 flex items-center justify-center bg-white border-2 border-stone-200 text-stone-700 rounded-full p-3 shadow-lg hover:border-teal-300">
+        <Camera size={18} />
       </button>
 
       {alerts.filter((a) => !a.dismissed).length > 0 && (
@@ -7381,18 +7369,31 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState(null);
   const [sent, setSent] = useState(false);
+  const [saved, setSaved] = useState(false);
   const fileInputRef = useRef(null);
 
   useEffect(() => { fileInputRef.current?.click(); }, []);
 
+  // Cancelling a device's native photo picker doesn't reliably fire a change event in every
+  // browser, so this can't just silently wait forever — a visible retry keeps the screen from
+  // looking stuck if nothing comes back.
   const handleFileSelected = (e) => {
     const f = e.target.files?.[0];
-    if (!f) { onDone(); return; } // camera opened, but nothing was captured — nothing to review
+    if (!f) return;
     setFile(f);
     setPreview(URL.createObjectURL(f));
   };
 
   const toggleStudent = (id) => setSelectedStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const saveToDevice = () => {
+    if (!file) return;
+    const a = document.createElement("a");
+    a.href = preview;
+    a.download = file.name || "photo.jpg";
+    a.click();
+    setSaved(true);
+  };
 
   const send = async () => {
     if (!file) return;
@@ -7421,8 +7422,11 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     return (
       <div className="app-page text-center py-16">
         <input ref={fileInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileSelected} />
-        <p className="text-sm text-stone-400">Opening camera…</p>
-        <button onClick={onDone} className="mt-4 text-xs font-semibold text-stone-500">Cancel</button>
+        <p className="text-sm text-stone-400 mb-4">Waiting for a photo…</p>
+        <button onClick={() => fileInputRef.current?.click()} className="text-sm font-semibold text-white bg-teal-700 rounded-lg px-4 py-2.5 hover:bg-teal-800 mb-3">
+          Open camera
+        </button>
+        <button onClick={onDone} className="block mx-auto text-xs font-semibold text-stone-500">Cancel</button>
       </div>
     );
   }
@@ -7440,6 +7444,9 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     <div className="app-page">
       <button onClick={onDone} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Discard</button>
       <img src={preview} alt="" className="w-full aspect-square object-cover rounded-xl mb-3" />
+      <button onClick={saveToDevice} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-teal-700 border border-teal-300 rounded-xl py-2 mb-3 hover:bg-teal-50">
+        {saved ? <><Check size={15} /> Saved to device</> : <><Download size={15} /> Save to device — send later</>}
+      </button>
       <textarea value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a few words (optional)" rows={2}
         className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
       <div className="flex gap-1 mb-3 bg-stone-100 rounded-lg p-1">
@@ -14819,6 +14826,31 @@ function SchoolwideQRCode() {
     return () => { cancelled = true; };
   }, []);
 
+  const download = () => {
+    if (!dataUrl) return;
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = "school-checkin-code.png";
+    a.click();
+  };
+
+  // Opens a separate, minimal window with just the code blown up large, then prints only that —
+  // printing the admin page directly would print the whole dashboard around it, not a clean sign.
+  const print = () => {
+    if (!dataUrl) return;
+    const win = window.open("", "_blank", "width=700,height=900");
+    if (!win) return;
+    win.document.write(`
+      <html><head><title>Check-in code</title></head>
+      <body style="margin:0; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; font-family:sans-serif;">
+        <img src="${dataUrl}" style="width:70vw; max-width:500px;" />
+        <p style="font-size:24px; font-weight:bold; margin-top:24px;">Scan to check in or out</p>
+      </body></html>
+    `);
+    win.document.close();
+    win.onload = () => win.print();
+  };
+
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-4 flex flex-col items-center text-center max-w-xs">
       {dataUrl ? (
@@ -14828,6 +14860,10 @@ function SchoolwideQRCode() {
       )}
       <p className="text-sm font-semibold text-stone-800 mt-3">Check-in code</p>
       <p className="text-xs text-stone-400 mt-1">Print this and post it wherever families come in — the same code works for every family, every day.</p>
+      <div className="flex gap-2 mt-3">
+        <button onClick={print} disabled={!dataUrl} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-50 disabled:opacity-40">Print large</button>
+        <button onClick={download} disabled={!dataUrl} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-50 disabled:opacity-40">Download image</button>
+      </div>
     </div>
   );
 }
