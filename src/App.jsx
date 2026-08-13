@@ -7298,7 +7298,7 @@ function BlogComposeScreen({ onSubmit, onBack }) {
       await onSubmit(title, blocks, setProgress);
       onBack();
     } catch (err) {
-      setError(err?.message === "timeout" ? "That's taking too long — check your connection and try again." : "Couldn't post — check your connection and try again.");
+      setError(describeUploadError(err));
     }
     setPosting(false);
   };
@@ -7374,9 +7374,7 @@ function PhotoUploadScreen({ tile, date, roster, photos, uploadClassPhoto, onBac
       setSelected([]);
       setCaption("");
     } catch (err) {
-      setError(err?.message === "timeout"
-        ? "That's taking too long — check your connection and try again."
-        : "Couldn't upload — check your connection and try again.");
+      setError(describeUploadError(err));
     }
     setUploading(false);
   };
@@ -9900,7 +9898,17 @@ const SCHEDULE_BLOCK_COLORS = ["teal", "emerald", "amber", "rose", "cyan", "oran
 // photo runs 3-15MB, which can make an upload look stuck for a long time (or fail outright) on a
 // slow connection. Shrinking to a reasonable max dimension and re-encoding as JPEG cuts that down
 // dramatically without a visible quality loss for anything displayed at app size.
-function compressImageFile(file, maxDimension = 1600, quality = 0.82) {
+// Surfaces the real Firebase error code/message rather than a generic "something went wrong" —
+// storage/unauthorized specifically means Storage Rules are rejecting the request (missing,
+// unpublished, or evaluating false against this account's real data), which is a completely
+// different, much more specific problem than a slow or dropped connection, and worth being able
+// to tell apart at a glance rather than guessing blind.
+function describeUploadError(err) {
+  if (err?.message === "timeout") return "That's taking too long — check your connection and try again.";
+  const code = err?.code ? ` (${err.code})` : "";
+  return `Couldn't upload${code} — ${err?.message || "unknown error"}.`;
+}
+function compressImageFile(file, maxDimension = 2048, quality = 0.9) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
