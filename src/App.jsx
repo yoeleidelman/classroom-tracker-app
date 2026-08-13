@@ -29,7 +29,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -327,10 +327,10 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
 function uid() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 function todayISO() { return isoDate(new Date()); }
 // Replaces WhatsAppButton across every "generate a message about a student, then send" flow —
-// looks up that student's linked family account and sends straight into this teacher's individual
-// thread with them, the same reliable, already-tested path used everywhere else in-app messaging
-// happens, rather than handing off to an outside app.
-function SendInAppButton({ studentId, classId, message, sendIndividualMessageToFamily, className }) {
+// looks up that student's linked family account and sends straight into their classroom thread,
+// the same reliable, already-tested path used everywhere else in-app messaging happens, rather
+// than handing off to an outside app.
+function SendInAppButton({ studentId, classId, message, sendMessage, className }) {
   const [state, setState] = useState("idle"); // idle | sending | sent | no-family
   const send = async () => {
     if (!message?.trim()) return;
@@ -338,7 +338,7 @@ function SendInAppButton({ studentId, classId, message, sendIndividualMessageToF
     const allFamilies = await loadAllWithPrefix("family:");
     const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === studentId && l.classId === classId));
     if (!match) { setState("no-family"); return; }
-    await sendIndividualMessageToFamily(match.familyGroupId || match.uid, message.trim());
+    await sendMessage(match.familyGroupId || match.uid, message.trim());
     setState("sent");
   };
   if (state === "sent") return <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><Check size={13} /> Sent in-app</span>;
@@ -668,6 +668,15 @@ function computeToggledCheckIn(existingCheckIns, date, byLabel) {
 function isCheckedInNow(checkIns, date) {
   return (checkIns || []).some((c) => c.date === date && c.checkInTime && !c.checkOutTime);
 }
+// Same check-in/out logic as the per-class teacher toggle, but standalone and parameterized by
+// classId — used by the school-wide preschool attendance view, which acts across every preschool
+// class at once rather than the one class a teacher happens to be logged into.
+async function toggleCheckInForStudent(classId, studentId, byLabel) {
+  const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true)) || emptyStudentData();
+  const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel);
+  await saveJSON(`class:${classId}:kriya:${studentId}`, { ...data, checkIns: result.checkIns }, true);
+  return result;
+}
 // Reuses the exact same day-type resolution Planner already uses to decide whether to hide
 // attendance on a given date — rather than a separate "school days" calendar, a day is a school
 // day unless it's explicitly marked as a type that hides attendance (e.g. "No School"). This
@@ -885,6 +894,37 @@ async function loadAllWithPrefix(prefix) {
     console.error("Prefix load failed", prefix, e);
     return [];
   }
+}
+
+// Tracks what each PERSON has actually seen, separate from the messages themselves — "have I seen
+// this" belongs to the individual, not the conversation. Two guardians on one family, or two
+// co-teachers on one class, can each be at a different point in the exact same shared thread.
+// Keyed by the viewer's own login uid, never the shared family/class identity.
+async function getReadState(viewerId) {
+  return (await loadJSON(`read-state:${viewerId}`, {}, true)) || {};
+}
+async function markThreadRead(viewerId, threadKey) {
+  const state = await getReadState(viewerId);
+  state[threadKey] = new Date().toISOString();
+  await saveJSON(`read-state:${viewerId}`, state, true);
+}
+// Snoozing doesn't mark a thread read — it just quiets the indicator for a while, so an unread
+// reply still shows as unread once the snooze period passes, rather than being silently dismissed.
+async function snoozeThread(viewerId, threadKey, minutes) {
+  const state = await getReadState(viewerId);
+  state.snoozed = state.snoozed || {};
+  state.snoozed[threadKey] = new Date(Date.now() + minutes * 60000).toISOString();
+  await saveJSON(`read-state:${viewerId}`, state, true);
+}
+// A thread counts as unread if its last message came from the other side and is newer than the
+// last time this viewer marked it read (or was never marked read at all) — and isn't currently
+// snoozed.
+function isThreadUnread(readState, threadKey, lastMessage, myRole) {
+  if (!lastMessage || lastMessage.senderType === myRole) return false;
+  const snoozedUntil = readState.snoozed?.[threadKey];
+  if (snoozedUntil && new Date(snoozedUntil) > new Date()) return false;
+  const lastRead = readState[threadKey];
+  return !lastRead || new Date(lastMessage.timestamp) > new Date(lastRead);
 }
 
 const ClassContext = createContext({ className: "", onSwitchClass: () => {}, classType: "elementary" });
@@ -2649,6 +2689,41 @@ function BulkImportPanel({ onImport, onCancel }) {
   );
 }
 
+// Self-contained rather than threaded through AdminDashboard's already enormous prop list — reads
+// and writes one small, school-wide document directly. This is the one number every "contact the
+// office" deep link on the parent side points at, so getting it right here is what makes those
+// links actually work.
+function OfficeContactSettings() {
+  const [phone, setPhone] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    loadJSON("schoolSettings", {}, true).then((s) => { setPhone(s?.officePhone || ""); setLoaded(true); });
+  }, []);
+
+  const save = async () => {
+    const existing = (await loadJSON("schoolSettings", {}, true)) || {};
+    await saveJSON("schoolSettings", { ...existing, officePhone: phone.trim() }, true);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-4 mb-6">
+      <p className="text-sm font-semibold text-stone-800 mb-1">Office phone number</p>
+      <p className="text-xs text-stone-400 mb-3">Parents reach the office through this number — call, text, or WhatsApp — right from a button in their app, not a separate in-app inbox for you to check.</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="e.g. (555) 123-4567" className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        <button onClick={save} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Save</button>
+        {saved && <span className="text-xs font-semibold text-emerald-700">Saved</span>}
+      </div>
+    </div>
+  );
+}
+
 function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -2820,6 +2895,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           </div>
         </div>
         <p className="text-stone-500 text-sm mb-6">Every class in the school. Tap one to open it with full access.</p>
+
+        <OfficeContactSettings />
 
         <button onClick={() => setShowAdminMessages(true)} className="w-full mb-6 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800">
           <MessageCircle size={16} /> School Office Messages
@@ -3661,6 +3738,66 @@ function TourHint({ active, step, total, text, align = "left", onNext, onSkip, c
   );
 }
 
+// Not a compose box — a launcher. Reaching the office happens through the phone, text, or
+// WhatsApp app already installed on the parent's device, addressed to the same number the office
+// already watches, so nothing new gets added to what she has to monitor. Anything the office has
+// broadcast is still visible here, read-only, since that's a one-way push she chose to send, not
+// something requiring her to watch for replies.
+function ContactOfficeView({ adminThread, onBack }) {
+  const [officePhone, setOfficePhone] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadJSON("schoolSettings", {}, true).then((s) => { setOfficePhone(s?.officePhone || null); setLoading(false); });
+  }, []);
+
+  const digits = (officePhone || "").replace(/[^\d]/g, "");
+  const messages = [...(adminThread?.messages || [])].reverse();
+
+  return (
+    <div className="app-page">
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-lg font-bold text-stone-900 mb-1">School Office</h1>
+      <p className="text-xs text-stone-400 mb-4">Reach the office directly — the same number you'd already call or text.</p>
+
+      {loading && <p className="text-sm text-stone-400">Loading…</p>}
+      {!loading && !digits && (
+        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">The school hasn't added a phone number yet — check with them directly for now.</p>
+      )}
+      {!loading && digits && (
+        <div className="grid grid-cols-3 gap-2 mb-6">
+          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-teal-300">
+            <Phone size={22} className="text-teal-700" />
+            <span className="text-xs font-semibold text-stone-700">Call</span>
+          </a>
+          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-teal-300">
+            <MessageCircle size={22} className="text-teal-700" />
+            <span className="text-xs font-semibold text-stone-700">Text</span>
+          </a>
+          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-teal-300">
+            <MessageCircle size={22} className="text-emerald-600" />
+            <span className="text-xs font-semibold text-stone-700">WhatsApp</span>
+          </a>
+        </div>
+      )}
+
+      {messages.length > 0 && (
+        <>
+          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">From the office</p>
+          <div className="space-y-2">
+            {messages.map((m) => (
+              <div key={m.id} className="bg-white border border-stone-200 rounded-xl p-3.5">
+                <p className="text-sm text-stone-700 whitespace-pre-wrap">{m.text}</p>
+                <p className="text-[10px] text-stone-400 mt-1">{new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ConversationThreadView({ title, subtitle, messages, onSend, myRole, config, teacher, threadKey, onBack }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -3819,10 +3956,12 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
   );
 }
 
-// Shared full-size photo viewer — a photo embedded in a card is always cropped to fit that card's
-// shape, so this is the one place a parent (or teacher) actually sees the whole, uncropped image,
-// with a real download to their device rather than just a bigger version still trapped in the app.
-function PhotoLightbox({ url, caption, onClose }) {
+// Shared full-size media viewer — a photo or video embedded in a card is always cropped or
+// constrained to fit that card's shape, so this is the one place someone actually sees the whole
+// thing, with a real download to their device rather than just a bigger version still trapped in
+// the app. Handles both photos and videos through the same component, since a mixed batch in a
+// blog post shouldn't need two different lightbox experiences depending on what was tapped.
+function PhotoLightbox({ url, type = "photo", caption, onClose }) {
   const [downloading, setDownloading] = useState(false);
   const download = async (e) => {
     e.stopPropagation();
@@ -3833,7 +3972,7 @@ function PhotoLightbox({ url, caption, onClose }) {
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = blobUrl;
-      a.download = "photo.jpg";
+      a.download = type === "video" ? "video.mp4" : "photo.jpg";
       a.click();
       URL.revokeObjectURL(blobUrl);
     } catch {
@@ -3844,7 +3983,11 @@ function PhotoLightbox({ url, caption, onClose }) {
   return (
     <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={onClose}>
       <button onClick={onClose} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2"><X size={22} /></button>
-      <img src={url} alt={caption || "Photo"} className="max-w-full max-h-[75vh] rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
+      {type === "video" ? (
+        <video src={url} controls autoPlay playsInline className="max-w-full max-h-[75vh] rounded-lg" onClick={(e) => e.stopPropagation()} />
+      ) : (
+        <img src={url} alt={caption || "Photo"} className="max-w-full max-h-[75vh] rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
+      )}
       {caption && <p className="text-white text-sm mt-3 text-center max-w-md">{caption}</p>}
       <button onClick={download} disabled={downloading}
         className="mt-4 flex items-center gap-1.5 text-sm font-semibold text-white bg-white/15 hover:bg-white/25 rounded-lg px-4 py-2 disabled:opacity-60">
@@ -4062,10 +4205,36 @@ function ParentBlogView({ link, family, onBack }) {
   );
 }
 
+// Persistent top bar for the parent side, matching the same pattern the teacher side already
+// uses — Home, Messages, Blog, and Settings always one tap away, instead of icons buried in the
+// header or a full-screen overlay you have to back out of to reach anything else.
+function ParentMainTabs({ active, navigate, hasUnread }) {
+  const tabs = [
+    { id: "home", label: "Home", icon: HomeIcon },
+    { id: "messages", label: "Messages", icon: MessageCircle },
+    { id: "blog", label: "Blog", icon: Newspaper },
+    { id: "settings", label: "Settings", icon: SettingsIcon },
+  ];
+  return (
+    <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1">
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        const isActive = active === t.id;
+        return (
+          <button key={t.id} onClick={() => navigate(t.id)}
+            className={`flex-1 relative flex items-center justify-center gap-1.5 rounded-md py-2 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+            <Icon size={15} /> {t.label}
+            {t.id === "messages" && hasUnread && <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-rose-500" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
-  const [showAccount, setShowAccount] = useState(false);
+  const [parentTab, setParentTab] = useState("home"); // "home" | "messages" | "blog" | "settings" — persistent top bar, not a toggled overlay
   const [showScanner, setShowScanner] = useState(false);
-  const [showMessagePicker, setShowMessagePicker] = useState(false);
   // Starts active on this account's first-ever login (no separate wizard, no explicit "start
   // tour" step) and never again once dismissed — tracked per individual guardian login, not
   // shared across a family group, since a newly-added second guardian should still get their own
@@ -4094,19 +4263,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const [messagingThread, setMessagingThread] = useState({ messages: [] });
   const [messagingAdmin, setMessagingAdmin] = useState(false);
   const [adminThread, setAdminThread] = useState({ messages: [] });
-  const [teachersByClass, setTeachersByClass] = useState({}); // classId -> [teacher, ...]
-  const [messagingTeacher, setMessagingTeacher] = useState(null); // the teacher currently open, or null
-  const [teacherThread, setTeacherThread] = useState({ messages: [] });
-
-  useEffect(() => {
-    const classIds = [...new Set((family?.studentLinks || []).map((l) => l.classId))];
-    if (classIds.length === 0) return;
-    loadAllWithPrefix("teacher:").then((all) => {
-      const byClass = {};
-      classIds.forEach((cid) => { byClass[cid] = all.filter((t) => (t.assignedClassIds || []).includes(cid) && t.active !== false); });
-      setTeachersByClass(byClass);
-    });
-  }, [family]);
+  const [unreadThreads, setUnreadThreads] = useState([]); // [{ threadKey, kind, classId, title, preview, timestamp }]
 
   // Every conversation key below uses the family GROUP id, not this specific login's own uid —
   // so a second guardian, signed in under their own separate account, lands on the exact same
@@ -4115,24 +4272,44 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // second guardian, where the group id and the individual uid are the same thing anyway.
   const myGroupId = family.familyGroupId || family.uid;
 
-  const openIndividualMessagesFor = async (teacher) => {
-    setMessagingTeacher(teacher);
-    const thread = await loadJSON(`teacher-messages:${teacher.uid}:${myGroupId}`, { messages: [] }, true);
-    setTeacherThread(thread || { messages: [] });
+  // Checked fresh each time the home screen loads — there's no live push here, so "new message"
+  // means "new since I last opened this app," not an instant alert the moment it's sent.
+  const refreshUnreadThreads = useCallback(async () => {
+    const classLinks = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()];
+    const readState = await getReadState(family.uid);
+    const results = [];
+    for (const l of classLinks) {
+      const thread = await loadJSON(`class:${l.classId}:messages:${myGroupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const last = thread?.messages?.[thread.messages.length - 1];
+      if (isThreadUnread(readState, `class-${l.classId}`, last, "family")) {
+        results.push({ threadKey: `class-${l.classId}`, kind: "class", classId: l.classId, title: l.className, preview: last.text, senderName: last.senderName, timestamp: last.timestamp });
+      }
+    }
+    const adminThreadData = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
+    const lastAdmin = adminThreadData?.messages?.[adminThreadData.messages.length - 1];
+    if (isThreadUnread(readState, `admin-${myGroupId}`, lastAdmin, "family")) {
+      results.push({ threadKey: `admin-${myGroupId}`, kind: "admin", title: "School Office", preview: lastAdmin.text, senderName: lastAdmin.senderName, timestamp: lastAdmin.timestamp });
+    }
+    setUnreadThreads(results);
+  }, [family, myGroupId]);
+
+  useEffect(() => { refreshUnreadThreads(); }, [refreshUnreadThreads]);
+
+  const dismissUnread = async (item) => {
+    await markThreadRead(family.uid, item.threadKey);
+    setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
   };
-  const sendIndividualMessageToTeacher = async (teacherUid, text, attachmentUrl, attachmentType) => {
-    const key = `teacher-messages:${teacherUid}:${myGroupId}`;
-    const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
-    const next = { messages: [...existing.messages, entry] };
-    await saveJSON(key, next, true);
-    return next;
+  const openUnread = async (item) => {
+    if (item.kind === "admin") await openAdminMessages();
+    else await openMessagesFor(item.classId);
+    setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
   };
 
   const openMessagesFor = async (classId) => {
     setMessagingClassId(classId);
     const thread = await loadJSON(`class:${classId}:messages:${myGroupId}`, { messages: [] }, true);
     setMessagingThread(thread || { messages: [] });
+    markThreadRead(family.uid, `class-${classId}`);
   };
 
   // Not scoped to any class — this is a shared line to the office, not a specific classroom, so
@@ -4142,14 +4319,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     setMessagingAdmin(true);
     const thread = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
     setAdminThread(thread || { messages: [] });
-  };
-  const sendMessageToAdmin = async (text, attachmentUrl, attachmentType) => {
-    const key = `admin-messages:${myGroupId}`;
-    const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
-    const next = { messages: [...existing.messages, entry] };
-    await saveJSON(key, next, true);
-    return next;
+    markThreadRead(family.uid, `admin-${myGroupId}`);
   };
 
   const [scanError, setScanError] = useState(null);
@@ -4278,65 +4448,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ConversationThreadView title="School Office" subtitle="For anything not specific to one classroom" messages={adminThread.messages} myRole="family" threadKey={`admin-${myGroupId}`}
-          onBack={() => setMessagingAdmin(false)}
-          onSend={async (text, attachmentUrl, attachmentType) => { await sendMessageToAdmin(text, attachmentUrl, attachmentType); await openAdminMessages(); }} />
-      </div>
-    );
-  }
-
-  if (messagingTeacher) {
-    return (
-      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
-        <GlobalAppStyles />
-        <ConversationThreadView title={messagingTeacher.name} subtitle="Individual — not shared with anyone else in the classroom" messages={teacherThread.messages} myRole="family" threadKey={`teacher-${messagingTeacher.uid}`}
-          onBack={() => setMessagingTeacher(null)}
-          onSend={async (text, attachmentUrl, attachmentType) => { await sendIndividualMessageToTeacher(messagingTeacher.uid, text, attachmentUrl, attachmentType); await openIndividualMessagesFor(messagingTeacher); }} />
-      </div>
-    );
-  }
-
-  if (showMessagePicker) {
-    return (
-      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
-        <GlobalAppStyles />
-        <div className="app-page">
-          <button onClick={() => setShowMessagePicker(false)} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-          <h1 className="display-font text-lg font-bold text-stone-900 mb-4">Messages</h1>
-
-          {(family?.studentLinks || []).length > 0 && (
-            <div className="space-y-3 mb-3">
-              {[...new Map(family.studentLinks.map((l) => [l.classId, l])).values()].map((l) => (
-                <div key={l.classId} className="bg-white border border-stone-200 rounded-xl overflow-hidden">
-                  <button onClick={() => { setShowMessagePicker(false); openMessagesFor(l.classId); }}
-                    className="w-full text-left p-4 flex items-center justify-between hover:bg-stone-50">
-                    <div>
-                      <p className="font-semibold text-stone-900">{l.className}</p>
-                      <p className="text-xs text-stone-400">Message the classroom</p>
-                    </div>
-                    <ChevronRight size={16} className="text-stone-300" />
-                  </button>
-                  {(teachersByClass[l.classId] || []).map((t) => (
-                    <button key={t.uid} onClick={() => { setShowMessagePicker(false); openIndividualMessagesFor(t); }}
-                      className="w-full text-left px-4 py-3 flex items-center justify-between border-t border-stone-100 hover:bg-stone-50">
-                      <p className="text-sm text-stone-700">Message {t.name} individually</p>
-                      <ChevronRight size={14} className="text-stone-300" />
-                    </button>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
-
-          <button onClick={() => { setShowMessagePicker(false); openAdminMessages(); }}
-            className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
-            <div>
-              <p className="font-semibold text-stone-900">School Office</p>
-              <p className="text-xs text-stone-400">For anything not specific to one classroom</p>
-            </div>
-            <ChevronRight size={16} className="text-stone-300" />
-          </button>
-        </div>
+        <ContactOfficeView adminThread={adminThread} onBack={() => setMessagingAdmin(false)} />
       </div>
     );
   }
@@ -4345,7 +4457,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
       <div className="max-w-lg mx-auto px-4 py-6">
-        <div className="flex items-center justify-between mb-6 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
+        <div className="flex items-center justify-between mb-4 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
             <img src="/logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
             <div className="min-w-0">
@@ -4356,19 +4468,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               )}
             </div>
           </div>
-          <div className="flex items-center gap-0.5 shrink-0">
-            <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="right"
-              text="Tap here anytime to message your child's classroom, a specific teacher, or the school office."
-              onNext={advanceTour} onSkip={dismissTour}>
-              <button onClick={() => setShowMessagePicker(true)} className="text-stone-400 hover:text-teal-700 p-2 rounded-lg hover:bg-stone-100">
-                <MessageCircle size={19} />
-              </button>
-            </TourHint>
-            <button onClick={() => setShowAccount((v) => !v)} className="text-stone-400 hover:text-stone-700 p-2 rounded-lg hover:bg-stone-100"><SettingsIcon size={19} /></button>
-          </div>
         </div>
 
-        {showAccount ? (
+        <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
+          text="Messages and your class blog now live right here in the top bar — always one tap away."
+          onNext={advanceTour} onSkip={dismissTour}>
+          <ParentMainTabs active={parentTab} navigate={setParentTab} hasUnread={unreadThreads.length > 0} />
+        </TourHint>
+
+        {parentTab === "settings" ? (
           <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
             <p className="font-semibold text-stone-800 text-sm mb-3">My account</p>
             <label className="block text-xs font-medium text-stone-500 mb-1">Family name</label>
@@ -4451,8 +4559,60 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             </div>
             <button onClick={() => setActionUnlocked(false)} className="w-full bg-stone-200 text-stone-700 rounded-xl py-3 text-sm font-bold hover:bg-stone-300">Done</button>
           </>
+        ) : parentTab === "messages" ? (
+          <div className="space-y-3">
+            {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
+              <button key={l.classId} onClick={() => openMessagesFor(l.classId)}
+                className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
+                <div>
+                  <p className="font-semibold text-stone-900">{l.className}</p>
+                  <p className="text-xs text-stone-400">Message the classroom</p>
+                </div>
+                <ChevronRight size={16} className="text-stone-300" />
+              </button>
+            ))}
+            <button onClick={() => openAdminMessages()}
+              className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
+              <div>
+                <p className="font-semibold text-stone-900">School Office</p>
+                <p className="text-xs text-stone-400">Call, text, or WhatsApp — plus anything they've sent you</p>
+              </div>
+              <ChevronRight size={16} className="text-stone-300" />
+            </button>
+          </div>
+        ) : parentTab === "blog" ? (
+          <div className="space-y-3">
+            {(family?.studentLinks || []).length === 0 ? (
+              <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
+            ) : (
+              [...new Map(family.studentLinks.map((l) => [l.classId, l])).values()].map((l) => (
+                <button key={l.classId} onClick={() => setViewingBlogFor(l)}
+                  className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
+                  <div>
+                    <p className="font-semibold text-stone-900">{l.className}</p>
+                    <p className="text-xs text-stone-400">Class Blog</p>
+                  </div>
+                  <ChevronRight size={16} className="text-stone-300" />
+                </button>
+              ))
+            )}
+          </div>
         ) : (
           <>
+            {unreadThreads.length > 0 && (
+              <div className="space-y-2 mb-4">
+                {unreadThreads.map((item) => (
+                  <div key={item.threadKey} className="bg-teal-50 border border-teal-300 rounded-xl p-3.5 flex items-start gap-2.5">
+                    <div className="bg-teal-700 text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
+                    <button onClick={() => openUnread(item)} className="flex-1 text-left min-w-0">
+                      <p className="text-sm font-bold text-stone-900">New message — {item.title}</p>
+                      <p className="text-xs text-stone-600 truncate">{item.senderName}: {item.preview}</p>
+                    </button>
+                    <button onClick={() => dismissUnread(item)} className="text-stone-400 hover:text-stone-600 p-1 shrink-0"><X size={16} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
             {scanError && (
               <div className="rounded-xl p-3 mb-3 text-sm font-semibold bg-rose-50 text-rose-800 border border-rose-200">
                 {scanError}
@@ -4707,6 +4867,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [selectedSkillCat, setSelectedSkillCat] = useState(null);
   const [selectedSkillReportCat, setSelectedSkillReportCat] = useState(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState(null);
+  const [incidentDetailReturn, setIncidentDetailReturn] = useState("detail"); // where "back" from incident detail goes — varies by entry point
   const [selectedReflectionMonth, setSelectedReflectionMonth] = useState(null);
   const [celebratingSegment, setCelebratingSegment] = useState(null); // { subjectLabel, segment } — which completed benchmark segment is being announced
 
@@ -4848,34 +5009,30 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // Bundles several photo/video+caption "parts" into one shareable post — a teacher building a
   // weekly recap sends it all at once, one notification, not one per item. Every file across every
   // part goes through the same reliable pipeline as the Photos tile (or its video counterpart).
+  // Each part holds one freely mixed batch — any combination of photos and videos together, not
+  // artificially split by type, since there's no real reason a recap of ten photos and one video
+  // needs to be broken into separate parts just because of what kind of file each one is.
   const submitBlogPost = async (title, blocksInput, onProgress) => {
     const postId = uid();
-    const totalItems = blocksInput.reduce((sum, b) => sum + (b.files?.length || 0) + (b.videoFile ? 1 : 0), 0);
+    const totalItems = blocksInput.reduce((sum, b) => sum + (b.mediaItems?.length || 0), 0);
     let uploadedCount = 0;
     const uploadedBlocks = [];
     for (const block of blocksInput) {
-      const photoUrls = [];
-      for (const file of block.files || []) {
-        const path = `blog/${classId}/${postId}/${uid()}.jpg`;
-        const url = await uploadOneImage(file, path, () => {
-          // per-file progress isn't meaningful across multiple files — report overall completion instead
-          if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalItems, 1)) * 100));
-        });
-        photoUrls.push(url);
+      const media = [];
+      for (const item of block.mediaItems || []) {
+        const reportProgress = () => { if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalItems, 1)) * 100)); };
+        let url;
+        if (item.type === "video") {
+          const ext = (item.file.name || "").split(".").pop() || "mp4";
+          url = await uploadOneVideo(item.file, `blog/${classId}/${postId}/${uid()}.${ext}`, reportProgress);
+        } else {
+          url = await uploadOneImage(item.file, `blog/${classId}/${postId}/${uid()}.jpg`, reportProgress);
+        }
+        media.push({ url, type: item.type });
         uploadedCount++;
         if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
       }
-      let videoUrl = null;
-      if (block.videoFile) {
-        const ext = (block.videoFile.name || "").split(".").pop() || "mp4";
-        const path = `blog/${classId}/${postId}/${uid()}.${ext}`;
-        videoUrl = await uploadOneVideo(block.videoFile, path, () => {
-          if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalItems, 1)) * 100));
-        });
-        uploadedCount++;
-        if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
-      }
-      uploadedBlocks.push({ id: uid(), photoUrls, videoUrl, text: (block.text || "").trim() });
+      uploadedBlocks.push({ id: uid(), media, text: (block.text || "").trim() });
     }
     const entry = withLogger({
       id: postId, timestamp: new Date().toISOString(), authorType: "teacher",
@@ -5472,18 +5629,6 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     return next;
   };
 
-  // A second, separate line alongside the class-wide one — this teacher's own personal thread with
-  // a family, not shared with any co-teacher or aide in the same room. Keyed by this teacher's own
-  // uid, not the class, since it's their individual line regardless of which class it's about.
-  const sendIndividualMessageToFamily = async (familyUid, text, attachmentUrl, attachmentType) => {
-    const key = `teacher-messages:${loggedInTeacher.uid}:${familyUid}`;
-    const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
-    const next = { messages: [...existing.messages, entry] };
-    await saveJSON(key, next, true);
-    return next;
-  };
-
   const markNoHomeworkToday = (date) => {
     roster.forEach((s) => {
       const data = studentData[s.id] || emptyStudentData();
@@ -5623,6 +5768,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           toggleCheckInByTeacher={toggleCheckInByTeacher} config={config} plannerDays={plannerDays} navigate={setView} />
       )}
 
+      {view === "all-preschool-attendance" && (
+        <AllPreschoolAttendanceView loggedByName={loggedByName} navigate={setView} />
+      )}
+
       {view === "daily-log" && (
         <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} photos={photos} config={config}
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
@@ -5631,6 +5780,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog} uploadClassPhoto={uploadClassPhoto}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
           openIncidentForm={() => openIncidentForm(null, "daily-log")} navigate={setView} />
+      )}
+
+      {view === "preschool-incidents" && (
+        <PreschoolIncidentsView roster={roster} incidents={incidents} config={config}
+          openIncidentForm={(id) => openIncidentForm(id, "preschool-incidents")}
+          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setIncidentDetailReturn("preschool-incidents"); setView("incident-detail"); }} navigate={setView} />
       )}
 
       {view === "segment-celebration-message" && celebratingSegment && (
@@ -5672,13 +5827,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} />
       )}
 
-      {view === "individual-messages" && (
-        <TeacherIndividualMessagesView classId={classId} teacherUid={loggedInTeacher?.uid} roster={roster} config={config} loggedInTeacher={loggedInTeacher}
-          sendIndividualMessageToFamily={sendIndividualMessageToFamily} onLogSent={(studentId, entry) => addCommunication(studentId, entry)} navigate={setView} />
-      )}
-
       {view === "communication" && (
-        <CommunicationListView roster={roster} studentData={studentData} navigate={setView}
+        <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={setView}
           openStudent={(id) => { setCurrentId(id); setView("comm-entry"); }} />
       )}
 
@@ -5805,7 +5955,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
           onOpenFluencyDetail={(entry) => { setDetailReturnView("detail"); setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
           onOpenSkillDetail={(catId) => { setDetailReturnView("detail"); setSelectedSkillCat(catId); setView("skill-detail"); }}
-          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setView("incident-detail"); }}
+          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setIncidentDetailReturn("detail"); setView("incident-detail"); }}
           onFetchCrossClassHistory={fetchCrossClassHistory} currentClassName={className} />
       )}
 
@@ -5822,23 +5972,23 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
-        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} classId={classId} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
-          onBack={() => setView(currentId ? "detail" : "home")}
+        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} classId={classId} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
+          onBack={() => setView(incidentDetailReturn)}
           onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(studentId, email) => updateStudentField(studentId, "parentEmail", email)}
           onUpdateIncident={updateIncident}
-          onRemoveIncident={(id) => { removeIncident(id); setView(currentId ? "detail" : "home"); }} />
+          onRemoveIncident={(id) => { removeIncident(id); setView(incidentDetailReturn); }} />
       )}
 
       {view === "fluency-detail" && currentId && selectedFluencyEntry && (
-        <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
+        <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
           onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
 
       {view === "skill-detail" && currentId && selectedSkillCat && (
         <SkillDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
-          category={config.categories.find((c) => c.id === selectedSkillCat)} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
+          category={config.categories.find((c) => c.id === selectedSkillCat)} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
           onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
@@ -5870,7 +6020,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "message-draft" && currentId && messageFlag && (
-        <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
+        <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
           onBack={() => setView("detail")} onSaveParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onLogSent={(entry) => addCommunication(currentId, entry)} />
       )}
@@ -5931,6 +6081,7 @@ function MainTabs({ active, navigate }) {
     ? [
         { id: "attendance", label: "Attendance", icon: Check },
         { id: "daily-log", label: "Daily Log", icon: ClipboardList },
+        { id: "preschool-incidents", label: "Incidents", icon: AlertTriangle },
         { id: "communication", label: "Comm", icon: Mail },
         { id: "blog", label: "Blog", icon: Newspaper },
         { id: "planner", label: "Planner", icon: Calendar },
@@ -6822,6 +6973,52 @@ const PRESCHOOL_TILES = [
 // elementary Home screen, but presented on its own, without the homework/points/flags clutter
 // that doesn't apply to a preschool room, and with bigger, simpler touch targets to match the
 // same fast-glance philosophy as the rest of the preschool screens.
+// A dedicated tab for preschool, not a floating button like elementary has — quick to reach for
+// recording a behavior incident (hitting, biting, and the like), separate from the Health tile in
+// Daily Log, which is specifically for health notes. Shows the whole class's recent incidents in
+// one place too, since preschool didn't have any class-wide view of these before this existed.
+function PreschoolIncidentsView({ roster, incidents, config, openIncidentForm, onOpenIncidentDetail, navigate }) {
+  const catMap = {};
+  config.incidents.categories.forEach((c) => (catMap[c.id] = c));
+  const sorted = [...incidents].sort((a, b) => (a.date + (a.time || "") < b.date + (b.time || "") ? 1 : -1));
+
+  return (
+    <div className="app-page-wide">
+      <Header navigate={navigate} />
+      <MainTabs active="preschool-incidents" navigate={navigate} />
+
+      <button onClick={() => openIncidentForm(null)} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800">
+        <AlertTriangle size={17} /> Record incident
+      </button>
+
+      <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Recent incidents</p>
+      {sorted.length === 0 ? (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing logged yet.</p>
+      ) : (
+        <div className="space-y-2">
+          {sorted.map((inc) => {
+            const cat = catMap[inc.category];
+            const names = (inc.studentIds || []).map((id) => roster.find((s) => s.id === id)?.name).filter(Boolean).join(", ");
+            return (
+              <button key={inc.id} onClick={() => onOpenIncidentDetail(inc.id)}
+                className="w-full text-left bg-white border border-stone-200 rounded-xl p-3.5 hover:border-teal-300">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className={`inline-block text-xs font-semibold px-2 py-0.5 rounded-full bg-${cat?.color || "stone"}-100 text-${cat?.color || "stone"}-700`}>
+                    {cat?.label || inc.category || "Uncategorized"}
+                  </span>
+                  <span className="text-xs text-stone-400">{inc.date}</span>
+                </div>
+                <p className="text-sm text-stone-700">{names || "No students tagged"}</p>
+                {inc.flaggedForAdmin && <span className="text-[10px] font-semibold text-rose-600 flex items-center gap-1 mt-1"><Flag size={11} className="fill-rose-600" /> Flagged for admin</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, config, plannerDays, navigate }) {
   const date = todayISO();
   const schoolDay = isSchoolDay(date, config, plannerDays);
@@ -6839,6 +7036,9 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
     <div className="app-page-wide">
       <Header navigate={navigate} />
       <MainTabs active="attendance" navigate={navigate} />
+      <button onClick={() => navigate("all-preschool-attendance")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+        <Users size={16} /> All preschool students — dismissal view
+      </button>
       <p className="text-xs text-stone-400 mb-3">Who's actually here right now — not a daily record of late or excused, just in or not. Families can also check their own child in or out from their end.</p>
       {!schoolDay && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
@@ -6888,6 +7088,116 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// Every preschool student in the school, on one page, grouped by family so siblings sit together
+// and dismiss together — built specifically for the "one teacher clearing out the whole building
+// at pickup" situation, where waiting for each room's own attendance screen doesn't work.
+// Reachable from any preschool class, not just the admin dashboard, since it's usually a teacher
+// doing this, not the office. Family grouping is a best-effort match on parent email or phone —
+// there's no hard family ID on a student record, so this is a heuristic, not a guarantee.
+function AllPreschoolAttendanceView({ loggedByName, navigate }) {
+  const [loading, setLoading] = useState(true);
+  const [families, setFamilies] = useState([]); // [{ key, students: [{ id, name, classId, className, checkIns }] }]
+  const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
+  const date = todayISO();
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const preschoolClasses = (allClasses || []).filter((c) => c.classType === "preschool" && !c.archived);
+    const perClass = await Promise.all(preschoolClasses.map(async (c) => {
+      const roster = await loadJSON(`class:${c.id}:roster`, [], true);
+      const withData = await Promise.all(roster.map(async (s) => {
+        const data = await loadJSON(`class:${c.id}:kriya:${s.id}`, null, true);
+        return { id: s.id, name: s.name, classId: c.id, className: c.name, parentEmail: s.parentEmail, parentPhone: s.parentPhone, checkIns: data?.checkIns || [] };
+      }));
+      return withData;
+    }));
+    const allStudents = perClass.flat();
+
+    // Groups by shared parent email first, then phone, for students without an email on file —
+    // anyone matching neither becomes their own single-student group.
+    const groups = {};
+    allStudents.forEach((s) => {
+      const key = s.parentEmail ? `e:${s.parentEmail.toLowerCase()}` : s.parentPhone ? `p:${s.parentPhone}` : `solo:${s.id}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(s);
+    });
+    const grouped = Object.entries(groups).map(([key, students]) => ({ key, students: students.sort((a, b) => a.name.localeCompare(b.name)) }));
+    grouped.sort((a, b) => a.students[0].name.localeCompare(b.students[0].name));
+    setFamilies(grouped);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleTap = async (student, isIn) => {
+    const todaysEntries = student.checkIns.filter((c) => c.date === date);
+    if (!isIn && wouldBeRepeatCheckIn(student.checkIns, date)) {
+      setConfirmingRepeatFor(student.id);
+      return;
+    }
+    const byLabel = loggedByName ? `Teacher: ${loggedByName}` : "Teacher";
+    await toggleCheckInForStudent(student.classId, student.id, byLabel);
+    await refresh();
+    setConfirmingRepeatFor(null);
+  };
+
+  return (
+    <div className="app-page-wide">
+      <button onClick={() => navigate("attendance")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">All Preschool Students</h1>
+      <p className="text-xs text-stone-400 mb-4">Every preschool room on one page, grouped by family — built for dismissal, when one teacher is checking everyone out at once.</p>
+
+      {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+      {!loading && families.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No preschool students found.</p>}
+
+      <div className="space-y-3">
+        {families.map((fam) => (
+          <div key={fam.key} className={`rounded-xl border-2 p-3 ${fam.students.length > 1 ? "bg-amber-50/40 border-amber-200" : "border-stone-200 bg-white"}`}>
+            {fam.students.map((s) => {
+              const todaysEntries = s.checkIns.filter((c) => c.date === date).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
+              const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
+              const isIn = Boolean(openEntry);
+              const confirming = confirmingRepeatFor === s.id;
+              return (
+                <div key={s.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${isIn ? "text-emerald-800" : ""}`}>
+                  <div>
+                    <span className="font-semibold text-stone-900 text-base block">{s.name}</span>
+                    <span className="text-[11px] text-stone-400">{s.className}</span>
+                    {todaysEntries.length === 0 ? (
+                      <span className="block text-xs font-semibold text-stone-400">Not checked in yet today</span>
+                    ) : (
+                      <div className="mt-0.5">
+                        {todaysEntries.map((e) => (
+                          <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
+                            In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {confirming ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-stone-500">Log another visit today?</span>
+                      <button onClick={() => handleTap(s, false)} className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes, check in</button>
+                      <button onClick={() => setConfirmingRepeatFor(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => handleTap(s, isIn)}
+                      className={`text-sm font-bold px-4 py-2.5 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                      {isIn ? "Check out" : "Check in"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -6955,7 +7265,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
         <MainTabs active="daily-log" navigate={navigate} />
         <div className="flex gap-3 items-start">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 flex-1 min-w-0">
-            {PRESCHOOL_TILES.map((tile) => {
+            {PRESCHOOL_TILES.filter((tile) => tile.id !== "mood" || config.preschool?.moodEnabled !== false).map((tile) => {
               const Icon = tile.icon;
               const st = TILE_STYLES[tile.color];
               const logged = (tile.id === "health" || tile.id === "photos") ? null : loggedCountFor(tile.id);
@@ -7268,7 +7578,7 @@ const BLOG_REACTIONS = [
 function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment }) {
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
-  const [lightboxPhoto, setLightboxPhoto] = useState(null);
+  const [lightboxMedia, setLightboxMedia] = useState(null);
   const comments = post.comments || [];
 
   const submitComment = () => {
@@ -7293,26 +7603,51 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
       {post.title && <p className="display-font text-base font-bold text-stone-900 px-4 pb-2">{post.title}</p>}
 
       <div className="divide-y divide-stone-100">
-        {post.blocks.map((block) => (
-          <div key={block.id} className="py-3 first:pt-0 last:pb-0">
-            {block.photoUrls?.length === 1 && (
-              <img src={block.photoUrls[0]} alt="" onClick={() => setLightboxPhoto({ url: block.photoUrls[0], caption: block.text })}
-                className="w-full aspect-[4/3] object-cover cursor-pointer" />
-            )}
-            {block.photoUrls?.length > 1 && (
-              <div className="grid grid-cols-2 gap-0.5">
-                {block.photoUrls.map((src, i) => (
-                  <img key={i} src={src} alt="" onClick={() => setLightboxPhoto({ url: src, caption: block.text })}
-                    className="w-full aspect-square object-cover cursor-pointer" />
-                ))}
-              </div>
-            )}
-            {block.videoUrl && (
-              <video src={block.videoUrl} controls playsInline className="w-full max-h-96 bg-black" />
-            )}
-            {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3">{block.text}</p>}
-          </div>
-        ))}
+        {post.blocks.map((block) => {
+          // Falls back to the old separate photoUrls/videoUrl shape for posts saved before mixed
+          // batches existed, so nothing already published breaks or needs migrating.
+          const media = block.media || [
+            ...(block.photoUrls || []).map((url) => ({ url, type: "photo" })),
+            ...(block.videoUrl ? [{ url: block.videoUrl, type: "video" }] : []),
+          ];
+          return (
+            <div key={block.id} className="py-3 first:pt-0 last:pb-0">
+              {media.length === 1 && (
+                <div className="relative cursor-pointer" onClick={() => setLightboxMedia({ url: media[0].url, type: media[0].type, caption: block.text })}>
+                  {media[0].type === "video" ? (
+                    <>
+                      <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                        <div className="bg-white/90 rounded-full p-3"><Play size={20} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                      </div>
+                    </>
+                  ) : (
+                    <img src={media[0].url} alt="" className="w-full aspect-[4/3] object-cover" />
+                  )}
+                </div>
+              )}
+              {media.length > 1 && (
+                <div className="grid grid-cols-2 gap-0.5">
+                  {media.map((m, i) => (
+                    <div key={i} className="relative aspect-square cursor-pointer" onClick={() => setLightboxMedia({ url: m.url, type: m.type, caption: block.text })}>
+                      {m.type === "video" ? (
+                        <>
+                          <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                            <div className="bg-white/90 rounded-full p-2"><Play size={13} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                          </div>
+                        </>
+                      ) : (
+                        <img src={m.url} alt="" className="w-full h-full object-cover" />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3">{block.text}</p>}
+            </div>
+          );
+        })}
       </div>
 
       <div className="flex items-center gap-1 px-3 pt-3 pb-2">
@@ -7329,8 +7664,8 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
         })}
       </div>
 
-      {lightboxPhoto && (
-        <PhotoLightbox url={lightboxPhoto.url} caption={lightboxPhoto.caption} onClose={() => setLightboxPhoto(null)} />
+      {lightboxMedia && (
+        <PhotoLightbox url={lightboxMedia.url} type={lightboxMedia.type} caption={lightboxMedia.caption} onClose={() => setLightboxMedia(null)} />
       )}
 
       {commentsEnabled && (
@@ -7402,37 +7737,43 @@ function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, 
 
 function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
   const [title, setTitle] = useState("");
-  const [blocks, setBlocks] = useState([{ id: uid(), text: "", files: [], previews: [], videoFile: null, videoPreview: null, videoError: null }]);
+  const [blocks, setBlocks] = useState([{ id: uid(), text: "", mediaItems: [] }]);
   const [posting, setPosting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
   const [genState, setGenState] = useState({}); // blockId -> { open, roughNote, generating, error }
 
-  const addBlock = () => setBlocks((prev) => [...prev, { id: uid(), text: "", files: [], previews: [], videoFile: null, videoPreview: null, videoError: null }]);
+  const addBlock = () => setBlocks((prev) => [...prev, { id: uid(), text: "", mediaItems: [] }]);
   const removeBlock = (id) => setBlocks((prev) => prev.filter((b) => b.id !== id));
   const updateText = (id, text) => setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, text } : b)));
-  const addFiles = (id, fileList) => {
+
+  // One mixed batch per part — any combination of photos and videos together, added in a single
+  // pick. Each video is checked for length right when it's added, independently of the others, so
+  // one too-long clip in a batch of ten photos doesn't block the rest.
+  const addMedia = async (blockId, fileList) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
-    setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, files: [...b.files, ...files], previews: [...b.previews, ...files.map((f) => URL.createObjectURL(f))] } : b)));
-  };
-  const removePhoto = (blockId, idx) => setBlocks((prev) => prev.map((b) => (b.id === blockId
-    ? { ...b, files: b.files.filter((_, i) => i !== idx), previews: b.previews.filter((_, i) => i !== idx) }
-    : b)));
-
-  // Checked at selection time, not just at submit — a teacher who picked too-long a clip finds out
-  // immediately, not after waiting through most of an upload.
-  const addVideo = async (blockId, file) => {
-    if (!file) return;
-    setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoError: null } : b)));
-    try {
-      await validateVideoDuration(file);
-      setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoFile: file, videoPreview: URL.createObjectURL(file) } : b)));
-    } catch (err) {
-      setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoError: err.message } : b)));
+    for (const file of files) {
+      const isVideo = file.type.startsWith("video/");
+      const itemId = uid();
+      if (isVideo) {
+        try {
+          await validateVideoDuration(file);
+        } catch (err) {
+          setBlocks((prev) => prev.map((b) => (b.id === blockId
+            ? { ...b, mediaItems: [...b.mediaItems, { id: itemId, file: null, preview: null, type: "video", error: err.message }] }
+            : b)));
+          continue; // eslint-disable-line no-continue
+        }
+      }
+      setBlocks((prev) => prev.map((b) => (b.id === blockId
+        ? { ...b, mediaItems: [...b.mediaItems, { id: itemId, file, preview: URL.createObjectURL(file), type: isVideo ? "video" : "photo", error: null }] }
+        : b)));
     }
   };
-  const removeVideo = (blockId) => setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoFile: null, videoPreview: null, videoError: null } : b)));
+  const removeMedia = (blockId, itemId) => setBlocks((prev) => prev.map((b) => (b.id === blockId
+    ? { ...b, mediaItems: b.mediaItems.filter((m) => m.id !== itemId) }
+    : b)));
 
   const toggleGenerate = (blockId) => setGenState((prev) => ({ ...prev, [blockId]: { ...prev[blockId], open: !prev[blockId]?.open, roughNote: "", error: false } }));
   const setRoughNote = (blockId, val) => setGenState((prev) => ({ ...prev, [blockId]: { ...prev[blockId], roughNote: val } }));
@@ -7449,7 +7790,7 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
     }
   };
 
-  const hasContent = blocks.some((b) => b.text.trim() || b.files.length > 0 || b.videoFile);
+  const hasContent = blocks.some((b) => b.text.trim() || b.mediaItems.some((m) => m.file));
 
   const submit = async () => {
     if (!hasContent) { setError("Add at least a photo, a video, or some text first."); return; }
@@ -7457,7 +7798,8 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
     setPosting(true);
     setProgress(0);
     try {
-      await onSubmit(title, blocks, setProgress);
+      const cleanBlocks = blocks.map((b) => ({ ...b, mediaItems: b.mediaItems.filter((m) => m.file) })); // drop rejected videos, never sent
+      await onSubmit(title, cleanBlocks, setProgress);
       onBack();
     } catch (err) {
       setError(describeUploadError(err));
@@ -7465,7 +7807,7 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
     setPosting(false);
   };
 
-  const activeBlockCount = blocks.filter((b) => b.text.trim() || b.files.length > 0 || b.videoFile).length;
+  const activeBlockCount = blocks.filter((b) => b.text.trim() || b.mediaItems.some((m) => m.file)).length;
 
   return (
     <div className={PAGE}>
@@ -7482,40 +7824,28 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
                 <p className="text-[10px] font-semibold text-stone-400 uppercase">Part {i + 1}</p>
                 {blocks.length > 1 && <button onClick={() => removeBlock(block.id)} className="text-[11px] text-rose-500 font-semibold">Remove</button>}
               </div>
-              {block.previews.length > 0 && (
-                <div className={`grid gap-1 mb-1.5 ${block.previews.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
-                  {block.previews.map((src, idx) => (
-                    <div key={idx} className="relative">
-                      <img src={src} alt="" className="w-full aspect-square object-cover rounded-lg" />
-                      <button onClick={() => removePhoto(block.id, idx)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
+              {block.mediaItems.length > 0 && (
+                <div className={`grid gap-1 mb-1.5 ${block.mediaItems.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+                  {block.mediaItems.map((m) => (
+                    <div key={m.id} className="relative">
+                      {m.error ? (
+                        <div className="w-full aspect-square rounded-lg bg-rose-50 border border-rose-200 flex items-center justify-center p-2">
+                          <p className="text-[10px] text-rose-600 text-center">{m.error}</p>
+                        </div>
+                      ) : m.type === "video" ? (
+                        <video src={m.preview} className="w-full aspect-square object-cover rounded-lg" />
+                      ) : (
+                        <img src={m.preview} alt="" className="w-full aspect-square object-cover rounded-lg" />
+                      )}
+                      <button onClick={() => removeMedia(block.id, m.id)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
                     </div>
                   ))}
                 </div>
               )}
-              {block.videoPreview && (
-                <div className="relative mb-1.5">
-                  <video src={block.videoPreview} controls className="w-full rounded-lg max-h-52" />
-                  <button onClick={() => removeVideo(block.id)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
-                </div>
-              )}
-              {block.videoError && <p className="text-[11px] text-rose-600 mb-1.5">{block.videoError}</p>}
-              <div className="flex gap-1.5 mb-1.5">
-                {!block.videoFile && (
-                  <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
-                    + Add photo
-                    <input type="file" accept="image/*" multiple onChange={(e) => { addFiles(block.id, e.target.files); e.target.value = ""; }} className="hidden" />
-                  </label>
-                )}
-                {block.files.length === 0 && !block.videoFile && (
-                  <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
-                    + Add video
-                    <input type="file" accept="video/*" onChange={(e) => { addVideo(block.id, e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
-                  </label>
-                )}
-              </div>
-              {(block.files.length > 0 || block.videoFile) && (
-                <p className="text-[10px] text-stone-400 mb-1.5">One photo set or one video per part — add another part below for more.</p>
-              )}
+              <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 mb-1.5 cursor-pointer">
+                + Add photos or video
+                <input type="file" accept="image/*,video/*" multiple onChange={(e) => { addMedia(block.id, e.target.files); e.target.value = ""; }} className="hidden" />
+              </label>
 
               {gs.open && (
                 <div className="border border-teal-200 bg-teal-50/50 rounded-lg p-2 mb-1.5">
@@ -9674,6 +10004,10 @@ function ReflectionHistoryView({ reflections, onOpenMonth, onBack, navigate }) {
 function AdminMessagesView({ families, navigate }) {
   const [threads, setThreads] = useState({});
   const [openGroup, setOpenGroup] = useState(null);
+  const [mode, setMode] = useState("inbox"); // "inbox" | "broadcast"
+  const [broadcastText, setBroadcastText] = useState("");
+  const [broadcasting, setBroadcasting] = useState(false);
+  const [broadcastSentTo, setBroadcastSentTo] = useState(null);
 
   const groups = useMemo(() => {
     const byGroup = {};
@@ -9701,6 +10035,19 @@ function AdminMessagesView({ families, navigate }) {
     return next;
   };
 
+  // One message, pushed into every family's own thread with the office at once — per family, not
+  // per student, so a household with two kids in the school still gets exactly one copy.
+  const sendBroadcast = async () => {
+    if (!broadcastText.trim()) return;
+    setBroadcasting(true);
+    for (const g of groups) {
+      await sendToFamily(g.groupId, broadcastText.trim()); // eslint-disable-line no-await-in-loop
+    }
+    await refresh();
+    setBroadcastSentTo(groups.length);
+    setBroadcasting(false);
+  };
+
   const withThreads = groups.filter((g) => (threads[g.groupId]?.messages || []).length > 0);
   const withoutThreads = groups.filter((g) => !(threads[g.groupId]?.messages || []).length);
 
@@ -9721,127 +10068,64 @@ function AdminMessagesView({ families, navigate }) {
         <button onClick={() => navigate(null)} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
         <h1 className="display-font text-xl font-bold text-stone-900 mb-4">School Office Messages</h1>
 
-        {withThreads.length > 0 && (
-          <div className="space-y-2 mb-5">
-            {withThreads.map((g) => {
-              const thread = threads[g.groupId];
-              const last = thread.messages[thread.messages.length - 1];
-              const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-              return (
-                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-semibold text-stone-900">{guardianNames}</p>
-                    <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>
-                  </div>
-                  <p className="text-xs text-stone-500 truncate">{last.senderType === "admin" ? "You: " : ""}{last.text}</p>
-                </button>
-              );
-            })}
-          </div>
-        )}
+        <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
+          <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+            <Mail size={14} /> Inbox
+          </button>
+          <button onClick={() => setMode("broadcast")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "broadcast" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+            <Plus size={14} /> Broadcast to all families
+          </button>
+        </div>
 
-        {withoutThreads.length > 0 && (
+        {mode === "broadcast" ? (
+          <div>
+            <p className="text-xs text-stone-400 mb-3">Sent to every family in the school as one message in their School Office thread — once per family, not once per student.</p>
+            <textarea value={broadcastText} onChange={(e) => setBroadcastText(e.target.value)} rows={5} placeholder="What's this about?"
+              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+            <button onClick={sendBroadcast} disabled={!broadcastText.trim() || broadcasting || broadcastSentTo !== null}
+              className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${broadcastSentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
+              {broadcasting ? <Loader2 className="animate-spin" size={15} /> : broadcastSentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
+              {broadcasting ? "Sending…" : broadcastSentTo !== null ? `Sent to ${broadcastSentTo} famil${broadcastSentTo === 1 ? "y" : "ies"}` : "Send to every family"}
+            </button>
+          </div>
+        ) : (
           <>
-            <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Start a conversation</p>
-            <div className="space-y-2">
-              {withoutThreads.map((g) => (
-                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-3 text-sm font-semibold text-stone-700 hover:border-teal-300">
-                  {g.guardians.map((gu) => gu.name).join(" & ")}
-                </button>
-              ))}
-            </div>
+            {withThreads.length > 0 && (
+              <div className="space-y-2 mb-5">
+                {withThreads.map((g) => {
+                  const thread = threads[g.groupId];
+                  const last = thread.messages[thread.messages.length - 1];
+                  const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+                  return (
+                    <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-semibold text-stone-900">{guardianNames}</p>
+                        <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>
+                      </div>
+                      <p className="text-xs text-stone-500 truncate">{last.senderType === "admin" ? "You: " : ""}{last.text}</p>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {withoutThreads.length > 0 && (
+              <>
+                <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Start a conversation</p>
+                <div className="space-y-2">
+                  {withoutThreads.map((g) => (
+                    <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-3 text-sm font-semibold text-stone-700 hover:border-teal-300">
+                      {g.guardians.map((gu) => gu.name).join(" & ")}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {groups.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No family accounts yet.</p>}
           </>
         )}
-
-        {groups.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No family accounts yet.</p>}
       </div>
-    </div>
-  );
-}
-
-// Same idea as TeacherMessagesView, but keyed to this teacher's own uid rather than the class —
-// a separate, personal line that doesn't get seen by any co-teacher or aide sharing the room.
-// Same grouping as the class-wide list — a second guardian shares this personal line with the
-// teacher too, since it's a private line between "this family" and "this teacher," not between
-// one specific login and the teacher.
-function TeacherIndividualMessagesView({ classId, teacherUid, roster, config, loggedInTeacher, sendIndividualMessageToFamily, onLogSent, navigate }) {
-  const [groups, setGroups] = useState(null);
-  const [threads, setThreads] = useState({});
-  const [openGroup, setOpenGroup] = useState(null);
-  const [mode, setMode] = useState("inbox"); // "inbox" | "compose"
-
-  const refresh = useCallback(async () => {
-    const all = await loadAllWithPrefix("family:");
-    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
-    const byGroup = {};
-    relevant.forEach((f) => {
-      const groupId = f.familyGroupId || f.uid;
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
-      byGroup[groupId].guardians.push(f);
-    });
-    const groupList = Object.values(byGroup);
-    setGroups(groupList);
-    const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${teacherUid}:${g.groupId}`, { messages: [] }, true)]));
-    setThreads(Object.fromEntries(entries));
-  }, [classId, teacherUid]);
-
-  useEffect(() => { refresh(); }, [refresh]);
-
-  if (openGroup) {
-    const thread = threads[openGroup.groupId] || { messages: [] };
-    const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
-    const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
-    return (
-      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`indiv-${openGroup.groupId}`}
-        onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text, attachmentUrl, attachmentType) => { await sendIndividualMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType); await refresh(); }} />
-    );
-  }
-
-  return (
-    <div className={PAGE}>
-      <Header navigate={navigate} />
-      <MainTabs active="communication" navigate={navigate} />
-      <button onClick={() => navigate("communication")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-lg font-bold text-stone-900 mb-1">My Messages</h1>
-      <p className="text-xs text-stone-400 mb-3">Your own personal line with each family — separate from the shared class conversation.</p>
-
-      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
-        <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-          <Mail size={14} /> Inbox
-        </button>
-        <button onClick={() => setMode("compose")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "compose" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-          <Plus size={14} /> New message
-        </button>
-      </div>
-
-      {mode === "compose" ? (
-        <IndividualMessageComposer roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily} onLogSent={onLogSent} />
-      ) : (
-        <>
-          {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-          {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
-
-          <div className="space-y-2">
-            {(groups || []).map((g) => {
-              const thread = threads[g.groupId];
-              const last = thread?.messages?.[thread.messages.length - 1];
-              const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
-              const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-              return (
-                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-semibold text-stone-900">{guardianNames}</p>
-                    {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
-                  </div>
-                  <p className="text-xs text-stone-400 mb-1">{childNames}</p>
-                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
-                </button>
-              );
-            })}
-          </div>
-        </>
-      )}
     </div>
   );
 }
@@ -9916,7 +10200,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
               const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
               return (
-                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                <button key={g.groupId} onClick={() => { setOpenGroup(g); markThreadRead(loggedInTeacher.uid, `classroom-${g.groupId}`); }} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold text-stone-900">{guardianNames}</p>
                     {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
@@ -9933,19 +10217,62 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   );
 }
 
-function CommunicationListView({ roster, studentData, navigate, openStudent }) {
+function CommunicationListView({ roster, studentData, classId, loggedInTeacher, navigate, openStudent }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
+  const [unreadFamilies, setUnreadFamilies] = useState([]); // [{ groupId, guardianNames, preview, timestamp }]
+
+  const refreshUnread = useCallback(async () => {
+    const all = await loadAllWithPrefix("family:");
+    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+    const byGroup = {};
+    relevant.forEach((f) => {
+      const groupId = f.familyGroupId || f.uid;
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [] };
+      byGroup[groupId].guardians.push(f);
+    });
+    const readState = await getReadState(loggedInTeacher.uid);
+    const results = [];
+    for (const g of Object.values(byGroup)) {
+      const thread = await loadJSON(`class:${classId}:messages:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const last = thread?.messages?.[thread.messages.length - 1];
+      const threadKey = `classroom-${g.groupId}`;
+      if (isThreadUnread(readState, threadKey, last, "teacher")) {
+        results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: last.text, senderName: last.senderName, timestamp: last.timestamp });
+      }
+    }
+    setUnreadFamilies(results);
+  }, [classId, loggedInTeacher]);
+
+  useEffect(() => { refreshUnread(); }, [refreshUnread]);
+
+  const snoozeFamily = async (item) => {
+    await snoozeThread(loggedInTeacher.uid, item.threadKey, 60); // snoozes for an hour
+    setUnreadFamilies((prev) => prev.filter((f) => f.threadKey !== item.threadKey));
+  };
+
   return (
     <div className={PAGE}>
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
 
+      {unreadFamilies.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {unreadFamilies.map((item) => (
+            <div key={item.threadKey} className="bg-teal-50 border border-teal-300 rounded-xl p-3.5 flex items-start gap-2.5">
+              <div className="bg-teal-700 text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
+              <button onClick={() => navigate("messages")} className="flex-1 text-left min-w-0">
+                <p className="text-sm font-bold text-stone-900">New message — {item.guardianNames}</p>
+                <p className="text-xs text-stone-600 truncate">{item.preview}</p>
+              </button>
+              <button onClick={() => snoozeFamily(item)} title="Snooze for an hour" className="text-stone-400 hover:text-stone-600 p-1 shrink-0"><Bell size={16} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <button onClick={() => navigate("messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
         <Mail size={16} /> Classroom Messages
-      </button>
-      <button onClick={() => navigate("individual-messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
-        <MessageCircle size={16} /> My Messages
       </button>
 
       <div className="flex flex-col md:flex-row gap-2 mb-5">
@@ -10921,7 +11248,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
-function FluencyDetailView({ student, entry, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent, onUpdateParentEmail }) {
+function FluencyDetailView({ student, entry, classId, config, loggedInTeacher, sendMessageToFamily, onBack, onLogSent, onUpdateParentEmail }) {
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(student?.parentEmail || "");
@@ -10995,7 +11322,7 @@ function FluencyDetailView({ student, entry, classId, config, loggedInTeacher, s
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             {sendEmails && <MailActionButtons email={sendEmails} subject={`Fluency check — ${entry.date}`} body={draft} />}
-            <SendInAppButton studentId={student.id} classId={classId} message={draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily} />
+            <SendInAppButton studentId={student.id} classId={classId} message={draft} sendMessage={sendMessageToFamily} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -11051,7 +11378,7 @@ function GrowthChart({ timeline, color }) {
   );
 }
 
-function SkillDetailView({ student, data, category, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent, onUpdateParentEmail }) {
+function SkillDetailView({ student, data, category, classId, config, loggedInTeacher, sendMessageToFamily, onBack, onLogSent, onUpdateParentEmail }) {
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(student?.parentEmail || "");
@@ -11140,7 +11467,7 @@ function SkillDetailView({ student, data, category, classId, config, loggedInTea
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             {sendEmails && <MailActionButtons email={sendEmails} subject={`${category.title} — Progress note`} body={draft} />}
-            <SendInAppButton studentId={student.id} classId={classId} message={draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily} />
+            <SendInAppButton studentId={student.id} classId={classId} message={draft} sendMessage={sendMessageToFamily} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -11517,13 +11844,14 @@ function PrintableStudentReport({ student, data, incidents, classAssessments, co
   );
 }
 
-function IncidentDetailView({ incident, roster, classId, config, plannerDays, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
+function IncidentDetailView({ incident, roster, classId, config, plannerDays, loggedInTeacher, sendMessageToFamily, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
   const [recipientModes, setRecipientModes] = useState({}); // studentId -> "p1" | "p2" | "both"
   const [editing, setEditing] = useState(false);
   const [editCategory, setEditCategory] = useState(incident?.category || "");
   const [editDescription, setEditDescription] = useState(incident?.description || "");
+  const [lightboxMedia, setLightboxMedia] = useState(null);
 
   if (!incident) {
     return (
@@ -11622,7 +11950,26 @@ function IncidentDetailView({ incident, roster, classId, config, plannerDays, lo
           </div>
         )}
 
-        <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Students involved</p>
+        {incident.media?.length > 0 && (
+          <div className={`grid gap-1 mt-3 mb-1 ${incident.media.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+            {incident.media.map((m, i) => (
+              <div key={i} className="relative aspect-square cursor-pointer" onClick={() => setLightboxMedia({ url: m.url, type: m.type })}>
+                {m.type === "video" ? (
+                  <>
+                    <video src={m.url} muted playsInline className="w-full h-full object-cover rounded-lg pointer-events-none" />
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/20 rounded-lg">
+                      <div className="bg-white/90 rounded-full p-2"><Play size={14} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                    </div>
+                  </>
+                ) : (
+                  <img src={m.url} alt="" className="w-full h-full object-cover rounded-lg" />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <p className="text-xs font-semibold text-stone-500 uppercase mb-2 mt-3">Students involved</p>
         <ul className="space-y-2">
           {involvedStudents.map((s) => {
             const d = drafts[s.id];
@@ -11685,7 +12032,7 @@ function IncidentDetailView({ incident, roster, classId, config, plannerDays, lo
                         return (
                           <>
                             {sendEmails && <MailActionButtons email={sendEmails} subject={`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`} body={d.draft} size="small" />}
-                            <SendInAppButton studentId={s.id} classId={classId} message={d.draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
+                            <SendInAppButton studentId={s.id} classId={classId} message={d.draft} sendMessage={sendMessageToFamily}
                               className="flex items-center gap-1 text-[10px] font-semibold text-white bg-teal-700 rounded-lg px-2 py-1 hover:bg-teal-800" />
                           </>
                         );
@@ -11702,6 +12049,9 @@ function IncidentDetailView({ incident, roster, classId, config, plannerDays, lo
           })}
         </ul>
       </div>
+      {lightboxMedia && (
+        <PhotoLightbox url={lightboxMedia.url} type={lightboxMedia.type} onClose={() => setLightboxMedia(null)} />
+      )}
     </div>
   );
 }
@@ -13182,9 +13532,43 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
   const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
   const [showDetails, setShowDetails] = useState(false);
   const [flaggedForAdmin, setFlaggedForAdmin] = useState(false);
+  const [mediaItems, setMediaItems] = useState([]); // { id, file, preview, type, error }
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [incidentId] = useState(() => uid()); // generated up front so attachment paths are stable even before saving
   const toggleStudent = (id) => setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const save = () => onSave({ category, date, time, description, studentIds, flaggedForAdmin });
+  const addMedia = async (fileList) => {
+    const files = Array.from(fileList || []);
+    for (const file of files) {
+      const isVideo = file.type.startsWith("video/");
+      const itemId = uid();
+      if (isVideo) {
+        try { await validateVideoDuration(file); }
+        catch (err) { setMediaItems((prev) => [...prev, { id: itemId, file: null, preview: null, type: "video", error: err.message }]); continue; } // eslint-disable-line no-continue
+      }
+      setMediaItems((prev) => [...prev, { id: itemId, file, preview: URL.createObjectURL(file), type: isVideo ? "video" : "photo", error: null }]);
+    }
+  };
+  const removeMedia = (itemId) => setMediaItems((prev) => prev.filter((m) => m.id !== itemId));
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const media = [];
+      for (const item of mediaItems.filter((m) => m.file)) {
+        const url = item.type === "video"
+          ? await uploadOneVideo(item.file, `incident-attachments/${incidentId}/${uid()}.${(item.file.name || "").split(".").pop() || "mp4"}`)
+          : await uploadOneImage(item.file, `incident-attachments/${incidentId}/${uid()}.jpg`);
+        media.push({ url, type: item.type });
+      }
+      onSave({ id: incidentId, category, date, time, description, studentIds, flaggedForAdmin, media });
+    } catch (err) {
+      setSaveError(describeUploadError(err));
+      setSaving(false);
+    }
+  };
 
   return (
     <div className={PAGE}>
@@ -13214,9 +13598,35 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
           <span className="text-xs text-stone-400 ml-auto">{flaggedForAdmin ? "Shows on the admin overview" : "Tap to flag"}</span>
         </button>
 
-        <button disabled={studentIds.length === 0} onClick={save}
+        <label className="block text-sm font-semibold text-stone-700 mb-1">Photo or video <span className="text-stone-400 font-normal">(optional)</span></label>
+        {mediaItems.length > 0 && (
+          <div className={`grid gap-1 mb-1.5 ${mediaItems.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+            {mediaItems.map((m) => (
+              <div key={m.id} className="relative">
+                {m.error ? (
+                  <div className="w-full aspect-square rounded-lg bg-rose-50 border border-rose-200 flex items-center justify-center p-2">
+                    <p className="text-[10px] text-rose-600 text-center">{m.error}</p>
+                  </div>
+                ) : m.type === "video" ? (
+                  <video src={m.preview} className="w-full aspect-square object-cover rounded-lg" />
+                ) : (
+                  <img src={m.preview} alt="" className="w-full aspect-square object-cover rounded-lg" />
+                )}
+                <button onClick={() => removeMedia(m.id)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 mb-4 cursor-pointer">
+          + Add photo or video
+          <input type="file" accept="image/*,video/*" multiple onChange={(e) => { addMedia(e.target.files); e.target.value = ""; }} className="hidden" />
+        </label>
+
+        {saveError && <p className="text-xs text-rose-600 mb-3">{saveError}</p>}
+
+        <button disabled={studentIds.length === 0 || saving} onClick={save}
           className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40 mb-2">
-          Log it — that's enough for now
+          {saving ? "Saving…" : "Log it — that's enough for now"}
         </button>
         {studentIds.length === 0 && <p className="text-xs text-stone-400 text-center mb-3">Select at least one student</p>}
 
@@ -13238,9 +13648,9 @@ function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
               <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" placeholder="Type, or use the mic" />
               <MicButton onResult={(spoken) => setDescription((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
             </div>
-            <button disabled={studentIds.length === 0} onClick={save}
+            <button disabled={studentIds.length === 0 || saving} onClick={save}
               className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-              Save with these details
+              {saving ? "Saving…" : "Save with these details"}
             </button>
           </div>
         )}
@@ -13348,7 +13758,7 @@ Keep it under 120 words, friendly but direct, no exaggeration. Output only the m
   return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
-function MessageDraftView({ student, flag, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onSaveParentEmail, onLogSent }) {
+function MessageDraftView({ student, flag, classId, config, loggedInTeacher, sendMessageToFamily, onBack, onSaveParentEmail, onLogSent }) {
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -13421,7 +13831,7 @@ function MessageDraftView({ student, flag, classId, config, loggedInTeacher, sen
         <div className="flex flex-wrap gap-2 mb-2">
           <button onClick={run} className="flex items-center gap-1.5 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
           {sendEmails && <MailActionButtons email={sendEmails} subject={subject} body={draft} />}
-          <SendInAppButton studentId={student.id} classId={classId} message={draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily} />
+          <SendInAppButton studentId={student.id} classId={classId} message={draft} sendMessage={sendMessageToFamily} />
           <button onClick={logSent} disabled={logged}
             className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
             {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -13622,109 +14032,6 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
   );
 }
 
-// The "compose new" half of My Messages — same reasoning as ClassBroadcastComposer: this is the
-// individual-teacher channel's "write something new" side, embedded next to its own inbox rather
-// than living as a separate destination.
-function IndividualMessageComposer({ roster, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onLogSent }) {
-  const [selectedIds, setSelectedIds] = useState([]);
-  const [topic, setTopic] = useState("");
-  const [draft, setDraft] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [sentTo, setSentTo] = useState(null); // number of families the message went to, once sent
-  const [noFamilyWarning, setNoFamilyWarning] = useState(null); // names of selected students with no linked parent account
-
-  const selectedStudents = roster.filter((s) => selectedIds.includes(s.id));
-  const toggleStudent = (id) => { setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])); setDraft(null); setSentTo(null); };
-
-  const run = async () => {
-    if (!topic.trim() || selectedStudents.length === 0) return;
-    setLoading(true); setError(false); setDraft(null); setSentTo(null);
-    try {
-      const text = await generateStudentTopicMessage(topic.trim(), selectedStudents.map((s) => s.name), config, loggedInTeacher);
-      setDraft(text || "");
-    } catch {
-      setError(true);
-      setDraft(""); // generation failed, but the teacher can still write it themselves below
-    } finally { setLoading(false); }
-  };
-
-  const send = async () => {
-    if (!draft?.trim()) return;
-    setSending(true);
-    const allFamilies = await loadAllWithPrefix("family:");
-    const groupIds = new Set();
-    const studentsWithNoFamily = [];
-    selectedStudents.forEach((s) => {
-      const matches = allFamilies.filter((f) => (f.studentLinks || []).some((l) => l.studentId === s.id && l.classId === classId));
-      if (matches.length === 0) studentsWithNoFamily.push(s.name);
-      matches.forEach((f) => groupIds.add(f.familyGroupId || f.uid));
-    });
-    for (const groupId of groupIds) {
-      await sendIndividualMessageToFamily(groupId, draft.trim()); // eslint-disable-line no-await-in-loop
-    }
-    selectedStudents.forEach((s) => onLogSent(s.id, { date: todayISO(), channel: "in-app", type: "automated", source: "custom-message", subject: topic.slice(0, 60), body: draft }));
-    setNoFamilyWarning(studentsWithNoFamily.length > 0 ? studentsWithNoFamily : null);
-    setSentTo(groupIds.size);
-    setSending(false);
-  };
-
-  return (
-    <div className="md:w-[32rem]">
-      <p className="text-stone-500 text-sm mb-4">Build a message about anything — not tied to a specific incident or report — for one student or a few at once. Sent as an in-app message the parent can reply to.</p>
-      <label className="block text-xs font-medium text-stone-500 mb-1">Student(s)</label>
-      {roster.length === 0 ? (
-        <p className="text-xs text-stone-400 mb-4">Add students from Settings first.</p>
-      ) : (
-        <div className="flex flex-wrap gap-1.5 mb-4">
-          {roster.map((s) => {
-            const isSelected = selectedIds.includes(s.id);
-            return (
-              <button key={s.id} onClick={() => toggleStudent(s.id)}
-                className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${isSelected ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
-                {s.name}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
-      <div className="flex items-start gap-1.5 mb-3">
-        <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
-          placeholder="e.g. Wanted to check in about how the week has been going since the move."
-          className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-        <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-      </div>
-      <button onClick={run} disabled={!topic.trim() || selectedStudents.length === 0 || loading}
-        className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-        {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft !== null ? "Regenerate" : "Generate message"}
-      </button>
-
-      {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
-
-      {draft !== null && !loading && (
-        <>
-          <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
-          <div className="flex items-start gap-1.5 mb-4">
-            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-            <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-          </div>
-          <button onClick={send} disabled={sending || !draft.trim() || sentTo !== null}
-            className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${sentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
-            {sending ? <Loader2 className="animate-spin" size={15} /> : sentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
-            {sending ? "Sending…" : sentTo !== null ? `Sent to ${sentTo} famil${sentTo === 1 ? "y" : "ies"}` : "Send in-app message"}
-          </button>
-          {noFamilyWarning && (
-            <p className="text-xs text-amber-700 mt-2">No linked parent account yet for: {noFamilyWarning.join(", ")} — they didn't get this message. Add a parent account for them in Settings first.</p>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
 // ---------- Settings ----------
 
 const HEBREW_MONTHS = [
@@ -13764,8 +14071,8 @@ function buildParentLoginEmail(parentName, studentName, studentType, parentEmail
   const portalUrl = `${window.location.origin}${window.location.pathname}?portal=parent`;
   const isPreschool = studentType === "preschool";
   const featureList = isPreschool
-    ? `- Check ${studentName} in and out yourself by scanning the QR code posted at school\n- See a daily log of ${studentName}'s day — mood, meals, naps, diapers, and photos\n- Message ${studentName}'s classroom, a specific teacher, or the school office directly`
-    : `- Message ${studentName}'s classroom, a specific teacher, or the school office directly, right from your phone`;
+    ? `- Check ${studentName} in and out yourself by scanning the QR code posted at school\n- See a daily log of ${studentName}'s day — mood, meals, naps, diapers, and photos\n- Message ${studentName}'s classroom or the school office directly`
+    : `- Message ${studentName}'s classroom or the school office directly, right from your phone`;
 
   const subject = `Your account for ${studentName}'s school app`;
   const body = `Hi ${parentName || "there"},
@@ -14577,6 +14884,17 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             )}
           </Section>
 
+          {isPreschool && (
+            <Section title="Daily Log tiles">
+              <label className="flex items-center gap-2 text-sm text-stone-700">
+                <input type="checkbox" checked={config.preschool?.moodEnabled !== false}
+                  onChange={(e) => update((c) => { c.preschool = { ...(c.preschool || {}), moodEnabled: e.target.checked }; return c; })} />
+                Show the Mood tile in Daily Log
+              </label>
+              <p className="text-xs text-stone-400 mt-1">Turn this off if your program doesn't track mood — the tile disappears from Daily Log, but nothing already logged is deleted.</p>
+            </Section>
+          )}
+
           <Section title="Students">
             <div className="flex gap-2 mb-1">
               <input value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !showAddStudentDetails && submitNewStudent()}
@@ -15362,7 +15680,7 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
 // email to both at once (a single "to" can hold multiple addresses). In-app sending goes to the
 // family as a whole regardless of which guardian's email was toggled on, since there's one shared
 // family account, not a separate one per guardian's contact method.
-function ParentSendActions({ student, classId, subject, body, sendIndividualMessageToFamily, size = "normal" }) {
+function ParentSendActions({ student, classId, subject, body, sendMessageToFamily, size = "normal" }) {
   const hasP2 = Boolean(student.parent2Email || student.parent2Phone);
   const [selected, setSelected] = useState(["p1"]);
   const toggle = (p) => setSelected((prev) => {
@@ -15392,7 +15710,7 @@ function ParentSendActions({ student, classId, subject, body, sendIndividualMess
       )}
       <div className="flex flex-wrap gap-2">
         {emails && <MailActionButtons email={emails} subject={subject} body={body} size={size} />}
-        <SendInAppButton studentId={student.id} classId={classId} message={body} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
+        <SendInAppButton studentId={student.id} classId={classId} message={body} sendMessage={sendMessageToFamily}
           className={`flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg hover:bg-teal-800 ${size === "small" ? "px-2.5 py-1.5" : "px-3 py-2"}`} />
       </div>
     </div>
