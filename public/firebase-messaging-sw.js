@@ -1,16 +1,48 @@
-// This file has to live at the site's root (not inside /public/js or similar) — a service
-// worker can only control the scope it's served from, and the root is what covers the whole app.
-//
-// Right now this just registers cleanly so the app counts as installable. Firebase's messaging
-// setup gets added here in the next phase — this file is deliberately named
-// firebase-messaging-sw.js in advance since that's the path Firebase's SDK looks for by default,
-// so nothing needs to be renamed or re-registered later.
+importScripts("https://www.gstatic.com/firebasejs/12.4.0/firebase-app-compat.js");
+importScripts("https://www.gstatic.com/firebasejs/12.4.0/firebase-messaging-compat.js");
  
-self.addEventListener("install", () => {
-  self.skipWaiting();
+// Same config as your real src/firebase.js — a service worker runs in its own separate context
+// with no access to your app's modules or imports, so it needs its own copy of this, not a
+// shared one.
+firebase.initializeApp({
+  apiKey: "AIzaSyDP07Yo9gCUsQw5SO1B4bTshkZmHP-6xYQ",
+  authDomain: "classroom-tracker-3cb28.firebaseapp.com",
+  projectId: "classroom-tracker-3cb28",
+  storageBucket: "classroom-tracker-3cb28.firebasestorage.app",
+  messagingSenderId: "822542197252",
+  appId: "1:822542197252:web:649dbe767af1fba792cb51",
 });
  
-self.addEventListener("activate", (event) => {
-  event.waitUntil(self.clients.claim());
+const messaging = firebase.messaging();
+ 
+// Fires when a push arrives while the app isn't the active tab (or isn't open at all) — this is
+// the actual "device buzzes with a notification" moment. If the app IS open and in the
+// foreground, this does NOT fire; that case is handled separately, in-app, later.
+messaging.onBackgroundMessage((payload) => {
+  const title = payload.notification?.title || "New notification";
+  self.registration.showNotification(title, {
+    body: payload.notification?.body || "",
+    icon: payload.data?.icon || "/icons-parent/icon-192.png",
+    badge: "/icons-parent/icon-192.png",
+    data: payload.data || {},
+  });
+});
+ 
+// Tapping the notification itself — brings an already-open tab to the front instead of opening a
+// duplicate one, and otherwise opens a fresh one landed on whatever page the notification was
+// actually about (a specific conversation, the blog, etc.), once that targeting is wired up.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || "/";
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        if (client.url.includes(self.location.origin) && "focus" in client) {
+          return client.focus();
+        }
+      }
+      return clients.openWindow(targetUrl);
+    })
+  );
 });
  
