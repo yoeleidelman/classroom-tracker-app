@@ -1,11 +1,26 @@
+ndex · HTML
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
-<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-<link rel="manifest" href="/manifest.json" />    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link id="apple-icon-link" rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link id="manifest-link" rel="manifest" href="/manifest.json" />    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta id="apple-title-meta" name="apple-mobile-web-app-title" content="Classroom" />
+    <meta id="theme-color-meta" name="theme-color" content="#2b2723" />
+    <script>
+      (function () {
+        var isParent = new URLSearchParams(window.location.search).get("portal") === "parent";
+        if (!isParent) return;
+        document.getElementById("manifest-link").setAttribute("href", "/manifest-parent.json");
+        document.getElementById("apple-icon-link").setAttribute("href", "/icons-parent/icon-192.png");
+        document.getElementById("apple-title-meta").setAttribute("content", "SJA Parent");
+        document.getElementById("theme-color-meta").setAttribute("content", "#a8562f");
+      })();
+    </script>
     <title>classroom-tracker-app</title>
   </head>
   <body>
@@ -13,3 +28,4 @@
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
+ 
