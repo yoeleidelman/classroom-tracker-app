@@ -29,7 +29,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -242,7 +242,7 @@ function getResultNote(r) { return r != null && typeof r === "object" ? (r.note 
 // hardcoded — this is also where the school reference itself is configurable (previously
 // hardcoded as "Hebrew school" regardless of what kind of school it actually was).
 function buildStyleInstructions(config, teacherName) {
-  const style = config.messageStyle || {};
+  const style = config?.messageStyle || {};
   const term = (style.schoolTerm || "school").trim() || "school";
   const toneText = {
     warm: "Write in a warm, personal tone — friendly but still professional.",
@@ -292,7 +292,7 @@ function toItalicUnicode(str) {
 }
 
 function applyMessageDisclaimer(draftText, config, schoolLabel, teacherSignOff) {
-  const style = config.messageStyle || {};
+  const style = config?.messageStyle || {};
   if (style.showDisclaimer === false) return draftText;
   const term = (style.schoolTerm || "school").trim() || "school";
   const label = schoolLabel || `Sent via your child's ${term} classroom system`;
@@ -3661,19 +3661,73 @@ function TourHint({ active, step, total, text, align = "left", onNext, onSkip, c
   );
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, myRole, onBack }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, myRole, config, teacher, threadKey, onBack }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [roughNote, setRoughNote] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState(false);
+  const [attachFile, setAttachFile] = useState(null);
+  const [attachPreview, setAttachPreview] = useState(null);
+  const [attachType, setAttachType] = useState(null); // "photo" | "video"
+  const [attachError, setAttachError] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [lightboxPhoto, setLightboxPhoto] = useState(null);
   const bottomRef = useRef(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "auto" }); }, [messages.length]);
 
+  const pickAttachment = async (file) => {
+    if (!file) return;
+    setAttachError(null);
+    const isVideo = file.type.startsWith("video/");
+    if (isVideo) {
+      try { await validateVideoDuration(file); }
+      catch (err) { setAttachError(err.message); return; }
+    }
+    setAttachFile(file);
+    setAttachType(isVideo ? "video" : "photo");
+    setAttachPreview(URL.createObjectURL(file));
+  };
+  const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
+
   const send = async () => {
-    if (!text.trim() || sending) return;
+    if ((!text.trim() && !attachFile) || sending) return;
     setSending(true);
-    await onSend(text.trim());
-    setText("");
+    try {
+      let attachmentUrl = null;
+      if (attachFile) {
+        setUploadProgress(0);
+        const ext = attachType === "video" ? (attachFile.name || "").split(".").pop() || "mp4" : "jpg";
+        const path = `message-attachments/${threadKey}/${uid()}.${ext}`;
+        attachmentUrl = attachType === "video"
+          ? await uploadOneVideo(attachFile, path, setUploadProgress)
+          : await uploadOneImage(attachFile, path, setUploadProgress);
+      }
+      await onSend(text.trim(), attachmentUrl, attachType);
+      setText("");
+      clearAttachment();
+    } catch (err) {
+      setAttachError(describeUploadError(err));
+    }
+    setUploadProgress(null);
     setSending(false);
+  };
+
+  const generate = async () => {
+    if (!roughNote.trim() || generating) return;
+    setGenerating(true);
+    setGenError(false);
+    try {
+      const draft = await generateReplyMessage(roughNote.trim(), messages, config, myRole, teacher);
+      setText(draft || "");
+      setShowGenerate(false);
+      setRoughNote("");
+    } catch {
+      setGenError(true);
+    }
+    setGenerating(false);
   };
 
   return (
@@ -3692,12 +3746,23 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, onB
           const mine = m.senderType === myRole;
           return (
             <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[80%] rounded-2xl px-3.5 py-2.5 ${mine ? "bg-teal-700 text-white" : "bg-white border border-stone-200 text-stone-800"}`}>
-                <p className={`text-[10px] font-semibold mb-0.5 ${mine ? "text-teal-100" : "text-stone-400"}`}>{m.senderName}</p>
-                <p className="text-sm whitespace-pre-wrap">{m.text}</p>
-                <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
-                  {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-                </p>
+              <div className={`max-w-[80%] rounded-2xl overflow-hidden ${mine ? "bg-teal-700 text-white" : "bg-white border border-stone-200 text-stone-800"}`}>
+                <div className="px-3.5 pt-2.5">
+                  <p className={`text-[10px] font-semibold mb-0.5 ${mine ? "text-teal-100" : "text-stone-400"}`}>{m.senderName}</p>
+                </div>
+                {m.attachmentType === "photo" && m.attachmentUrl && (
+                  <img src={m.attachmentUrl} alt="" onClick={() => setLightboxPhoto({ url: m.attachmentUrl })}
+                    className="w-full max-h-64 object-cover cursor-pointer mt-1" />
+                )}
+                {m.attachmentType === "video" && m.attachmentUrl && (
+                  <video src={m.attachmentUrl} controls playsInline className="w-full max-h-64 bg-black mt-1" />
+                )}
+                <div className="px-3.5 pb-2.5 pt-1">
+                  {m.text && <p className="text-sm whitespace-pre-wrap">{m.text}</p>}
+                  <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
+                    {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                  </p>
+                </div>
               </div>
             </div>
           );
@@ -3705,18 +3770,89 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, onB
         <div ref={bottomRef} />
       </div>
 
-      <div className="flex items-end gap-2 shrink-0 sticky bottom-0 bg-stone-50 pt-2 pb-1">
-        <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          className="flex-1 rounded-xl border border-stone-300 px-3 py-2.5 text-sm resize-none" />
-        <button onClick={send} disabled={!text.trim() || sending} className="bg-teal-700 text-white rounded-xl px-4 py-2.5 text-sm font-bold disabled:opacity-40 hover:bg-teal-800 shrink-0">
-          Send
-        </button>
+      {lightboxPhoto && <PhotoLightbox url={lightboxPhoto.url} onClose={() => setLightboxPhoto(null)} />}
+
+      <div className="shrink-0 sticky bottom-0 bg-stone-50 pt-2 pb-1">
+        {showGenerate && (
+          <div className="border border-teal-200 bg-teal-50/50 rounded-xl p-2.5 mb-2">
+            <div className="flex items-center gap-1.5">
+              <input value={roughNote} onChange={(e) => setRoughNote(e.target.value)} placeholder="What do you want to say? I'll polish it."
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); generate(); } }}
+                className="flex-1 rounded-lg border border-stone-300 px-2.5 py-1.5 text-sm" autoFocus />
+              <button onClick={generate} disabled={!roughNote.trim() || generating}
+                className="flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800 disabled:opacity-40 shrink-0">
+                {generating ? <Loader2 className="animate-spin" size={13} /> : <Sparkles size={13} />} {generating ? "…" : "Generate"}
+              </button>
+              <button onClick={() => { setShowGenerate(false); setRoughNote(""); }} className="text-stone-400 hover:text-stone-600 p-1 shrink-0"><X size={16} /></button>
+            </div>
+            {genError && <p className="text-xs text-rose-600 mt-1.5">Couldn't generate a draft right now — try again, or just type your message.</p>}
+          </div>
+        )}
+        {attachPreview && (
+          <div className="relative inline-block mb-2 ml-11">
+            {attachType === "video"
+              ? <video src={attachPreview} className="h-20 rounded-lg" />
+              : <img src={attachPreview} alt="" className="h-20 rounded-lg" />}
+            <button onClick={clearAttachment} className="absolute -top-1.5 -right-1.5 bg-stone-700 text-white rounded-full p-0.5"><X size={12} /></button>
+          </div>
+        )}
+        {attachError && <p className="text-xs text-rose-600 mb-1.5 ml-11">{attachError}</p>}
+        <div className="flex items-end gap-2">
+          <button onClick={() => setShowGenerate((v) => !v)} title="Generate with AI"
+            className={`shrink-0 rounded-xl p-2.5 border ${showGenerate ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+            <Sparkles size={17} />
+          </button>
+          <label title="Attach a photo or video"
+            className={`shrink-0 rounded-xl p-2.5 border cursor-pointer ${attachFile ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+            <Camera size={17} />
+            <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+          </label>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            className="flex-1 rounded-xl border border-stone-300 px-3 py-2.5 text-sm resize-none" />
+          <button onClick={send} disabled={(!text.trim() && !attachFile) || sending} className="bg-teal-700 text-white rounded-xl px-4 py-2.5 text-sm font-bold disabled:opacity-40 hover:bg-teal-800 shrink-0">
+            {sending ? (uploadProgress !== null ? `${uploadProgress}%` : "…") : "Send"}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
+// Shared full-size photo viewer — a photo embedded in a card is always cropped to fit that card's
+// shape, so this is the one place a parent (or teacher) actually sees the whole, uncropped image,
+// with a real download to their device rather than just a bigger version still trapped in the app.
+function PhotoLightbox({ url, caption, onClose }) {
+  const [downloading, setDownloading] = useState(false);
+  const download = async (e) => {
+    e.stopPropagation();
+    setDownloading(true);
+    try {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = "photo.jpg";
+      a.click();
+      URL.revokeObjectURL(blobUrl);
+    } catch {
+      window.open(url, "_blank"); // fallback if the fetch-and-save approach is blocked for any reason
+    }
+    setDownloading(false);
+  };
+  return (
+    <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={onClose}>
+      <button onClick={onClose} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2"><X size={22} /></button>
+      <img src={url} alt={caption || "Photo"} className="max-w-full max-h-[75vh] rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
+      {caption && <p className="text-white text-sm mt-3 text-center max-w-md">{caption}</p>}
+      <button onClick={download} disabled={downloading}
+        className="mt-4 flex items-center gap-1.5 text-sm font-semibold text-white bg-white/15 hover:bg-white/25 rounded-lg px-4 py-2 disabled:opacity-60">
+        {downloading ? <Loader2 className="animate-spin" size={15} /> : <Download size={15} />} {downloading ? "Downloading…" : "Download"}
+      </button>
+    </div>
+  );
+}
 function ChildDailyLogView({ link, onBack, onOpenBlog }) {
   const [date, setDate] = useState(todayISO());
   const [loading, setLoading] = useState(true);
@@ -3843,11 +3979,7 @@ function ChildDailyLogView({ link, onBack, onOpenBlog }) {
         </div>
       )}
       {viewingPhoto && (
-        <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={() => setViewingPhoto(null)}>
-          <button onClick={() => setViewingPhoto(null)} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2"><X size={22} /></button>
-          <img src={viewingPhoto.url} alt={viewingPhoto.caption || "Class photo"} className="max-w-full max-h-[80vh] rounded-lg" onClick={(e) => e.stopPropagation()} />
-          {viewingPhoto.caption && <p className="text-white text-sm mt-3 text-center">{viewingPhoto.caption}</p>}
-        </div>
+        <PhotoLightbox url={viewingPhoto.url} caption={viewingPhoto.caption} onClose={() => setViewingPhoto(null)} />
       )}
     </div>
   );
@@ -3902,8 +4034,13 @@ function ParentBlogView({ link, family, onBack }) {
   return (
     <div className="app-page">
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.className}</h1>
-      <p className="text-xs text-stone-400 mb-4">Class Blog</p>
+      <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
+        <img src="/logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
+        <div className="min-w-0">
+          <h1 className="display-font text-base font-bold text-stone-900 truncate">{link.className}</h1>
+          <p className="text-[11px] text-stone-400">Class Blog</p>
+        </div>
+      </div>
 
       {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
       {!loading && sorted.length === 0 && (
@@ -3983,10 +4120,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const thread = await loadJSON(`teacher-messages:${teacher.uid}:${myGroupId}`, { messages: [] }, true);
     setTeacherThread(thread || { messages: [] });
   };
-  const sendIndividualMessageToTeacher = async (teacherUid, text) => {
+  const sendIndividualMessageToTeacher = async (teacherUid, text, attachmentUrl, attachmentType) => {
     const key = `teacher-messages:${teacherUid}:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString() };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     return next;
@@ -4006,10 +4143,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const thread = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
     setAdminThread(thread || { messages: [] });
   };
-  const sendMessageToAdmin = async (text) => {
+  const sendMessageToAdmin = async (text, attachmentUrl, attachmentType) => {
     const key = `admin-messages:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString() };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     return next;
@@ -4057,10 +4194,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // Same conversation the teacher side writes to — one thread per family per class, not per
   // child, so two kids in the same room share one conversation with it rather than splitting an
   // otherwise identical exchange in two.
-  const sendMessageToTeacher = async (classId, text) => {
+  const sendMessageToTeacher = async (classId, text, attachmentUrl, attachmentType) => {
     const key = `class:${classId}:messages:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString() };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     return next;
@@ -4130,9 +4267,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family"
+        <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
           onBack={() => setMessagingClassId(null)}
-          onSend={async (text) => { await sendMessageToTeacher(messagingClassId, text); await openMessagesFor(messagingClassId); }} />
+          onSend={async (text, attachmentUrl, attachmentType) => { await sendMessageToTeacher(messagingClassId, text, attachmentUrl, attachmentType); await openMessagesFor(messagingClassId); }} />
       </div>
     );
   }
@@ -4141,9 +4278,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ConversationThreadView title="School Office" subtitle="For anything not specific to one classroom" messages={adminThread.messages} myRole="family"
+        <ConversationThreadView title="School Office" subtitle="For anything not specific to one classroom" messages={adminThread.messages} myRole="family" threadKey={`admin-${myGroupId}`}
           onBack={() => setMessagingAdmin(false)}
-          onSend={async (text) => { await sendMessageToAdmin(text); await openAdminMessages(); }} />
+          onSend={async (text, attachmentUrl, attachmentType) => { await sendMessageToAdmin(text, attachmentUrl, attachmentType); await openAdminMessages(); }} />
       </div>
     );
   }
@@ -4152,9 +4289,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ConversationThreadView title={messagingTeacher.name} subtitle="Individual — not shared with anyone else in the classroom" messages={teacherThread.messages} myRole="family"
+        <ConversationThreadView title={messagingTeacher.name} subtitle="Individual — not shared with anyone else in the classroom" messages={teacherThread.messages} myRole="family" threadKey={`teacher-${messagingTeacher.uid}`}
           onBack={() => setMessagingTeacher(null)}
-          onSend={async (text) => { await sendIndividualMessageToTeacher(messagingTeacher.uid, text); await openIndividualMessagesFor(messagingTeacher); }} />
+          onSend={async (text, attachmentUrl, attachmentType) => { await sendIndividualMessageToTeacher(messagingTeacher.uid, text, attachmentUrl, attachmentType); await openIndividualMessagesFor(messagingTeacher); }} />
       </div>
     );
   }
@@ -4700,25 +4837,6 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // given photo, since a security rule trying to check that would need to search inside an array
   // of tagged student ids — exactly the kind of check that's fragile to get right without being
   // able to test real rule execution, the same tradeoff made earlier for check-ins.
-  // Shared by the Photos tile and the class blog — same compress-then-upload-with-timeout
-  // pipeline either way, so a fix or improvement made for one automatically benefits both.
-  const uploadOneImage = async (file, path, onProgress) => {
-    const fileRef = storageRef(storage, path);
-    const compressed = await compressImageFile(file);
-    return new Promise((resolve, reject) => {
-      const task = uploadBytesResumable(fileRef, compressed, { contentType: "image/jpeg" });
-      const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 45000);
-      task.on("state_changed",
-        (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
-        (err) => { clearTimeout(timeoutId); reject(err); },
-        async () => {
-          clearTimeout(timeoutId);
-          try { resolve(await getDownloadURL(task.snapshot.ref)); }
-          catch (err) { reject(err); }
-        }
-      );
-    });
-  };
   const uploadClassPhoto = async (file, studentIds, caption, photoDate, onProgress) => {
     const photoId = uid();
     const path = `photos/${classId}/${photoId}.jpg`; // always jpg — compression always re-encodes to jpeg
@@ -4727,12 +4845,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistPhotos([entry, ...photos]);
     return entry;
   };
-  // Bundles several photo+caption "parts" into one shareable post — a teacher building a weekly
-  // recap sends it all at once, one notification, not one per photo. Every photo across every
-  // part goes through the exact same reliable pipeline as the Photos tile.
+  // Bundles several photo/video+caption "parts" into one shareable post — a teacher building a
+  // weekly recap sends it all at once, one notification, not one per item. Every file across every
+  // part goes through the same reliable pipeline as the Photos tile (or its video counterpart).
   const submitBlogPost = async (title, blocksInput, onProgress) => {
     const postId = uid();
-    const totalPhotos = blocksInput.reduce((sum, b) => sum + (b.files?.length || 0), 0);
+    const totalItems = blocksInput.reduce((sum, b) => sum + (b.files?.length || 0) + (b.videoFile ? 1 : 0), 0);
     let uploadedCount = 0;
     const uploadedBlocks = [];
     for (const block of blocksInput) {
@@ -4741,13 +4859,23 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         const path = `blog/${classId}/${postId}/${uid()}.jpg`;
         const url = await uploadOneImage(file, path, () => {
           // per-file progress isn't meaningful across multiple files — report overall completion instead
-          if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalPhotos, 1)) * 100));
+          if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalItems, 1)) * 100));
         });
         photoUrls.push(url);
         uploadedCount++;
-        if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalPhotos, 1)) * 100));
+        if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
       }
-      uploadedBlocks.push({ id: uid(), photoUrls, text: (block.text || "").trim() });
+      let videoUrl = null;
+      if (block.videoFile) {
+        const ext = (block.videoFile.name || "").split(".").pop() || "mp4";
+        const path = `blog/${classId}/${postId}/${uid()}.${ext}`;
+        videoUrl = await uploadOneVideo(block.videoFile, path, () => {
+          if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalItems, 1)) * 100));
+        });
+        uploadedCount++;
+        if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
+      }
+      uploadedBlocks.push({ id: uid(), photoUrls, videoUrl, text: (block.text || "").trim() });
     }
     const entry = withLogger({
       id: postId, timestamp: new Date().toISOString(), authorType: "teacher",
@@ -5335,10 +5463,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // One conversation per family per class — not per individual teacher, since a preschool room
   // often has more than one adult in it and a parent shouldn't need to know who's on duty today
   // to reach "the classroom." Any teacher assigned to this class reads and writes the same thread.
-  const sendMessageToFamily = async (familyUid, text) => {
+  const sendMessageToFamily = async (familyUid, text, attachmentUrl, attachmentType) => {
     const key = `class:${classId}:messages:${familyUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString() };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     return next;
@@ -5347,10 +5475,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // A second, separate line alongside the class-wide one — this teacher's own personal thread with
   // a family, not shared with any co-teacher or aide in the same room. Keyed by this teacher's own
   // uid, not the class, since it's their individual line regardless of which class it's about.
-  const sendIndividualMessageToFamily = async (familyUid, text) => {
+  const sendIndividualMessageToFamily = async (familyUid, text, attachmentUrl, attachmentType) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${familyUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString() };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     return next;
@@ -5541,11 +5669,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       </div>
 
       {view === "messages" && (
-        <TeacherMessagesView classId={classId} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} />
+        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} />
       )}
 
       {view === "individual-messages" && (
-        <TeacherIndividualMessagesView classId={classId} teacherUid={loggedInTeacher?.uid} sendIndividualMessageToFamily={sendIndividualMessageToFamily} navigate={setView} />
+        <TeacherIndividualMessagesView classId={classId} teacherUid={loggedInTeacher?.uid} roster={roster} config={config} loggedInTeacher={loggedInTeacher}
+          sendIndividualMessageToFamily={sendIndividualMessageToFamily} onLogSent={(studentId, entry) => addCommunication(studentId, entry)} navigate={setView} />
       )}
 
       {view === "communication" && (
@@ -5562,7 +5691,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "blog-compose" && (
-        <BlogComposeScreen onSubmit={submitBlogPost} onBack={() => setView("blog")} />
+        <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher} onSubmit={submitBlogPost} onBack={() => setView("blog")} />
       )}
 
       {view === "tools" && (
@@ -5572,15 +5701,6 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       {view === "comm-entry" && currentId && (
         <CommunicationEntryView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           onBack={() => setView("communication")} onAddEntry={(entry) => addCommunication(currentId, entry)} />
-      )}
-
-      {view === "class-announcement" && (
-        <ClassAnnouncementView roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} onBack={() => setView("communication")} />
-      )}
-
-      {view === "student-message-generator" && (
-        <StudentMessageGeneratorView roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily} onBack={() => setView("communication")}
-          onLogSent={(studentId, entry) => addCommunication(studentId, entry)} />
       )}
 
       {view === "monthly-reports" && (
@@ -7148,6 +7268,7 @@ const BLOG_REACTIONS = [
 function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment }) {
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
+  const [lightboxPhoto, setLightboxPhoto] = useState(null);
   const comments = post.comments || [];
 
   const submitComment = () => {
@@ -7171,18 +7292,25 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
 
       {post.title && <p className="display-font text-base font-bold text-stone-900 px-4 pb-2">{post.title}</p>}
 
-      <div className="space-y-3">
+      <div className="divide-y divide-stone-100">
         {post.blocks.map((block) => (
-          <div key={block.id}>
-            {block.photoUrls.length === 1 && (
-              <img src={block.photoUrls[0]} alt="" className="w-full aspect-[4/3] object-cover" />
+          <div key={block.id} className="py-3 first:pt-0 last:pb-0">
+            {block.photoUrls?.length === 1 && (
+              <img src={block.photoUrls[0]} alt="" onClick={() => setLightboxPhoto({ url: block.photoUrls[0], caption: block.text })}
+                className="w-full aspect-[4/3] object-cover cursor-pointer" />
             )}
-            {block.photoUrls.length > 1 && (
+            {block.photoUrls?.length > 1 && (
               <div className="grid grid-cols-2 gap-0.5">
-                {block.photoUrls.map((src, i) => <img key={i} src={src} alt="" className="w-full aspect-square object-cover" />)}
+                {block.photoUrls.map((src, i) => (
+                  <img key={i} src={src} alt="" onClick={() => setLightboxPhoto({ url: src, caption: block.text })}
+                    className="w-full aspect-square object-cover cursor-pointer" />
+                ))}
               </div>
             )}
-            {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-2">{block.text}</p>}
+            {block.videoUrl && (
+              <video src={block.videoUrl} controls playsInline className="w-full max-h-96 bg-black" />
+            )}
+            {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3">{block.text}</p>}
           </div>
         ))}
       </div>
@@ -7200,6 +7328,10 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
           );
         })}
       </div>
+
+      {lightboxPhoto && (
+        <PhotoLightbox url={lightboxPhoto.url} caption={lightboxPhoto.caption} onClose={() => setLightboxPhoto(null)} />
+      )}
 
       {commentsEnabled && (
         <div className="border-t border-stone-100 px-4 py-2.5">
@@ -7268,14 +7400,15 @@ function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, 
   );
 }
 
-function BlogComposeScreen({ onSubmit, onBack }) {
+function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
   const [title, setTitle] = useState("");
-  const [blocks, setBlocks] = useState([{ id: uid(), text: "", files: [], previews: [] }]);
+  const [blocks, setBlocks] = useState([{ id: uid(), text: "", files: [], previews: [], videoFile: null, videoPreview: null, videoError: null }]);
   const [posting, setPosting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
+  const [genState, setGenState] = useState({}); // blockId -> { open, roughNote, generating, error }
 
-  const addBlock = () => setBlocks((prev) => [...prev, { id: uid(), text: "", files: [], previews: [] }]);
+  const addBlock = () => setBlocks((prev) => [...prev, { id: uid(), text: "", files: [], previews: [], videoFile: null, videoPreview: null, videoError: null }]);
   const removeBlock = (id) => setBlocks((prev) => prev.filter((b) => b.id !== id));
   const updateText = (id, text) => setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, text } : b)));
   const addFiles = (id, fileList) => {
@@ -7287,10 +7420,39 @@ function BlogComposeScreen({ onSubmit, onBack }) {
     ? { ...b, files: b.files.filter((_, i) => i !== idx), previews: b.previews.filter((_, i) => i !== idx) }
     : b)));
 
-  const hasContent = blocks.some((b) => b.text.trim() || b.files.length > 0);
+  // Checked at selection time, not just at submit — a teacher who picked too-long a clip finds out
+  // immediately, not after waiting through most of an upload.
+  const addVideo = async (blockId, file) => {
+    if (!file) return;
+    setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoError: null } : b)));
+    try {
+      await validateVideoDuration(file);
+      setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoFile: file, videoPreview: URL.createObjectURL(file) } : b)));
+    } catch (err) {
+      setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoError: err.message } : b)));
+    }
+  };
+  const removeVideo = (blockId) => setBlocks((prev) => prev.map((b) => (b.id === blockId ? { ...b, videoFile: null, videoPreview: null, videoError: null } : b)));
+
+  const toggleGenerate = (blockId) => setGenState((prev) => ({ ...prev, [blockId]: { ...prev[blockId], open: !prev[blockId]?.open, roughNote: "", error: false } }));
+  const setRoughNote = (blockId, val) => setGenState((prev) => ({ ...prev, [blockId]: { ...prev[blockId], roughNote: val } }));
+  const generateFor = async (blockId) => {
+    const note = genState[blockId]?.roughNote?.trim();
+    if (!note) return;
+    setGenState((prev) => ({ ...prev, [blockId]: { ...prev[blockId], generating: true, error: false } }));
+    try {
+      const draft = await generateBlogCaption(note, config, loggedInTeacher);
+      updateText(blockId, draft || "");
+      setGenState((prev) => ({ ...prev, [blockId]: { open: false, roughNote: "", generating: false, error: false } }));
+    } catch {
+      setGenState((prev) => ({ ...prev, [blockId]: { ...prev[blockId], generating: false, error: true } }));
+    }
+  };
+
+  const hasContent = blocks.some((b) => b.text.trim() || b.files.length > 0 || b.videoFile);
 
   const submit = async () => {
-    if (!hasContent) { setError("Add at least a photo or some text first."); return; }
+    if (!hasContent) { setError("Add at least a photo, a video, or some text first."); return; }
     setError(null);
     setPosting(true);
     setProgress(0);
@@ -7303,7 +7465,7 @@ function BlogComposeScreen({ onSubmit, onBack }) {
     setPosting(false);
   };
 
-  const activeBlockCount = blocks.filter((b) => b.text.trim() || b.files.length > 0).length;
+  const activeBlockCount = blocks.filter((b) => b.text.trim() || b.files.length > 0 || b.videoFile).length;
 
   return (
     <div className={PAGE}>
@@ -7312,30 +7474,74 @@ function BlogComposeScreen({ onSubmit, onBack }) {
       <div className="md:w-96 space-y-3">
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Give this post a title (optional)"
           className="w-full display-font text-base font-bold rounded-lg border border-stone-300 px-3 py-2 outline-none focus:border-teal-400" />
-        {blocks.map((block, i) => (
-          <div key={block.id} className="border border-stone-200 rounded-xl p-2.5">
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="text-[10px] font-semibold text-stone-400 uppercase">Part {i + 1}</p>
-              {blocks.length > 1 && <button onClick={() => removeBlock(block.id)} className="text-[11px] text-rose-500 font-semibold">Remove</button>}
-            </div>
-            {block.previews.length > 0 && (
-              <div className={`grid gap-1 mb-1.5 ${block.previews.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
-                {block.previews.map((src, idx) => (
-                  <div key={idx} className="relative">
-                    <img src={src} alt="" className="w-full aspect-square object-cover rounded-lg" />
-                    <button onClick={() => removePhoto(block.id, idx)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
-                  </div>
-                ))}
+        {blocks.map((block, i) => {
+          const gs = genState[block.id] || {};
+          return (
+            <div key={block.id} className="border border-stone-200 rounded-xl p-2.5">
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-[10px] font-semibold text-stone-400 uppercase">Part {i + 1}</p>
+                {blocks.length > 1 && <button onClick={() => removeBlock(block.id)} className="text-[11px] text-rose-500 font-semibold">Remove</button>}
               </div>
-            )}
-            <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 mb-1.5 cursor-pointer">
-              + Add photo
-              <input type="file" accept="image/*" multiple onChange={(e) => { addFiles(block.id, e.target.files); e.target.value = ""; }} className="hidden" />
-            </label>
-            <textarea value={block.text} onChange={(e) => updateText(block.id, e.target.value)} placeholder="Add a caption..." rows={2}
-              className="w-full text-sm rounded-lg border border-stone-200 px-2.5 py-1.5 outline-none focus:border-teal-400" />
-          </div>
-        ))}
+              {block.previews.length > 0 && (
+                <div className={`grid gap-1 mb-1.5 ${block.previews.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+                  {block.previews.map((src, idx) => (
+                    <div key={idx} className="relative">
+                      <img src={src} alt="" className="w-full aspect-square object-cover rounded-lg" />
+                      <button onClick={() => removePhoto(block.id, idx)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {block.videoPreview && (
+                <div className="relative mb-1.5">
+                  <video src={block.videoPreview} controls className="w-full rounded-lg max-h-52" />
+                  <button onClick={() => removeVideo(block.id)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
+                </div>
+              )}
+              {block.videoError && <p className="text-[11px] text-rose-600 mb-1.5">{block.videoError}</p>}
+              <div className="flex gap-1.5 mb-1.5">
+                {!block.videoFile && (
+                  <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+                    + Add photo
+                    <input type="file" accept="image/*" multiple onChange={(e) => { addFiles(block.id, e.target.files); e.target.value = ""; }} className="hidden" />
+                  </label>
+                )}
+                {block.files.length === 0 && !block.videoFile && (
+                  <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+                    + Add video
+                    <input type="file" accept="video/*" onChange={(e) => { addVideo(block.id, e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+                  </label>
+                )}
+              </div>
+              {(block.files.length > 0 || block.videoFile) && (
+                <p className="text-[10px] text-stone-400 mb-1.5">One photo set or one video per part — add another part below for more.</p>
+              )}
+
+              {gs.open && (
+                <div className="border border-teal-200 bg-teal-50/50 rounded-lg p-2 mb-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <input value={gs.roughNote || ""} onChange={(e) => setRoughNote(block.id, e.target.value)} placeholder="What's this about? I'll polish it."
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); generateFor(block.id); } }}
+                      className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-xs" autoFocus />
+                    <button onClick={() => generateFor(block.id)} disabled={!gs.roughNote?.trim() || gs.generating}
+                      className="flex items-center gap-1 text-[11px] font-semibold text-white bg-teal-700 rounded-lg px-2.5 py-1.5 hover:bg-teal-800 disabled:opacity-40 shrink-0">
+                      {gs.generating ? <Loader2 className="animate-spin" size={12} /> : <Sparkles size={12} />} {gs.generating ? "…" : "Generate"}
+                    </button>
+                  </div>
+                  {gs.error && <p className="text-[11px] text-rose-600 mt-1">Couldn't generate right now — try again, or just type the caption.</p>}
+                </div>
+              )}
+              <div className="flex items-start gap-1.5">
+                <textarea value={block.text} onChange={(e) => updateText(block.id, e.target.value)} placeholder="Add a caption..." rows={2}
+                  className="flex-1 text-sm rounded-lg border border-stone-200 px-2.5 py-1.5 outline-none focus:border-teal-400" />
+                <button onClick={() => toggleGenerate(block.id)} title="Generate with AI"
+                  className={`shrink-0 rounded-lg p-2 border ${gs.open ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+                  <Sparkles size={15} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
         <button onClick={addBlock} className="text-xs font-semibold text-teal-700">+ Add another part to this post</button>
         {error && <p className="text-xs text-rose-600">{error}</p>}
         <button onClick={submit} disabled={posting} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">
@@ -9486,10 +9692,10 @@ function AdminMessagesView({ families, navigate }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const sendToFamily = async (groupId, text) => {
+  const sendToFamily = async (groupId, text, attachmentUrl, attachmentType) => {
     const key = `admin-messages:${groupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString() };
+    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     return next;
@@ -9502,9 +9708,9 @@ function AdminMessagesView({ families, navigate }) {
     const thread = threads[openGroup.groupId] || { messages: [] };
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
     return (
-      <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages}
+      <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
         onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text) => { await sendToFamily(openGroup.groupId, text); await refresh(); }} />
+        onSend={async (text, attachmentUrl, attachmentType) => { await sendToFamily(openGroup.groupId, text, attachmentUrl, attachmentType); await refresh(); }} />
     );
   }
 
@@ -9558,10 +9764,11 @@ function AdminMessagesView({ families, navigate }) {
 // Same grouping as the class-wide list — a second guardian shares this personal line with the
 // teacher too, since it's a private line between "this family" and "this teacher," not between
 // one specific login and the teacher.
-function TeacherIndividualMessagesView({ classId, teacherUid, sendIndividualMessageToFamily, navigate }) {
+function TeacherIndividualMessagesView({ classId, teacherUid, roster, config, loggedInTeacher, sendIndividualMessageToFamily, onLogSent, navigate }) {
   const [groups, setGroups] = useState(null);
   const [threads, setThreads] = useState({});
   const [openGroup, setOpenGroup] = useState(null);
+  const [mode, setMode] = useState("inbox"); // "inbox" | "compose"
 
   const refresh = useCallback(async () => {
     const all = await loadAllWithPrefix("family:");
@@ -9585,39 +9792,56 @@ function TeacherIndividualMessagesView({ classId, teacherUid, sendIndividualMess
     const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
     return (
-      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher"
+      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`indiv-${openGroup.groupId}`}
         onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text) => { await sendIndividualMessageToFamily(openGroup.groupId, text); await refresh(); }} />
+        onSend={async (text, attachmentUrl, attachmentType) => { await sendIndividualMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType); await refresh(); }} />
     );
   }
 
   return (
     <div className={PAGE}>
+      <Header navigate={navigate} />
+      <MainTabs active="communication" navigate={navigate} />
       <button onClick={() => navigate("communication")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-lg font-bold text-stone-900 mb-1">My individual messages</h1>
-      <p className="text-xs text-stone-400 mb-4">Your own personal line with each family — separate from the shared class conversation.</p>
+      <h1 className="display-font text-lg font-bold text-stone-900 mb-1">My Messages</h1>
+      <p className="text-xs text-stone-400 mb-3">Your own personal line with each family — separate from the shared class conversation.</p>
 
-      {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-      {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
-
-      <div className="space-y-2">
-        {(groups || []).map((g) => {
-          const thread = threads[g.groupId];
-          const last = thread?.messages?.[thread.messages.length - 1];
-          const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
-          const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-          return (
-            <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-semibold text-stone-900">{guardianNames}</p>
-                {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
-              </div>
-              <p className="text-xs text-stone-400 mb-1">{childNames}</p>
-              <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
-            </button>
-          );
-        })}
+      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
+        <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <Mail size={14} /> Inbox
+        </button>
+        <button onClick={() => setMode("compose")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "compose" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <Plus size={14} /> New message
+        </button>
       </div>
+
+      {mode === "compose" ? (
+        <IndividualMessageComposer roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily} onLogSent={onLogSent} />
+      ) : (
+        <>
+          {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+          {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
+
+          <div className="space-y-2">
+            {(groups || []).map((g) => {
+              const thread = threads[g.groupId];
+              const last = thread?.messages?.[thread.messages.length - 1];
+              const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+              const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+              return (
+                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-stone-900">{guardianNames}</p>
+                    {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                  </div>
+                  <p className="text-xs text-stone-400 mb-1">{childNames}</p>
+                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -9628,10 +9852,11 @@ function TeacherIndividualMessagesView({ classId, teacherUid, sendIndividualMess
 // Grouped by family, not by individual login — two guardians on the same family share one row
 // and one conversation here, the same way they share it on their own side, rather than showing up
 // as two disconnected families that happen to have the same kids.
-function TeacherMessagesView({ classId, sendMessageToFamily, loggedByName, navigate }) {
+function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, loggedByName, navigate }) {
   const [groups, setGroups] = useState(null); // null = loading
   const [threads, setThreads] = useState({}); // groupId -> {messages}
   const [openGroup, setOpenGroup] = useState(null);
+  const [mode, setMode] = useState("inbox"); // "inbox" | "compose"
 
   const refresh = useCallback(async () => {
     const all = await loadAllWithPrefix("family:");
@@ -9655,9 +9880,9 @@ function TeacherMessagesView({ classId, sendMessageToFamily, loggedByName, navig
     const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
     return (
-      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher"
+      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
         onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text) => { await sendMessageToFamily(openGroup.groupId, text); await refresh(); }} />
+        onSend={async (text, attachmentUrl, attachmentType) => { await sendMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType); await refresh(); }} />
     );
   }
 
@@ -9666,29 +9891,44 @@ function TeacherMessagesView({ classId, sendMessageToFamily, loggedByName, navig
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
       <button onClick={() => navigate("communication")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-lg font-bold text-stone-900 mb-4">Message families</h1>
+      <h1 className="display-font text-lg font-bold text-stone-900 mb-3">Classroom Messages</h1>
 
-      {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-      {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
-
-      <div className="space-y-2">
-        {(groups || []).map((g) => {
-          const thread = threads[g.groupId];
-          const last = thread?.messages?.[thread.messages.length - 1];
-          const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
-          const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-          return (
-            <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-semibold text-stone-900">{guardianNames}</p>
-                {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
-              </div>
-              <p className="text-xs text-stone-400 mb-1">{childNames}</p>
-              <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
-            </button>
-          );
-        })}
+      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
+        <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <Mail size={14} /> Inbox
+        </button>
+        <button onClick={() => setMode("compose")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "compose" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <Plus size={14} /> New broadcast
+        </button>
       </div>
+
+      {mode === "compose" ? (
+        <ClassBroadcastComposer roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} />
+      ) : (
+        <>
+          {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+          {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
+
+          <div className="space-y-2">
+            {(groups || []).map((g) => {
+              const thread = threads[g.groupId];
+              const last = thread?.messages?.[thread.messages.length - 1];
+              const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
+              const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+              return (
+                <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-stone-900">{guardianNames}</p>
+                    {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                  </div>
+                  <p className="text-xs text-stone-400 mb-1">{childNames}</p>
+                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -9702,16 +9942,10 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
       <MainTabs active="communication" navigate={navigate} />
 
       <button onClick={() => navigate("messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
-        <MessageCircle size={16} /> Message families
+        <Mail size={16} /> Classroom Messages
       </button>
       <button onClick={() => navigate("individual-messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
-        <MessageCircle size={16} /> My individual messages
-      </button>
-      <button onClick={() => navigate("class-announcement")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
-        <Mail size={16} /> Message the whole class
-      </button>
-      <button onClick={() => navigate("student-message-generator")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
-        <MessageCircle size={16} /> Generate a parent message
+        <MessageCircle size={16} /> My Messages
       </button>
 
       <div className="flex flex-col md:flex-row gap-2 mb-5">
@@ -9907,6 +10141,69 @@ function describeUploadError(err) {
   if (err?.message === "timeout") return "That's taking too long — check your connection and try again.";
   const code = err?.code ? ` (${err.code})` : "";
   return `Couldn't upload${code} — ${err?.message || "unknown error"}.`;
+}
+// Reads a video file's actual duration client-side, entirely locally — no upload needed just to
+// check length. Rejects clips over the limit before any bytes ever go to Storage, since there's no
+// value in letting someone wait through an upload only to find out afterward it was too long.
+const MAX_VIDEO_SECONDS = 30;
+function validateVideoDuration(file, maxSeconds = MAX_VIDEO_SECONDS) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(video.src);
+      if (video.duration > maxSeconds) {
+        reject(new Error(`Videos must be ${maxSeconds} seconds or shorter — this one is about ${Math.round(video.duration)}s. Trim it and try again.`));
+      } else {
+        resolve(video.duration);
+      }
+    };
+    video.onerror = () => { URL.revokeObjectURL(video.src); reject(new Error("Couldn't read that video file — try a different one.")); };
+    video.src = URL.createObjectURL(file);
+  });
+}
+// Shared by the Photos tile, the class blog, and message attachments — same compress-then-upload-
+// with-timeout pipeline everywhere, so a fix or improvement made in one place benefits all of them.
+// Module-level rather than tucked inside one component, since both the teacher side and the parent
+// side need to upload images.
+async function uploadOneImage(file, path, onProgress) {
+  const fileRef = storageRef(storage, path);
+  const compressed = await compressImageFile(file);
+  return new Promise((resolve, reject) => {
+    const task = uploadBytesResumable(fileRef, compressed, { contentType: "image/jpeg" });
+    const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 45000);
+    task.on("state_changed",
+      (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
+      (err) => { clearTimeout(timeoutId); reject(err); },
+      async () => {
+        clearTimeout(timeoutId);
+        try { resolve(await getDownloadURL(task.snapshot.ref)); }
+        catch (err) { reject(err); }
+      }
+    );
+  });
+}
+// Videos aren't compressed client-side the way photos are — real video transcoding in the browser
+// is heavy, complex infrastructure genuinely out of scope here. Instead, length is kept in check by
+// rejecting anything over the duration limit before upload even starts, and the upload itself gets
+// a longer timeout than a photo would, since even a short raw clip is a much bigger file than a
+// compressed image.
+async function uploadOneVideo(file, path, onProgress) {
+  await validateVideoDuration(file);
+  const fileRef = storageRef(storage, path);
+  return new Promise((resolve, reject) => {
+    const task = uploadBytesResumable(fileRef, file, { contentType: file.type || "video/mp4" });
+    const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 120000);
+    task.on("state_changed",
+      (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
+      (err) => { clearTimeout(timeoutId); reject(err); },
+      async () => {
+        clearTimeout(timeoutId);
+        try { resolve(await getDownloadURL(task.snapshot.ref)); }
+        catch (err) { reject(err); }
+      }
+    );
+  });
 }
 function compressImageFile(file, maxDimension = 2048, quality = 0.9) {
   return new Promise((resolve, reject) => {
@@ -10937,6 +11234,61 @@ Write a short, clear announcement — 2-4 sentences. Output only the message tex
   return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
+// Drafts a reply within an ongoing conversation, given a quick rough note and the recent
+// back-and-forth for context — lighter-weight than the topic-based generators used for starting a
+// new broadcast, since a reply usually just needs polishing, not a full brief. Teacher replies get
+// the same style/sign-off treatment as other teacher-authored messages; parent replies don't, since
+// that disclaimer is specifically framed as coming from the school.
+// Drafts a polished blog caption from a quick rough note — no conversation context needed here,
+// since a caption stands on its own rather than replying to anything, and no disclaimer sign-off
+// either, since a blog post is already clearly attributed via the post's own header, unlike a
+// direct message which needs to explain who it's automatically from.
+async function generateBlogCaption(roughNote, config, teacher) {
+  const prompt = `${buildStyleInstructions(config, teacher?.name)}
+
+This is a caption for a photo (or a standalone note) in a class blog post that every family in the class will see — not a private message to one family.
+
+STRICT RULES:
+- Use ONLY the information given below. Do not invent specifics that weren't stated.
+
+What the teacher wants to say, in their own rough words: ${roughNote}
+
+Write a short, warm caption — 1-2 sentences. Output only the caption text, nothing else.`;
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 300, messages: [{ role: "user", content: prompt }] }),
+  });
+  const data = await response.json();
+  return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+}
+async function generateReplyMessage(roughNote, recentMessages, config, senderRole, teacher) {
+  const isSchoolSide = senderRole === "teacher" || senderRole === "admin";
+  const context = recentMessages.slice(-4).map((m) => `${m.senderName}: ${m.text}`).join("\n");
+  const styleBlock = isSchoolSide
+    ? buildStyleInstructions(config, teacher?.name)
+    : "Write in a warm, clear, everyday tone — a genuine message from a parent to their child's school.";
+  const prompt = `${styleBlock}
+
+This is a reply within an ongoing message conversation between a ${isSchoolSide ? "school and a parent" : "parent and their child's school"}. Recent conversation for context:
+${context || "(no earlier messages yet — this is the first message in the thread)"}
+
+STRICT RULES:
+- Use ONLY the information given below. Do not invent specifics that weren't stated.
+- If the note is vague or missing a detail, write around it naturally rather than inventing one.
+
+What they want to say, in their own rough words: ${roughNote}
+
+Write a short, warm, clear reply — 1-3 sentences, matching the tone of a real back-and-forth conversation, not a formal announcement. Output only the message text, nothing else.`;
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 400, messages: [{ role: "user", content: prompt }] }),
+  });
+  const data = await response.json();
+  const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+  return isSchoolSide ? applyMessageDisclaimer(text, config, null, teacher?.messageSignOff) : text;
+}
 async function generateStudentTopicMessage(topic, studentNames, config, teacher) {
   const teacherName = teacher?.name;
   const who = studentNames.length === 1 ? studentNames[0] : `${studentNames.slice(0, -1).join(", ")} and ${studentNames[studentNames.length - 1]}`;
@@ -13156,7 +13508,11 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
   );
 }
 
-function ClassAnnouncementView({ roster, classId, config, loggedInTeacher, sendMessageToFamily, onBack }) {
+// The "compose new" half of Classroom Messages — embedded directly in TeacherMessagesView rather
+// than living as its own separate top-level destination, since it's fundamentally the same
+// classroom channel as the inbox, just the "write something new" side of it instead of "browse
+// what's there." No header of its own — the view embedding this provides that.
+function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, sendMessageToFamily }) {
   const [topic, setTopic] = useState("");
   const [subject, setSubject] = useState("");
   const [draft, setDraft] = useState(null);
@@ -13188,9 +13544,6 @@ function ClassAnnouncementView({ roster, classId, config, loggedInTeacher, sendM
     return !s.parentEmail && !s.parent2Email;
   });
 
-  // Fans out as a separate in-app message into every linked family's classroom thread — not a
-  // single broadcast/group thread, and not the blog. One family, one message, deduplicated by
-  // family group so a household with two guardians or two siblings here only gets it once.
   const sendInApp = async () => {
     if (!draft?.trim()) return;
     setSendingInApp(true);
@@ -13205,75 +13558,74 @@ function ClassAnnouncementView({ roster, classId, config, loggedInTeacher, sendM
   };
 
   return (
-    <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Message the whole class</h1>
-      <p className="text-stone-500 text-sm mb-5">A quick note in your own words, turned into a formal announcement to every family at once.</p>
-      <div className="md:w-[32rem]">
-        <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
-        <div className="flex items-start gap-1.5 mb-3">
-          <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
-            placeholder="e.g. Trip this Thursday — bring $10 and a labeled lunch. No school Friday for a teacher in-service day."
-            className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-          <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-        </div>
-        <button onClick={run} disabled={!topic.trim() || loading}
-          className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-          {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft ? "Regenerate" : "Generate announcement"}
-        </button>
-
-        {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
-
-        {draft !== null && !loading && (
-          <>
-            <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
-            <div className="flex items-start gap-1.5 mb-4">
-              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-              <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-            </div>
-
-            <div className="border border-teal-200 bg-teal-50/40 rounded-xl p-3 mb-4">
-              <p className="text-xs font-semibold text-stone-700 mb-1">Send as an in-app message</p>
-              <p className="text-[11px] text-stone-400 mb-2">Goes to every family linked to this class as a separate message in their classroom thread — each family sees only their own copy.</p>
-              <button onClick={sendInApp} disabled={sendingInApp || sentInAppTo !== null}
-                className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2 ${sentInAppTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
-                {sendingInApp ? <Loader2 className="animate-spin" size={14} /> : sentInAppTo !== null ? <Check size={14} /> : <MessageCircle size={14} />}
-                {sendingInApp ? "Sending…" : sentInAppTo !== null ? `Sent to ${sentInAppTo} famil${sentInAppTo === 1 ? "y" : "ies"}` : "Send in-app to the whole class"}
-              </button>
-            </div>
-
-            <p className="text-xs font-semibold text-stone-700 mb-1">Or send by email instead</p>
-            <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
-            <div className="flex gap-1.5 mb-2">
-              {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
-                <button key={val} onClick={() => setRecipientMode(val)}
-                  className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-stone-400 mb-1">
-              {parentEmails.length > 0
-                ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
-                : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
-            </p>
-            {missingEmail.length > 0 && (
-              <p className="text-xs text-amber-700 mb-3">
-                No parent email on file for: {missingEmail.map((s) => s.name).join(", ")} — add it in Settings for them to receive this.
-              </p>
-            )}
-            <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
-            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
-            <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
-            <p className="text-xs text-stone-400 mt-3">Email doesn't send automatically — review the message, then send it yourself.</p>
-          </>
-        )}
+    <div className="md:w-[32rem]">
+      <p className="text-stone-500 text-sm mb-4">A quick note in your own words, turned into a formal announcement to every family at once.</p>
+      <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
+      <div className="flex items-start gap-1.5 mb-3">
+        <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
+          placeholder="e.g. Trip this Thursday — bring $10 and a labeled lunch. No school Friday for a teacher in-service day."
+          className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
       </div>
+      <button onClick={run} disabled={!topic.trim() || loading}
+        className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+        {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft ? "Regenerate" : "Generate announcement"}
+      </button>
+
+      {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
+
+      {draft !== null && !loading && (
+        <>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
+          <div className="flex items-start gap-1.5 mb-4">
+            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+          </div>
+
+          <div className="border border-teal-200 bg-teal-50/40 rounded-xl p-3 mb-4">
+            <p className="text-xs font-semibold text-stone-700 mb-1">Send as an in-app message</p>
+            <p className="text-[11px] text-stone-400 mb-2">Goes to every family linked to this class as a separate message in their classroom thread — each family sees only their own copy.</p>
+            <button onClick={sendInApp} disabled={sendingInApp || sentInAppTo !== null}
+              className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2 ${sentInAppTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
+              {sendingInApp ? <Loader2 className="animate-spin" size={14} /> : sentInAppTo !== null ? <Check size={14} /> : <MessageCircle size={14} />}
+              {sendingInApp ? "Sending…" : sentInAppTo !== null ? `Sent to ${sentInAppTo} famil${sentInAppTo === 1 ? "y" : "ies"}` : "Send in-app to the whole class"}
+            </button>
+          </div>
+
+          <p className="text-xs font-semibold text-stone-700 mb-1">Or send by email instead</p>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+          <div className="flex gap-1.5 mb-2">
+            {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+              <button key={val} onClick={() => setRecipientMode(val)}
+                className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-stone-400 mb-1">
+            {parentEmails.length > 0
+              ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
+              : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
+          </p>
+          {missingEmail.length > 0 && (
+            <p className="text-xs text-amber-700 mb-3">
+              No parent email on file for: {missingEmail.map((s) => s.name).join(", ")} — add it in Settings for them to receive this.
+            </p>
+          )}
+          <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
+          <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+          <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
+          <p className="text-xs text-stone-400 mt-3">Email doesn't send automatically — review the message, then send it yourself.</p>
+        </>
+      )}
     </div>
   );
 }
 
-function StudentMessageGeneratorView({ roster, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent }) {
+// The "compose new" half of My Messages — same reasoning as ClassBroadcastComposer: this is the
+// individual-teacher channel's "write something new" side, embedded next to its own inbox rather
+// than living as a separate destination.
+function IndividualMessageComposer({ roster, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onLogSent }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const [topic, setTopic] = useState("");
   const [draft, setDraft] = useState(null);
@@ -13298,9 +13650,6 @@ function StudentMessageGeneratorView({ roster, classId, config, loggedInTeacher,
     } finally { setLoading(false); }
   };
 
-  // Sends the same drafted text into each selected student's family's individual thread with this
-  // teacher — deduplicated by family group, so siblings in the same family (or a family selected
-  // via two different students) only ever get the message once, not once per child.
   const send = async () => {
     if (!draft?.trim()) return;
     setSending(true);
@@ -13322,60 +13671,56 @@ function StudentMessageGeneratorView({ roster, classId, config, loggedInTeacher,
   };
 
   return (
-    <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Generate a parent message</h1>
-      <p className="text-stone-500 text-sm mb-5">Build a message about anything — not tied to a specific incident or report — for one student or a few at once. Sent as an in-app message the parent can reply to.</p>
-      <div className="md:w-[32rem]">
-        <label className="block text-xs font-medium text-stone-500 mb-1">Student(s)</label>
-        {roster.length === 0 ? (
-          <p className="text-xs text-stone-400 mb-4">Add students from Settings first.</p>
-        ) : (
-          <div className="flex flex-wrap gap-1.5 mb-4">
-            {roster.map((s) => {
-              const isSelected = selectedIds.includes(s.id);
-              return (
-                <button key={s.id} onClick={() => toggleStudent(s.id)}
-                  className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${isSelected ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
-                  {s.name}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
-        <div className="flex items-start gap-1.5 mb-3">
-          <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
-            placeholder="e.g. Wanted to check in about how the week has been going since the move."
-            className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-          <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+    <div className="md:w-[32rem]">
+      <p className="text-stone-500 text-sm mb-4">Build a message about anything — not tied to a specific incident or report — for one student or a few at once. Sent as an in-app message the parent can reply to.</p>
+      <label className="block text-xs font-medium text-stone-500 mb-1">Student(s)</label>
+      {roster.length === 0 ? (
+        <p className="text-xs text-stone-400 mb-4">Add students from Settings first.</p>
+      ) : (
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {roster.map((s) => {
+            const isSelected = selectedIds.includes(s.id);
+            return (
+              <button key={s.id} onClick={() => toggleStudent(s.id)}
+                className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${isSelected ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+                {s.name}
+              </button>
+            );
+          })}
         </div>
-        <button onClick={run} disabled={!topic.trim() || selectedStudents.length === 0 || loading}
-          className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-          {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft !== null ? "Regenerate" : "Generate message"}
-        </button>
+      )}
 
-        {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
-
-        {draft !== null && !loading && (
-          <>
-            <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
-            <div className="flex items-start gap-1.5 mb-4">
-              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-              <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-            </div>
-            <button onClick={send} disabled={sending || !draft.trim() || sentTo !== null}
-              className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${sentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
-              {sending ? <Loader2 className="animate-spin" size={15} /> : sentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
-              {sending ? "Sending…" : sentTo !== null ? `Sent to ${sentTo} famil${sentTo === 1 ? "y" : "ies"}` : "Send in-app message"}
-            </button>
-            {noFamilyWarning && (
-              <p className="text-xs text-amber-700 mt-2">No linked parent account yet for: {noFamilyWarning.join(", ")} — they didn't get this message. Add a parent account for them in Settings first.</p>
-            )}
-          </>
-        )}
+      <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
+      <div className="flex items-start gap-1.5 mb-3">
+        <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
+          placeholder="e.g. Wanted to check in about how the week has been going since the move."
+          className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
       </div>
+      <button onClick={run} disabled={!topic.trim() || selectedStudents.length === 0 || loading}
+        className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+        {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft !== null ? "Regenerate" : "Generate message"}
+      </button>
+
+      {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
+
+      {draft !== null && !loading && (
+        <>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
+          <div className="flex items-start gap-1.5 mb-4">
+            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+          </div>
+          <button onClick={send} disabled={sending || !draft.trim() || sentTo !== null}
+            className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${sentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
+            {sending ? <Loader2 className="animate-spin" size={15} /> : sentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
+            {sending ? "Sending…" : sentTo !== null ? `Sent to ${sentTo} famil${sentTo === 1 ? "y" : "ies"}` : "Send in-app message"}
+          </button>
+          {noFamilyWarning && (
+            <p className="text-xs text-amber-700 mt-2">No linked parent account yet for: {noFamilyWarning.join(", ")} — they didn't get this message. Add a parent account for them in Settings first.</p>
+          )}
+        </>
+      )}
     </div>
   );
 }
