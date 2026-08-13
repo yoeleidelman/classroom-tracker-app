@@ -3743,6 +3743,44 @@ function TourHint({ active, step, total, text, align = "left", onNext, onSkip, c
 // already watches, so nothing new gets added to what she has to monitor. Anything the office has
 // broadcast is still visible here, read-only, since that's a one-way push she chose to send, not
 // something requiring her to watch for replies.
+// Sits directly on the parent's home screen — reaching the office shouldn't require digging into
+// a "Messages" section at all, since it isn't a conversation, it's a launcher. "Updates" still
+// leads to anything the office has broadcast, for the (less common) case someone wants that history.
+function OfficeContactCard({ onViewUpdates }) {
+  const [officePhone, setOfficePhone] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadJSON("schoolSettings", {}, true).then((s) => { setOfficePhone(s?.officePhone || null); setLoading(false); });
+  }, []);
+
+  const digits = (officePhone || "").replace(/[^\d]/g, "");
+  if (loading || !digits) return null;
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-3.5 mb-4">
+      <div className="flex items-center justify-between mb-2.5">
+        <p className="text-sm font-semibold text-stone-800">Contact the office</p>
+        <button onClick={onViewUpdates} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Updates</button>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+          <Phone size={18} className="text-teal-700" />
+          <span className="text-[11px] font-semibold text-stone-700">Call</span>
+        </a>
+        <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+          <MessageCircle size={18} className="text-teal-700" />
+          <span className="text-[11px] font-semibold text-stone-700">Text</span>
+        </a>
+        <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+          <MessageCircle size={18} className="text-emerald-600" />
+          <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
+        </a>
+      </div>
+    </div>
+  );
+}
+
 function ContactOfficeView({ adminThread, onBack }) {
   const [officePhone, setOfficePhone] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -3961,8 +3999,12 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
 // thing, with a real download to their device rather than just a bigger version still trapped in
 // the app. Handles both photos and videos through the same component, since a mixed batch in a
 // blog post shouldn't need two different lightbox experiences depending on what was tapped.
-function PhotoLightbox({ url, type = "photo", caption, onClose }) {
+// Carousel navigation (arrows + swipe) is optional — only active when a caller passes a mediaList,
+// so every other usage of this component keeps behaving exactly as it did before.
+function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, currentIndex, onNavigate }) {
   const [downloading, setDownloading] = useState(false);
+  const touchStartX = useRef(null);
+  const hasCarousel = Array.isArray(mediaList) && mediaList.length > 1 && typeof currentIndex === "number";
   const download = async (e) => {
     e.stopPropagation();
     setDownloading(true);
@@ -3980,14 +4022,31 @@ function PhotoLightbox({ url, type = "photo", caption, onClose }) {
     }
     setDownloading(false);
   };
+  const goPrev = (e) => { e?.stopPropagation(); if (hasCarousel && currentIndex > 0) onNavigate(currentIndex - 1); };
+  const goNext = (e) => { e?.stopPropagation(); if (hasCarousel && currentIndex < mediaList.length - 1) onNavigate(currentIndex + 1); };
+  const onTouchStart = (e) => { touchStartX.current = e.touches[0].clientX; };
+  const onTouchEnd = (e) => {
+    if (touchStartX.current === null) return;
+    const delta = e.changedTouches[0].clientX - touchStartX.current;
+    if (Math.abs(delta) > 50) { if (delta > 0) goPrev(); else goNext(); }
+    touchStartX.current = null;
+  };
   return (
-    <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={onClose}
+      onTouchStart={hasCarousel ? onTouchStart : undefined} onTouchEnd={hasCarousel ? onTouchEnd : undefined}>
       <button onClick={onClose} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2"><X size={22} /></button>
+      {hasCarousel && currentIndex > 0 && (
+        <button onClick={goPrev} className="absolute left-2 md:left-4 top-1/2 -translate-y-1/2 text-white bg-black/50 rounded-full p-2 hover:bg-black/70"><ChevronLeft size={24} /></button>
+      )}
+      {hasCarousel && currentIndex < mediaList.length - 1 && (
+        <button onClick={goNext} className="absolute right-2 md:right-4 top-1/2 -translate-y-1/2 text-white bg-black/50 rounded-full p-2 hover:bg-black/70"><ChevronRight size={24} /></button>
+      )}
       {type === "video" ? (
         <video src={url} controls autoPlay playsInline className="max-w-full max-h-[75vh] rounded-lg" onClick={(e) => e.stopPropagation()} />
       ) : (
         <img src={url} alt={caption || "Photo"} className="max-w-full max-h-[75vh] rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
       )}
+      {hasCarousel && <p className="text-white/60 text-xs mt-2">{currentIndex + 1} of {mediaList.length}</p>}
       {caption && <p className="text-white text-sm mt-3 text-center max-w-md">{caption}</p>}
       <button onClick={download} disabled={downloading}
         className="mt-4 flex items-center gap-1.5 text-sm font-semibold text-white bg-white/15 hover:bg-white/25 rounded-lg px-4 py-2 disabled:opacity-60">
@@ -4135,6 +4194,7 @@ function ParentBlogView({ link, family, onBack }) {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState([]);
   const [commentsEnabled, setCommentsEnabled] = useState(true);
+  const [lightboxIndex, setLightboxIndex] = useState(null);
   const bottomRef = useRef(null);
   const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
   const authorName = family.name || "A family";
@@ -4174,6 +4234,24 @@ function ParentBlogView({ link, family, onBack }) {
 
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
 
+  // Flattened in the same chronological order the feed renders in, so swiping through the
+  // lightbox moves through every photo and video in the whole blog, not just the batch in
+  // whichever post you happened to tap into — the same feel as opening a photo in a chat and
+  // swiping through everything shared, not just one message's attachments.
+  const allMedia = sorted.flatMap((post) =>
+    post.blocks.flatMap((block) => {
+      const media = block.media || [
+        ...(block.photoUrls || []).map((url) => ({ url, type: "photo" })),
+        ...(block.videoUrl ? [{ url: block.videoUrl, type: "video" }] : []),
+      ];
+      return media.map((m) => ({ ...m, caption: block.text }));
+    })
+  );
+  const openMedia = (url) => {
+    const idx = allMedia.findIndex((m) => m.url === url);
+    if (idx !== -1) setLightboxIndex(idx);
+  };
+
   return (
     <div className="app-page">
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
@@ -4195,12 +4273,17 @@ function ParentBlogView({ link, family, onBack }) {
           <div className="space-y-4">
             {sorted.map((post) => (
               <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
-                commentsEnabled={commentsEnabled} onComment={onComment} />
+                commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
             ))}
           </div>
         </>
       )}
       <div ref={bottomRef} />
+      {lightboxIndex !== null && allMedia[lightboxIndex] && (
+        <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
+          mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
+          onClose={() => setLightboxIndex(null)} />
+      )}
     </div>
   );
 }
@@ -4213,18 +4296,17 @@ function ParentMainTabs({ active, navigate, hasUnread }) {
     { id: "home", label: "Home", icon: HomeIcon },
     { id: "messages", label: "Messages", icon: MessageCircle },
     { id: "blog", label: "Blog", icon: Newspaper },
-    { id: "settings", label: "Settings", icon: SettingsIcon },
   ];
   return (
-    <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1">
+    <div className="flex">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 relative flex items-center justify-center gap-1.5 rounded-md py-2 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-            <Icon size={15} /> {t.label}
-            {t.id === "messages" && hasUnread && <span className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-rose-500" />}
+            className={`flex-1 relative flex items-center justify-center gap-1.5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 ${isActive ? "text-teal-800 border-teal-700" : "text-stone-400 border-transparent"}`}>
+            <Icon size={16} /> {t.label}
+            {t.id === "messages" && hasUnread && <span className="absolute top-2 right-[28%] w-1.5 h-1.5 rounded-full bg-rose-500" />}
           </button>
         );
       })}
@@ -4456,28 +4538,35 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
-      <div className="max-w-lg mx-auto px-4 py-6">
-        <div className="flex items-center justify-between mb-4 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
+      <div className="bg-teal-800 sticky top-0 z-10 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)" }}>
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2.5 min-w-0">
-            <img src="/logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
+            <img src="/logo-transparent.png" alt="" className="w-8 h-8 object-contain shrink-0 bg-white rounded-lg p-0.5" />
             <div className="min-w-0">
-              <h1 className="display-font text-base font-bold text-stone-900 truncate">{family?.name || "Your family"}</h1>
-              <p className="text-[11px] text-stone-400">Family Portal</p>
+              <h1 className="display-font text-base font-bold text-white truncate leading-tight">{family?.name || "Your family"}</h1>
               {canSwitchToTeacher && (
-                <button onClick={onSwitchToTeacher} className="text-[11px] text-stone-400 hover:text-teal-700">Switch to Teacher view</button>
+                <button onClick={onSwitchToTeacher} className="text-[11px] text-teal-100 hover:text-white">Switch to Teacher view</button>
               )}
             </div>
           </div>
+          <button onClick={() => setParentTab("settings")} className="text-teal-100 hover:text-white p-2 rounded-lg hover:bg-white/10 shrink-0"><SettingsIcon size={20} /></button>
         </div>
+        {parentTab !== "settings" && (
+          <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
+            text="Contact the office right from Home now — Messages is just for your classroom."
+            onNext={advanceTour} onSkip={dismissTour}>
+            <div className="bg-white border-t border-stone-200 max-w-lg mx-auto">
+              <ParentMainTabs active={parentTab} navigate={setParentTab} hasUnread={unreadThreads.length > 0} />
+            </div>
+          </TourHint>
+        )}
+      </div>
 
-        <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
-          text="Messages and your class blog now live right here in the top bar — always one tap away."
-          onNext={advanceTour} onSkip={dismissTour}>
-          <ParentMainTabs active={parentTab} navigate={setParentTab} hasUnread={unreadThreads.length > 0} />
-        </TourHint>
-
+      <div className="max-w-lg mx-auto px-4 py-5">
         {parentTab === "settings" ? (
-          <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
+          <>
+            <button onClick={() => setParentTab("home")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+            <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
             <p className="font-semibold text-stone-800 text-sm mb-3">My account</p>
             <label className="block text-xs font-medium text-stone-500 mb-1">Family name</label>
             <div className="flex gap-2 mb-4">
@@ -4500,6 +4589,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             </button>
             <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
           </div>
+          </>
         ) : actionUnlocked ? (
           <>
             <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4">
@@ -4571,14 +4661,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 <ChevronRight size={16} className="text-stone-300" />
               </button>
             ))}
-            <button onClick={() => openAdminMessages()}
-              className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
-              <div>
-                <p className="font-semibold text-stone-900">School Office</p>
-                <p className="text-xs text-stone-400">Call, text, or WhatsApp — plus anything they've sent you</p>
-              </div>
-              <ChevronRight size={16} className="text-stone-300" />
-            </button>
           </div>
         ) : parentTab === "blog" ? (
           <div className="space-y-3">
@@ -4599,6 +4681,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           </div>
         ) : (
           <>
+            <OfficeContactCard onViewUpdates={() => openAdminMessages()} />
             {unreadThreads.length > 0 && (
               <div className="space-y-2 mb-4">
                 {unreadThreads.map((item) => (
@@ -7575,10 +7658,9 @@ const BLOG_REACTIONS = [
   { key: "clap", emoji: "👏" },
 ];
 
-function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment }) {
+function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia }) {
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
-  const [lightboxMedia, setLightboxMedia] = useState(null);
   const comments = post.comments || [];
 
   const submitComment = () => {
@@ -7613,7 +7695,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
           return (
             <div key={block.id} className="py-3 first:pt-0 last:pb-0">
               {media.length === 1 && (
-                <div className="relative cursor-pointer" onClick={() => setLightboxMedia({ url: media[0].url, type: media[0].type, caption: block.text })}>
+                <div className="relative cursor-pointer" onClick={() => onOpenMedia(media[0].url)}>
                   {media[0].type === "video" ? (
                     <>
                       <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
@@ -7629,7 +7711,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
               {media.length > 1 && (
                 <div className="grid grid-cols-2 gap-0.5">
                   {media.map((m, i) => (
-                    <div key={i} className="relative aspect-square cursor-pointer" onClick={() => setLightboxMedia({ url: m.url, type: m.type, caption: block.text })}>
+                    <div key={i} className="relative aspect-square cursor-pointer" onClick={() => onOpenMedia(m.url)}>
                       {m.type === "video" ? (
                         <>
                           <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
@@ -7664,10 +7746,6 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
         })}
       </div>
 
-      {lightboxMedia && (
-        <PhotoLightbox url={lightboxMedia.url} type={lightboxMedia.type} caption={lightboxMedia.caption} onClose={() => setLightboxMedia(null)} />
-      )}
-
       {commentsEnabled && (
         <div className="border-t border-stone-100 px-4 py-2.5">
           {comments.length > 0 && !commentsOpen && (
@@ -7698,8 +7776,26 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
 
 function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, onReact, onComment, navigate }) {
   const bottomRef = useRef(null);
+  const [lightboxIndex, setLightboxIndex] = useState(null);
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, []); // eslint-disable-line
+
+  // Same reasoning as the parent side's blog view — one continuous, chronological list of every
+  // photo and video across the whole feed, so swiping in the lightbox isn't limited to whichever
+  // post you tapped into.
+  const allMedia = sorted.flatMap((post) =>
+    post.blocks.flatMap((block) => {
+      const media = block.media || [
+        ...(block.photoUrls || []).map((url) => ({ url, type: "photo" })),
+        ...(block.videoUrl ? [{ url: block.videoUrl, type: "video" }] : []),
+      ];
+      return media.map((m) => ({ ...m, caption: block.text }));
+    })
+  );
+  const openMedia = (url) => {
+    const idx = allMedia.findIndex((m) => m.url === url);
+    if (idx !== -1) setLightboxIndex(idx);
+  };
 
   return (
     <div className={PAGE}>
@@ -7724,13 +7820,18 @@ function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, 
               {sorted.map((post) => (
                 <BlogPostCard key={post.id} post={post} currentUserId={currentUserId}
                   onReact={(postId, emoji) => onReact(postId, emoji, currentUserId)}
-                  commentsEnabled={commentsEnabled} onComment={onComment} />
+                  commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
               ))}
             </div>
           </>
         )}
         <div ref={bottomRef} />
       </div>
+      {lightboxIndex !== null && allMedia[lightboxIndex] && (
+        <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
+          mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
+          onClose={() => setLightboxIndex(null)} />
+      )}
     </div>
   );
 }
