@@ -23,13 +23,13 @@ import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
-import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
+import { ref as storageRef, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -278,7 +278,7 @@ function buildStyleInstructions(config, teacherName) {
 // received something similar. Applied in code after generation, not left to the AI, since it
 // needs to be exact and consistent every time.
 // Converts plain a-z/A-Z letters to their Unicode "Mathematical Italic" equivalents — visually
-// italic in any plain-text context (Gmail's compose link, WhatsApp, anywhere), since these are
+// italic in any plain-text context (Gmail's compose link, in-app messages, anywhere), since these are
 // genuinely different characters rather than a formatting instruction that a plain-text channel
 // could silently drop. Unicode has one gap in this block (lowercase h uses the pre-existing Planck
 // constant character by convention) which is handled as a special case below.
@@ -326,17 +326,28 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
 
 function uid() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 function todayISO() { return isoDate(new Date()); }
-function waLink(phone, message) {
-  const digits = (phone || "").replace(/[^\d]/g, "");
-  return `https://wa.me/${digits}?text=${encodeURIComponent(message)}`;
-}
-function WhatsAppButton({ phone, message, className }) {
-  if (!phone) return null;
+// Replaces WhatsAppButton across every "generate a message about a student, then send" flow —
+// looks up that student's linked family account and sends straight into this teacher's individual
+// thread with them, the same reliable, already-tested path used everywhere else in-app messaging
+// happens, rather than handing off to an outside app.
+function SendInAppButton({ studentId, classId, message, sendIndividualMessageToFamily, className }) {
+  const [state, setState] = useState("idle"); // idle | sending | sent | no-family
+  const send = async () => {
+    if (!message?.trim()) return;
+    setState("sending");
+    const allFamilies = await loadAllWithPrefix("family:");
+    const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === studentId && l.classId === classId));
+    if (!match) { setState("no-family"); return; }
+    await sendIndividualMessageToFamily(match.familyGroupId || match.uid, message.trim());
+    setState("sent");
+  };
+  if (state === "sent") return <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><Check size={13} /> Sent in-app</span>;
+  if (state === "no-family") return <span className="text-xs text-amber-700">No parent account linked for this student yet.</span>;
   return (
-    <a href={waLink(phone, message)} target="_blank" rel="noopener noreferrer"
-      className={className || "flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-2.5 py-1.5 hover:bg-emerald-700"}>
-      <MessageCircle size={12} /> Send WhatsApp
-    </a>
+    <button onClick={send} disabled={state === "sending"}
+      className={className || "flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg px-2.5 py-1.5 hover:bg-teal-800 disabled:opacity-50"}>
+      {state === "sending" ? <Loader2 className="animate-spin" size={12} /> : <MessageCircle size={12} />} Send in-app
+    </button>
   );
 }
 function withinWindow(dateStr, windowDays) {
@@ -3706,7 +3717,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, onB
   );
 }
 
-function ChildDailyLogView({ link, onBack }) {
+function ChildDailyLogView({ link, onBack, onOpenBlog }) {
   const [date, setDate] = useState(todayISO());
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
@@ -3760,7 +3771,10 @@ function ChildDailyLogView({ link, onBack }) {
     <div className="app-page">
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.studentName}</h1>
-      <p className="text-xs text-stone-400 mb-4">{link.className}</p>
+      <p className="text-xs text-stone-400 mb-3">{link.className}</p>
+      <button onClick={onOpenBlog} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-teal-700 border border-teal-300 rounded-xl py-2 mb-4 hover:bg-teal-50">
+        <Newspaper size={15} /> Class Blog
+      </button>
 
       <div className="flex items-center justify-center gap-3 mb-5 bg-white border border-stone-200 rounded-xl py-2">
         <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-teal-700 p-1"><ChevronLeft size={18} /></button>
@@ -3839,6 +3853,78 @@ function ChildDailyLogView({ link, onBack }) {
   );
 }
 
+// Self-contained, like ChildDailyLogView — fetches directly by classId rather than depending on
+// ClassApp's own closures, since a parent isn't inside any one class's context and may have
+// children in several different classes at once.
+function ParentBlogView({ link, family, onBack }) {
+  const [loading, setLoading] = useState(true);
+  const [posts, setPosts] = useState([]);
+  const [commentsEnabled, setCommentsEnabled] = useState(true);
+  const bottomRef = useRef(null);
+  const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
+  const authorName = family.name || "A family";
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      loadJSON(`class:${link.classId}:blogPosts`, [], true),
+      loadJSON(`class:${link.classId}:config`, {}, true),
+    ]).then(([bp, cfg]) => {
+      if (cancelled) return;
+      setPosts(bp || []);
+      setCommentsEnabled(cfg?.blogCommentsEnabled !== false);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [link.classId]);
+
+  useEffect(() => { if (!loading) bottomRef.current?.scrollIntoView({ block: "end" }); }, [loading]);
+
+  const persist = (next) => { setPosts(next); saveJSON(`class:${link.classId}:blogPosts`, next, true); };
+
+  const onReact = (postId, emoji) => {
+    const post = posts.find((p) => p.id === postId);
+    if (!post) return;
+    const current = post.reactions?.[emoji] || [];
+    const nextForEmoji = current.includes(reactorId) ? current.filter((id) => id !== reactorId) : [...current, reactorId];
+    persist(posts.map((p) => (p.id === postId ? { ...p, reactions: { ...p.reactions, [emoji]: nextForEmoji } } : p)));
+  };
+
+  const onComment = (postId, text) => {
+    if (!text.trim()) return;
+    const comment = { id: uid(), text: text.trim(), authorName, authorType: "family", timestamp: new Date().toISOString() };
+    persist(posts.map((p) => (p.id === postId ? { ...p, comments: [...(p.comments || []), comment] } : p)));
+  };
+
+  const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+
+  return (
+    <div className="app-page">
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.className}</h1>
+      <p className="text-xs text-stone-400 mb-4">Class Blog</p>
+
+      {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+      {!loading && sorted.length === 0 && (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
+      )}
+      {!loading && sorted.length > 0 && (
+        <>
+          <p className="text-center text-[11px] text-stone-400 mb-4">Beginning of the class blog</p>
+          <div className="space-y-4">
+            {sorted.map((post) => (
+              <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
+                commentsEnabled={commentsEnabled} onComment={onComment} />
+            ))}
+          </div>
+        </>
+      )}
+      <div ref={bottomRef} />
+    </div>
+  );
+}
+
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
   const [showAccount, setShowAccount] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
@@ -3859,6 +3945,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     else setTourStep((s) => s + 1);
   };
   const [viewingChild, setViewingChild] = useState(null); // the studentLink currently open in the daily log view, or null
+  const [viewingBlogFor, setViewingBlogFor] = useState(null); // the studentLink whose class blog is open, or null
   const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
   // A scan doesn't perform anything by itself — it only unlocks the ability to act, which then
   // has to be used deliberately per child. Locks again the moment they leave this screen, so
@@ -4020,11 +4107,20 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     setTimeout(() => setPwSuccess(false), 3000);
   };
 
+  if (viewingBlogFor) {
+    return (
+      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
+        <GlobalAppStyles />
+        <ParentBlogView link={viewingBlogFor} family={family} onBack={() => setViewingBlogFor(null)} />
+      </div>
+    );
+  }
+
   if (viewingChild) {
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ChildDailyLogView link={viewingChild} onBack={() => setViewingChild(null)} />
+        <ChildDailyLogView link={viewingChild} onBack={() => setViewingChild(null)} onOpenBlog={() => setViewingBlogFor(viewingChild)} />
       </div>
     );
   }
@@ -4431,6 +4527,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [programsInClass, setProgramsInClass] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [photos, setPhotos] = useState([]);
+  const [blogPosts, setBlogPosts] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
   const [classPoints, setClassPoints] = useState({});
   const [monthlyReportState, setMonthlyReportState] = useState({ dismissedMonth: null });
@@ -4482,6 +4579,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const c = await loadC("config", DEFAULT_CONFIG);
       const inc = await loadC("incidents", []);
       const ph = await loadC("photos", []);
+      const bp = await loadC("blogPosts", []);
       const ca = await loadC("classAssessments", []);
       const cp = await loadC("classPoints", {});
       const mrs = await loadC("monthlyReportState", { dismissedMonth: null });
@@ -4556,6 +4654,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: mergedPlanner });
       setIncidents(finalIncidents);
       setPhotos(ph);
+      setBlogPosts(bp);
       setClassAssessments(finalCA);
       setClassPoints(finalCP);
       setMonthlyReportState(mrs);
@@ -4593,6 +4692,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const persistStudent = (id, newData) => { setStudentData((prev) => ({ ...prev, [id]: newData })); saveC(`kriya:${id}`, newData); };
   const persistIncidents = (next) => { setIncidents(next); saveC("incidents", next); };
   const persistPhotos = (next) => { setPhotos(next); saveC("photos", next); };
+  const persistBlogPosts = (next) => { setBlogPosts(next); saveC("blogPosts", next); };
   // Photos live in Storage (the actual image), not Firestore — Firestore only ever holds a
   // reference to it (the download URL) plus who it's tagged to, mirroring how incidents already
   // work: one shared array per class, filtered per student when a specific child's log is shown.
@@ -4600,16 +4700,73 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // given photo, since a security rule trying to check that would need to search inside an array
   // of tagged student ids — exactly the kind of check that's fragile to get right without being
   // able to test real rule execution, the same tradeoff made earlier for check-ins.
-  const uploadClassPhoto = async (file, studentIds, caption, photoDate) => {
-    const photoId = uid();
-    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
-    const path = `photos/${classId}/${photoId}.${ext}`;
+  // Shared by the Photos tile and the class blog — same compress-then-upload-with-timeout
+  // pipeline either way, so a fix or improvement made for one automatically benefits both.
+  const uploadOneImage = async (file, path, onProgress) => {
     const fileRef = storageRef(storage, path);
-    await uploadBytes(fileRef, file);
-    const url = await getDownloadURL(fileRef);
+    const compressed = await compressImageFile(file);
+    return new Promise((resolve, reject) => {
+      const task = uploadBytesResumable(fileRef, compressed, { contentType: "image/jpeg" });
+      const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 45000);
+      task.on("state_changed",
+        (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
+        (err) => { clearTimeout(timeoutId); reject(err); },
+        async () => {
+          clearTimeout(timeoutId);
+          try { resolve(await getDownloadURL(task.snapshot.ref)); }
+          catch (err) { reject(err); }
+        }
+      );
+    });
+  };
+  const uploadClassPhoto = async (file, studentIds, caption, photoDate, onProgress) => {
+    const photoId = uid();
+    const path = `photos/${classId}/${photoId}.jpg`; // always jpg — compression always re-encodes to jpeg
+    const url = await uploadOneImage(file, path, onProgress);
     const entry = withLogger({ id: photoId, date: photoDate || todayISO(), url, storagePath: path, studentIds, caption: caption || "" });
     persistPhotos([entry, ...photos]);
     return entry;
+  };
+  // Bundles several photo+caption "parts" into one shareable post — a teacher building a weekly
+  // recap sends it all at once, one notification, not one per photo. Every photo across every
+  // part goes through the exact same reliable pipeline as the Photos tile.
+  const submitBlogPost = async (title, blocksInput, onProgress) => {
+    const postId = uid();
+    const totalPhotos = blocksInput.reduce((sum, b) => sum + (b.files?.length || 0), 0);
+    let uploadedCount = 0;
+    const uploadedBlocks = [];
+    for (const block of blocksInput) {
+      const photoUrls = [];
+      for (const file of block.files || []) {
+        const path = `blog/${classId}/${postId}/${uid()}.jpg`;
+        const url = await uploadOneImage(file, path, () => {
+          // per-file progress isn't meaningful across multiple files — report overall completion instead
+          if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalPhotos, 1)) * 100));
+        });
+        photoUrls.push(url);
+        uploadedCount++;
+        if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalPhotos, 1)) * 100));
+      }
+      uploadedBlocks.push({ id: uid(), photoUrls, text: (block.text || "").trim() });
+    }
+    const entry = withLogger({
+      id: postId, timestamp: new Date().toISOString(), authorType: "teacher",
+      title: (title || "").trim() || null, blocks: uploadedBlocks, reactions: {}, comments: [],
+    });
+    persistBlogPosts([...blogPosts, entry]);
+    return entry;
+  };
+  const toggleBlogReaction = (postId, emoji, reactorId) => {
+    const post = blogPosts.find((p) => p.id === postId);
+    if (!post) return;
+    const current = post.reactions?.[emoji] || [];
+    const nextForEmoji = current.includes(reactorId) ? current.filter((id) => id !== reactorId) : [...current, reactorId];
+    persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, reactions: { ...p.reactions, [emoji]: nextForEmoji } } : p)));
+  };
+  const addBlogComment = (postId, text, authorName, authorType) => {
+    if (!text.trim()) return;
+    const comment = { id: uid(), text: text.trim(), authorName, authorType, timestamp: new Date().toISOString() };
+    persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, comments: [...(p.comments || []), comment] } : p)));
   };
   const persistClassAssessments = (next) => { setClassAssessments(next); saveC("classAssessments", next); };
   const persistClassPoints = (next) => { setClassPoints(next); saveC("classPoints", next); };
@@ -5396,6 +5553,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           openStudent={(id) => { setCurrentId(id); setView("comm-entry"); }} />
       )}
 
+      {view === "blog" && (
+        <BlogFeedView posts={blogPosts} currentUserId={loggedInTeacher?.uid} currentUserType="teacher"
+          commentsEnabled={config.blogCommentsEnabled !== false}
+          onReact={toggleBlogReaction}
+          onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
+          navigate={setView} />
+      )}
+
+      {view === "blog-compose" && (
+        <BlogComposeScreen onSubmit={submitBlogPost} onBack={() => setView("blog")} />
+      )}
+
       {view === "tools" && (
         <ToolsView schoolTools={schoolTools} navigate={setView} />
       )}
@@ -5406,11 +5575,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "class-announcement" && (
-        <ClassAnnouncementView roster={roster} config={config} loggedInTeacher={loggedInTeacher} onBack={() => setView("communication")} />
+        <ClassAnnouncementView roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} onBack={() => setView("communication")} />
       )}
 
       {view === "student-message-generator" && (
-        <StudentMessageGeneratorView roster={roster} config={config} loggedInTeacher={loggedInTeacher} onBack={() => setView("communication")}
+        <StudentMessageGeneratorView roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily} onBack={() => setView("communication")}
           onLogSent={(studentId, entry) => addCommunication(studentId, entry)} />
       )}
 
@@ -5533,7 +5702,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
-        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher}
+        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} classId={classId} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
           onBack={() => setView(currentId ? "detail" : "home")}
           onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(studentId, email) => updateStudentField(studentId, "parentEmail", email)}
@@ -5542,14 +5711,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "fluency-detail" && currentId && selectedFluencyEntry && (
-        <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} config={config} loggedInTeacher={loggedInTeacher}
+        <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
           onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
 
       {view === "skill-detail" && currentId && selectedSkillCat && (
         <SkillDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
-          category={config.categories.find((c) => c.id === selectedSkillCat)} config={config} loggedInTeacher={loggedInTeacher}
+          category={config.categories.find((c) => c.id === selectedSkillCat)} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
           onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
@@ -5581,7 +5750,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "message-draft" && currentId && messageFlag && (
-        <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag} config={config} loggedInTeacher={loggedInTeacher}
+        <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
           onBack={() => setView("detail")} onSaveParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onLogSent={(entry) => addCommunication(currentId, entry)} />
       )}
@@ -5643,6 +5812,7 @@ function MainTabs({ active, navigate }) {
         { id: "attendance", label: "Attendance", icon: Check },
         { id: "daily-log", label: "Daily Log", icon: ClipboardList },
         { id: "communication", label: "Comm", icon: Mail },
+        { id: "blog", label: "Blog", icon: Newspaper },
         { id: "planner", label: "Planner", icon: Calendar },
       ]
     : [
@@ -5650,6 +5820,7 @@ function MainTabs({ active, navigate }) {
         { id: "assessments", label: "Assessments", icon: BookOpen },
         { id: "points", label: "Points", icon: Star },
         { id: "communication", label: "Comm", icon: Mail },
+        { id: "blog", label: "Blog", icon: Newspaper },
         { id: "planner", label: "Planner", icon: Calendar },
         { id: "tools", label: "Tools", icon: Wrench },
       ];
@@ -6967,12 +7138,221 @@ function MoodScreen({ date, roster, studentData, checkedInIds, setMood, onBack }
 // specific kids, not the whole room by assumption), then pick or take the picture itself. The
 // actual upload happens after the file is chosen, not before, so there's nothing to clean up if
 // a teacher picks students and then changes their mind about the photo.
+const BLOG_REACTIONS = [
+  { key: "heart", emoji: "❤️" },
+  { key: "smile", emoji: "😊" },
+  { key: "thumbsup", emoji: "👍" },
+  { key: "clap", emoji: "👏" },
+];
+
+function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment }) {
+  const [commentDraft, setCommentDraft] = useState("");
+  const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
+  const comments = post.comments || [];
+
+  const submitComment = () => {
+    if (!commentDraft.trim()) return;
+    onComment(post.id, commentDraft);
+    setCommentDraft("");
+    setCommentsOpen(true);
+  };
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden">
+      <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-2.5">
+        <div className="w-8 h-8 rounded-full bg-teal-100 flex items-center justify-center text-teal-800 text-xs font-bold shrink-0">
+          {(post.loggedBy || "?").split(" ").map((w) => w[0]).slice(0, 2).join("")}
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-stone-900 truncate">{post.loggedBy || "Class"}</p>
+          <p className="text-[11px] text-stone-400 capitalize">{post.authorType} · {formatRelativeTime(post.timestamp)}</p>
+        </div>
+      </div>
+
+      {post.title && <p className="display-font text-base font-bold text-stone-900 px-4 pb-2">{post.title}</p>}
+
+      <div className="space-y-3">
+        {post.blocks.map((block) => (
+          <div key={block.id}>
+            {block.photoUrls.length === 1 && (
+              <img src={block.photoUrls[0]} alt="" className="w-full aspect-[4/3] object-cover" />
+            )}
+            {block.photoUrls.length > 1 && (
+              <div className="grid grid-cols-2 gap-0.5">
+                {block.photoUrls.map((src, i) => <img key={i} src={src} alt="" className="w-full aspect-square object-cover" />)}
+              </div>
+            )}
+            {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-2">{block.text}</p>}
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-1 px-3 pt-3 pb-2">
+        {BLOG_REACTIONS.map((r) => {
+          const reactorIds = post.reactions?.[r.key] || [];
+          const active = reactorIds.includes(currentUserId);
+          return (
+            <button key={r.key} onClick={() => onReact(post.id, r.key)}
+              className={`flex items-center gap-1 text-xs font-semibold rounded-full px-2.5 py-1.5 ${active ? "bg-teal-50 text-teal-800 border border-teal-300" : "text-stone-500 border border-transparent hover:bg-stone-50"}`}>
+              <span className="text-sm leading-none">{r.emoji}</span>
+              {reactorIds.length > 0 && <span>{reactorIds.length}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {commentsEnabled && (
+        <div className="border-t border-stone-100 px-4 py-2.5">
+          {comments.length > 0 && !commentsOpen && (
+            <button onClick={() => setCommentsOpen(true)} className="text-xs text-stone-400 font-medium mb-1">
+              View {comments.length} comment{comments.length === 1 ? "" : "s"}
+            </button>
+          )}
+          {commentsOpen && (
+            <div className="space-y-1.5 mb-2">
+              {comments.map((c) => (
+                <p key={c.id} className="text-xs text-stone-600 leading-snug">
+                  <span className="font-semibold text-stone-800">{c.authorName}</span> {c.text}
+                </p>
+              ))}
+            </div>
+          )}
+          <div className="flex items-center gap-1.5">
+            <input value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitComment()} placeholder="Write a comment..."
+              className="flex-1 text-xs rounded-full border border-stone-200 px-3 py-1.5 outline-none focus:border-teal-400" />
+            <button onClick={submitComment} className="text-xs font-semibold text-teal-700 px-2">Post</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, onReact, onComment, navigate }) {
+  const bottomRef = useRef(null);
+  const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, []); // eslint-disable-line
+
+  return (
+    <div className={PAGE}>
+      <Header navigate={navigate} />
+      <MainTabs active="blog" navigate={navigate} />
+
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Class Blog</p>
+        {(currentUserType === "teacher" || currentUserType === "admin") && (
+          <button onClick={() => navigate("blog-compose")} className="text-xs font-bold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800">
+            + New post
+          </button>
+        )}
+      </div>
+      <div className="md:w-[28rem]">
+        {sorted.length === 0 ? (
+          <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center mt-4">Nothing posted here yet.</p>
+        ) : (
+          <>
+            <p className="text-center text-[11px] text-stone-400 my-4">Beginning of the class blog</p>
+            <div className="space-y-4">
+              {sorted.map((post) => (
+                <BlogPostCard key={post.id} post={post} currentUserId={currentUserId}
+                  onReact={(postId, emoji) => onReact(postId, emoji, currentUserId)}
+                  commentsEnabled={commentsEnabled} onComment={onComment} />
+              ))}
+            </div>
+          </>
+        )}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
+function BlogComposeScreen({ onSubmit, onBack }) {
+  const [title, setTitle] = useState("");
+  const [blocks, setBlocks] = useState([{ id: uid(), text: "", files: [], previews: [] }]);
+  const [posting, setPosting] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState(null);
+
+  const addBlock = () => setBlocks((prev) => [...prev, { id: uid(), text: "", files: [], previews: [] }]);
+  const removeBlock = (id) => setBlocks((prev) => prev.filter((b) => b.id !== id));
+  const updateText = (id, text) => setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, text } : b)));
+  const addFiles = (id, fileList) => {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+    setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, files: [...b.files, ...files], previews: [...b.previews, ...files.map((f) => URL.createObjectURL(f))] } : b)));
+  };
+  const removePhoto = (blockId, idx) => setBlocks((prev) => prev.map((b) => (b.id === blockId
+    ? { ...b, files: b.files.filter((_, i) => i !== idx), previews: b.previews.filter((_, i) => i !== idx) }
+    : b)));
+
+  const hasContent = blocks.some((b) => b.text.trim() || b.files.length > 0);
+
+  const submit = async () => {
+    if (!hasContent) { setError("Add at least a photo or some text first."); return; }
+    setError(null);
+    setPosting(true);
+    setProgress(0);
+    try {
+      await onSubmit(title, blocks, setProgress);
+      onBack();
+    } catch (err) {
+      setError(err?.message === "timeout" ? "That's taking too long — check your connection and try again." : "Couldn't post — check your connection and try again.");
+    }
+    setPosting(false);
+  };
+
+  const activeBlockCount = blocks.filter((b) => b.text.trim() || b.files.length > 0).length;
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-4">New blog post</h1>
+      <div className="md:w-96 space-y-3">
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Give this post a title (optional)"
+          className="w-full display-font text-base font-bold rounded-lg border border-stone-300 px-3 py-2 outline-none focus:border-teal-400" />
+        {blocks.map((block, i) => (
+          <div key={block.id} className="border border-stone-200 rounded-xl p-2.5">
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-[10px] font-semibold text-stone-400 uppercase">Part {i + 1}</p>
+              {blocks.length > 1 && <button onClick={() => removeBlock(block.id)} className="text-[11px] text-rose-500 font-semibold">Remove</button>}
+            </div>
+            {block.previews.length > 0 && (
+              <div className={`grid gap-1 mb-1.5 ${block.previews.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+                {block.previews.map((src, idx) => (
+                  <div key={idx} className="relative">
+                    <img src={src} alt="" className="w-full aspect-square object-cover rounded-lg" />
+                    <button onClick={() => removePhoto(block.id, idx)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 mb-1.5 cursor-pointer">
+              + Add photo
+              <input type="file" accept="image/*" multiple onChange={(e) => { addFiles(block.id, e.target.files); e.target.value = ""; }} className="hidden" />
+            </label>
+            <textarea value={block.text} onChange={(e) => updateText(block.id, e.target.value)} placeholder="Add a caption..." rows={2}
+              className="w-full text-sm rounded-lg border border-stone-200 px-2.5 py-1.5 outline-none focus:border-teal-400" />
+          </div>
+        ))}
+        <button onClick={addBlock} className="text-xs font-semibold text-teal-700">+ Add another part to this post</button>
+        {error && <p className="text-xs text-rose-600">{error}</p>}
+        <button onClick={submit} disabled={posting} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">
+          {posting ? `Posting… ${progress}%` : activeBlockCount > 1 ? "Post all parts together" : "Post"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PhotoUploadScreen({ tile, date, roster, photos, uploadClassPhoto, onBack }) {
   const st = TILE_STYLES[tile.color];
   const [selected, setSelected] = useState([]);
   const [caption, setCaption] = useState("");
   const [photoDate, setPhotoDate] = useState(date);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
 
@@ -6988,12 +7368,15 @@ function PhotoUploadScreen({ tile, date, roster, photos, uploadClassPhoto, onBac
     }
     setError(null);
     setUploading(true);
+    setProgress(0);
     try {
-      await uploadClassPhoto(file, selected, caption.trim(), photoDate);
+      await uploadClassPhoto(file, selected, caption.trim(), photoDate, setProgress);
       setSelected([]);
       setCaption("");
     } catch (err) {
-      setError("Couldn't upload — check your connection and try again.");
+      setError(err?.message === "timeout"
+        ? "That's taking too long — check your connection and try again."
+        : "Couldn't upload — check your connection and try again.");
     }
     setUploading(false);
   };
@@ -7029,10 +7412,10 @@ function PhotoUploadScreen({ tile, date, roster, photos, uploadClassPhoto, onBac
 
       {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
 
-      <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handleFile} className="hidden" />
+      <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFile} className="hidden" />
       <button onClick={() => fileInputRef.current?.click()} disabled={uploading}
         className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 flex items-center justify-center gap-2 ${st.solid} ${st.solidHover}`}>
-        <Camera size={18} /> {uploading ? "Uploading…" : "Take or choose a photo"}
+        <Camera size={18} /> {uploading ? `Uploading… ${progress}%` : "Take or choose a photo"}
       </button>
 
       {photosForDate.length > 0 && (
@@ -9320,16 +9703,12 @@ function CommunicationListView({ roster, studentData, navigate, openStudent }) {
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
 
-      {isPreschool && (
-        <button onClick={() => navigate("messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
-          <MessageCircle size={16} /> Message families
-        </button>
-      )}
-      {isPreschool && (
-        <button onClick={() => navigate("individual-messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
-          <MessageCircle size={16} /> My individual messages
-        </button>
-      )}
+      <button onClick={() => navigate("messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
+        <MessageCircle size={16} /> Message families
+      </button>
+      <button onClick={() => navigate("individual-messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+        <MessageCircle size={16} /> My individual messages
+      </button>
       <button onClick={() => navigate("class-announcement")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
         <Mail size={16} /> Message the whole class
       </button>
@@ -9517,6 +9896,35 @@ const SCHEDULE_BLOCK_COLORS = ["teal", "emerald", "amber", "rose", "cyan", "oran
 // teacher drag or resize just one day without disturbing the rest of the week. Migrated from the
 // old model exactly once, automatically, the first time a class loads under the new system, so
 // nothing already configured gets lost in the switch.
+// Resizes and re-compresses an image client-side before it ever reaches Storage — a typical phone
+// photo runs 3-15MB, which can make an upload look stuck for a long time (or fail outright) on a
+// slow connection. Shrinking to a reasonable max dimension and re-encoding as JPEG cuts that down
+// dramatically without a visible quality loss for anything displayed at app size.
+function compressImageFile(file, maxDimension = 1600, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxDimension || height > maxDimension) {
+        if (width > height) { height = Math.round(height * (maxDimension / width)); width = maxDimension; }
+        else { width = Math.round(width * (maxDimension / height)); height = maxDimension; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (!blob) { reject(new Error("Couldn't process that image.")); return; }
+        resolve(blob);
+      }, "image/jpeg", quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't read that image file.")); };
+    img.src = url;
+  });
+}
 function migrateSchedulesToBlocks(config) {
   const schedules = config.planner?.schedules || [];
   const weekdaySchedule = config.planner?.weekdaySchedule || {};
@@ -9574,6 +9982,22 @@ function findPeriodAtTime(dateStr, timeStr, config, plannerDays) {
     return start != null && end != null && mins >= start && mins < end;
   });
   return match ? match.label : null;
+}
+// A blog post's timestamp shows relative to now while recent ("2 hours ago"), then falls back to
+// an actual date once it's old enough that "X days ago" stops being useful at a glance.
+function formatRelativeTime(isoTimestamp) {
+  if (!isoTimestamp) return "";
+  const then = new Date(isoTimestamp);
+  const diffMs = Date.now() - then.getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "Yesterday";
+  if (days < 7) return `${days} days ago`;
+  return then.toLocaleDateString(undefined, { month: "short", day: "numeric", year: then.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
 }
 function formatTime12h(hhmm) {
   if (!hhmm || !hhmm.includes(":")) return hhmm || "";
@@ -10192,7 +10616,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
-function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
+function FluencyDetailView({ student, entry, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent, onUpdateParentEmail }) {
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(student?.parentEmail || "");
@@ -10266,7 +10690,7 @@ function FluencyDetailView({ student, entry, config, loggedInTeacher, onBack, on
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             {sendEmails && <MailActionButtons email={sendEmails} subject={`Fluency check — ${entry.date}`} body={draft} />}
-            {sendPhones.map((p) => <WhatsAppButton key={p.phone} phone={p.phone} message={draft} />)}
+            <SendInAppButton studentId={student.id} classId={classId} message={draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -10322,7 +10746,7 @@ function GrowthChart({ timeline, color }) {
   );
 }
 
-function SkillDetailView({ student, data, category, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
+function SkillDetailView({ student, data, category, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent, onUpdateParentEmail }) {
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState(student?.parentEmail || "");
@@ -10411,7 +10835,7 @@ function SkillDetailView({ student, data, category, config, loggedInTeacher, onB
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
             {sendEmails && <MailActionButtons email={sendEmails} subject={`${category.title} — Progress note`} body={draft} />}
-            {sendPhones.map((p) => <WhatsAppButton key={p.phone} phone={p.phone} message={draft} />)}
+            <SendInAppButton studentId={student.id} classId={classId} message={draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
             </button>
@@ -10733,7 +11157,7 @@ function PrintableStudentReport({ student, data, incidents, classAssessments, co
   );
 }
 
-function IncidentDetailView({ incident, roster, config, plannerDays, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
+function IncidentDetailView({ incident, roster, classId, config, plannerDays, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
   const [recipientModes, setRecipientModes] = useState({}); // studentId -> "p1" | "p2" | "both"
@@ -10901,9 +11325,8 @@ function IncidentDetailView({ incident, roster, config, plannerDays, loggedInTea
                         return (
                           <>
                             {sendEmails && <MailActionButtons email={sendEmails} subject={`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`} body={d.draft} size="small" />}
-                            {sendPhones.map((p) => (
-                              <WhatsAppButton key={p.phone} phone={p.phone} message={d.draft} className="flex items-center gap-1 text-[10px] font-semibold text-white bg-emerald-600 rounded-lg px-2 py-1 hover:bg-emerald-700" />
-                            ))}
+                            <SendInAppButton studentId={s.id} classId={classId} message={d.draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
+                              className="flex items-center gap-1 text-[10px] font-semibold text-white bg-teal-700 rounded-lg px-2 py-1 hover:bg-teal-800" />
                           </>
                         );
                       })()}
@@ -12018,6 +12441,58 @@ function PeriodListEditor({ periods, onChange, subjects }) {
   );
 }
 
+// A separate component from PeriodListEditor on purpose — that one is still shared with Half Day
+// templates, which stay untouched, so this doesn't retrofit color-coding onto something that
+// needs to keep working exactly as it did. Each period is its own color-coded card, editable
+// inline, with the same per-period notes field the regular (non-override) day view already has —
+// customizing a day still means seeing and planning that day, not just editing a list.
+function DayOverrideScheduleEditor({ periods, onChange, slotDrafts, setSlotDrafts, saveSlot, subjects }) {
+  const updatePeriod = (i, field, value) => onChange(periods.map((p, idx) => (idx === i ? { ...p, [field]: value } : p)));
+  const movePeriod = (i, dir) => { const next = [...periods]; [next[i], next[i + dir]] = [next[i + dir], next[i]]; onChange(next); };
+  const removePeriod = (i) => onChange(periods.filter((_, idx) => idx !== i));
+  const addPeriod = () => {
+    const usedColors = new Set(periods.map((p) => p.color));
+    const color = SCHEDULE_BLOCK_COLORS.find((c) => !usedColors.has(c)) || SCHEDULE_BLOCK_COLORS[periods.length % SCHEDULE_BLOCK_COLORS.length];
+    const lastEnd = periods.length ? periods[periods.length - 1].endTime : "09:00";
+    onChange([...periods, { id: uid(), label: "New period", startTime: lastEnd, endTime: minutesToTime(Math.min(timeToMinutes(lastEnd) + 30, 23 * 60)), color }]);
+  };
+
+  return (
+    <div>
+      <datalist id="day-override-label-options">
+        {(subjects || []).map((s) => <option key={s.id} value={s.label} />)}
+        {SCHEDULE_BLOCK_LIBRARY.map((b) => <option key={b} value={b} />)}
+      </datalist>
+      <div className="space-y-2">
+        {periods.map((slot, i) => {
+          const st = TILE_STYLES[slot.color] || TILE_STYLES.teal;
+          return (
+            <div key={slot.id} className={`rounded-lg border ${st.tileBorder} ${st.tileBg} p-2`}>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <input value={slot.label} onChange={(e) => updatePeriod(i, "label", e.target.value)} placeholder="Subject / period" list="day-override-label-options"
+                  className={`flex-1 rounded-lg border border-white/60 bg-white/70 px-2 py-1.5 text-sm font-semibold ${st.labelText}`} />
+                <input type="time" value={slot.startTime} onChange={(e) => updatePeriod(i, "startTime", e.target.value)} className="rounded-lg border border-white/60 bg-white/70 px-2 py-1.5 text-xs" />
+                <span className="text-stone-400 text-xs">–</span>
+                <input type="time" value={slot.endTime} onChange={(e) => updatePeriod(i, "endTime", e.target.value)} className="rounded-lg border border-white/60 bg-white/70 px-2 py-1.5 text-xs" />
+                <button disabled={i === 0} onClick={() => movePeriod(i, -1)} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronUp size={13} /></button>
+                <button disabled={i === periods.length - 1} onClick={() => movePeriod(i, 1)} className="text-stone-400 hover:text-stone-700 disabled:opacity-20 p-1"><ChevronDown size={13} /></button>
+                <ConfirmDelete onConfirm={() => removePeriod(i)} size={13} />
+              </div>
+              <textarea
+                value={slotDrafts[slot.id] || ""}
+                onChange={(e) => setSlotDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))}
+                onBlur={(e) => saveSlot(slot.id, e.target.value)}
+                rows={2} placeholder="What's being covered..."
+                className="w-full rounded-lg border border-white/60 bg-white/70 px-2 py-1 text-xs" />
+            </div>
+          );
+        })}
+      </div>
+      <button onClick={addPeriod} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-2"><Plus size={12} /> Add period</button>
+    </div>
+  );
+}
+
 function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlannerDay, clearPlannerDayType, addPlannerEvent, removePlannerEvent, config, onClose }) {
   const entry = plannerDays?.[date] || {};
   const [notes, setNotes] = useState(entry.notes || "");
@@ -12073,14 +12548,17 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
           </div>
 
           {hasOverride ? (
-            <PeriodListEditor periods={template || []} onChange={(next) => setPlannerDay(date, { scheduleOverride: next })} subjects={config.subjects} />
+            <DayOverrideScheduleEditor periods={template || []} onChange={(next) => setPlannerDay(date, { scheduleOverride: next })}
+              slotDrafts={slotDrafts} setSlotDrafts={setSlotDrafts} saveSlot={saveSlot} subjects={config.subjects} />
           ) : template && template.length > 0 && (
             <div className="space-y-2">
-              {template.map((slot) => (
-                <div key={slot.id} className="border border-stone-200 rounded-lg p-2">
+              {template.map((slot) => {
+                const st = TILE_STYLES[slot.color] || null;
+                return (
+                <div key={slot.id} className={`rounded-lg border p-2 ${st ? `${st.tileBorder} ${st.tileBg}` : "border-stone-200"}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-semibold text-stone-700">{slot.label}</span>
-                    <span className="text-[10px] text-stone-400">{slot.startTime}–{slot.endTime}</span>
+                    <span className={`text-xs font-semibold ${st ? st.labelText : "text-stone-700"}`}>{slot.label}</span>
+                    <span className={`text-[10px] ${st ? `${st.labelText} opacity-70` : "text-stone-400"}`}>{formatTime12h(slot.startTime)}–{formatTime12h(slot.endTime)}</span>
                   </div>
                   <div className="flex items-start gap-1.5">
                     <textarea
@@ -12088,7 +12566,7 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
                       onChange={(e) => setSlotDrafts((prev) => ({ ...prev, [slot.id]: e.target.value }))}
                       onBlur={(e) => saveSlot(slot.id, e.target.value)}
                       rows={2} placeholder="What's being covered..."
-                      className="flex-1 rounded-lg border border-stone-200 px-2 py-1 text-xs" />
+                      className={`flex-1 rounded-lg border px-2 py-1 text-xs ${st ? "border-white/60 bg-white/70" : "border-stone-200"}`} />
                     <MicButton onResult={(spoken) => {
                       const next = slotDrafts[slot.id] ? `${slotDrafts[slot.id]} ${spoken}` : spoken;
                     setSlotDrafts((prev) => ({ ...prev, [slot.id]: next }));
@@ -12096,7 +12574,8 @@ function DayDetailPanel({ date, dayTypes, plannerDays, plannerEvents, setPlanner
                   }} />
                 </div>
               </div>
-            ))}
+                );
+              })}
           </div>
           )}
         </div>
@@ -12509,7 +12988,7 @@ Keep it under 120 words, friendly but direct, no exaggeration. Output only the m
   return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
 }
 
-function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSaveParentEmail, onLogSent }) {
+function MessageDraftView({ student, flag, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onSaveParentEmail, onLogSent }) {
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -12582,7 +13061,7 @@ function MessageDraftView({ student, flag, config, loggedInTeacher, onBack, onSa
         <div className="flex flex-wrap gap-2 mb-2">
           <button onClick={run} className="flex items-center gap-1.5 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
           {sendEmails && <MailActionButtons email={sendEmails} subject={subject} body={draft} />}
-          {sendPhones.map((p) => <WhatsAppButton key={p.phone} phone={p.phone} message={draft} />)}
+          <SendInAppButton studentId={student.id} classId={classId} message={draft} sendIndividualMessageToFamily={sendIndividualMessageToFamily} />
           <button onClick={logSent} disabled={logged}
             className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
             {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -12669,16 +13148,18 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
   );
 }
 
-function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
+function ClassAnnouncementView({ roster, classId, config, loggedInTeacher, sendMessageToFamily, onBack }) {
   const [topic, setTopic] = useState("");
   const [subject, setSubject] = useState("");
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const [sendingInApp, setSendingInApp] = useState(false);
+  const [sentInAppTo, setSentInAppTo] = useState(null);
 
   const run = async () => {
     if (!topic.trim()) return;
-    setLoading(true); setError(false); setDraft(null);
+    setLoading(true); setError(false); setDraft(null); setSentInAppTo(null);
     try {
       const text = await generateClassAnnouncementMessage(topic.trim(), config, loggedInTeacher);
       setDraft(text || "");
@@ -12688,7 +13169,7 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
     } finally { setLoading(false); }
   };
 
-  const [recipientMode, setRecipientMode] = useState("p1"); // "p1" | "p2" | "both" — which parent(s) get this class-wide send
+  const [recipientMode, setRecipientMode] = useState("p1"); // "p1" | "p2" | "both" — which parent(s) get the emailed version
   const parentEmails = roster.flatMap((s) => [
     (recipientMode === "p1" || recipientMode === "both") && s.parentEmail,
     (recipientMode === "p2" || recipientMode === "both") && s.parent2Email,
@@ -12698,6 +13179,22 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
     if (recipientMode === "p2") return !s.parent2Email;
     return !s.parentEmail && !s.parent2Email;
   });
+
+  // Fans out as a separate in-app message into every linked family's classroom thread — not a
+  // single broadcast/group thread, and not the blog. One family, one message, deduplicated by
+  // family group so a household with two guardians or two siblings here only gets it once.
+  const sendInApp = async () => {
+    if (!draft?.trim()) return;
+    setSendingInApp(true);
+    const allFamilies = await loadAllWithPrefix("family:");
+    const relevant = allFamilies.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+    const groupIds = new Set(relevant.map((f) => f.familyGroupId || f.uid));
+    for (const groupId of groupIds) {
+      await sendMessageToFamily(groupId, draft.trim()); // eslint-disable-line no-await-in-loop
+    }
+    setSentInAppTo(groupIds.size);
+    setSendingInApp(false);
+  };
 
   return (
     <div className={PAGE}>
@@ -12721,6 +13218,23 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
 
         {draft !== null && !loading && (
           <>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
+            <div className="flex items-start gap-1.5 mb-4">
+              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+              <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+            </div>
+
+            <div className="border border-teal-200 bg-teal-50/40 rounded-xl p-3 mb-4">
+              <p className="text-xs font-semibold text-stone-700 mb-1">Send as an in-app message</p>
+              <p className="text-[11px] text-stone-400 mb-2">Goes to every family linked to this class as a separate message in their classroom thread — each family sees only their own copy.</p>
+              <button onClick={sendInApp} disabled={sendingInApp || sentInAppTo !== null}
+                className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2 ${sentInAppTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
+                {sendingInApp ? <Loader2 className="animate-spin" size={14} /> : sentInAppTo !== null ? <Check size={14} /> : <MessageCircle size={14} />}
+                {sendingInApp ? "Sending…" : sentInAppTo !== null ? `Sent to ${sentInAppTo} famil${sentInAppTo === 1 ? "y" : "ies"}` : "Send in-app to the whole class"}
+              </button>
+            </div>
+
+            <p className="text-xs font-semibold text-stone-700 mb-1">Or send by email instead</p>
             <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
             <div className="flex gap-1.5 mb-2">
               {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
@@ -12742,13 +13256,8 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
             )}
             <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
             <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
-            <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
-            <div className="flex items-start gap-1.5 mb-4">
-              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-              <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-            </div>
             <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
-            <p className="text-xs text-stone-400 mt-3">Nothing sends automatically — review the message, then send it yourself.</p>
+            <p className="text-xs text-stone-400 mt-3">Email doesn't send automatically — review the message, then send it yourself.</p>
           </>
         )}
       </div>
@@ -12756,52 +13265,59 @@ function ClassAnnouncementView({ roster, config, loggedInTeacher, onBack }) {
   );
 }
 
-function StudentMessageGeneratorView({ roster, config, loggedInTeacher, onBack, onLogSent }) {
+function StudentMessageGeneratorView({ roster, classId, config, loggedInTeacher, sendIndividualMessageToFamily, onBack, onLogSent }) {
   const [selectedIds, setSelectedIds] = useState([]);
   const [topic, setTopic] = useState("");
-  const [subject, setSubject] = useState("");
   const [draft, setDraft] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
-  const [logged, setLogged] = useState(false);
-  const [recipientMode, setRecipientMode] = useState("p1"); // "p1" | "p2" | "both"
+  const [sending, setSending] = useState(false);
+  const [sentTo, setSentTo] = useState(null); // number of families the message went to, once sent
+  const [noFamilyWarning, setNoFamilyWarning] = useState(null); // names of selected students with no linked parent account
 
   const selectedStudents = roster.filter((s) => selectedIds.includes(s.id));
-  const toggleStudent = (id) => { setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])); setDraft(null); setLogged(false); };
-  const anyHasParent2 = selectedStudents.some((s) => s.parent2Email || s.parent2Phone);
+  const toggleStudent = (id) => { setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id])); setDraft(null); setSentTo(null); };
 
   const run = async () => {
     if (!topic.trim() || selectedStudents.length === 0) return;
-    setLoading(true); setError(false); setDraft(null); setLogged(false);
+    setLoading(true); setError(false); setDraft(null); setSentTo(null);
     try {
       const text = await generateStudentTopicMessage(topic.trim(), selectedStudents.map((s) => s.name), config, loggedInTeacher);
       setDraft(text || "");
     } catch {
       setError(true);
-      setDraft(""); // generation failed, but the teacher can still write and send it manually
+      setDraft(""); // generation failed, but the teacher can still write it themselves below
     } finally { setLoading(false); }
   };
 
-  const logSent = () => {
-    const entrySubject = subject || topic.slice(0, 60);
-    selectedStudents.forEach((s) => onLogSent(s.id, { date: todayISO(), channel: "email", type: "automated", source: "custom-message", subject: entrySubject, body: draft }));
-    setLogged(true);
+  // Sends the same drafted text into each selected student's family's individual thread with this
+  // teacher — deduplicated by family group, so siblings in the same family (or a family selected
+  // via two different students) only ever get the message once, not once per child.
+  const send = async () => {
+    if (!draft?.trim()) return;
+    setSending(true);
+    const allFamilies = await loadAllWithPrefix("family:");
+    const groupIds = new Set();
+    const studentsWithNoFamily = [];
+    selectedStudents.forEach((s) => {
+      const matches = allFamilies.filter((f) => (f.studentLinks || []).some((l) => l.studentId === s.id && l.classId === classId));
+      if (matches.length === 0) studentsWithNoFamily.push(s.name);
+      matches.forEach((f) => groupIds.add(f.familyGroupId || f.uid));
+    });
+    for (const groupId of groupIds) {
+      await sendIndividualMessageToFamily(groupId, draft.trim()); // eslint-disable-line no-await-in-loop
+    }
+    selectedStudents.forEach((s) => onLogSent(s.id, { date: todayISO(), channel: "in-app", type: "automated", source: "custom-message", subject: topic.slice(0, 60), body: draft }));
+    setNoFamilyWarning(studentsWithNoFamily.length > 0 ? studentsWithNoFamily : null);
+    setSentTo(groupIds.size);
+    setSending(false);
   };
-
-  const emails = selectedStudents.flatMap((s) => [
-    (recipientMode === "p1" || recipientMode === "both") && s.parentEmail,
-    (recipientMode === "p2" || recipientMode === "both") && s.parent2Email,
-  ]).filter(Boolean);
-  const phones = selectedStudents.flatMap((s) => [
-    (recipientMode === "p1" || recipientMode === "both") && s.parentPhone && { phone: s.parentPhone, label: `${s.name} (${s.parent1Name || "Parent 1"})` },
-    (recipientMode === "p2" || recipientMode === "both") && s.parent2Phone && { phone: s.parent2Phone, label: `${s.name} (${s.parent2Name || "Parent 2"})` },
-  ]).filter(Boolean);
 
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Generate a parent message</h1>
-      <p className="text-stone-500 text-sm mb-5">Build a message about anything — not tied to a specific incident or report — for one student or a few at once.</p>
+      <p className="text-stone-500 text-sm mb-5">Build a message about anything — not tied to a specific incident or report — for one student or a few at once. Sent as an in-app message the parent can reply to.</p>
       <div className="md:w-[32rem]">
         <label className="block text-xs font-medium text-stone-500 mb-1">Student(s)</label>
         {roster.length === 0 ? (
@@ -12836,42 +13352,19 @@ function StudentMessageGeneratorView({ roster, config, loggedInTeacher, onBack, 
 
         {draft !== null && !loading && (
           <>
-            {anyHasParent2 && (
-              <>
-                <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
-                <div className="flex gap-1.5 mb-1">
-                  {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
-                    <button key={val} onClick={() => setRecipientMode(val)}
-                      className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[10px] text-stone-400 mb-3">{emails.length > 0 ? `Includes: ${emails.join(", ")}` : "No email on file for the parent(s) selected."}</p>
-              </>
-            )}
-            <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
-            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. Checking in" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
             <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
             <div className="flex items-start gap-1.5 mb-4">
               <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
               <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
             </div>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {emails.length > 0 && <MailActionButtons bcc={emails} subject={subject || `About ${selectedStudents.map((s) => s.name).join(", ")}`} body={draft} />}
-              {phones.map((p) => (
-                <WhatsAppButton key={p.phone} phone={p.phone} message={draft}
-                  className="flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg px-3 py-2 hover:bg-emerald-700" />
-              ))}
-            </div>
-            {emails.length === 0 && phones.length === 0 && (
-              <p className="text-xs text-amber-700 mb-2">No contact info on file for the selected student(s) yet — add it in Settings, or copy the message below to send your own way.</p>
-            )}
-            <button onClick={logSent} disabled={logged}
-              className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
-              {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
+            <button onClick={send} disabled={sending || !draft.trim() || sentTo !== null}
+              className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${sentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
+              {sending ? <Loader2 className="animate-spin" size={15} /> : sentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
+              {sending ? "Sending…" : sentTo !== null ? `Sent to ${sentTo} famil${sentTo === 1 ? "y" : "ies"}` : "Send in-app message"}
             </button>
-            <p className="text-xs text-stone-400 mt-3">Nothing sends automatically — review the message, then send it yourself. Logging records it under each selected student's communication history.</p>
+            {noFamilyWarning && (
+              <p className="text-xs text-amber-700 mt-2">No linked parent account yet for: {noFamilyWarning.join(", ")} — they didn't get this message. Add a parent account for them in Settings first.</p>
+            )}
           </>
         )}
       </div>
@@ -13699,6 +14192,15 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             </Section>
           )}
 
+          <Section title="Class blog">
+            <p className="text-xs text-stone-400 mb-3">Every family linked to this class can see and react to posts here. Comments are a separate choice — reactions (a tap of a heart, a thumbs up) are always available either way.</p>
+            <label className="flex items-center gap-2 text-sm text-stone-700">
+              <input type="checkbox" checked={config.blogCommentsEnabled !== false}
+                onChange={(e) => update((c) => { c.blogCommentsEnabled = e.target.checked; return c; })} />
+              Allow parents to comment on blog posts
+            </label>
+          </Section>
+
           <Section title="Demo & data reset">
             <p className="text-xs text-stone-400 mb-3">Useful when sharing this with another teacher for feedback, or starting fresh. Both replace your current roster, attendance, incidents, points, planner entries, and benchmarks — your Settings customizations (categories, thresholds, schedule templates) are kept either way.</p>
             <div className="flex flex-wrap gap-2">
@@ -14077,7 +14579,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
                 <option value="top">Show it at the start of the message</option>
               </select>
               <label className="block text-xs font-medium text-stone-500 mb-1">The exact text of that note</label>
-              <p className="text-xs text-stone-400 mb-1.5">This is yours specifically — it follows you across every class you teach, not just this one. Shown in italics so it's visibly distinct from your own words, even in plain-text email or WhatsApp. Leave blank to use the default wording.</p>
+              <p className="text-xs text-stone-400 mb-1.5">This is yours specifically — it follows you across every class you teach, not just this one. Shown in italics so it's visibly distinct from your own words, even in plain-text email or an in-app message. Leave blank to use the default wording.</p>
               <textarea value={signOff} onChange={(e) => setSignOff(e.target.value)} rows={2}
                 placeholder="— Sent via your child's classroom system, an automated update. No reply needed unless you have a question. —"
                 className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
@@ -14504,9 +15006,10 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
 
 // Recipient toggle for a single student's parent(s) — Parent 1 selected by default, with Parent 2
 // available as an add-on if that parent's own contact info is on file. Selecting both sends one
-// email to both at once (a single "to" can hold multiple addresses); WhatsApp can't combine two
-// numbers into one link, so each selected parent with a phone on file gets their own button.
-function ParentSendActions({ student, subject, body, size = "normal" }) {
+// email to both at once (a single "to" can hold multiple addresses). In-app sending goes to the
+// family as a whole regardless of which guardian's email was toggled on, since there's one shared
+// family account, not a separate one per guardian's contact method.
+function ParentSendActions({ student, classId, subject, body, sendIndividualMessageToFamily, size = "normal" }) {
   const hasP2 = Boolean(student.parent2Email || student.parent2Phone);
   const [selected, setSelected] = useState(["p1"]);
   const toggle = (p) => setSelected((prev) => {
@@ -14519,10 +15022,6 @@ function ParentSendActions({ student, subject, body, size = "normal" }) {
     selected.includes("p1") && student.parentEmail,
     selected.includes("p2") && student.parent2Email,
   ].filter(Boolean).join(", ");
-  const phones = [
-    selected.includes("p1") && student.parentPhone && { phone: student.parentPhone, label: p1Label },
-    selected.includes("p2") && student.parent2Phone && { phone: student.parent2Phone, label: p2Label },
-  ].filter(Boolean);
 
   return (
     <div>
@@ -14534,16 +15033,14 @@ function ParentSendActions({ student, subject, body, size = "normal" }) {
             <button onClick={() => toggle("p2")} className={`text-xs font-semibold px-2 py-1 rounded-full border ${selected.includes("p2") ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{p2Label}</button>
           </div>
           <p className="text-[10px] text-stone-400">
-            {emails ? `Includes: ${emails}` : "No email on file for the parent(s) selected — add one in Settings, or use a WhatsApp number below if there is one."}
+            {emails ? `Includes: ${emails}` : "No email on file for the parent(s) selected — add one in Settings, or send in-app below."}
           </p>
         </div>
       )}
       <div className="flex flex-wrap gap-2">
         {emails && <MailActionButtons email={emails} subject={subject} body={body} size={size} />}
-        {phones.map((p) => (
-          <WhatsAppButton key={p.phone} phone={p.phone} message={body}
-            className={`flex items-center gap-1 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 ${size === "small" ? "px-2.5 py-1.5" : "px-3 py-2"}`} />
-        ))}
+        <SendInAppButton studentId={student.id} classId={classId} message={body} sendIndividualMessageToFamily={sendIndividualMessageToFamily}
+          className={`flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg hover:bg-teal-800 ${size === "small" ? "px-2.5 py-1.5" : "px-3 py-2"}`} />
       </div>
     </div>
   );
