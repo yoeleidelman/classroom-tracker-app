@@ -185,6 +185,7 @@ const DEFAULT_CONFIG = {
   },
   incidents: {
     categories: [
+      { id: "health", label: "Health", color: "cyan" },
       { id: "discipline", label: "Discipline", color: "rose" },
       { id: "social", label: "Social / Peer", color: "violet" },
       { id: "lost-item", label: "Lost item or work", color: "amber" },
@@ -2695,16 +2696,22 @@ function BulkImportPanel({ onImport, onCancel }) {
 // links actually work.
 function OfficeContactSettings() {
   const [phone, setPhone] = useState("");
+  const [draft, setDraft] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     loadJSON("schoolSettings", {}, true).then((s) => { setPhone(s?.officePhone || ""); setLoaded(true); });
   }, []);
 
+  const startEditing = () => { setDraft(phone); setEditing(true); };
+
   const save = async () => {
     const existing = (await loadJSON("schoolSettings", {}, true)) || {};
-    await saveJSON("schoolSettings", { ...existing, officePhone: phone.trim() }, true);
+    await saveJSON("schoolSettings", { ...existing, officePhone: draft.trim() }, true);
+    setPhone(draft.trim());
+    setEditing(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   };
@@ -2715,16 +2722,56 @@ function OfficeContactSettings() {
     <div className="bg-white border border-stone-200 rounded-xl p-4 mb-6">
       <p className="text-sm font-semibold text-stone-800 mb-1">Office phone number</p>
       <p className="text-xs text-stone-400 mb-3">Parents reach the office through this number — call, text, or WhatsApp — right from a button in their app, not a separate in-app inbox for you to check.</p>
-      <div className="flex flex-wrap items-center gap-2">
-        <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="e.g. (555) 123-4567" className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-        <button onClick={save} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Save</button>
-        {saved && <span className="text-xs font-semibold text-emerald-700">Saved</span>}
-      </div>
+      {editing ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. (555) 123-4567" autoFocus
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+          <button onClick={save} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800">Save</button>
+          <button onClick={() => setEditing(false)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">Cancel</button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm font-semibold text-stone-800">{phone || "Not set yet"}</span>
+          <button onClick={startEditing} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-50">
+            {phone ? "Edit" : "Set number"}
+          </button>
+          {saved && <span className="text-xs font-semibold text-emerald-700">Saved</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Same top-bar pattern as the classroom and parent sides — the admin page had grown into one
+// long scroll of every section stacked on top of each other; splitting it into destinations
+// makes each one reachable directly instead of scrolling past everything else to find it.
+function AdminMainTabs({ active, navigate }) {
+  const tabs = [
+    { id: "overview", label: "Overview", icon: HomeIcon },
+    { id: "classes", label: "Classes", icon: Wrench },
+    { id: "students", label: "Students", icon: Users },
+    { id: "teachers", label: "Teachers", icon: BookOpen },
+    { id: "families", label: "Families", icon: MessageCircle },
+    { id: "more", label: "More", icon: SettingsIcon },
+  ];
+  return (
+    <div className="flex bg-white border border-stone-200 rounded-xl overflow-x-auto no-scrollbar mb-6">
+      {tabs.map((t, i) => {
+        const Icon = t.icon;
+        const isActive = active === t.id;
+        return (
+          <button key={t.id} onClick={() => navigate(t.id)}
+            className={`flex-1 shrink-0 flex items-center justify-center gap-1 px-1.5 py-2.5 text-xs font-semibold border-b-2 ${i > 0 ? "border-l border-l-stone-200" : ""} ${isActive ? "text-teal-800 border-b-teal-700 bg-teal-50/50" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
+            <Icon size={13} /> {t.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
 function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+  const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -2894,8 +2941,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
           </div>
         </div>
-        <p className="text-stone-500 text-sm mb-6">Every class in the school. Tap one to open it with full access.</p>
+        <p className="text-stone-500 text-sm mb-5">Every class in the school. Tap one to open it with full access.</p>
 
+        <AdminMainTabs active={adminTab} navigate={setAdminTab} />
+
+        {adminTab === "overview" && (
+        <>
         <OfficeContactSettings />
 
         <button onClick={() => setShowAdminMessages(true)} className="w-full mb-6 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800">
@@ -2982,7 +3033,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </div>
           </div>
         )}
+        </>
+        )}
 
+        {adminTab === "classes" && (
+        <>
         {activeClasses.length === 0 && <p className="text-stone-400 text-sm text-center py-10 bg-white rounded-xl border border-stone-200">No classes yet.</p>}
         <ul className="space-y-2 mb-6">
           {activeClasses.map((cls) => (
@@ -3051,8 +3106,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <p className="text-xs text-stone-400 mb-3">One shared code for the whole school — the same code works for every family, every day. Print it and post it wherever families actually walk in.</p>
           <SchoolwideQRCode />
         </div>
+        </>
+        )}
 
-        <div className="mt-6 pt-6 border-t border-stone-200">
+        {adminTab === "more" && (
+        <>
+        <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
           <p className="text-xs text-stone-400 mb-3">Build a custom Excel report — pick who to include and what to include, and it downloads as one file with a sheet per type of data.</p>
           {!showExportPanel ? (
@@ -3063,8 +3122,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             <ExportPanel classes={activeClasses} globalStudents={globalStudents} onExport={handleExport} onCancel={() => setShowExportPanel(false)} />
           )}
         </div>
+        </>
+        )}
 
-        <div className="mt-6 pt-6 border-t border-stone-200">
+        {adminTab === "students" && (
+        <>
+        <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">School-wide students</p>
           <p className="text-xs text-stone-400 mb-3">Create students once here — teachers will be able to pull existing students into their own class instead of re-creating them. (Assigning students to classes is coming next; for now, this is where the shared list itself lives.)</p>
 
@@ -3121,8 +3184,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </div>
           )}
         </div>
+        </>
+        )}
 
-        <div className="mt-6 pt-6 border-t border-stone-200">
+        {adminTab === "more" && (
+        <>
+        <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">School calendar</p>
           <p className="text-xs text-stone-400 mb-3">Create an event once — it shows up automatically on every calendar you choose, and editing it here updates everywhere at once.</p>
 
@@ -3231,8 +3298,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             })}
           </ul>
         </div>
+        </>
+        )}
 
-        <div className="mt-6 pt-6 border-t border-stone-200">
+        {adminTab === "teachers" && (
+        <>
+        <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Teacher accounts</p>
           <p className="text-xs text-stone-400 mb-3">Each teacher signs in with their own email and password, and only sees the classes assigned to them here.</p>
 
@@ -3321,8 +3392,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </div>
           )}
         </div>
+        </>
+        )}
 
-        <div className="mt-6 pt-6 border-t border-stone-200">
+        {adminTab === "families" && (
+        <>
+        <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Family accounts</p>
           <p className="text-xs text-stone-400 mb-3">A separate portal, not the class app — a family signs in on their own link and only ever sees their own linked child(ren).</p>
 
@@ -3426,7 +3501,10 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </div>
           )}
         </div>
+        </>
+        )}
 
+        {adminTab === "more" && (
         <div className="mt-6 pt-6 border-t border-stone-200">
           {!showPwChange ? (
             <button onClick={() => setShowPwChange(true)} className="w-full text-xs font-semibold text-stone-500 hover:text-teal-700 text-center">
@@ -3446,6 +3524,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </div>
           )}
         </div>
+        )}
       </div>
 
       {profileStudent && (
@@ -3770,11 +3849,11 @@ function OfficeContactCard({ onViewUpdates }) {
         <div className="bg-white border border-stone-200 rounded-xl p-3 mt-2">
           <div className="grid grid-cols-3 gap-2 mb-2">
             <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-              <Phone size={18} className="text-teal-700" />
+              <Phone size={18} className="text-[#a8562f]" />
               <span className="text-[11px] font-semibold text-stone-700">Call</span>
             </a>
             <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-              <MessageCircle size={18} className="text-teal-700" />
+              <MessageCircle size={18} className="text-[#a8562f]" />
               <span className="text-[11px] font-semibold text-stone-700">Text</span>
             </a>
             <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
@@ -3782,7 +3861,7 @@ function OfficeContactCard({ onViewUpdates }) {
               <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
             </a>
           </div>
-          <button onClick={onViewUpdates} className="text-xs font-semibold text-teal-700 hover:text-teal-900">See updates from the office →</button>
+          <button onClick={onViewUpdates} className="text-xs font-semibold text-[#a8562f] hover:text-[#7a3f1f]">See updates from the office →</button>
         </div>
       )}
     </div>
@@ -3812,15 +3891,15 @@ function ContactOfficeView({ adminThread, onBack }) {
       )}
       {!loading && digits && (
         <div className="grid grid-cols-3 gap-2 mb-6">
-          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-teal-300">
-            <Phone size={22} className="text-teal-700" />
+          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#a8562f]">
+            <Phone size={22} className="text-[#a8562f]" />
             <span className="text-xs font-semibold text-stone-700">Call</span>
           </a>
-          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-teal-300">
-            <MessageCircle size={22} className="text-teal-700" />
+          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#a8562f]">
+            <MessageCircle size={22} className="text-[#a8562f]" />
             <span className="text-xs font-semibold text-stone-700">Text</span>
           </a>
-          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-teal-300">
+          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#a8562f]">
             <MessageCircle size={22} className="text-emerald-600" />
             <span className="text-xs font-semibold text-stone-700">WhatsApp</span>
           </a>
@@ -4119,15 +4198,15 @@ function ChildDailyLogView({ link, onBack, onOpenBlog }) {
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.studentName}</h1>
       <p className="text-xs text-stone-400 mb-3">{link.className}</p>
       {onOpenBlog && (
-        <button onClick={onOpenBlog} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-teal-700 border border-teal-300 rounded-xl py-2 mb-4 hover:bg-teal-50">
+        <button onClick={onOpenBlog} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-[#a8562f] border border-[#a8562f66] rounded-xl py-2 mb-4 hover:bg-[#a8562f0d]">
           <Newspaper size={15} /> Class Blog
         </button>
       )}
 
       <div className="flex items-center justify-center gap-3 mb-5 bg-white border border-stone-200 rounded-xl py-2">
-        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-teal-700 p-1"><ChevronLeft size={18} /></button>
+        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-[#a8562f] p-1"><ChevronLeft size={18} /></button>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} className="text-sm font-semibold text-stone-800 border-none text-center" />
-        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-teal-700 p-1 disabled:opacity-30"><ChevronRight size={18} /></button>
+        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-[#a8562f] p-1 disabled:opacity-30"><ChevronRight size={18} /></button>
       </div>
 
       {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
@@ -4301,6 +4380,22 @@ function ParentBlogView({ link, family, onBack }) {
 // Persistent top bar for the parent side, matching the same pattern the teacher side already
 // uses — Home, Messages, Blog, and Settings always one tap away, instead of icons buried in the
 // header or a full-screen overlay you have to back out of to reach anything else.
+// A grounded, connected row rather than separate floating pills — same underline-tab feel as the
+// main navigation bar above it, so switching between children (or between classes) reads as part
+// of the app's structure rather than loose buttons sitting on the page.
+function ChildSwitcher({ labels, selectedIndex, onSelect }) {
+  return (
+    <div className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
+      {labels.map((label, i) => (
+        <button key={i} onClick={() => onSelect(i)}
+          className={`flex-1 py-2.5 text-sm font-semibold border-b-2 ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#a8562f] border-b-[#a8562f] bg-[#a8562f0d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function ParentMainTabs({ active, navigate, hasUnread }) {
   const tabs = [
     { id: "home", label: "Home", icon: HomeIcon },
@@ -4314,7 +4409,7 @@ function ParentMainTabs({ active, navigate, hasUnread }) {
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 relative flex items-center justify-center gap-1.5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 ${isActive ? "text-[#7a2e26] border-[#7a2e26]" : "text-stone-400 border-transparent"}`}>
+            className={`flex-1 relative flex items-center justify-center gap-1.5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 ${isActive ? "text-[#a8562f] border-[#a8562f]" : "text-stone-400 border-transparent"}`}>
             <Icon size={16} /> {t.label}
             {t.id === "messages" && hasUnread && <span className="absolute top-2 right-[28%] w-1.5 h-1.5 rounded-full bg-rose-500" />}
           </button>
@@ -4530,7 +4625,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
-      <div className="sticky top-0 z-10 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #2b2723 0%, #2b2723 45%, #7a2e26 100%)" }}>
+      <div className="sticky top-0 z-10 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #a8562f 0%, #c17847 100%)" }}>
         <div className="max-w-lg mx-auto px-4 pt-3.5 pb-3 flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0">
             <img src="/logo-transparent.png" alt="" className="w-12 h-12 object-contain shrink-0 bg-white rounded-xl p-1 shadow-sm" />
@@ -4564,7 +4659,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <label className="block text-xs font-medium text-stone-500 mb-1">Family name</label>
             <div className="flex gap-2 mb-4">
               <input value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-              <button onClick={saveName} className="bg-teal-700 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
+              <button onClick={saveName} className="bg-[#a8562f] text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-[#8a4726]">Save</button>
             </div>
             {nameSaved && <p className="text-xs text-emerald-600 -mt-3 mb-4">Saved.</p>}
 
@@ -4577,7 +4672,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
             {pwError && <p className="text-xs text-rose-600 mb-2">{pwError}</p>}
             {pwSuccess && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
-            <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50 mb-3">
+            <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-[#a8562f] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#8a4726] disabled:opacity-50 mb-3">
               {pwSaving ? "Updating..." : "Change password"}
             </button>
             <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
@@ -4646,7 +4741,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           <div className="space-y-3">
             {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
               <button key={l.classId} onClick={() => openMessagesFor(l.classId)}
-                className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
+                className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-[#a8562f]">
                 <div>
                   <p className="font-semibold text-stone-900">{l.className}</p>
                   <p className="text-xs text-stone-400">Message the classroom</p>
@@ -4664,15 +4759,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             return (
               <div>
                 {uniqueClasses.length > 1 && (
-                  <div className="flex gap-1.5 mb-4 overflow-x-auto no-scrollbar">
-                    {uniqueClasses.map((l, i) => (
-                      <button key={l.classId} onClick={() => setSelectedBlogClassIndex(i)}
-                        className={`shrink-0 px-3.5 py-2 rounded-full text-sm font-semibold border-2 ${selectedBlogClassIndex === i ? "text-white border-transparent" : "bg-white text-stone-600 border-stone-200"}`}
-                        style={selectedBlogClassIndex === i ? { background: "linear-gradient(120deg, #2b2723 0%, #7a2e26 100%)" } : {}}>
-                        {l.studentName}
-                      </button>
-                    ))}
-                  </div>
+                  <ChildSwitcher labels={uniqueClasses.map((l) => l.studentName)} selectedIndex={selectedBlogClassIndex} onSelect={setSelectedBlogClassIndex} />
                 )}
                 <ParentBlogView link={selectedLink} family={family} />
               </div>
@@ -4684,8 +4771,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             {unreadThreads.length > 0 && (
               <div className="space-y-2 mb-4">
                 {unreadThreads.map((item) => (
-                  <div key={item.threadKey} className="bg-teal-50 border border-teal-300 rounded-xl p-3.5 flex items-start gap-2.5">
-                    <div className="bg-teal-700 text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
+                  <div key={item.threadKey} className="bg-[#a8562f0d] border border-[#a8562f66] rounded-xl p-3.5 flex items-start gap-2.5">
+                    <div className="bg-[#a8562f] text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
                     <button onClick={() => openUnread(item)} className="flex-1 text-left min-w-0">
                       <p className="text-sm font-bold text-stone-900">New message — {item.title}</p>
                       <p className="text-xs text-stone-600 truncate">{item.senderName}: {item.preview}</p>
@@ -4704,7 +4791,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
               text="Scan the QR code posted at school to check your child in and out yourself."
               onNext={advanceTour} onSkip={dismissTour}>
-              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #2b2723 0%, #7a2e26 100%)" }}>
+              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #a8562f 0%, #c17847 100%)" }}>
                 Scan QR code to check in or out
               </button>
             </TourHint>
@@ -4716,15 +4803,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             ) : (
               <>
                 {family.studentLinks.length > 1 && (
-                  <div className="flex gap-1.5 mb-4 overflow-x-auto no-scrollbar">
-                    {family.studentLinks.map((link, i) => (
-                      <button key={i} onClick={() => setSelectedChildIndex(i)}
-                        className={`shrink-0 px-3.5 py-2 rounded-full text-sm font-semibold border-2 ${selectedChildIndex === i ? "text-white border-transparent" : "bg-white text-stone-600 border-stone-200"}`}
-                        style={selectedChildIndex === i ? { background: "linear-gradient(120deg, #2b2723 0%, #7a2e26 100%)" } : {}}>
-                        {link.studentName}
-                      </button>
-                    ))}
-                  </div>
+                  <ChildSwitcher labels={family.studentLinks.map((l) => l.studentName)} selectedIndex={selectedChildIndex} onSelect={setSelectedChildIndex} />
                 )}
                 {(() => {
                   const link = family.studentLinks[selectedChildIndex] || family.studentLinks[0];
@@ -4973,6 +5052,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [classSessionPos, setClassSessionPos] = useState(0);
   const [classSessionDate, setClassSessionDate] = useState(null);
   const [incidentPreset, setIncidentPreset] = useState(null);
+  const [incidentCategoryPreset, setIncidentCategoryPreset] = useState(null);
   const [incidentReturn, setIncidentReturn] = useState("home");
   const [periodAttPreset, setPeriodAttPreset] = useState(null);
   const [periodAttReturn, setPeriodAttReturn] = useState("home");
@@ -5109,21 +5189,6 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const persistIncidents = (next) => { setIncidents(next); saveC("incidents", next); };
   const persistPhotos = (next) => { setPhotos(next); saveC("photos", next); };
   const persistBlogPosts = (next) => { setBlogPosts(next); saveC("blogPosts", next); };
-  // Photos live in Storage (the actual image), not Firestore — Firestore only ever holds a
-  // reference to it (the download URL) plus who it's tagged to, mirroring how incidents already
-  // work: one shared array per class, filtered per student when a specific child's log is shown.
-  // Access is scoped to "has a child in this class," not to which specific children appear in a
-  // given photo, since a security rule trying to check that would need to search inside an array
-  // of tagged student ids — exactly the kind of check that's fragile to get right without being
-  // able to test real rule execution, the same tradeoff made earlier for check-ins.
-  const uploadClassPhoto = async (file, studentIds, caption, photoDate, onProgress) => {
-    const photoId = uid();
-    const path = `photos/${classId}/${photoId}.jpg`; // always jpg — compression always re-encodes to jpeg
-    const url = await uploadOneImage(file, path, onProgress);
-    const entry = withLogger({ id: photoId, date: photoDate || todayISO(), url, storagePath: path, studentIds, caption: caption || "" });
-    persistPhotos([entry, ...photos]);
-    return entry;
-  };
   // Bundles several photo/video+caption "parts" into one shareable post — a teacher building a
   // weekly recap sends it all at once, one notification, not one per item. Every file across every
   // part goes through the same reliable pipeline as the Photos tile (or its video counterpart).
@@ -5817,7 +5882,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistConfig({ ...config, categories: [...config.categories, { ...newCat, id: uid(), active: true }] });
   };
 
-  const openIncidentForm = (studentId, returnTo) => { setIncidentPreset(studentId); setIncidentReturn(returnTo); setView("incident"); };
+  const openIncidentForm = (studentId, returnTo, categoryId) => { setIncidentPreset(studentId); setIncidentCategoryPreset(categoryId || null); setIncidentReturn(returnTo); setView("incident"); };
   const openPeriodAttendanceForm = (studentId, returnTo) => { setPeriodAttPreset(studentId); setPeriodAttReturn(returnTo); setView("period-attendance"); };
   const todaysScheduleForForm = (() => {
     const todayStr = todayISO();
@@ -5895,15 +5960,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
           logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
-          logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog} uploadClassPhoto={uploadClassPhoto}
+          logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
-          openIncidentForm={() => openIncidentForm(null, "daily-log")} navigate={setView} />
-      )}
-
-      {view === "preschool-incidents" && (
-        <PreschoolIncidentsView roster={roster} incidents={incidents} config={config}
-          openIncidentForm={(id) => openIncidentForm(id, "preschool-incidents")}
-          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setIncidentDetailReturn("preschool-incidents"); setView("incident-detail"); }} navigate={setView} />
+          openIncidentForm={(studentId, returnTo, categoryId) => openIncidentForm(studentId, returnTo || "daily-log", categoryId)}
+          classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={setView} />
       )}
 
       {view === "segment-celebration-message" && celebratingSegment && (
@@ -6126,7 +6186,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "incident" && (
-        <IncidentForm roster={roster} config={config} presetId={incidentPreset}
+        <IncidentForm roster={roster} config={config} presetId={incidentPreset} categoryPreset={incidentCategoryPreset}
           onCancel={() => setView(incidentReturn)}
           onSave={(entry) => { addIncident(entry); setView(incidentReturn); }} />
       )}
@@ -6199,7 +6259,6 @@ function MainTabs({ active, navigate }) {
     ? [
         { id: "attendance", label: "Attendance", icon: Check },
         { id: "daily-log", label: "Daily Log", icon: ClipboardList },
-        { id: "preschool-incidents", label: "Incidents", icon: AlertTriangle },
         { id: "communication", label: "Comm", icon: Mail },
         { id: "blog", label: "Blog", icon: Newspaper },
         { id: "planner", label: "Planner", icon: Calendar },
@@ -7083,60 +7142,15 @@ const PRESCHOOL_TILES = [
   { id: "nap", label: "Nap", icon: Moon, color: "indigo", bulkDefault: "all" },
   { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "all" },
   { id: "bathroom", label: "Bathroom", icon: Droplets, color: "teal", bulkDefault: "none" },
-  { id: "health", label: "Health note", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
-  { id: "photos", label: "Photos", icon: Camera, color: "amber", bulkDefault: "none" },
+  { id: "health-incident", label: "Health incident", icon: HeartPulse, color: "cyan", bulkDefault: "none", special: "incident", categoryMatch: "health" },
+  { id: "incident", label: "Incident", icon: AlertTriangle, color: "amber", bulkDefault: "none", special: "incident" },
+  { id: "photos", label: "Photos", icon: Camera, color: "amber", bulkDefault: "none", special: "camera" },
 ];
 
 // Preschool attendance — same underlying data (setAttendance, config.attendance.statuses) as the
 // elementary Home screen, but presented on its own, without the homework/points/flags clutter
 // that doesn't apply to a preschool room, and with bigger, simpler touch targets to match the
 // same fast-glance philosophy as the rest of the preschool screens.
-// A dedicated tab for preschool, not a floating button like elementary has — quick to reach for
-// recording a behavior incident (hitting, biting, and the like), separate from the Health tile in
-// Daily Log, which is specifically for health notes. Shows the whole class's recent incidents in
-// one place too, since preschool didn't have any class-wide view of these before this existed.
-function PreschoolIncidentsView({ roster, incidents, config, openIncidentForm, onOpenIncidentDetail, navigate }) {
-  const catMap = {};
-  config.incidents.categories.forEach((c) => (catMap[c.id] = c));
-  const sorted = [...incidents].sort((a, b) => (a.date + (a.time || "") < b.date + (b.time || "") ? 1 : -1));
-
-  return (
-    <div className="app-page-wide">
-      <Header navigate={navigate} />
-      <MainTabs active="preschool-incidents" navigate={navigate} />
-
-      <button onClick={() => openIncidentForm(null)} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800">
-        <AlertTriangle size={17} /> Record incident
-      </button>
-
-      <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Recent incidents</p>
-      {sorted.length === 0 ? (
-        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing logged yet.</p>
-      ) : (
-        <div className="space-y-2">
-          {sorted.map((inc) => {
-            const cat = catMap[inc.category];
-            const names = (inc.studentIds || []).map((id) => roster.find((s) => s.id === id)?.name).filter(Boolean).join(", ");
-            return (
-              <button key={inc.id} onClick={() => onOpenIncidentDetail(inc.id)}
-                className="w-full text-left bg-white border border-stone-200 rounded-xl p-3.5 hover:border-teal-300">
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <span className={`inline-block text-xs font-semibold px-2 py-0.5 rounded-full bg-${cat?.color || "stone"}-100 text-${cat?.color || "stone"}-700`}>
-                    {cat?.label || inc.category || "Uncategorized"}
-                  </span>
-                  <span className="text-xs text-stone-400">{inc.date}</span>
-                </div>
-                <p className="text-sm text-stone-700">{names || "No students tagged"}</p>
-                {inc.flaggedForAdmin && <span className="text-[10px] font-semibold text-rose-600 flex items-center gap-1 mt-1"><Flag size={11} className="fill-rose-600" /> Flagged for admin</span>}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, config, plannerDays, navigate }) {
   const date = todayISO();
   const schoolDay = isSchoolDay(date, config, plannerDays);
@@ -7353,8 +7367,107 @@ function PreschoolScheduleSidebar({ periods, events, navigate }) {
   );
 }
 
-function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, navigate }) {
+// Launches the device's own camera immediately, rather than a photo-picker screen — tapping the
+// tile should feel like reaching for a camera app, not opening a gallery. After a photo is taken,
+// offers a fast send: post it to the blog, or send it straight to specific families, right from
+// the moment it was captured, since a good candid is easy to lose momentum on if it means leaving
+// the app first to actually get to a camera.
+function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamily, onDone }) {
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [caption, setCaption] = useState("");
+  const [recipientMode, setRecipientMode] = useState("blog"); // "blog" | "students"
+  const [selectedStudentIds, setSelectedStudentIds] = useState([]);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState(null);
+  const [sent, setSent] = useState(false);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => { fileInputRef.current?.click(); }, []);
+
+  const handleFileSelected = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) { onDone(); return; } // camera opened, but nothing was captured — nothing to review
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+  };
+
+  const toggleStudent = (id) => setSelectedStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const send = async () => {
+    if (!file) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      if (recipientMode === "blog") {
+        await submitBlogPost(null, [{ id: uid(), text: caption, mediaItems: [{ id: uid(), file, type: "photo" }] }]);
+      } else {
+        const url = await uploadOneImage(file, `message-attachments/photo-quick-${classId}/${uid()}.jpg`);
+        const allFamilies = await loadAllWithPrefix("family:");
+        for (const sid of selectedStudentIds) {
+          const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === sid && l.classId === classId));
+          if (match) await sendMessageToFamily(match.familyGroupId || match.uid, caption, url, "photo"); // eslint-disable-line no-await-in-loop
+        }
+      }
+      setSent(true);
+      setTimeout(onDone, 1200);
+    } catch (err) {
+      setSendError(describeUploadError(err));
+      setSending(false);
+    }
+  };
+
+  if (!preview) {
+    return (
+      <div className="app-page text-center py-16">
+        <input ref={fileInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileSelected} />
+        <p className="text-sm text-stone-400">Opening camera…</p>
+        <button onClick={onDone} className="mt-4 text-xs font-semibold text-stone-500">Cancel</button>
+      </div>
+    );
+  }
+
+  if (sent) {
+    return (
+      <div className="app-page text-center py-16">
+        <Check className="mx-auto text-emerald-600 mb-2" size={32} />
+        <p className="text-sm font-semibold text-emerald-700">Sent!</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app-page">
+      <button onClick={onDone} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Discard</button>
+      <img src={preview} alt="" className="w-full aspect-square object-cover rounded-xl mb-3" />
+      <textarea value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a few words (optional)" rows={2}
+        className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+      <div className="flex gap-1 mb-3 bg-stone-100 rounded-lg p-1">
+        <button onClick={() => setRecipientMode("blog")} className={`flex-1 rounded-md py-2 text-xs font-semibold ${recipientMode === "blog" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Post to Blog</button>
+        <button onClick={() => setRecipientMode("students")} className={`flex-1 rounded-md py-2 text-xs font-semibold ${recipientMode === "students" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Send to specific students</button>
+      </div>
+      {recipientMode === "students" && (
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {roster.map((s) => (
+            <button key={s.id} onClick={() => toggleStudent(s.id)}
+              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${selectedStudentIds.includes(s.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+              {s.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {sendError && <p className="text-xs text-rose-600 mb-3">{sendError}</p>}
+      <button onClick={send} disabled={sending || (recipientMode === "students" && selectedStudentIds.length === 0)}
+        className="w-full bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40">
+        {sending ? "Sending…" : "Send"}
+      </button>
+    </div>
+  );
+}
+
+function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, classId, submitBlogPost, sendMessageToFamily, navigate }) {
   const [screen, setScreen] = useState(null); // null = dashboard grid
+  const openCameraCapture = () => setScreen("camera");
   const [date] = useState(todayISO());
   // Students not checked in today shouldn't be swept into a bulk "everyone ate lunch" action, or
   // logged for at all — a student who never came in shouldn't end up with a meal or nap record.
@@ -7383,12 +7496,24 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
         <MainTabs active="daily-log" navigate={navigate} />
         <div className="flex gap-3 items-start">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 flex-1 min-w-0">
-            {PRESCHOOL_TILES.filter((tile) => tile.id !== "mood" || config.preschool?.moodEnabled !== false).map((tile) => {
+            {PRESCHOOL_TILES.filter((tile) => config.preschool?.tilesEnabled?.[tile.id] !== false).map((tile) => {
               const Icon = tile.icon;
               const st = TILE_STYLES[tile.color];
-              const logged = (tile.id === "health" || tile.id === "photos") ? null : loggedCountFor(tile.id);
+              const logged = tile.special ? null : loggedCountFor(tile.id);
+              const handleTap = () => {
+                if (tile.special === "incident") {
+                  const matchedCategory = tile.categoryMatch
+                    ? config.incidents.categories.find((c) => c.id === tile.categoryMatch || c.label.toLowerCase().includes(tile.categoryMatch))?.id
+                    : null;
+                  openIncidentForm(null, "daily-log", matchedCategory);
+                } else if (tile.special === "camera") {
+                  openCameraCapture();
+                } else {
+                  setScreen(tile.id);
+                }
+              };
               return (
-                <button key={tile.id} onClick={() => (tile.id === "health" ? openIncidentForm() : setScreen(tile.id))}
+                <button key={tile.id} onClick={handleTap}
                   className={`hover-lift flex flex-col items-center justify-center gap-1.5 rounded-2xl border-2 py-6 px-2 ${st.tileBg} ${st.tileBorder} ${st.tileBorderHover}`}>
                   <Icon size={32} className={st.iconText} />
                   <span className={`text-sm font-bold text-center ${st.labelText}`}>{tile.label}</span>
@@ -7423,8 +7548,8 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
     return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
       logBulk={logBathroomBulk} removeLog={removeBathroomLog} onBack={() => setScreen(null)} />;
   }
-  if (screen === "photos") {
-    return <PhotoUploadScreen tile={tile} date={date} roster={roster} photos={photos} uploadClassPhoto={uploadClassPhoto} onBack={() => setScreen(null)} />;
+  if (screen === "camera") {
+    return <CameraCaptureView roster={roster} classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} onDone={() => setScreen(null)} />;
   }
   return null;
 }
@@ -8014,92 +8139,6 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
           {posting ? `Posting… ${progress}%` : activeBlockCount > 1 ? "Post all parts together" : "Post"}
         </button>
       </div>
-    </div>
-  );
-}
-
-function PhotoUploadScreen({ tile, date, roster, photos, uploadClassPhoto, onBack }) {
-  const st = TILE_STYLES[tile.color];
-  const [selected, setSelected] = useState([]);
-  const [caption, setCaption] = useState("");
-  const [photoDate, setPhotoDate] = useState(date);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState(null);
-  const fileInputRef = useRef(null);
-
-  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-
-  const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // lets the same file be picked again later without needing a different one first
-    if (!file) return;
-    if (selected.length === 0) {
-      setError("Tap who's in the photo first.");
-      return;
-    }
-    setError(null);
-    setUploading(true);
-    setProgress(0);
-    try {
-      await uploadClassPhoto(file, selected, caption.trim(), photoDate, setProgress);
-      setSelected([]);
-      setCaption("");
-    } catch (err) {
-      setError(describeUploadError(err));
-    }
-    setUploading(false);
-  };
-
-  const photosForDate = photos.filter((p) => p.date === photoDate);
-
-  return (
-    <div className="app-page">
-      <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
-      <p className="text-xs text-stone-400 mb-2">
-        Not tied to who's checked in today — a class photo or a post from earlier in the week still goes to every family, whether or not their child happened to be here.
-      </p>
-      <label className="block text-xs font-medium text-stone-500 mb-1">Date</label>
-      <input type="date" value={photoDate} onChange={(e) => setPhotoDate(e.target.value)} max={todayISO()}
-        className="rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
-
-      <button onClick={() => setSelected(roster.map((s) => s.id))}
-        className={`w-full text-sm font-bold px-3 py-2.5 rounded-lg border-2 mb-2 ${st.solid} ${st.solidBorder} text-white`}>
-        Whole class ({roster.length})
-      </button>
-      <div className="flex flex-wrap gap-1.5 mb-4">
-        {roster.map((s) => (
-          <button key={s.id} onClick={() => toggle(s.id)}
-            className={`text-sm font-semibold px-3 py-2 rounded-full border ${selected.includes(s.id) ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300 bg-white"}`}>
-            {s.name}
-          </button>
-        ))}
-        {roster.length === 0 && <p className="text-xs text-stone-400">No students in this class yet.</p>}
-      </div>
-
-      <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Caption (optional)"
-        className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
-
-      {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
-
-      <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFile} className="hidden" />
-      <button onClick={() => fileInputRef.current?.click()} disabled={uploading}
-        className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 flex items-center justify-center gap-2 ${st.solid} ${st.solidHover}`}>
-        <Camera size={18} /> {uploading ? `Uploading… ${progress}%` : "Take or choose a photo"}
-      </button>
-
-      {photosForDate.length > 0 && (
-        <>
-          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mt-6 mb-2">Already posted for this date</p>
-          <div className="grid grid-cols-3 gap-2">
-            {photosForDate.map((p) => (
-              <div key={p.id} className="aspect-square rounded-lg overflow-hidden bg-stone-100">
-                <img src={p.url} alt={p.caption || "Class photo"} className="w-full h-full object-cover" />
-              </div>
-            ))}
-          </div>
-        </>
-      )}
     </div>
   );
 }
@@ -13660,13 +13699,13 @@ function SubstituteModeView({ className, roster, studentData, config, plannerDay
   );
 }
 
-function IncidentForm({ roster, config, presetId, onCancel, onSave }) {
-  const [category, setCategory] = useState("");
+function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSave }) {
+  const [category, setCategory] = useState(categoryPreset || "");
   const [date, setDate] = useState(todayISO());
   const [time] = useState(() => new Date().toTimeString().slice(0, 5));
   const [description, setDescription] = useState("");
   const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
-  const [showDetails, setShowDetails] = useState(false);
+  const [showDetails, setShowDetails] = useState(Boolean(categoryPreset));
   const [flaggedForAdmin, setFlaggedForAdmin] = useState(false);
   const [mediaItems, setMediaItems] = useState([]); // { id, file, preview, type, error }
   const [saving, setSaving] = useState(false);
@@ -15022,12 +15061,19 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
           {isPreschool && (
             <Section title="Daily Log tiles">
-              <label className="flex items-center gap-2 text-sm text-stone-700">
-                <input type="checkbox" checked={config.preschool?.moodEnabled !== false}
-                  onChange={(e) => update((c) => { c.preschool = { ...(c.preschool || {}), moodEnabled: e.target.checked }; return c; })} />
-                Show the Mood tile in Daily Log
-              </label>
-              <p className="text-xs text-stone-400 mt-1">Turn this off if your program doesn't track mood — the tile disappears from Daily Log, but nothing already logged is deleted.</p>
+              <p className="text-xs text-stone-400 mb-2">Turn off any tile your program doesn't use — it disappears from Daily Log, but nothing already logged is deleted.</p>
+              <div className="space-y-1.5">
+                {PRESCHOOL_TILES.map((tile) => (
+                  <label key={tile.id} className="flex items-center gap-2 text-sm text-stone-700">
+                    <input type="checkbox" checked={config.preschool?.tilesEnabled?.[tile.id] !== false}
+                      onChange={(e) => update((c) => {
+                        c.preschool = { ...(c.preschool || {}), tilesEnabled: { ...(c.preschool?.tilesEnabled || {}), [tile.id]: e.target.checked } };
+                        return c;
+                      })} />
+                    {tile.label}
+                  </label>
+                ))}
+              </div>
             </Section>
           )}
 
