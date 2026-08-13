@@ -3746,9 +3746,13 @@ function TourHint({ active, step, total, text, align = "left", onNext, onSkip, c
 // Sits directly on the parent's home screen — reaching the office shouldn't require digging into
 // a "Messages" section at all, since it isn't a conversation, it's a launcher. "Updates" still
 // leads to anything the office has broadcast, for the (less common) case someone wants that history.
+// Deliberately unobtrusive — reaching the office isn't why a parent opens this app most days, so
+// it's a small, collapsed row rather than a card competing with the actual daily content for the
+// top of the screen. Expands in place when tapped, rather than opening a whole new page.
 function OfficeContactCard({ onViewUpdates }) {
   const [officePhone, setOfficePhone] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     loadJSON("schoolSettings", {}, true).then((s) => { setOfficePhone(s?.officePhone || null); setLoading(false); });
@@ -3758,25 +3762,29 @@ function OfficeContactCard({ onViewUpdates }) {
   if (loading || !digits) return null;
 
   return (
-    <div className="bg-white border border-stone-200 rounded-xl p-3.5 mb-4">
-      <div className="flex items-center justify-between mb-2.5">
-        <p className="text-sm font-semibold text-stone-800">Contact the office</p>
-        <button onClick={onViewUpdates} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Updates</button>
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <Phone size={18} className="text-teal-700" />
-          <span className="text-[11px] font-semibold text-stone-700">Call</span>
-        </a>
-        <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <MessageCircle size={18} className="text-teal-700" />
-          <span className="text-[11px] font-semibold text-stone-700">Text</span>
-        </a>
-        <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <MessageCircle size={18} className="text-emerald-600" />
-          <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
-        </a>
-      </div>
+    <div className="mb-4">
+      <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-1.5 text-xs font-semibold text-stone-500 hover:text-stone-700">
+        <Phone size={13} /> Contact the office {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+      </button>
+      {expanded && (
+        <div className="bg-white border border-stone-200 rounded-xl p-3 mt-2">
+          <div className="grid grid-cols-3 gap-2 mb-2">
+            <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+              <Phone size={18} className="text-teal-700" />
+              <span className="text-[11px] font-semibold text-stone-700">Call</span>
+            </a>
+            <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+              <MessageCircle size={18} className="text-teal-700" />
+              <span className="text-[11px] font-semibold text-stone-700">Text</span>
+            </a>
+            <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+              <MessageCircle size={18} className="text-emerald-600" />
+              <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
+            </a>
+          </div>
+          <button onClick={onViewUpdates} className="text-xs font-semibold text-teal-700 hover:text-teal-900">See updates from the office →</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -4107,12 +4115,14 @@ function ChildDailyLogView({ link, onBack, onOpenBlog }) {
 
   return (
     <div className="app-page">
-      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>}
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.studentName}</h1>
       <p className="text-xs text-stone-400 mb-3">{link.className}</p>
-      <button onClick={onOpenBlog} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-teal-700 border border-teal-300 rounded-xl py-2 mb-4 hover:bg-teal-50">
-        <Newspaper size={15} /> Class Blog
-      </button>
+      {onOpenBlog && (
+        <button onClick={onOpenBlog} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-teal-700 border border-teal-300 rounded-xl py-2 mb-4 hover:bg-teal-50">
+          <Newspaper size={15} /> Class Blog
+        </button>
+      )}
 
       <div className="flex items-center justify-center gap-3 mb-5 bg-white border border-stone-200 rounded-xl py-2">
         <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-teal-700 p-1"><ChevronLeft size={18} /></button>
@@ -4254,7 +4264,7 @@ function ParentBlogView({ link, family, onBack }) {
 
   return (
     <div className="app-page">
-      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>}
       <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
         <img src="/logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
         <div className="min-w-0">
@@ -4304,7 +4314,7 @@ function ParentMainTabs({ active, navigate, hasUnread }) {
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 relative flex items-center justify-center gap-1.5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 ${isActive ? "text-teal-800 border-teal-700" : "text-stone-400 border-transparent"}`}>
+            className={`flex-1 relative flex items-center justify-center gap-1.5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 ${isActive ? "text-[#7a2e26] border-[#7a2e26]" : "text-stone-400 border-transparent"}`}>
             <Icon size={16} /> {t.label}
             {t.id === "messages" && hasUnread && <span className="absolute top-2 right-[28%] w-1.5 h-1.5 rounded-full bg-rose-500" />}
           </button>
@@ -4332,8 +4342,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     if (tourStep >= TOUR_TOTAL_STEPS - 1) dismissTour();
     else setTourStep((s) => s + 1);
   };
-  const [viewingChild, setViewingChild] = useState(null); // the studentLink currently open in the daily log view, or null
-  const [viewingBlogFor, setViewingBlogFor] = useState(null); // the studentLink whose class blog is open, or null
+  const [selectedChildIndex, setSelectedChildIndex] = useState(0); // which child's daily log shows on Home, when there's more than one
+  const [selectedBlogClassIndex, setSelectedBlogClassIndex] = useState(0); // which class's blog shows, when linked to more than one
   const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
   // A scan doesn't perform anything by itself — it only unlocks the ability to act, which then
   // has to be used deliberately per child. Locks again the moment they leave this screen, so
@@ -4496,24 +4506,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     setTimeout(() => setPwSuccess(false), 3000);
   };
 
-  if (viewingBlogFor) {
-    return (
-      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
-        <GlobalAppStyles />
-        <ParentBlogView link={viewingBlogFor} family={family} onBack={() => setViewingBlogFor(null)} />
-      </div>
-    );
-  }
-
-  if (viewingChild) {
-    return (
-      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
-        <GlobalAppStyles />
-        <ChildDailyLogView link={viewingChild} onBack={() => setViewingChild(null)} onOpenBlog={() => setViewingBlogFor(viewingChild)} />
-      </div>
-    );
-  }
-
   if (messagingClassId) {
     const className = (family.studentLinks.find((l) => l.classId === messagingClassId) || {}).className || "the class";
     return (
@@ -4538,18 +4530,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
-      <div className="bg-teal-800 sticky top-0 z-10 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)" }}>
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <img src="/logo-transparent.png" alt="" className="w-8 h-8 object-contain shrink-0 bg-white rounded-lg p-0.5" />
+      <div className="sticky top-0 z-10 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #2b2723 0%, #2b2723 45%, #7a2e26 100%)" }}>
+        <div className="max-w-lg mx-auto px-4 pt-3.5 pb-3 flex items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            <img src="/logo-transparent.png" alt="" className="w-12 h-12 object-contain shrink-0 bg-white rounded-xl p-1 shadow-sm" />
             <div className="min-w-0">
-              <h1 className="display-font text-base font-bold text-white truncate leading-tight">{family?.name || "Your family"}</h1>
+              <p className="text-[11px] font-semibold text-white/60 uppercase tracking-wide leading-tight">Welcome back</p>
+              <h1 className="display-font text-lg font-bold text-white truncate leading-tight">{family?.name || "Your family"}</h1>
               {canSwitchToTeacher && (
-                <button onClick={onSwitchToTeacher} className="text-[11px] text-teal-100 hover:text-white">Switch to Teacher view</button>
+                <button onClick={onSwitchToTeacher} className="text-[11px] text-white/60 hover:text-white">Switch to Teacher view</button>
               )}
             </div>
           </div>
-          <button onClick={() => setParentTab("settings")} className="text-teal-100 hover:text-white p-2 rounded-lg hover:bg-white/10 shrink-0"><SettingsIcon size={20} /></button>
+          <button onClick={() => setParentTab("settings")} className="text-white/70 hover:text-white p-2 rounded-lg hover:bg-white/10 shrink-0"><SettingsIcon size={20} /></button>
         </div>
         {parentTab !== "settings" && (
           <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
@@ -4663,22 +4656,28 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             ))}
           </div>
         ) : parentTab === "blog" ? (
-          <div className="space-y-3">
-            {(family?.studentLinks || []).length === 0 ? (
-              <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
-            ) : (
-              [...new Map(family.studentLinks.map((l) => [l.classId, l])).values()].map((l) => (
-                <button key={l.classId} onClick={() => setViewingBlogFor(l)}
-                  className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-teal-300">
-                  <div>
-                    <p className="font-semibold text-stone-900">{l.className}</p>
-                    <p className="text-xs text-stone-400">Class Blog</p>
+          (family?.studentLinks || []).length === 0 ? (
+            <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
+          ) : (() => {
+            const uniqueClasses = [...new Map(family.studentLinks.map((l) => [l.classId, l])).values()];
+            const selectedLink = uniqueClasses[selectedBlogClassIndex] || uniqueClasses[0];
+            return (
+              <div>
+                {uniqueClasses.length > 1 && (
+                  <div className="flex gap-1.5 mb-4 overflow-x-auto no-scrollbar">
+                    {uniqueClasses.map((l, i) => (
+                      <button key={l.classId} onClick={() => setSelectedBlogClassIndex(i)}
+                        className={`shrink-0 px-3.5 py-2 rounded-full text-sm font-semibold border-2 ${selectedBlogClassIndex === i ? "text-white border-transparent" : "bg-white text-stone-600 border-stone-200"}`}
+                        style={selectedBlogClassIndex === i ? { background: "linear-gradient(120deg, #2b2723 0%, #7a2e26 100%)" } : {}}>
+                        {l.studentName}
+                      </button>
+                    ))}
                   </div>
-                  <ChevronRight size={16} className="text-stone-300" />
-                </button>
-              ))
-            )}
-          </div>
+                )}
+                <ParentBlogView link={selectedLink} family={family} />
+              </div>
+            );
+          })()
         ) : (
           <>
             <OfficeContactCard onViewUpdates={() => openAdminMessages()} />
@@ -4705,7 +4704,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
               text="Scan the QR code posted at school to check your child in and out yourself."
               onNext={advanceTour} onSkip={dismissTour}>
-              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold mb-4 hover:bg-teal-800">
+              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #2b2723 0%, #7a2e26 100%)" }}>
                 Scan QR code to check in or out
               </button>
             </TourHint>
@@ -4715,35 +4714,71 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 <p className="text-sm text-stone-400">No children linked to this account yet — check with the school if this doesn't look right.</p>
               </div>
             ) : (
-              <TourHint active={tourStep === 2} step={3} total={TOUR_TOTAL_STEPS} align="left"
-                text={`Tap on ${family.studentLinks[0]?.studentName || "your child"} to see their day — mood, meals, naps, and more, as their teacher logs it.`}
-                onNext={advanceTour} onSkip={dismissTour}>
-                <div className="space-y-2">
-                  {family.studentLinks.map((link, i) => {
-                    const status = checkInStatus[link.studentId];
-                    const isIn = status?.isIn;
-                    const entries = status?.entries || [];
-                    return (
-                      <button key={i} onClick={() => setViewingChild(link)}
-                        className={`w-full text-left rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
-                        <p className="font-semibold text-stone-900">{link.studentName}</p>
-                        <p className="text-xs text-stone-400">{link.className}</p>
-                        {entries.length === 0 ? (
-                          <p className="text-xs font-semibold text-stone-400 mt-0.5">Not checked in yet today</p>
-                        ) : (
-                          <div className="mt-0.5 space-y-0.5">
-                            {entries.map((e) => (
-                              <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
-                                In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
-                              </p>
-                            ))}
-                          </div>
-                        )}
+              <>
+                {family.studentLinks.length > 1 && (
+                  <div className="flex gap-1.5 mb-4 overflow-x-auto no-scrollbar">
+                    {family.studentLinks.map((link, i) => (
+                      <button key={i} onClick={() => setSelectedChildIndex(i)}
+                        className={`shrink-0 px-3.5 py-2 rounded-full text-sm font-semibold border-2 ${selectedChildIndex === i ? "text-white border-transparent" : "bg-white text-stone-600 border-stone-200"}`}
+                        style={selectedChildIndex === i ? { background: "linear-gradient(120deg, #2b2723 0%, #7a2e26 100%)" } : {}}>
+                        {link.studentName}
                       </button>
-                    );
-                  })}
-                </div>
-              </TourHint>
+                    ))}
+                  </div>
+                )}
+                {(() => {
+                  const link = family.studentLinks[selectedChildIndex] || family.studentLinks[0];
+                  const status = checkInStatus[link.studentId];
+                  const isIn = status?.isIn;
+                  const entries = status?.entries || [];
+                  const confirming = confirmingRepeatChild === link.studentId;
+                  return (
+                    <TourHint active={tourStep === 2} step={3} total={TOUR_TOTAL_STEPS} align="left"
+                      text={`Your child's day shows right here — mood, meals, naps, and more, as their teacher logs it.`}
+                      onNext={advanceTour} onSkip={dismissTour}>
+                      <div>
+                        <div className={`rounded-xl p-4 border-2 mb-4 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex-1 min-w-0">
+                              {entries.length === 0 ? (
+                                <p className="text-xs font-semibold text-stone-400">Not checked in yet today</p>
+                              ) : (
+                                <div className="space-y-0.5">
+                                  {entries.map((e) => (
+                                    <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
+                                      In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
+                                    </p>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            {confirming ? (
+                              <div className="flex flex-col items-end gap-1.5 shrink-0">
+                                <span className="text-[10px] text-stone-500">Log another visit today?</span>
+                                <div className="flex gap-1.5">
+                                  <button onClick={() => { toggleCheckInByFamily(link); setConfirmingRepeatChild(null); }}
+                                    className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes</button>
+                                  <button onClick={() => setConfirmingRepeatChild(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <button onClick={() => {
+                                const hasCompletedToday = entries.filter((e) => e.checkInTime && e.checkOutTime).length > 0;
+                                if (!isIn && hasCompletedToday) { setConfirmingRepeatChild(link.studentId); return; }
+                                toggleCheckInByFamily(link);
+                              }}
+                                className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                                {isIn ? "Check out" : "Check in"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <ChildDailyLogView link={link} onOpenBlog={() => setParentTab("blog")} />
+                      </div>
+                    </TourHint>
+                  );
+                })()}
+              </>
             )}
           </>
         )}
