@@ -30,7 +30,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -986,6 +986,38 @@ async function markThreadRead(viewerId, threadKey) {
   state[threadKey] = new Date().toISOString();
   await saveJSON(`read-state:${viewerId}`, state, true);
 }
+
+// Generic across every thread shape in the app (class messages, admin messages) — all of them
+// store the same { messages: [...] } document, keyed differently, so these take the actual
+// storage key directly rather than trying to derive it from a thread's shorter display key.
+// Editing keeps the original text the first time only, so a second or third edit doesn't
+// overwrite what was genuinely first said — that's the actual accountability record, even though
+// the UI only ever surfaces "(edited)" rather than a full history by default.
+async function editMessageInThread(storageKey, messageId, newText) {
+  const thread = (await loadJSON(storageKey, null, true)) || { messages: [] };
+  const next = {
+    messages: thread.messages.map((m) => (m.id === messageId
+      ? { ...m, text: newText, edited: true, originalText: m.originalText ?? m.text }
+      : m)),
+  };
+  await saveJSON(storageKey, next, true);
+  return next;
+}
+
+// A soft delete, not a real erase — the placeholder a deleted message leaves behind ("This
+// message was deleted") is what lets a family, and the school itself if a concern is ever
+// raised, know something was said and removed, rather than a silent gap with no trace at all.
+// Attachments and text are actually cleared from storage, not just hidden by the UI.
+async function deleteMessageInThread(storageKey, messageId) {
+  const thread = (await loadJSON(storageKey, null, true)) || { messages: [] };
+  const next = {
+    messages: thread.messages.map((m) => (m.id === messageId
+      ? { id: m.id, senderType: m.senderType, senderName: m.senderName, timestamp: m.timestamp, deleted: true }
+      : m)),
+  };
+  await saveJSON(storageKey, next, true);
+  return next;
+}
 // Snoozing doesn't mark a thread read — it just quiets the indicator for a while, so an unread
 // reply still shows as unread once the snooze period passes, rather than being silently dismissed.
 async function snoozeThread(viewerId, threadKey, minutes) {
@@ -1379,13 +1411,16 @@ function AppInner() {
   const [isSubstituteSession, setIsSubstituteSession] = useState(false);
 
   // Same one-time-read pattern as isParentPortal above — captured once at mount, before anything
-  // strips these params off the URL. classId lets a teacher's notification skip the manual class
-  // picker and land straight in the right class; groupId (only meaningful once inside that class)
-  // additionally opens one specific family's conversation once ClassApp itself has mounted.
+  // strips these params off the URL. A plain ?classId= (no "open=") means "restore whatever class
+  // was active before" — either a fresh reload of the same tab, or the OS having fully killed and
+  // restarted the page in the background, which happens on some phones. "open=messages&classId="
+  // specifically means a notification tap, which additionally opens one exact conversation via
+  // groupId once ClassApp itself has mounted.
   const [pendingDeepLink] = useState(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("open") !== "messages" || !params.get("classId")) return null;
-    return { classId: params.get("classId"), groupId: params.get("groupId") || null };
+    const urlClassId = params.get("classId");
+    if (!urlClassId) return null;
+    return { classId: urlClassId, groupId: params.get("open") === "messages" ? params.get("groupId") || null : null };
   });
   const [deepLinkClassEntered, setDeepLinkClassEntered] = useState(false); // guards against re-entering the class on every re-render
 
@@ -1397,9 +1432,8 @@ function AppInner() {
     if (!pendingDeepLink || deepLinkClassEntered || !currentTeacher || classId) return;
     const target = registry.find((c) => !c.archived && c.id === pendingDeepLink.classId && (currentTeacher.assignedClassIds || []).includes(c.id));
     if (target) {
-      enterAssignedClass(target);
+      enterAssignedClass(target); // already leaves a clean ?classId= on the URL — nothing further needed here
       setDeepLinkClassEntered(true);
-      window.history.replaceState({}, "", window.location.pathname); // a later refresh shouldn't re-trigger the same jump
     }
   }, [pendingDeepLink, deepLinkClassEntered, currentTeacher, classId, registry]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1611,7 +1645,24 @@ function AppInner() {
     setCurrentTeacher((prev) => ({ ...prev, messageSignOff: newSignOff }));
   };
 
-  const enterAssignedClass = (cls) => { setClassId(cls.id); setClassName(cls.name); };
+  // Pushing a real history entry here (not just changing React state) is what makes the Android
+  // hardware back button actually step back to the class picker instead of closing the app
+  // outright — without this, the browser has no history of its own to go back through, so it
+  // falls straight through to exiting. Reflecting classId in the URL also means a reload (or the
+  // OS fully killing and restarting the page in the background, which happens on some phones)
+  // can restore the same class instead of always resetting to the picker.
+  const enterAssignedClass = (cls) => {
+    setClassId(cls.id);
+    setClassName(cls.name);
+    const url = new URL(window.location.href);
+    url.searchParams.set("classId", cls.id);
+    // Explicitly dropped, not just left alone — a notification's one-time "open=messages&groupId="
+    // params could still be sitting on the current URL when this runs from the deep-link resolver,
+    // and they'd be wrong to carry forward into ongoing navigation/restore state.
+    url.searchParams.delete("open");
+    url.searchParams.delete("groupId");
+    window.history.pushState({ classId: cls.id }, "", url);
+  };
 
   const signOutStaff = async () => {
     setClassId(null);
@@ -1619,7 +1670,37 @@ function AppInner() {
     await signOutTeacher();
   };
 
-  const backToTeacherClassPicker = () => { setClassId(null); setClassName(""); };
+  const backToTeacherClassPicker = () => {
+    setClassId(null);
+    setClassName("");
+    const url = new URL(window.location.href);
+    url.searchParams.delete("classId");
+    window.history.pushState({ classId: null }, "", url);
+  };
+
+  // The actual back-button handler — fires on the hardware/gesture back press, and on the
+  // browser's own back/forward buttons if this were ever opened in a regular tab. Reads whatever
+  // the URL now says (that's already been updated by the browser itself by the time this fires)
+  // and syncs React state to match, rather than re-deriving a "previous" value — the URL is
+  // already the source of truth at this point.
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const urlClassId = params.get("classId");
+      if (urlClassId && currentTeacher) {
+        const target = registry.find((c) => !c.archived && c.id === urlClassId && (currentTeacher.assignedClassIds || []).includes(c.id));
+        if (target) {
+          setClassId(target.id);
+          setClassName(target.name);
+          return;
+        }
+      }
+      setClassId(null);
+      setClassName("");
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [registry, currentTeacher]);
 
   // Creating another person's login can't happen from the browser with normal client
   // credentials — it needs elevated, server-side access, so this calls a dedicated backend
@@ -4097,10 +4178,24 @@ function TourHint({ active, step, total, text, align = "left", onNext, onSkip, c
 // Deliberately unobtrusive — reaching the office isn't why a parent opens this app most days, so
 // it's a small, collapsed row rather than a card competing with the actual daily content for the
 // top of the screen. Expands in place when tapped, rather than opening a whole new page.
-function OfficeContactCard({ onViewUpdates }) {
+// lucide-react is a generic icon set with no brand marks — this is the actual recognizable
+// WhatsApp glyph (speech bubble + handset), drawn inline in WhatsApp's own brand green
+// specifically so "this opens WhatsApp" reads at a glance, the same way the phone icon already
+// reads as "call" — a generic message-bubble icon tinted green doesn't carry that recognition.
+function WhatsAppIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="#25D366">
+      <path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38a9.9 9.9 0 0 0 4.74 1.21h.01c5.46 0 9.9-4.45 9.9-9.91C21.96 6.45 17.5 2 12.04 2zm5.8 14.02c-.24.68-1.4 1.3-1.93 1.35-.5.05-1.03.24-3.42-.72-2.9-1.16-4.72-4.15-4.87-4.34-.14-.19-1.17-1.56-1.17-2.98s.73-2.12 1-2.4c.24-.27.53-.34.71-.34.18 0 .35 0 .5.01.16.01.38-.06.6.46.24.56.8 1.95.87 2.09.07.14.12.31.02.5-.1.19-.15.31-.29.48-.15.17-.3.37-.44.5-.14.14-.3.29-.13.58.17.29.75 1.24 1.61 2.01 1.11.99 2.04 1.29 2.34 1.44.29.14.46.12.63-.07.17-.19.72-.84.92-1.13.19-.29.38-.24.63-.14.26.1 1.64.77 1.92.92.29.14.48.21.55.33.07.12.07.71-.16 1.4z"/>
+    </svg>
+  );
+}
+
+// Controlled from the header's own Contact Office icon now, not a self-managed inline toggle —
+// renders as a full-width panel spanning the same width as the rest of the page content, not a
+// small anchored popover, since a 3-icon grid needs real room to be comfortably tappable.
+function ContactOfficePanel({ onViewUpdates }) {
   const [officePhone, setOfficePhone] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     loadJSON("schoolSettings", {}, true).then((s) => { setOfficePhone(s?.officePhone || null); setLoading(false); });
@@ -4110,29 +4205,22 @@ function OfficeContactCard({ onViewUpdates }) {
   if (loading || !digits) return null;
 
   return (
-    <div className="mb-4">
-      <button onClick={() => setExpanded((v) => !v)} className="flex items-center gap-1.5 text-xs font-semibold text-stone-500 hover:text-stone-700">
-        <Phone size={13} /> Contact the office {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-      </button>
-      {expanded && (
-        <div className="bg-white border border-stone-200 rounded-xl p-3 mt-2">
-          <div className="grid grid-cols-3 gap-2 mb-2">
-            <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-              <Phone size={18} className="text-[#a8562f]" />
-              <span className="text-[11px] font-semibold text-stone-700">Call</span>
-            </a>
-            <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-              <MessageCircle size={18} className="text-[#a8562f]" />
-              <span className="text-[11px] font-semibold text-stone-700">Text</span>
-            </a>
-            <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-              <MessageCircle size={18} className="text-emerald-600" />
-              <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
-            </a>
-          </div>
-          <button onClick={onViewUpdates} className="text-xs font-semibold text-[#a8562f] hover:text-[#7a3f1f]">See updates from the office →</button>
-        </div>
-      )}
+    <div className="bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3">
+      <div className="grid grid-cols-3 gap-2 mb-2">
+        <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+          <Phone size={18} className="text-[#1c3453]" />
+          <span className="text-[11px] font-semibold text-stone-700">Call</span>
+        </a>
+        <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+          <MessageCircle size={18} className="text-[#1c3453]" />
+          <span className="text-[11px] font-semibold text-stone-700">Text</span>
+        </a>
+        <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
+          <WhatsAppIcon size={19} />
+          <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
+        </a>
+      </div>
+      <button onClick={onViewUpdates} className="text-xs font-semibold text-[#1c3453] hover:text-[#14283f]">See updates from the office →</button>
     </div>
   );
 }
@@ -4160,15 +4248,15 @@ function ContactOfficeView({ adminThread, onBack }) {
       )}
       {!loading && digits && (
         <div className="grid grid-cols-3 gap-2 mb-6">
-          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#a8562f]">
-            <Phone size={22} className="text-[#a8562f]" />
+          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#1c3453]">
+            <Phone size={22} className="text-[#1c3453]" />
             <span className="text-xs font-semibold text-stone-700">Call</span>
           </a>
-          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#a8562f]">
-            <MessageCircle size={22} className="text-[#a8562f]" />
+          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#1c3453]">
+            <MessageCircle size={22} className="text-[#1c3453]" />
             <span className="text-xs font-semibold text-stone-700">Text</span>
           </a>
-          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#a8562f]">
+          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#1c3453]">
             <MessageCircle size={22} className="text-emerald-600" />
             <span className="text-xs font-semibold text-stone-700">WhatsApp</span>
           </a>
@@ -4192,7 +4280,7 @@ function ContactOfficeView({ adminThread, onBack }) {
   );
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, myRole, config, teacher, threadKey, onBack }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -4205,9 +4293,26 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
   const [attachError, setAttachError] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
+  const [openActionsFor, setOpenActionsFor] = useState(null); // message id whose Edit/Delete menu is open
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState("");
   const bottomRef = useRef(null);
+  const composerRef = useRef(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "auto" }); }, [messages.length]);
+
+  // Grows with what's actually being typed, the way most messaging apps handle this, instead of
+  // staying pinned to one line and forcing a scroll inside a tiny box to see what you've written.
+  // Resetting height to "auto" first is what lets scrollHeight shrink back down too, not just
+  // grow — without it the box would only ever get taller, never return to one line after a send
+  // or a delete. Capped at MAX_COMPOSER_HEIGHT so a very long message scrolls within the box
+  // itself rather than pushing the send button and the rest of the page around indefinitely.
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
+  }, [text]);
 
   const pickAttachment = async (file) => {
     if (!file) return;
@@ -4255,6 +4360,19 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
     setSending(false);
   };
 
+  const startEdit = (m) => { setEditingId(m.id); setEditDraft(m.text || ""); setOpenActionsFor(null); };
+  const cancelEdit = () => { setEditingId(null); setEditDraft(""); };
+  const saveEdit = async (id) => {
+    if (!editDraft.trim()) return;
+    await onEdit(id, editDraft.trim());
+    setEditingId(null);
+    setEditDraft("");
+  };
+  const confirmDelete = async (id) => {
+    await onDelete(id);
+    setOpenActionsFor(null);
+  };
+
   const generate = async () => {
     if (!roughNote.trim() || generating) return;
     setGenerating(true);
@@ -4284,32 +4402,75 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
         )}
         {messages.map((m) => {
           const mine = m.senderType === myRole;
+          // Edit/delete only ever apply to staff's own sent messages, never a family's — matches
+          // the accountability reasoning behind soft delete itself: the point is a school having
+          // a stable, trustworthy record of what it told a family, not the reverse.
+          const canModify = mine && myRole !== "family" && onEdit && onDelete && !m.deleted;
+
+          if (m.deleted) {
+            return (
+              <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[80%] rounded-2xl px-3.5 py-2.5 ${mine ? "bg-stone-200" : "bg-stone-100 border border-stone-200"}`}>
+                  <p className="text-xs italic text-stone-400">This message was deleted</p>
+                </div>
+              </div>
+            );
+          }
+
           return (
             <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[80%] rounded-2xl overflow-hidden ${mine ? "bg-teal-700 text-white" : "bg-white border border-stone-200 text-stone-800"}`}>
-                <div className="px-3.5 pt-2.5">
+              <div className={`max-w-[80%] rounded-2xl overflow-hidden relative ${mine ? "bg-teal-700 text-white" : "bg-white border border-stone-200 text-stone-800"}`}>
+                <div className="px-3.5 pt-2.5 flex items-start justify-between gap-2">
                   <p className={`text-[10px] font-semibold mb-0.5 ${mine ? "text-teal-100" : "text-stone-400"}`}>{m.senderName}</p>
+                  {canModify && (
+                    <button onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)}
+                      className={`shrink-0 -mt-1 -mr-1 p-1 rounded ${mine ? "text-teal-200 hover:text-white" : "text-stone-300 hover:text-stone-600"}`}>
+                      <MoreVertical size={14} />
+                    </button>
+                  )}
                 </div>
-                {m.attachmentType === "photo" && m.attachmentUrl && (
-                  <img src={m.attachmentUrl} alt="" onClick={() => setLightboxPhoto({ url: m.attachmentUrl })}
-                    className="w-full max-h-64 object-cover cursor-pointer mt-1" />
+
+                {openActionsFor === m.id && (
+                  <div className="mx-3.5 mb-1.5 flex gap-1.5">
+                    <button onClick={() => startEdit(m)} className={`text-[11px] font-semibold px-2 py-1 rounded-md ${mine ? "bg-teal-800 text-white hover:bg-teal-900" : "bg-stone-100 text-stone-700 hover:bg-stone-200"}`}>Edit</button>
+                    <ConfirmDelete onConfirm={() => confirmDelete(m.id)} size={12} label="Delete" />
+                  </div>
                 )}
-                {m.attachmentType === "video" && m.attachmentUrl && (
-                  <video src={m.attachmentUrl} controls playsInline className="w-full max-h-64 bg-black mt-1" />
+
+                {editingId === m.id ? (
+                  <div className="px-3.5 pb-2.5">
+                    <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={2} autoFocus
+                      className={`w-full rounded-lg px-2 py-1.5 text-sm mb-1.5 ${mine ? "text-stone-900" : "border border-stone-300"}`} />
+                    <div className="flex gap-1.5">
+                      <button onClick={() => saveEdit(m.id)} className={`text-[11px] font-semibold px-2.5 py-1 rounded-md ${mine ? "bg-white text-teal-700" : "bg-teal-700 text-white"}`}>Save</button>
+                      <button onClick={cancelEdit} className={`text-[11px] font-semibold px-2.5 py-1 rounded-md ${mine ? "bg-teal-800 text-teal-100" : "bg-stone-100 text-stone-500"}`}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {m.attachmentType === "photo" && m.attachmentUrl && (
+                      <img src={m.attachmentUrl} alt="" onClick={() => setLightboxPhoto({ url: m.attachmentUrl })}
+                        className="w-full max-h-64 object-cover cursor-pointer mt-1" />
+                    )}
+                    {m.attachmentType === "video" && m.attachmentUrl && (
+                      <video src={m.attachmentUrl} controls playsInline className="w-full max-h-64 bg-black mt-1" />
+                    )}
+                    {m.attachmentType === "file" && m.attachmentUrl && (
+                      <a href={m.attachmentUrl} target="_blank" rel="noopener noreferrer"
+                        className={`flex items-center gap-2 mx-3.5 mt-1 mb-1 px-3 py-2 rounded-lg border ${mine ? "border-teal-500 bg-teal-800/40" : "border-stone-200 bg-stone-50"}`}>
+                        <FileText size={18} className={mine ? "text-teal-100" : "text-stone-500"} />
+                        <span className={`text-xs font-semibold truncate ${mine ? "text-white" : "text-stone-700"}`}>{m.attachmentName || "Attached file"}</span>
+                      </a>
+                    )}
+                    <div className="px-3.5 pb-2.5 pt-1">
+                      {m.text && <p className="text-sm whitespace-pre-wrap">{m.text}</p>}
+                      <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
+                        {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                        {m.edited && <span className="italic"> · edited</span>}
+                      </p>
+                    </div>
+                  </>
                 )}
-                {m.attachmentType === "file" && m.attachmentUrl && (
-                  <a href={m.attachmentUrl} target="_blank" rel="noopener noreferrer"
-                    className={`flex items-center gap-2 mx-3.5 mt-1 mb-1 px-3 py-2 rounded-lg border ${mine ? "border-teal-500 bg-teal-800/40" : "border-stone-200 bg-stone-50"}`}>
-                    <FileText size={18} className={mine ? "text-teal-100" : "text-stone-500"} />
-                    <span className={`text-xs font-semibold truncate ${mine ? "text-white" : "text-stone-700"}`}>{m.attachmentName || "Attached file"}</span>
-                  </a>
-                )}
-                <div className="px-3.5 pb-2.5 pt-1">
-                  {m.text && <p className="text-sm whitespace-pre-wrap">{m.text}</p>}
-                  <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
-                    {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-                  </p>
-                </div>
               </div>
             </div>
           );
@@ -4366,9 +4527,9 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
             <Paperclip size={17} />
             <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
           </label>
-          <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
+          <textarea ref={composerRef} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            className="flex-1 rounded-xl border border-stone-300 px-3 py-2.5 text-sm resize-none" />
+            className="flex-1 rounded-xl border border-stone-300 px-3 py-2.5 text-sm resize-none overflow-y-auto" style={{ maxHeight: MAX_COMPOSER_HEIGHT }} />
           <button onClick={send} disabled={(!text.trim() && !attachFile) || sending} className="bg-teal-700 text-white rounded-xl px-4 py-2.5 text-sm font-bold disabled:opacity-40 hover:bg-teal-800 shrink-0">
             {sending ? (uploadProgress !== null ? `${uploadProgress}%` : "…") : "Send"}
           </button>
@@ -4439,7 +4600,7 @@ function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, curre
     </div>
   );
 }
-function ChildDailyLogView({ link, onBack, onOpenBlog }) {
+function ChildDailyLogView({ link, onBack }) {
   const [date, setDate] = useState(todayISO());
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
@@ -4479,12 +4640,19 @@ function ChildDailyLogView({ link, onBack, onOpenBlog }) {
 
   const hasAnything = Boolean(mood) || meals.length > 0 || naps.length > 0 || diapers.length > 0 || bathroomTrips.length > 0 || checkIns.length > 0 || incidents.length > 0 || photos.length > 0;
 
-  const Card = ({ color, title, children }) => {
+  const Card = ({ color, title, icon: Icon, children }) => {
     const st = TILE_STYLES[color];
     return (
-      <div className={`rounded-xl border-2 p-4 ${st.tileBg} ${st.tileBorder}`}>
-        <p className={`text-xs font-bold uppercase tracking-wide mb-1 ${st.labelText}`}>{title}</p>
-        <div className="text-sm text-stone-700">{children}</div>
+      <div className={`rounded-xl border-2 p-4 flex gap-3 ${st.tileBg} ${st.tileBorder}`}>
+        {Icon && (
+          <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${st.iconBg}`}>
+            <Icon size={18} className={st.iconText} />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <p className={`text-xs font-bold uppercase tracking-wide mb-1 ${st.labelText}`}>{title}</p>
+          <div className="text-sm text-stone-700">{children}</div>
+        </div>
       </div>
     );
   };
@@ -4492,18 +4660,11 @@ function ChildDailyLogView({ link, onBack, onOpenBlog }) {
   return (
     <div className="app-page">
       {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>}
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.studentName}</h1>
-      <p className="text-xs text-stone-400 mb-3">{link.className}</p>
-      {onOpenBlog && (
-        <button onClick={onOpenBlog} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-[#a8562f] border border-[#a8562f66] rounded-xl py-2 mb-4 hover:bg-[#a8562f0d]">
-          <Newspaper size={15} /> Class Blog
-        </button>
-      )}
 
       <div className="flex items-center justify-center gap-3 mb-5 bg-white border border-stone-200 rounded-xl py-2">
-        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-[#a8562f] p-1"><ChevronLeft size={18} /></button>
+        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-[#1c3453] p-1"><ChevronLeft size={18} /></button>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} className="text-sm font-semibold text-stone-800 border-none text-center" />
-        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-[#a8562f] p-1 disabled:opacity-30"><ChevronRight size={18} /></button>
+        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-[#1c3453] p-1 disabled:opacity-30"><ChevronRight size={18} /></button>
       </div>
 
       {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
@@ -4515,46 +4676,46 @@ function ChildDailyLogView({ link, onBack, onOpenBlog }) {
       {!loading && hasAnything && (
         <div className="space-y-3">
           {checkIns.map((c) => (
-            <Card key={c.id} color="teal" title="Attendance">
+            <Card key={c.id} color="teal" title="Attendance" icon={Check}>
               In {formatTime12h(c.checkInTime)}{c.checkOutTime ? ` — Out ${formatTime12h(c.checkOutTime)}` : " — still here"}
             </Card>
           ))}
           {mood && (
-            <Card color="orange" title="Mood">
+            <Card color="orange" title="Mood" icon={Smile}>
               {PRESCHOOL_MOOD_OPTIONS.find((m) => m.id === mood.mood)?.emoji} {PRESCHOOL_MOOD_OPTIONS.find((m) => m.id === mood.mood)?.label || mood.mood}
             </Card>
           )}
           {meals.map((m, i) => (
-            <Card key={i} color={m.mealType === "snack" ? "fuchsia" : "emerald"} title={m.mealType}>
+            <Card key={i} color={m.mealType === "snack" ? "fuchsia" : "emerald"} title={m.mealType} icon={m.mealType === "snack" ? Apple : Sandwich}>
               Ate: {MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount}
             </Card>
           ))}
           {naps.map((n, i) => (
-            <Card key={i} color="indigo" title="Nap">
+            <Card key={i} color="indigo" title="Nap" icon={Moon}>
               {n.skipped ? "Didn't nap today" : `${formatTime12h(n.start)} – ${formatTime12h(n.end)}`}
             </Card>
           ))}
           {diapers.length > 0 && (
-            <Card color="rose" title="Diapers">
+            <Card color="rose" title="Diapers" icon={Baby}>
               {diapers.map((d, i) => (
                 <p key={i}>{formatTime12h(d.time)} — {DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type}</p>
               ))}
             </Card>
           )}
           {bathroomTrips.length > 0 && (
-            <Card color="teal" title="Bathroom">
+            <Card color="teal" title="Bathroom" icon={Droplets}>
               {bathroomTrips.map((b, i) => (
                 <p key={i}>{formatTime12h(b.time)} — {BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type}</p>
               ))}
             </Card>
           )}
           {incidents.map((inc) => (
-            <Card key={inc.id} color="cyan" title="Health / incident note">
+            <Card key={inc.id} color="cyan" title="Health / incident note" icon={HeartPulse}>
               {inc.description}
             </Card>
           ))}
           {photos.length > 0 && (
-            <Card color="amber" title="Photos">
+            <Card color="amber" title="Photos" icon={Camera}>
               <div className="grid grid-cols-3 gap-2 mt-1">
                 {photos.map((p) => (
                   <button key={p.id} onClick={() => setViewingPhoto(p)} className="aspect-square rounded-lg overflow-hidden bg-white">
@@ -4685,7 +4846,7 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
     <div className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
       {labels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)}
-          className={`flex-1 py-2.5 text-sm font-semibold border-b-2 ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#a8562f] border-b-[#a8562f] bg-[#a8562f0d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
+          className={`flex-1 py-2.5 text-sm font-semibold border-b-2 ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
           {label}
         </button>
       ))}
@@ -4801,7 +4962,7 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 shrink-0 flex items-center justify-center py-3 text-xs sm:text-sm font-semibold whitespace-nowrap border-b-2 px-1 ${isActive ? "text-[#a8562f] border-[#a8562f]" : "text-stone-400 border-transparent"}`}>
+            className={`flex-1 shrink-0 flex items-center justify-center py-3 text-xs sm:text-sm font-semibold whitespace-nowrap border-b-2 px-1 ${isActive ? "text-[#1c3453] border-[#1c3453]" : "text-stone-400 border-transparent"}`}>
             <span className="relative inline-flex items-center gap-1 sm:gap-1.5">
               <Icon size={14} /> {t.label}
               <TabBadge count={t.count} />
@@ -4814,8 +4975,31 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
 }
 
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
-  const [parentTab, setParentTab] = useState("home"); // "home" | "messages" | "blog" | "settings" — persistent top bar, not a toggled overlay
+  const [parentTab, setParentTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home"); // "home" | "messages" | "blog" | "homework" | "settings" — persistent top bar, not a toggled overlay
+
+  // Same reasoning as the teacher side's class-selection history — pushing a real entry here is
+  // what lets the Android back button step back to the previous tab instead of closing the app,
+  // and what lets a killed-and-reloaded page restore the same tab instead of always resetting to
+  // Home. Tab switches happen far more often than class switches, so this uses replaceState, not
+  // pushState — a real, individually poppable history entry for every single tap would make the
+  // back button feel like it's stepping through tabs one-by-one forever, not a scoped "go back."
+  const navigateParentTab = (newTab) => {
+    setParentTab(newTab);
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", newTab);
+    window.history.replaceState({ parentTab: newTab }, "", url);
+  };
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      setParentTab(params.get("tab") || "home");
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   const [showScanner, setShowScanner] = useState(false);
+  const [contactPanelOpen, setContactPanelOpen] = useState(false);
   // Starts active on this account's first-ever login (no separate wizard, no explicit "start
   // tour" step) and never again once dismissed — tracked per individual guardian login, not
   // shared across a family group, since a newly-added second guardian should still get their own
@@ -5157,26 +5341,34 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
-      <div className="sticky top-0 z-10 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #a8562f 0%, #c17847 100%)" }}>
-        <div className="max-w-lg mx-auto px-4 pt-3.5 pb-3 flex items-center justify-between">
-          <div className="flex items-center gap-3 min-w-0">
-            <img src="/parent-logo-transparent.png" alt="" className="w-12 h-12 object-contain shrink-0 bg-white rounded-xl p-1 shadow-sm" />
+      <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <img src="/parent-logo-transparent.png" alt="" className="w-8 h-8 object-contain shrink-0" />
             <div className="min-w-0">
-              <p className="text-[11px] font-semibold text-white/60 uppercase tracking-wide leading-tight">Welcome back</p>
-              <h1 className="display-font text-lg font-bold text-white truncate leading-tight">{family?.name || "Your family"}</h1>
+              <h1 className="display-font text-sm font-bold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
               {canSwitchToTeacher && (
-                <button onClick={onSwitchToTeacher} className="text-[11px] text-white/60 hover:text-white">Switch to Teacher view</button>
+                <button onClick={onSwitchToTeacher} className="text-[10px] text-[#1c3453]/60 hover:text-[#1c3453]">Switch to Teacher view</button>
               )}
             </div>
           </div>
-          <button onClick={() => setParentTab("settings")} className="text-white/70 hover:text-white p-2 rounded-lg hover:bg-white/10 shrink-0"><SettingsIcon size={20} /></button>
+          <div className="flex items-center gap-3 shrink-0 pl-2">
+            <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#1c3453]/90 hover:text-[#1c3453]">
+              <Phone size={20} />
+              <span className="text-[10px] font-bold whitespace-nowrap leading-none">Contact office</span>
+            </button>
+            <button onClick={() => navigateParentTab("settings")} className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={22} /></button>
+          </div>
         </div>
+        {contactPanelOpen && (
+          <ContactOfficePanel onViewUpdates={() => { setContactPanelOpen(false); openAdminMessages().then(refreshUnreadThreads); }} />
+        )}
         {parentTab !== "settings" && (
           <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
-            text="Contact the office right from Home now — Messages is just for your classroom."
+            text="These tabs are how you get around — Messages, Blog, Homework, and more."
             onNext={advanceTour} onSkip={dismissTour}>
             <div className="bg-white border-t border-stone-200 max-w-lg mx-auto">
-              <ParentMainTabs active={parentTab} navigate={setParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount}
+              <ParentMainTabs active={parentTab} navigate={navigateParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount}
                 unreadHomeworkCount={unreadHomeworkCount} showHomework={(fullTimeStudentLinks || []).some((l) => l.classType !== "preschool")} />
             </div>
           </TourHint>
@@ -5186,13 +5378,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       <div className="max-w-lg mx-auto px-4 py-5">
         {parentTab === "settings" ? (
           <>
-            <button onClick={() => setParentTab("home")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+            <button onClick={() => navigateParentTab("home")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
             <p className="font-semibold text-stone-800 text-sm mb-3">My account</p>
             <label className="block text-xs font-medium text-stone-500 mb-1">Family name</label>
             <div className="flex gap-2 mb-4">
               <input value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-              <button onClick={saveName} className="bg-[#a8562f] text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-[#8a4726]">Save</button>
+              <button onClick={saveName} className="bg-[#1c3453] text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-[#14283f]">Save</button>
             </div>
             {nameSaved && <p className="text-xs text-emerald-600 -mt-3 mb-4">Saved.</p>}
 
@@ -5205,12 +5397,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
             {pwError && <p className="text-xs text-rose-600 mb-2">{pwError}</p>}
             {pwSuccess && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
-            <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-[#a8562f] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#8a4726] disabled:opacity-50 mb-3">
+            <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-[#1c3453] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#14283f] disabled:opacity-50 mb-3">
               {pwSaving ? "Updating..." : "Change password"}
             </button>
             <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
           </div>
-          <NotificationToggle uid={family.uid} accentColor="#a8562f" />
+          <NotificationToggle uid={family.uid} accentColor="#1c3453" />
           </>
         ) : actionUnlocked ? (
           <>
@@ -5273,14 +5465,28 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           </>
         ) : parentTab === "messages" ? (
           <div className="space-y-3">
+            <button onClick={() => openAdminMessages().then(refreshUnreadThreads)}
+              className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
+              <div>
+                <p className="font-semibold text-stone-900">School Office</p>
+                <p className="text-xs text-stone-400">Message the office directly</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 ml-2">
+                {unreadThreads.some((t) => t.kind === "admin") && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
+                <ChevronRight size={16} className="text-stone-300" />
+              </div>
+            </button>
             {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
               <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
-                className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-[#a8562f]">
+                className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
                 <div>
                   <p className="font-semibold text-stone-900">{l.className}</p>
                   <p className="text-xs text-stone-400">Message the classroom</p>
                 </div>
-                <ChevronRight size={16} className="text-stone-300" />
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  {unreadThreads.some((t) => t.threadKey === `class-${l.classId}`) && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
+                  <ChevronRight size={16} className="text-stone-300" />
+                </div>
               </button>
             ))}
           </div>
@@ -5310,12 +5516,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           })()
         ) : (
           <>
-            <OfficeContactCard onViewUpdates={() => openAdminMessages().then(refreshUnreadThreads)} />
             {unreadThreads.length > 0 && (
               <div className="space-y-2 mb-4">
                 {unreadThreads.map((item) => (
-                  <div key={item.threadKey} className="bg-[#a8562f0d] border border-[#a8562f66] rounded-xl p-3.5 flex items-start gap-2.5">
-                    <div className="bg-[#a8562f] text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
+                  <div key={item.threadKey} className="bg-[#1c34530d] border border-[#1c345366] rounded-xl p-3.5 flex items-start gap-2.5">
+                    <div className="bg-[#1c3453] text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
                     <button onClick={() => openUnread(item)} className="flex-1 text-left min-w-0">
                       <p className="text-sm font-bold text-stone-900">New message — {item.title}</p>
                       <p className="text-xs text-stone-600 truncate">{item.senderName}: {item.preview}</p>
@@ -5331,23 +5536,22 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 <button onClick={() => setScanError(null)} className="block text-xs font-normal underline mt-1">Dismiss</button>
               </div>
             )}
+            {(family?.studentLinks || []).length === 0 ? (
+              <div className="bg-white border border-stone-200 rounded-xl p-5 text-center mb-4">
+                <p className="text-sm text-stone-400">No children linked to this account yet — check with the school if this doesn't look right.</p>
+              </div>
+            ) : family.studentLinks.length > 1 && (
+              <ChildSwitcher labels={family.studentLinks.map((l) => l.studentName)} selectedIndex={selectedChildIndex} onSelect={setSelectedChildIndex} />
+            )}
             <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
               text="Scan the QR code posted at school to check your child in and out yourself."
               onNext={advanceTour} onSkip={dismissTour}>
-              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #a8562f 0%, #c17847 100%)" }}>
+              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #1c3453 0%, #2c4d73 100%)" }}>
                 Scan QR code to check in or out
               </button>
             </TourHint>
-            <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Your children</p>
-            {(family?.studentLinks || []).length === 0 ? (
-              <div className="bg-white border border-stone-200 rounded-xl p-5 text-center">
-                <p className="text-sm text-stone-400">No children linked to this account yet — check with the school if this doesn't look right.</p>
-              </div>
-            ) : (
+            {(family?.studentLinks || []).length > 0 && (
               <>
-                {family.studentLinks.length > 1 && (
-                  <ChildSwitcher labels={family.studentLinks.map((l) => l.studentName)} selectedIndex={selectedChildIndex} onSelect={setSelectedChildIndex} />
-                )}
                 {(() => {
                   const link = family.studentLinks[selectedChildIndex] || family.studentLinks[0];
                   const status = checkInStatus[link.studentId];
@@ -5371,7 +5575,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                             </div>
                           )}
                         </div>
-                        <ChildDailyLogView link={link} onOpenBlog={() => setParentTab("blog")} />
+                        <ChildDailyLogView link={link} />
                       </div>
                     </TourHint>
                   );
@@ -6833,7 +7037,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {showOnboarding && (
-        <OnboardingWizard config={config} setConfig={persistConfig} onClose={() => setShowOnboarding(false)} />
+        <OnboardingWizard config={config} setConfig={persistConfig} onClose={() => setShowOnboarding(false)} classType={classType} />
       )}
     </div>
     </AppModeContext.Provider>
@@ -11076,10 +11280,16 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
   if (openGroup) {
     const thread = threads[openGroup.groupId] || { messages: [] };
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
+    const storageKey = `admin-messages:${openGroup.groupId}`;
     return (
-      <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
-        onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }} />
+      <>
+        <GlobalAppStyles />
+        <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
+          onBack={() => { setOpenGroup(null); refresh(); }}
+          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }}
+          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
+      </>
     );
   }
 
@@ -11251,10 +11461,16 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     const thread = threads[openGroup.groupId] || { messages: [] };
     const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
+    const storageKey = `class:${classId}:messages:${openGroup.groupId}`;
     return (
-      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
-        onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }} />
+      <>
+        <GlobalAppStyles />
+        <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
+          onBack={() => { setOpenGroup(null); refresh(); }}
+          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }}
+          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
+      </>
     );
   }
 
@@ -11601,6 +11817,9 @@ async function uploadOneVideo(file, path, onProgress) {
 // generated id, not something a person would recognize), so whoever receives it sees a real name
 // to download, not a meaningless string.
 const MAX_FILE_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
+// Roughly 5-6 lines at the composer's own text size — long enough that a real message never
+// feels cramped, capped so one very long paste doesn't push the send button off-screen.
+const MAX_COMPOSER_HEIGHT = 130;
 async function uploadOneFile(file, path, onProgress) {
   if (file.size > MAX_FILE_ATTACHMENT_BYTES) throw new Error("File is too large — the limit is 20MB.");
   const fileRef = storageRef(storage, path);
@@ -15439,29 +15658,51 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
   );
 }
 
-const ONBOARDING_STEPS = [
+const ELEMENTARY_ONBOARDING_STEPS = [
   { key: "welcome", label: "Welcome" },
   { key: "subjects", label: "Subjects" },
   { key: "schedule", label: "Schedule" },
   { key: "attendance", label: "Attendance" },
-  { key: "homework", label: "Homework" },
+  { key: "messages", label: "Messages" },
+  { key: "blog", label: "Blog" },
+  { key: "homeworkPosts", label: "Homework" },
+  { key: "homeworkTracking", label: "HW Tracking" },
   { key: "points", label: "Points" },
   { key: "incidents", label: "Incidents" },
-  { key: "messages", label: "Parent Messages" },
   { key: "birthdays", label: "Birthdays" },
+  { key: "notifications", label: "Notifications" },
   { key: "done", label: "All Set" },
 ];
+
+// A genuinely different room, not a relabeled elementary class — no subjects (nothing is taught
+// as discrete periods), no period schedule, no points. Attendance is check-in/out driven by a
+// parent scanning a QR code rather than a teacher tapping a status, so that step is replaced
+// entirely rather than reused with different copy. Daily Log and its tiles are this room's actual
+// day-to-day tool and get their own step, which elementary has no equivalent of at all.
+const PRESCHOOL_ONBOARDING_STEPS = [
+  { key: "welcome", label: "Welcome" },
+  { key: "checkin", label: "Check-in" },
+  { key: "dailyLog", label: "Daily Log" },
+  { key: "messages", label: "Messages" },
+  { key: "blog", label: "Blog" },
+  { key: "incidents", label: "Incidents" },
+  { key: "birthdays", label: "Birthdays" },
+  { key: "notifications", label: "Notifications" },
+  { key: "done", label: "All Set" },
+];
+
 
 // The guided setup wizard — a friendlier front door to settings that already exist elsewhere,
 // not a separate system. Every change here writes through the same config object Settings uses,
 // via the same update(mutator) pattern, so nothing gets out of sync and nothing is duplicated.
-function OnboardingWizard({ config, setConfig, onClose }) {
+function OnboardingWizard({ config, setConfig, onClose, classType }) {
+  const steps = classType === "preschool" ? PRESCHOOL_ONBOARDING_STEPS : ELEMENTARY_ONBOARDING_STEPS;
   const completedSteps = config.onboarding?.completedSteps || [];
-  const firstIncomplete = ONBOARDING_STEPS.findIndex((s) => !completedSteps.includes(s.key));
+  const firstIncomplete = steps.findIndex((s) => !completedSteps.includes(s.key));
   const [stepIdx, setStepIdx] = useState(firstIncomplete === -1 ? 0 : firstIncomplete);
 
   const update = (mutator) => setConfig(mutator(structuredClone(config)));
-  const step = ONBOARDING_STEPS[stepIdx];
+  const step = steps[stepIdx];
 
   const markStarted = (c) => {
     c.onboarding = c.onboarding || { started: false, finished: false, completedSteps: [] };
@@ -15477,7 +15718,7 @@ function OnboardingWizard({ config, setConfig, onClose }) {
   };
 
   const goNext = () => {
-    if (stepIdx === ONBOARDING_STEPS.length - 1) {
+    if (stepIdx === steps.length - 1) {
       update((c) => {
         markStarted(c);
         if (!c.onboarding.completedSteps.includes(step.key)) c.onboarding.completedSteps.push(step.key);
@@ -15502,21 +15743,26 @@ function OnboardingWizard({ config, setConfig, onClose }) {
         <button onClick={pause} className="absolute top-4 right-4 text-stone-400 hover:text-stone-700 text-xs font-semibold">Close</button>
 
         <div className="flex items-center gap-1 mb-6 pr-12">
-          {ONBOARDING_STEPS.map((s, i) => (
+          {steps.map((s, i) => (
             <div key={s.key} className={`h-1.5 flex-1 rounded-full ${i <= stepIdx ? "bg-teal-600" : "bg-stone-200"}`} />
           ))}
         </div>
 
-        {step.key === "welcome" && <OnboardingWelcomeStep />}
+        {step.key === "welcome" && <OnboardingWelcomeStep classType={classType} />}
         {step.key === "subjects" && <OnboardingSubjectsStep config={config} update={update} />}
         {step.key === "schedule" && <OnboardingScheduleStep config={config} update={update} />}
         {step.key === "attendance" && <OnboardingAttendanceStep config={config} update={update} />}
-        {step.key === "homework" && <OnboardingHomeworkStep config={config} update={update} />}
+        {step.key === "checkin" && <OnboardingCheckinStep />}
+        {step.key === "dailyLog" && <OnboardingDailyLogStep config={config} update={update} />}
+        {step.key === "messages" && <OnboardingMessagesStep config={config} update={update} />}
+        {step.key === "blog" && <OnboardingBlogStep />}
+        {step.key === "homeworkPosts" && <OnboardingHomeworkPostsStep />}
+        {step.key === "homeworkTracking" && <OnboardingHomeworkTrackingStep config={config} update={update} />}
         {step.key === "points" && <OnboardingPointsStep config={config} update={update} />}
         {step.key === "incidents" && <OnboardingIncidentsStep config={config} update={update} />}
-        {step.key === "messages" && <OnboardingMessagesStep config={config} update={update} />}
         {step.key === "birthdays" && <OnboardingBirthdaysStep />}
-        {step.key === "done" && <OnboardingDoneStep config={config} />}
+        {step.key === "notifications" && <OnboardingNotificationsStep />}
+        {step.key === "done" && <OnboardingDoneStep config={config} classType={classType} />}
 
         <div className="flex items-center justify-between mt-6 pt-4 border-t border-stone-100">
           <button onClick={goBack} disabled={stepIdx === 0} className={`text-xs text-stone-400 hover:text-stone-700 ${stepIdx === 0 ? "opacity-0 pointer-events-none" : ""}`}>Back</button>
@@ -15525,7 +15771,7 @@ function OnboardingWizard({ config, setConfig, onClose }) {
               <button onClick={goNext} className="text-xs text-stone-500 hover:text-stone-700">Skip</button>
             )}
             <button onClick={goNext} className="bg-teal-700 text-white rounded-lg px-5 py-2 text-sm font-semibold hover:bg-teal-800">
-              {stepIdx === ONBOARDING_STEPS.length - 1 ? "Finish" : "Next"}
+              {stepIdx === steps.length - 1 ? "Finish" : "Next"}
             </button>
           </div>
         </div>
@@ -15534,10 +15780,12 @@ function OnboardingWizard({ config, setConfig, onClose }) {
   );
 }
 
-function OnboardingWelcomeStep() {
+function OnboardingWelcomeStep({ classType }) {
   return (
     <div>
-      <h2 className="display-font text-2xl font-bold text-stone-900 mb-2">Let's set up your class</h2>
+      <h2 className="display-font text-2xl font-bold text-stone-900 mb-2">
+        {classType === "preschool" ? "Let's set up your room" : "Let's set up your class"}
+      </h2>
       <p className="text-sm text-stone-600 mb-3">A few quick questions to get things set up the way you'd actually use them — skip anything you're not sure about, and change any of it later in Settings.</p>
       <p className="text-xs text-stone-400">This won't take long, and you don't have to finish it in one sitting — closing it anytime saves your place, and you can pick back up from Settings whenever you're ready.</p>
     </div>
@@ -15655,15 +15903,81 @@ function OnboardingAttendanceStep({ config, update }) {
   );
 }
 
-function OnboardingHomeworkStep({ config, update }) {
+// Preschool's actual attendance mechanism — a parent scans a QR code to check their own child in
+// or out, rather than a teacher tapping a status the way elementary does. Nothing to configure
+// here (the code is already generated and shared school-wide), so this is purely explaining how
+// it works and where to find the code, not a settings form like the elementary version.
+function OnboardingCheckinStep() {
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">How check-in works here</h2>
+      <p className="text-sm text-stone-600 mb-3">Families check their own child in and out by scanning a QR code — nothing for you to set up. The same code works for every family, every day.</p>
+      <p className="text-sm text-stone-600 mb-3">Ask your school office for the printed code if one isn't already posted at your door — it's managed school-wide from the admin dashboard, not per class.</p>
+      <p className="text-xs text-stone-400">You can also check a student in or out yourself from Attendance, for the times a family forgets to scan.</p>
+    </div>
+  );
+}
+
+// Not a settings form — the tiles themselves and their on/off state are already configurable in
+// Settings, and repeating that same editable list here would just be a second place for it to go
+// out of sync. This is purely a heads-up on what Daily Log actually is, since it has no
+// elementary equivalent to lean on for context the way most of the rest of this flow does.
+function OnboardingDailyLogStep({ config }) {
+  const enabledTiles = PRESCHOOL_TILES.filter((t) => config.preschool?.tilesEnabled?.[t.id] !== false);
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Your daily log</h2>
+      <p className="text-sm text-stone-600 mb-3">This is the main thing you'll fill in each day — a quick log per child that families see in real time: mood, meals, naps, diapers, and photos.</p>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {enabledTiles.map((t) => (
+          <span key={t.id} className="text-xs font-semibold bg-teal-50 text-teal-800 border border-teal-200 rounded-full px-3 py-1">{t.label}</span>
+        ))}
+      </div>
+      <p className="text-xs text-stone-400">All of these are already on by default — turn any off in Settings if they don't apply to your room.</p>
+    </div>
+  );
+}
+
+// Both class types get this exact step — a class blog works the same way regardless of room type,
+// so there's nothing classType-specific to say here the way there is for attendance or homework.
+function OnboardingBlogStep() {
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Your class blog</h2>
+      <p className="text-sm text-stone-600 mb-3">A running feed of photos and updates from the classroom — every family linked to your class sees it automatically, and gets notified the moment you post.</p>
+      <p className="text-sm text-stone-600 mb-3">Post as often as feels right — a single photo with a short caption is enough. There's nothing to set up here; it's ready to use from the Blog tab whenever you are.</p>
+      <p className="text-xs text-stone-400">Families won't need to ask "how was today" nearly as often once this becomes a habit.</p>
+    </div>
+  );
+}
+
+// Elementary-only — see the note on OnboardingHomeworkTrackingStep for why these two are kept
+// deliberately distinct in both name and copy despite sharing the word "homework."
+function OnboardingHomeworkPostsStep() {
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Posting homework</h2>
+      <p className="text-sm text-stone-600 mb-3">A dedicated place to post what's due — separate from messages and the blog. Mark each post as daily or weekly, and families automatically see the right heading ("Today's homework" or "This week's homework") without you needing to type a title.</p>
+      <p className="text-sm text-stone-600 mb-3">Add a photo, a file, or just plain text — whatever the assignment actually needs. Every family gets notified the moment you post.</p>
+      <p className="text-xs text-stone-400">Nothing to set up here either — it's ready to use from the Homework tab.</p>
+    </div>
+  );
+}
+
+// Renamed from the original OnboardingHomeworkStep specifically to stay distinct from the newer
+// OnboardingHomeworkPostsStep below — this one is about the teacher's own record of who did or
+// didn't turn work in, a completely different feature from posting the assignment itself for
+// families to see, and sitting right next to each other in the flow is exactly where that could
+// get confused without the copy calling it out directly.
+function OnboardingHomeworkTrackingStep({ config, update }) {
   const hw = config.homework || {};
   return (
     <div>
-      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Track homework?</h2>
-      <p className="text-sm text-stone-600 mb-4">Entirely optional — some classes track it daily, some weekly, some not at all.</p>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Track homework completion?</h2>
+      <p className="text-sm text-stone-600 mb-4">Different from the homework you just posted for families — this is your own record of which students actually turned work in, entirely optional, and separate either way.</p>
       <label className="flex items-center gap-2 text-sm text-stone-700 mb-3">
         <input type="checkbox" checked={hw.enabled || false} onChange={(e) => update((c) => { c.homework.enabled = e.target.checked; return c; })} />
-        Track homework for this class
+        Track homework completion for this class
       </label>
       {hw.enabled && (
         <>
@@ -15768,8 +16082,9 @@ function OnboardingMessagesStep({ config, update }) {
   const style = config.messageStyle || {};
   return (
     <div>
-      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Parent messages</h2>
-      <p className="text-sm text-stone-600 mb-4">Controls how the AI drafts messages to parents — the tone and how it refers to your school. Sample writing, custom opening/closing lines, and more are available later in Settings.</p>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Messaging families</h2>
+      <p className="text-sm text-stone-600 mb-3">Every family gets a direct line to your classroom, and you can broadcast one message to everyone at once when you need to. An AI assist can turn a quick note into a fully written message — you can also always just type it yourself.</p>
+      <p className="text-sm text-stone-600 mb-4">The settings below shape how that AI assist writes on your behalf — the tone and how it refers to your school. Sample writing, custom opening/closing lines, and more are available later in Settings.</p>
 
       <label className="block text-xs font-medium text-stone-500 mb-1">How you refer to the school</label>
       <input value={style.schoolTerm ?? "school"} onChange={(e) => update((c) => { c.messageStyle.schoolTerm = e.target.value; return c; })}
@@ -15785,6 +16100,19 @@ function OnboardingMessagesStep({ config, update }) {
   );
 }
 
+// Applies to both class types identically — worth its own step given how easy it is for a teacher
+// to miss turning this on themselves and then wonder later why they never got alerted to anything.
+function OnboardingNotificationsStep() {
+  return (
+    <div>
+      <h2 className="display-font text-xl font-bold text-stone-900 mb-1">Turn on notifications</h2>
+      <p className="text-sm text-stone-600 mb-3">This is what actually alerts you the moment a family messages you — without it, you'd have to remember to check the app yourself.</p>
+      <p className="text-sm text-stone-600 mb-3">Add this app to your home screen first (Share → Add to Home Screen on iPhone, or the menu → Add to Home Screen on Android), then open it from that icon and turn notifications on from the settings icon — notifications only work once it's opened that way, not from a browser tab.</p>
+      <p className="text-xs text-stone-400">You can do this anytime from Settings if you'd rather skip it for now.</p>
+    </div>
+  );
+}
+
 function OnboardingBirthdaysStep() {
   return (
     <div>
@@ -15795,13 +16123,19 @@ function OnboardingBirthdaysStep() {
   );
 }
 
-function OnboardingDoneStep({ config }) {
-  const summary = [
-    { done: (config.subjects || []).length > 0, label: `${(config.subjects || []).length} subject${(config.subjects || []).length === 1 ? "" : "s"} added` },
-    { done: (config.planner?.schedules || []).some((s) => (s.periods || []).length > 0), label: "Schedule started" },
-    { done: config.homework?.enabled, label: "Homework tracking on" },
-    { done: (config.points?.categories || []).length > 0, label: "Points category created" },
-  ];
+function OnboardingDoneStep({ config, classType }) {
+  const summary = classType === "preschool"
+    ? [
+        { done: true, label: "Daily Log ready to use" },
+        { done: (config.incidents?.categories || []).length > 0, label: "Incident categories ready" },
+        { done: true, label: "Check-in code ready — ask the office if it's not posted yet" },
+      ]
+    : [
+        { done: (config.subjects || []).length > 0, label: `${(config.subjects || []).length} subject${(config.subjects || []).length === 1 ? "" : "s"} added` },
+        { done: (config.planner?.schedules || []).some((s) => (s.periods || []).length > 0), label: "Schedule started" },
+        { done: config.homework?.enabled, label: "Homework completion tracking on" },
+        { done: (config.points?.categories || []).length > 0, label: "Points category created" },
+      ];
   return (
     <div>
       <h2 className="display-font text-2xl font-bold text-stone-900 mb-2">You're all set</h2>
@@ -15959,36 +16293,39 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             </Section>
           )}
 
-          {!isPreschool && (
-            <Section title="Guided setup">
-              {(() => {
-                const ob = config.onboarding || { started: false, finished: false, completedSteps: [] };
-                const doneCount = ob.completedSteps.length;
-                if (ob.finished) {
-                  return (
-                    <>
-                      <p className="text-xs text-stone-400 mb-3">You've been through guided setup — everything it touched is still adjustable below, any time.</p>
-                      <button onClick={onOpenOnboarding} className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">Go through it again</button>
-                    </>
-                  );
-                }
-                if (ob.started) {
-                  return (
-                    <>
-                      <p className="text-xs text-stone-400 mb-3">You're partway through — {doneCount} of {ONBOARDING_STEPS.length} sections done. Pick up right where you left off.</p>
-                      <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Continue setup</button>
-                    </>
-                  );
-                }
+          <Section title="Guided setup">
+            {(() => {
+              const ob = config.onboarding || { started: false, finished: false, completedSteps: [] };
+              const doneCount = ob.completedSteps.length;
+              const totalSteps = (isPreschool ? PRESCHOOL_ONBOARDING_STEPS : ELEMENTARY_ONBOARDING_STEPS).length;
+              if (ob.finished) {
                 return (
                   <>
-                    <p className="text-xs text-stone-400 mb-3">A short, skippable walkthrough to help set up your class — subjects, schedule, points, and more, one question at a time.</p>
-                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Start guided setup</button>
+                    <p className="text-xs text-stone-400 mb-3">You've been through guided setup — everything it touched is still adjustable below, any time.</p>
+                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">Go through it again</button>
                   </>
                 );
-              })()}
-            </Section>
-          )}
+              }
+              if (ob.started) {
+                return (
+                  <>
+                    <p className="text-xs text-stone-400 mb-3">You're partway through — {doneCount} of {totalSteps} sections done. Pick up right where you left off.</p>
+                    <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Continue setup</button>
+                  </>
+                );
+              }
+              return (
+                <>
+                  <p className="text-xs text-stone-400 mb-3">
+                    {isPreschool
+                      ? "A short, skippable walkthrough to help set up your room — check-in, daily log, messaging, and more, one question at a time."
+                      : "A short, skippable walkthrough to help set up your class — subjects, schedule, points, and more, one question at a time."}
+                  </p>
+                  <button onClick={onOpenOnboarding} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">Start guided setup</button>
+                </>
+              );
+            })()}
+          </Section>
 
           {!isPreschool && (
           <Section title="Subjects">
