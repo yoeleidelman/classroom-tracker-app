@@ -18,7 +18,7 @@ if (!getApps().length) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { uids, title, body, url } = req.body || {};
+  const { uids, title, body, url, icon } = req.body || {};
   if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: "uids must be a non-empty array." });
   if (!title || !body) return res.status(400).json({ error: "title and body are required." });
 
@@ -47,8 +47,16 @@ export default async function handler(req, res) {
     const messaging = getMessaging();
     const result = await messaging.sendEachForMulticast({
       tokens: allTokens,
-      notification: { title, body },
-      data: { url: url || "/" },
+      // Deliberately data-only, not a "notification" payload — a notification payload gets
+      // auto-displayed by the browser AND by the explicit showNotification() call in the service
+      // worker below, producing two separate notifications for the same message. Data-only means
+      // only our own explicit call ever shows anything.
+      data: {
+        title,
+        body,
+        url: url || "/",
+        icon: icon || "/icons-parent/icon-192.png",
+      },
     });
 
     // Any token FCM rejects as no-longer-valid gets removed from its owner's stored list — grouped

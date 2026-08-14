@@ -1376,15 +1376,17 @@ function AppInner() {
   // A push that arrives while this tab is the active, focused one doesn't go through the service
   // worker at all (that only handles background/closed-tab delivery) — this is the separate path
   // for "the app was already open when it happened." Shows the same kind of native notification
-  // either way, so it doesn't matter to the person which path it came through.
+  // either way, so it doesn't matter to the person which path it came through. Reads from
+  // payload.data, not payload.notification, matching the backend's deliberately data-only payload
+  // — see the service worker for why.
   useEffect(() => {
     let unsubscribe = () => {};
     messagingPromise.then((messaging) => {
       if (!messaging) return;
       unsubscribe = onMessage(messaging, (payload) => {
         if (Notification.permission !== "granted") return;
-        const title = payload.notification?.title || "New notification";
-        new Notification(title, { body: payload.notification?.body || "", icon: "/icons-parent/icon-192.png" });
+        const title = payload.data?.title || "New notification";
+        new Notification(title, { body: payload.data?.body || "", icon: payload.data?.icon || "/icons-parent/icon-192.png" });
       });
     });
     return () => unsubscribe();
@@ -8194,11 +8196,6 @@ function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, 
 
       <div className="flex items-center justify-between mb-1">
         <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Class Blog</p>
-        {(currentUserType === "teacher" || currentUserType === "admin") && (
-          <button onClick={() => navigate("blog-compose")} className="text-xs font-bold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800">
-            + New post
-          </button>
-        )}
       </div>
       <div className="md:w-[28rem]">
         {sorted.length === 0 ? (
@@ -8214,6 +8211,11 @@ function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, 
               ))}
             </div>
           </>
+        )}
+        {(currentUserType === "teacher" || currentUserType === "admin") && (
+          <button onClick={() => navigate("blog-compose")} className="w-full mt-4 text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800">
+            + New post
+          </button>
         )}
         <div ref={bottomRef} />
       </div>
