@@ -14,7 +14,8 @@
 // bg-fuchsia-100 bg-fuchsia-200 bg-fuchsia-400 bg-fuchsia-500 bg-fuchsia-600 text-fuchsia-700 text-fuchsia-800 border-fuchsia-500
 // bg-teal-100 bg-teal-200 bg-teal-400 bg-teal-500 bg-teal-600 bg-teal-900 text-teal-700 text-teal-800 text-teal-900 border-teal-500
 
-import { db, auth, storage } from "./firebase";
+import { db, auth, storage, messagingPromise } from "./firebase";
+import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
@@ -897,6 +898,77 @@ async function loadAllWithPrefix(prefix) {
   }
 }
 
+// ============================================================================================
+// PUSH NOTIFICATIONS — everything below sends a real device notification. Three small, separate
+// pieces, kept deliberately apart so adding a new kind of notification later is a matter of
+// composing them, not writing new plumbing:
+//
+//   1. sendPushNotification(uids, title, body, url) — the one function that actually calls the
+//      backend and sends. Never call this directly from a screen; always go through a "who"
+//      helper below (or add a new one), so the actual sending logic stays in exactly one place.
+//
+//   2. The "who" helpers (notifyFamilyGroup, notifyClassTeachers, notifyClassFamilies) — each
+//      answers one specific "who should hear about this" question and hands the uid list to
+//      sendPushNotification. If a new trigger needs a audience these don't already cover (e.g.
+//      "every admin," "one specific teacher by uid"), add a new notifyX function following the
+//      same shape — look up the right accounts, collect their uids, call sendPushNotification.
+//
+//   3. The call sites themselves — one line, added right after the action it's about already
+//      succeeded (never before, never in place of it), never awaited by the caller. Example, the
+//      exact shape every trigger below follows:
+//
+//        await saveJSON(key, next, true);                              // the real action
+//        notifyFamilyGroup(familyUid, "Title here", text, "/some/url"); // not awaited — fire and forget
+//        return next;
+//
+//      To add a brand new trigger (say, "notify admin when an incident gets flagged"): find where
+//      that flagging actually happens, add one line in that same shape right after it succeeds,
+//      reusing an existing notifyX helper or adding a new one if the audience is genuinely new.
+//      That's the whole change — nothing else in this file needs to know a new trigger exists.
+// ============================================================================================
+
+// Fire-and-forget by design — a failed push send should never block the actual message or post,
+// which has already succeeded by the time this runs, and never surface an error over something
+// the person sending didn't ask about.
+async function sendPushNotification(uids, title, body, url) {
+  if (!uids || uids.length === 0) return;
+  try {
+    await fetch("/api/send-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uids, title, body, url }),
+    });
+  } catch {
+    // best-effort only — nothing to recover here
+  }
+}
+
+// A message addressed to "the family" may cover more than one actual guardian login sharing the
+// same group — either one may have their own device notifications turned on, so both get a
+// chance at it, not just whichever uid happens to be the group's own id.
+async function notifyFamilyGroup(groupId, title, body, url) {
+  const allFamilies = await loadAllWithPrefix("family:");
+  const uids = allFamilies.filter((f) => (f.familyGroupId || f.uid) === groupId).map((f) => f.uid);
+  await sendPushNotification(uids, title, body, url);
+}
+
+// A classroom thread is shared among everyone teaching that room, not one specific teacher — a
+// message from a family should be able to reach any of them, not just whoever happens to be
+// signed in when it arrives.
+async function notifyClassTeachers(classId, title, body, url) {
+  const allTeachers = await loadAllWithPrefix("teacher:");
+  const uids = allTeachers.filter((t) => (t.assignedClassIds || []).includes(classId) && t.active !== false).map((t) => t.uid);
+  await sendPushNotification(uids, title, body, url);
+}
+
+// Every family with a child actually linked to this class — used for blog posts, which go out to
+// the whole room at once rather than one specific family.
+async function notifyClassFamilies(classId, title, body, url) {
+  const allFamilies = await loadAllWithPrefix("family:");
+  const uids = allFamilies.filter((f) => (f.linkedClassIds || []).includes(classId)).map((f) => f.uid);
+  await sendPushNotification(uids, title, body, url);
+}
+
 // Tracks what each PERSON has actually seen, separate from the messages themselves — "have I seen
 // this" belongs to the individual, not the conversation. Two guardians on one family, or two
 // co-teachers on one class, can each be at a different point in the exact same shared thread.
@@ -926,6 +998,73 @@ function isThreadUnread(readState, threadKey, lastMessage, myRole) {
   if (snoozedUntil && new Date(snoozedUntil) > new Date()) return false;
   const lastRead = readState[threadKey];
   return !lastRead || new Date(lastMessage.timestamp) > new Date(lastRead);
+}
+
+const VAPID_KEY = "BEqoLhS_bXi-hjn4U3NcgCGIpFZZ-Dct-KPFj4D0MOOVyzS0Mvj7-6JTD3s2GUxNqqciXMVI6jBsWcUcptLPFgQ";
+
+// iOS Safari won't even offer the notification permission prompt outside of standalone
+// (installed, opened from the home screen icon) mode — no code can work around this, it's a
+// platform rule. Checking it up front means the UI can say "install first" instead of a
+// permission request that would otherwise just silently do nothing on iOS.
+function isRunningStandalone() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+function isIOSDevice() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+}
+
+// Requests permission, registers this specific device/browser for push, and remembers its token
+// against the signed-in account — one account can have several devices enabled at once (a
+// teacher's phone AND tablet, say), so this adds to a list rather than replacing a single value.
+async function enableNotificationsFor(uid) {
+  if (!("Notification" in window)) return { ok: false, error: "This browser doesn't support notifications." };
+  if (isIOSDevice() && !isRunningStandalone()) return { ok: false, needsInstall: true };
+
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") return { ok: false, error: "Notifications weren't allowed — you can turn this on again later from your device's notification settings." };
+
+  const messaging = await messagingPromise;
+  if (!messaging) return { ok: false, error: "Notifications aren't supported in this browser." };
+
+  try {
+    const token = await getToken(messaging, { vapidKey: VAPID_KEY });
+    if (!token) return { ok: false, error: "Couldn't register this device — try again." };
+    const existing = (await loadJSON(`push-tokens:${uid}`, null, true)) || { tokens: [] };
+    if (!existing.tokens.some((t) => t.token === token)) {
+      existing.tokens.push({ token, addedAt: new Date().toISOString(), userAgent: navigator.userAgent });
+      await saveJSON(`push-tokens:${uid}`, existing, true);
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Couldn't register this device — try again." };
+  }
+}
+
+// Un-registers only THIS device, not every device the account has enabled — someone turning off
+// notifications on their phone shouldn't silently also turn them off on their tablet.
+async function disableNotificationsFor(uid) {
+  const messaging = await messagingPromise;
+  if (!messaging) return;
+  try {
+    const token = await getToken(messaging, { vapidKey: VAPID_KEY });
+    const existing = (await loadJSON(`push-tokens:${uid}`, null, true)) || { tokens: [] };
+    await saveJSON(`push-tokens:${uid}`, { tokens: existing.tokens.filter((t) => t.token !== token) }, true);
+  } catch {
+    // Nothing meaningful to recover here — if the token can't be retrieved, there's nothing to remove
+  }
+}
+// Whether the CURRENT device already has a registered token — used to show "Enabled" vs "Enable"
+// without needing to re-request anything just to check.
+async function isThisDeviceEnabled(uid) {
+  const messaging = await messagingPromise;
+  if (!messaging) return false;
+  try {
+    const token = await getToken(messaging, { vapidKey: VAPID_KEY });
+    const existing = (await loadJSON(`push-tokens:${uid}`, null, true)) || { tokens: [] };
+    return existing.tokens.some((t) => t.token === token);
+  } catch {
+    return false;
+  }
 }
 
 const ClassContext = createContext({ className: "", onSwitchClass: () => {}, classType: "elementary" });
@@ -1233,6 +1372,23 @@ function AppInner() {
   const [className, setClassName] = useState("");
   const [isAdminSession, setIsAdminSession] = useState(false);
   const [isSubstituteSession, setIsSubstituteSession] = useState(false);
+
+  // A push that arrives while this tab is the active, focused one doesn't go through the service
+  // worker at all (that only handles background/closed-tab delivery) — this is the separate path
+  // for "the app was already open when it happened." Shows the same kind of native notification
+  // either way, so it doesn't matter to the person which path it came through.
+  useEffect(() => {
+    let unsubscribe = () => {};
+    messagingPromise.then((messaging) => {
+      if (!messaging) return;
+      unsubscribe = onMessage(messaging, (payload) => {
+        if (Notification.permission !== "granted") return;
+        const title = payload.notification?.title || "New notification";
+        new Notification(title, { body: payload.notification?.body || "", icon: "/icons-parent/icon-192.png" });
+      });
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Real Firebase sign-in state — now drives the app's main screens (see the routing at the
   // bottom of this component). authChecked exists so we don't flash the sign-in screen for a
@@ -2694,6 +2850,68 @@ function BulkImportPanel({ onImport, onCancel }) {
 // and writes one small, school-wide document directly. This is the one number every "contact the
 // office" deep link on the parent side points at, so getting it right here is what makes those
 // links actually work.
+// Reusable across both the teacher and parent settings screens — accentColor lets each side
+// style it to match (teal for teacher, the terracotta parent color for family), same component
+// either way. Never auto-prompts; permission is only ever requested from a direct tap on the
+// button below, matching what both iOS and Android expect from a well-behaved site.
+function NotificationToggle({ uid, accentColor = "#0f766e" }) {
+  const [status, setStatus] = useState("checking"); // checking | unsupported | needs-install | denied | on | off
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    if (!uid) return;
+    if (!("Notification" in window)) { setStatus("unsupported"); return; }
+    if (isIOSDevice() && !isRunningStandalone()) { setStatus("needs-install"); return; }
+    if (Notification.permission === "denied") { setStatus("denied"); return; }
+    const enabled = await isThisDeviceEnabled(uid);
+    setStatus(enabled ? "on" : "off");
+  }, [uid]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const toggle = async () => {
+    setBusy(true);
+    setError(null);
+    if (status === "on") {
+      await disableNotificationsFor(uid);
+      setStatus("off");
+    } else {
+      const result = await enableNotificationsFor(uid);
+      if (result.ok) setStatus("on");
+      else if (result.needsInstall) setStatus("needs-install");
+      else setError(result.error || "Something went wrong — try again.");
+    }
+    setBusy(false);
+  };
+
+  if (status === "checking") return null;
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-4">
+      <p className="text-sm font-semibold text-stone-800 mb-1">Notifications</p>
+      {status === "unsupported" && <p className="text-xs text-stone-400">Not supported in this browser.</p>}
+      {status === "needs-install" && (
+        <p className="text-xs text-stone-500">Add this app to your home screen first (Share → Add to Home Screen), then open it from that icon — notifications can only be turned on from there.</p>
+      )}
+      {status === "denied" && (
+        <p className="text-xs text-stone-500">Notifications are blocked for this app in your device's own settings — they need to be allowed there before this can turn on.</p>
+      )}
+      {(status === "on" || status === "off") && (
+        <>
+          <p className="text-xs text-stone-400 mb-3">Get notified on this device for new messages.</p>
+          <button onClick={toggle} disabled={busy}
+            className="text-xs font-semibold rounded-lg px-3 py-2 border"
+            style={status === "on" ? { color: "#be123c", borderColor: "#fda4af" } : { color: "white", backgroundColor: accentColor, borderColor: accentColor }}>
+            {busy ? "…" : status === "on" ? "Turn off for this device" : "Enable for this device"}
+          </button>
+        </>
+      )}
+      {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
 function OfficeContactSettings() {
   const [phone, setPhone] = useState("");
   const [draft, setDraft] = useState("");
@@ -4557,6 +4775,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
+    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || "Sent a photo", "/");
     return next;
   };
 
@@ -4677,6 +4896,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             </button>
             <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
           </div>
+          <NotificationToggle uid={family.uid} accentColor="#a8562f" />
           </>
         ) : actionUnlocked ? (
           <>
@@ -5200,6 +5420,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       title: (title || "").trim() || null, blocks: uploadedBlocks, reactions: {}, comments: [],
     });
     persistBlogPosts([...blogPosts, entry]);
+    const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
+    notifyClassFamilies(classId, `New post in ${className}`, (title || "").trim() || firstCaption || "Check out the new post", "/?portal=parent");
     return entry;
   };
   const toggleBlogReaction = (postId, emoji, reactorId) => {
@@ -5787,6 +6009,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
+    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || "Sent a photo", "/?portal=parent");
     return next;
   };
 
@@ -10214,6 +10437,7 @@ function AdminMessagesView({ families, navigate }) {
     const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
+    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || "Sent a photo", "/?portal=parent");
     return next;
   };
 
@@ -14957,6 +15181,12 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <button onClick={onOpenMyAccount} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">
                 Change my name or password
               </button>
+            </Section>
+          )}
+
+          {loggedInTeacher && (
+            <Section title="Notifications">
+              <NotificationToggle uid={loggedInTeacher.uid} accentColor="#0f766e" />
             </Section>
           )}
 
