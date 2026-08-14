@@ -1067,7 +1067,7 @@ async function isThisDeviceEnabled(uid) {
   }
 }
 
-const ClassContext = createContext({ className: "", onSwitchClass: () => {}, classType: "elementary" });
+const ClassContext = createContext({ className: "", onSwitchClass: () => {}, classType: "elementary", commUnreadCount: 0 });
 // For an account that holds both a teacher and a family record — lets Header (rendered
 // independently by many different screens, not passed props from one shared parent) offer a
 // "switch to parent view" link without threading it through every one of those screens.
@@ -1373,6 +1373,31 @@ function AppInner() {
   const [isAdminSession, setIsAdminSession] = useState(false);
   const [isSubstituteSession, setIsSubstituteSession] = useState(false);
 
+  // Same one-time-read pattern as isParentPortal above — captured once at mount, before anything
+  // strips these params off the URL. classId lets a teacher's notification skip the manual class
+  // picker and land straight in the right class; groupId (only meaningful once inside that class)
+  // additionally opens one specific family's conversation once ClassApp itself has mounted.
+  const [pendingDeepLink] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("open") !== "messages" || !params.get("classId")) return null;
+    return { classId: params.get("classId"), groupId: params.get("groupId") || null };
+  });
+  const [deepLinkClassEntered, setDeepLinkClassEntered] = useState(false); // guards against re-entering the class on every re-render
+
+  // Auto-enters the right class the moment it's available, skipping the manual picker entirely —
+  // has to be an effect, not inline render logic, since entering a class means calling state
+  // setters. Only fires once per pending link; deepLinkClassEntered stops it from re-triggering
+  // on every subsequent re-render once the class is already entered.
+  useEffect(() => {
+    if (!pendingDeepLink || deepLinkClassEntered || !currentTeacher || classId) return;
+    const target = registry.find((c) => !c.archived && c.id === pendingDeepLink.classId && (currentTeacher.assignedClassIds || []).includes(c.id));
+    if (target) {
+      enterAssignedClass(target);
+      setDeepLinkClassEntered(true);
+      window.history.replaceState({}, "", window.location.pathname); // a later refresh shouldn't re-trigger the same jump
+    }
+  }, [pendingDeepLink, deepLinkClassEntered, currentTeacher, classId, registry]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // A push that arrives while this tab is the active, focused one doesn't go through the service
   // worker at all (that only handles background/closed-tab delivery) — this is the separate path
   // for "the app was already open when it happened." Shows the same kind of native notification
@@ -1386,7 +1411,14 @@ function AppInner() {
       unsubscribe = onMessage(messaging, (payload) => {
         if (Notification.permission !== "granted") return;
         const title = payload.data?.title || "New notification";
-        new Notification(title, { body: payload.data?.body || "", icon: payload.data?.icon || "/icons-parent/icon-192.png" });
+        const n = new Notification(title, { body: payload.data?.body || "", icon: payload.data?.icon || "/icons-parent/icon-192.png" });
+        // Foreground notifications don't go through the service worker's notificationclick handler
+        // at all — this is the separate path for making a tap actually go somewhere when the app
+        // was already open at the moment it arrived.
+        n.onclick = () => {
+          window.focus();
+          if (payload.data?.url) window.location.href = payload.data.url;
+        };
       });
     });
     return () => unsubscribe();
@@ -2275,7 +2307,8 @@ function AppInner() {
         subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
         loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
         canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
-        createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} />
+        createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord}
+        deepLinkGroupId={pendingDeepLink?.classId === classId ? pendingDeepLink.groupId : null} />
     );
   }
 
@@ -4616,11 +4649,41 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
   );
 }
 
-function ParentMainTabs({ active, navigate, hasUnread }) {
+// Split out from an inline expression specifically so it can use its own effect — marking a
+// class's blog as read has to happen when THAT class is actually the one being looked at, and
+// needs to re-fire every time the switcher changes which one that is.
+function ParentBlogTabContent({ uniqueClasses, selectedIndex, onSelectIndex, family, onMarkRead }) {
+  const selectedLink = uniqueClasses[selectedIndex] || uniqueClasses[0];
+  useEffect(() => {
+    if (selectedLink) onMarkRead(selectedLink.classId);
+  }, [selectedLink?.classId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div>
+      {uniqueClasses.length > 1 && (
+        <ChildSwitcher labels={uniqueClasses.map((l) => l.studentName)} selectedIndex={selectedIndex} onSelect={onSelectIndex} />
+      )}
+      <ParentBlogView link={selectedLink} family={family} />
+    </div>
+  );
+}
+
+// A small reusable numbered pill — same shape every place a tab needs to show "N new things,"
+// on either side of the app.
+function TabBadge({ count }) {
+  if (!count || count <= 0) return null;
+  return (
+    <span className="absolute -top-1 right-[22%] min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[10px] font-bold leading-none">
+      {count > 9 ? "9+" : count}
+    </span>
+  );
+}
+
+function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogCount = 0 }) {
   const tabs = [
     { id: "home", label: "Home", icon: HomeIcon },
-    { id: "messages", label: "Messages", icon: MessageCircle },
-    { id: "blog", label: "Blog", icon: Newspaper },
+    { id: "messages", label: "Messages", icon: MessageCircle, count: unreadMessagesCount },
+    { id: "blog", label: "Blog", icon: Newspaper, count: unreadBlogCount },
   ];
   return (
     <div className="flex">
@@ -4631,7 +4694,7 @@ function ParentMainTabs({ active, navigate, hasUnread }) {
           <button key={t.id} onClick={() => navigate(t.id)}
             className={`flex-1 relative flex items-center justify-center gap-1.5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 ${isActive ? "text-[#a8562f] border-[#a8562f]" : "text-stone-400 border-transparent"}`}>
             <Icon size={16} /> {t.label}
-            {t.id === "messages" && hasUnread && <span className="absolute top-2 right-[28%] w-1.5 h-1.5 rounded-full bg-rose-500" />}
+            <TabBadge count={t.count} />
           </button>
         );
       })}
@@ -4671,6 +4734,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const [messagingAdmin, setMessagingAdmin] = useState(false);
   const [adminThread, setAdminThread] = useState({ messages: [] });
   const [unreadThreads, setUnreadThreads] = useState([]); // [{ threadKey, kind, classId, title, preview, timestamp }]
+  const [unreadBlogCount, setUnreadBlogCount] = useState(0); // total new posts across every linked class
 
   // Every conversation key below uses the family GROUP id, not this specific login's own uid —
   // so a second guardian, signed in under their own separate account, lands on the exact same
@@ -4702,6 +4766,30 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
 
   useEffect(() => { refreshUnreadThreads(); }, [refreshUnreadThreads]);
 
+  // Same read-state document as messages, just a different key shape per class
+  // ("blog-{classId}" instead of "class-{classId}") — a post counts as new if it's newer than
+  // the last time this class's blog was actually opened, not just newer than account creation.
+  const refreshUnreadBlogCount = useCallback(async () => {
+    const uniqueClasses = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()];
+    const readState = await getReadState(family.uid);
+    let total = 0;
+    for (const l of uniqueClasses) {
+      const posts = await loadJSON(`class:${l.classId}:blogPosts`, [], true); // eslint-disable-line no-await-in-loop
+      const lastRead = readState[`blog-${l.classId}`];
+      total += posts.filter((p) => !lastRead || new Date(p.timestamp) > new Date(lastRead)).length;
+    }
+    setUnreadBlogCount(total);
+  }, [family]);
+
+  useEffect(() => { refreshUnreadBlogCount(); }, [refreshUnreadBlogCount]);
+
+  const markBlogRead = async (classId) => {
+    const posts = await loadJSON(`class:${classId}:blogPosts`, [], true);
+    const latest = posts[posts.length - 1];
+    if (latest) await markThreadRead(family.uid, `blog-${classId}`);
+    refreshUnreadBlogCount();
+  };
+
   const dismissUnread = async (item) => {
     await markThreadRead(family.uid, item.threadKey);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
@@ -4730,6 +4818,31 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   };
 
   const [scanError, setScanError] = useState(null);
+
+  // Deep-linking from a tapped push notification — reads the URL once on mount and jumps
+  // straight to whatever the notification was actually about, instead of landing on Home and
+  // making someone hunt for what's new. The URL gets cleaned up right after acting on it, so
+  // refreshing this same tab later doesn't keep re-triggering the same jump.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const open = params.get("open");
+    if (!open) return;
+    const classId = params.get("classId");
+    if (open === "messages") {
+      setParentTab("messages");
+      if (classId) openMessagesFor(classId);
+    } else if (open === "admin") {
+      setParentTab("messages");
+      openAdminMessages();
+    } else if (open === "blog" && classId) {
+      setParentTab("blog");
+      const uniqueClasses = [...new Map((family.studentLinks || []).map((l) => [l.classId, l])).values()];
+      const idx = uniqueClasses.findIndex((l) => l.classId === classId);
+      if (idx !== -1) setSelectedBlogClassIndex(idx);
+    }
+    const cleanUrl = window.location.pathname + (params.get("portal") ? "?portal=parent" : "");
+    window.history.replaceState({}, "", cleanUrl);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshCheckInStatus = useCallback(async () => {
     const today = todayISO();
@@ -4777,7 +4890,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || "Sent a photo", "/");
+    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || "Sent a photo", `/?open=messages&classId=${classId}&groupId=${myGroupId}`);
     return next;
   };
 
@@ -4865,7 +4978,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             text="Contact the office right from Home now — Messages is just for your classroom."
             onNext={advanceTour} onSkip={dismissTour}>
             <div className="bg-white border-t border-stone-200 max-w-lg mx-auto">
-              <ParentMainTabs active={parentTab} navigate={setParentTab} hasUnread={unreadThreads.length > 0} />
+              <ParentMainTabs active={parentTab} navigate={setParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount} />
             </div>
           </TourHint>
         )}
@@ -4977,14 +5090,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
           ) : (() => {
             const uniqueClasses = [...new Map(family.studentLinks.map((l) => [l.classId, l])).values()];
-            const selectedLink = uniqueClasses[selectedBlogClassIndex] || uniqueClasses[0];
             return (
-              <div>
-                {uniqueClasses.length > 1 && (
-                  <ChildSwitcher labels={uniqueClasses.map((l) => l.studentName)} selectedIndex={selectedBlogClassIndex} onSelect={setSelectedBlogClassIndex} />
-                )}
-                <ParentBlogView link={selectedLink} family={family} />
-              </div>
+              <ParentBlogTabContent uniqueClasses={uniqueClasses} selectedIndex={selectedBlogClassIndex} onSelectIndex={setSelectedBlogClassIndex}
+                family={family} onMarkRead={markBlogRead} />
             );
           })()
         ) : (
@@ -5201,7 +5309,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord }) {
+function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, deepLinkGroupId }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -5234,7 +5342,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
-  const [view, setView] = useState(classType === "preschool" ? "daily-log" : "home");
+  const [view, setView] = useState(() => (deepLinkGroupId ? "messages" : classType === "preschool" ? "daily-log" : "home"));
   const [showPlan, setShowPlan] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -5256,6 +5364,33 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const openCameraCapture = (returnTo) => { setCameraReturn(returnTo || "home"); setView("camera-capture"); };
   const [periodAttPreset, setPeriodAttPreset] = useState(null);
   const [periodAttReturn, setPeriodAttReturn] = useState("home");
+
+  // Lifted up from the Comm page itself specifically so the count is visible on the tab bar
+  // everywhere in the app, not just after actually navigating into Comm — matches the same
+  // reasoning as the parent side's Messages/Blog badges.
+  const [commUnreadFamilies, setCommUnreadFamilies] = useState([]);
+  const refreshCommUnread = useCallback(async () => {
+    const all = await loadAllWithPrefix("family:");
+    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+    const byGroup = {};
+    relevant.forEach((f) => {
+      const groupId = f.familyGroupId || f.uid;
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [] };
+      byGroup[groupId].guardians.push(f);
+    });
+    const readState = await getReadState(loggedInTeacher.uid);
+    const results = [];
+    for (const g of Object.values(byGroup)) {
+      const thread = await loadJSON(`class:${classId}:messages:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const last = thread?.messages?.[thread.messages.length - 1];
+      const threadKey = `classroom-${g.groupId}`;
+      if (isThreadUnread(readState, threadKey, last, "teacher")) {
+        results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: last.text, senderName: last.senderName, timestamp: last.timestamp });
+      }
+    }
+    setCommUnreadFamilies(results);
+  }, [classId, loggedInTeacher]);
+  useEffect(() => { refreshCommUnread(); }, [refreshCommUnread]);
   const [messageFlag, setMessageFlag] = useState(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
@@ -5423,7 +5558,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     });
     persistBlogPosts([...blogPosts, entry]);
     const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
-    notifyClassFamilies(classId, `New post in ${className}`, (title || "").trim() || firstCaption || "Check out the new post", "/?portal=parent");
+    notifyClassFamilies(classId, `New post in ${className}`, (title || "").trim() || firstCaption || "Check out the new post", `/?portal=parent&open=blog&classId=${classId}`);
     return entry;
   };
   const toggleBlogReaction = (postId, emoji, reactorId) => {
@@ -6011,7 +6146,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || "Sent a photo", "/?portal=parent");
+    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || "Sent a photo", `/?portal=parent&open=messages&classId=${classId}`);
     return next;
   };
 
@@ -6116,7 +6251,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   }
 
   return (
-    <ClassContext.Provider value={{ className, onSwitchClass, switchLabel, classType }}>
+    <ClassContext.Provider value={{ className, onSwitchClass, switchLabel, classType, commUnreadCount: commUnreadFamilies.length }}>
     <AppModeContext.Provider value={{ canSwitchToParent: Boolean(canSwitchToParent), switchToParent: onSwitchToParent || (() => {}) }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <div style={{
@@ -6206,11 +6341,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       </div>
 
       {view === "messages" && (
-        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} />
+        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} deepLinkGroupId={deepLinkGroupId} />
       )}
 
       {view === "communication" && (
         <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={setView}
+          unreadFamilies={commUnreadFamilies} onRefreshUnread={refreshCommUnread}
           openStudent={(id) => { setCurrentId(id); setView("comm-entry"); }} />
       )}
 
@@ -6463,12 +6599,12 @@ function Header({ navigate }) {
 }
 
 function MainTabs({ active, navigate }) {
-  const { classType } = useContext(ClassContext);
+  const { classType, commUnreadCount } = useContext(ClassContext);
   const tabs = classType === "preschool"
     ? [
         { id: "attendance", label: "Attendance", icon: Check },
         { id: "daily-log", label: "Daily Log", icon: ClipboardList },
-        { id: "communication", label: "Comm", icon: Mail },
+        { id: "communication", label: "Comm", icon: Mail, count: commUnreadCount },
         { id: "blog", label: "Blog", icon: Newspaper },
         { id: "planner", label: "Planner", icon: Calendar },
       ]
@@ -6476,7 +6612,7 @@ function MainTabs({ active, navigate }) {
         { id: "home", label: "Home", icon: HomeIcon },
         { id: "assessments", label: "Assessments", icon: BookOpen },
         { id: "points", label: "Points", icon: Star },
-        { id: "communication", label: "Comm", icon: Mail },
+        { id: "communication", label: "Comm", icon: Mail, count: commUnreadCount },
         { id: "blog", label: "Blog", icon: Newspaper },
         { id: "planner", label: "Planner", icon: Calendar },
         { id: "tools", label: "Tools", icon: Wrench },
@@ -6488,8 +6624,9 @@ function MainTabs({ active, navigate }) {
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+            className={`relative flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
             <Icon size={14} /> {t.label}
+            <TabBadge count={t.count} />
           </button>
         );
       })}
@@ -10439,7 +10576,7 @@ function AdminMessagesView({ families, navigate }) {
     const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || "Sent a photo", "/?portal=parent");
+    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || "Sent a photo", "/?portal=parent&open=admin");
     return next;
   };
 
@@ -10544,7 +10681,7 @@ function AdminMessagesView({ families, navigate }) {
 // Grouped by family, not by individual login — two guardians on the same family share one row
 // and one conversation here, the same way they share it on their own side, rather than showing up
 // as two disconnected families that happen to have the same kids.
-function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, loggedByName, navigate }) {
+function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, loggedByName, navigate, deepLinkGroupId }) {
   const [groups, setGroups] = useState(null); // null = loading
   const [threads, setThreads] = useState({}); // groupId -> {messages}
   const [openGroup, setOpenGroup] = useState(null);
@@ -10566,6 +10703,18 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   }, [classId]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Opens straight into the right family's thread the moment the inbox has actually loaded —
+  // can't fire any earlier than that, since the specific group object this needs doesn't exist
+  // until the fetch above completes.
+  useEffect(() => {
+    if (!deepLinkGroupId || !groups) return;
+    const match = groups.find((g) => g.groupId === deepLinkGroupId);
+    if (match) {
+      setOpenGroup(match);
+      markThreadRead(loggedInTeacher.uid, `classroom-${match.groupId}`);
+    }
+  }, [deepLinkGroupId, groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (openGroup) {
     const thread = threads[openGroup.groupId] || { messages: [] };
@@ -10625,38 +10774,13 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   );
 }
 
-function CommunicationListView({ roster, studentData, classId, loggedInTeacher, navigate, openStudent }) {
+function CommunicationListView({ roster, studentData, classId, loggedInTeacher, navigate, openStudent, unreadFamilies, onRefreshUnread }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
-  const [unreadFamilies, setUnreadFamilies] = useState([]); // [{ groupId, guardianNames, preview, timestamp }]
-
-  const refreshUnread = useCallback(async () => {
-    const all = await loadAllWithPrefix("family:");
-    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
-    const byGroup = {};
-    relevant.forEach((f) => {
-      const groupId = f.familyGroupId || f.uid;
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [] };
-      byGroup[groupId].guardians.push(f);
-    });
-    const readState = await getReadState(loggedInTeacher.uid);
-    const results = [];
-    for (const g of Object.values(byGroup)) {
-      const thread = await loadJSON(`class:${classId}:messages:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
-      const last = thread?.messages?.[thread.messages.length - 1];
-      const threadKey = `classroom-${g.groupId}`;
-      if (isThreadUnread(readState, threadKey, last, "teacher")) {
-        results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: last.text, senderName: last.senderName, timestamp: last.timestamp });
-      }
-    }
-    setUnreadFamilies(results);
-  }, [classId, loggedInTeacher]);
-
-  useEffect(() => { refreshUnread(); }, [refreshUnread]);
 
   const snoozeFamily = async (item) => {
     await snoozeThread(loggedInTeacher.uid, item.threadKey, 60); // snoozes for an hour
-    setUnreadFamilies((prev) => prev.filter((f) => f.threadKey !== item.threadKey));
+    onRefreshUnread();
   };
 
   return (
