@@ -318,7 +318,7 @@ Situation: Was absent one day this week and seemed to have a great day back — 
 Write 2-3 sentences. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -873,6 +873,16 @@ async function saveJSON(key, value, shared = false) {
   }
 }
 
+// Every backend API route this calls (generate, send-push, create-teacher, create-family) now
+// requires a valid Firebase ID token in the Authorization header — a route handler running on
+// the server has no other way to tell a real signed-in user apart from anyone on the internet
+// who found the URL. Centralized here so every one of the 16 call sites across the app gets this
+// automatically, rather than depending on remembering to add it in each place individually.
+async function authHeaders() {
+  const token = auth.currentUser ? await auth.currentUser.getIdToken() : null;
+  return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
+
 async function deleteJSON(key) {
   try {
     const ref = doc(db, "data", key);
@@ -935,7 +945,7 @@ async function sendPushNotification(uids, title, body, url) {
   try {
     await fetch("/api/send-push", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: await authHeaders(),
       body: JSON.stringify({ uids, title, body, url }),
     });
   } catch {
@@ -1579,7 +1589,7 @@ function AppInner() {
     try {
       const response = await fetch("/api/create-family", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body: JSON.stringify({ name, email, password: tempPassword, studentLinks, familyGroupId }),
       });
       const data = await response.json();
@@ -1710,7 +1720,7 @@ function AppInner() {
     try {
       const response = await fetch("/api/create-teacher", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body: JSON.stringify({ name, email, password: tempPassword, role, assignedClassIds, isSubstitute }),
       });
       const data = await response.json();
@@ -12103,7 +12113,7 @@ Write 2-3 short paragraphs weaving the exact figures above into natural sentence
 
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
 
@@ -12348,7 +12358,7 @@ Result: ${grade}
 Write 2-3 sentences. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12546,7 +12556,7 @@ ${entry.notes ? `Teacher's note: ${entry.notes}` : ""}
 Write 2-3 sentences. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12656,7 +12666,7 @@ ${summaryLines.map((l) => `- ${l}`).join("\n")}
 Write 2-3 sentences. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12805,7 +12815,7 @@ ${othersInvolved > 0 ? `Other students involved: ${othersInvolved}` : "No other 
 Write 2-3 sentences. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12831,7 +12841,7 @@ What the class just completed: ${segmentLabel}
 Write 2-3 sentences announcing this accomplishment to the class's families. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12859,7 +12869,7 @@ What this announcement is about, in the teacher's own words: ${topic}
 Write a short, clear announcement — 2-4 sentences. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12889,7 +12899,7 @@ What the teacher wants to say, in their own rough words: ${roughNote}
 Write a short, warm caption — 1-2 sentences. Output only the caption text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 300, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12915,7 +12925,7 @@ What they want to say, in their own rough words: ${roughNote}
 Write a short, warm, clear reply — 1-3 sentences, matching the tone of a real back-and-forth conversation, not a formal announcement. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 400, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -12939,7 +12949,7 @@ What this is about, in the teacher's own words: ${topic}
 Write a short, warm, clear message — 2-4 sentences. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
@@ -14040,7 +14050,7 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
         : `${instructions}\n\nDocument text:\n${rawText}`;
       const response = await fetch("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: await authHeaders(),
         body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 2000, messages: [{ role: "user", content }] }),
       });
       const data = await response.json();
@@ -15056,7 +15066,7 @@ Student's first name: ${student.name}
 Keep it under 120 words, friendly but direct, no exaggeration. Output only the message text, nothing else.`;
   const response = await fetch("/api/generate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await authHeaders(),
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();

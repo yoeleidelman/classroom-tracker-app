@@ -1,8 +1,17 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const { initializeApp, getApps, cert } = require("firebase-admin/app");
-const { getAuth } = require("firebase-admin/auth");
-const { getFirestore } = require("firebase-admin/firestore");
+// api/create-teacher.js
+// Creates a real Firebase Auth login for a teacher, then writes their own record as its own
+// document (data/teacher:{uid}) rather than appending to one shared list — this is what lets
+// Firestore security rules check "is this document mine" precisely. This can only safely run
+// on the server: creating another person's account requires elevated admin credentials that
+// must never be exposed in the browser.
+//
+// SECURITY: this creates accounts with an arbitrary role, including "admin" — without verifying
+// the caller first, anyone who finds this URL could create themselves an admin login with no
+// authentication at all. Every request must now prove, via a real Firebase ID token, that it
+// comes from an existing, active admin before anything happens.
+import { initializeApp, getApps, cert } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+import { getFirestore } from "firebase-admin/firestore";
 
 if (!getApps().length) {
   initializeApp({
@@ -10,8 +19,38 @@ if (!getApps().length) {
   });
 }
 
+// Verifies the request actually comes from a signed-in, active admin. Throws {status, message}
+// on any failure so the handler can respond appropriately without leaking why it failed.
+async function requireAdmin(req) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) throw { status: 401, message: "Sign-in required." };
+
+  const auth = getAuth();
+  let decoded;
+  try {
+    decoded = await auth.verifyIdToken(token);
+  } catch {
+    throw { status: 401, message: "Sign-in session is invalid or expired." };
+  }
+
+  const db = getFirestore();
+  const callerDoc = await db.collection("data").doc(`teacher:${decoded.uid}`).get();
+  const caller = callerDoc.exists ? callerDoc.data().value : null;
+  if (!caller || caller.active === false || caller.role !== "admin") {
+    throw { status: 403, message: "Admin access required." };
+  }
+  return decoded;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  try {
+    await requireAdmin(req);
+  } catch (err) {
+    return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
+  }
 
   const { name, email, password, role, assignedClassIds, isSubstitute } = req.body || {};
   if (!name || !email || !password || password.length < 6) {
