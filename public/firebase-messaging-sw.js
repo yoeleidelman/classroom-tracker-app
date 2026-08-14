@@ -28,8 +28,12 @@ messaging.onBackgroundMessage((payload) => {
   const title = payload.data?.title || "New notification";
   self.registration.showNotification(title, {
     body: payload.data?.body || "",
-    icon: payload.data?.icon || "/icons-parent/icon-192.png",
-    badge: "/icons-parent/icon-192.png",
+    // No "icon" field here on purpose — that's the larger image shown next to the notification
+    // text, separate from "badge" below. On several Android phones the OS already shows its own
+    // icon or the badge itself on the left of a notification, so adding a second, larger icon on
+    // the right just looks like a duplicate. "badge" alone is what every other well-behaved app
+    // (WhatsApp, Mail, etc.) relies on for this.
+    badge: "/icons-badge/badge-96.png",
     data: payload.data || {},
   });
 });

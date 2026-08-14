@@ -30,7 +30,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -961,11 +961,16 @@ async function notifyClassTeachers(classId, title, body, url) {
   await sendPushNotification(uids, title, body, url);
 }
 
-// Every family with a child actually linked to this class — used for blog posts, which go out to
-// the whole room at once rather than one specific family.
+// Every family with a child actually linked to this class, on a full-time basis — used for blog
+// posts, which only apply to a student's main class, not a part-time or specific-periods
+// enrollment where a different teacher is the one actually posting for them.
 async function notifyClassFamilies(classId, title, body, url) {
+  const roster = await loadJSON(`class:${classId}:roster`, [], true);
+  const fullTimeStudentIds = new Set(roster.filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time").map((s) => s.id));
   const allFamilies = await loadAllWithPrefix("family:");
-  const uids = allFamilies.filter((f) => (f.linkedClassIds || []).includes(classId)).map((f) => f.uid);
+  const uids = allFamilies
+    .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && fullTimeStudentIds.has(l.studentId)))
+    .map((f) => f.uid);
   await sendPushNotification(uids, title, body, url);
 }
 
@@ -1411,7 +1416,7 @@ function AppInner() {
       unsubscribe = onMessage(messaging, (payload) => {
         if (Notification.permission !== "granted") return;
         const title = payload.data?.title || "New notification";
-        const n = new Notification(title, { body: payload.data?.body || "", icon: payload.data?.icon || "/icons-parent/icon-192.png" });
+        const n = new Notification(title, { body: payload.data?.body || "", badge: "/icons-badge/badge-96.png" });
         // Foreground notifications don't go through the service worker's notificationclick handler
         // at all — this is the separate path for making a tap actually go somewhere when the app
         // was already open at the moment it arrived.
@@ -2493,20 +2498,18 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
         Substitute (temporary access)
       </label>
 
-      {role === "teacher" && (
-        <>
-          <label className="block text-xs font-semibold text-stone-700 mb-1">Assign to classes</label>
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {classes.length === 0 && <p className="text-xs text-stone-400">No classes yet.</p>}
-            {classes.map((c) => (
-              <button key={c.id} onClick={() => toggleClass(c.id)}
-                className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedClassIds.includes(c.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
-                {c.name}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
+      <label className="block text-xs font-semibold text-stone-700 mb-1">
+        Assign to classes {role === "admin" && <span className="font-normal text-stone-400">— optional for admins, but needed if they should get that class's own notifications and messages, not just school-wide access</span>}
+      </label>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {classes.length === 0 && <p className="text-xs text-stone-400">No classes yet.</p>}
+        {classes.map((c) => (
+          <button key={c.id} onClick={() => toggleClass(c.id)}
+            className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedClassIds.includes(c.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+            {c.name}
+          </button>
+        ))}
+      </div>
 
       {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
 
@@ -3123,6 +3126,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [familyCreatedNote, setFamilyCreatedNote] = useState("");
   const [showArchivedFamilies, setShowArchivedFamilies] = useState(false);
   const [addingGuardianTo, setAddingGuardianTo] = useState(null); // the family group currently getting a second guardian, or null
+  const [viewingFamilyGroupId, setViewingFamilyGroupId] = useState(null);
   const activeFamilies = (families || []).filter((f) => f.active !== false);
   const inactiveFamilies = (families || []).filter((f) => f.active === false);
   // Grouped for display so two logins for the same household read as one family with two
@@ -3179,7 +3183,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   };
 
   if (showAdminMessages) {
-    return <AdminMessagesView families={families} navigate={() => setShowAdminMessages(false)} />;
+    return <AdminMessagesView families={families} loggedInTeacher={currentTeacher} navigate={() => setShowAdminMessages(false)} />;
   }
 
   return (
@@ -3588,15 +3592,13 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                       <span className="text-xs text-stone-400 ml-2">{t.role === "admin" ? "Admin" : "Teacher"}{t.isSubstitute ? " · Substitute" : ""}</span>
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
-                      {t.role === "teacher" && (
-                        <button onClick={() => setEditingTeacherUid(isEditing ? null : t.uid)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
-                          {isEditing ? "Cancel" : "Edit classes"}
-                        </button>
-                      )}
+                      <button onClick={() => setEditingTeacherUid(isEditing ? null : t.uid)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
+                        {isEditing ? "Cancel" : "Edit classes"}
+                      </button>
                       <ArchiveOrDeleteMenu onArchive={() => onDeactivateTeacher(t.uid)} onDeletePermanently={() => onDeleteTeacher(t.uid)} size={14} />
                     </div>
                   </div>
-                  <p className="text-xs text-stone-400 mt-0.5">{t.email}{classNames.length > 0 ? ` · ${classNames.join(", ")}` : t.role === "teacher" ? " · No classes assigned yet" : ""}</p>
+                  <p className="text-xs text-stone-400 mt-0.5">{t.email}{classNames.length > 0 ? ` · ${classNames.join(", ")}` : " · No classes assigned yet"}</p>
 
                   {isEditing && (
                     <div className="mt-2 pt-2 border-t border-stone-100">
@@ -3711,9 +3713,14 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                   <p className="text-xs text-stone-400 mt-1.5">
                     {(primary.studentLinks || []).length === 0 ? "No children linked" : (primary.studentLinks || []).map((l) => l.studentName).join(", ")}
                   </p>
-                  <button onClick={() => setAddingGuardianTo(primary)} className="text-xs font-semibold text-teal-700 hover:text-teal-900 mt-1.5">
-                    + Add another guardian to this family
-                  </button>
+                  <div className="flex items-center gap-3 mt-1.5">
+                    <button onClick={() => setViewingFamilyGroupId(primary.familyGroupId || primary.uid)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
+                      Manage family
+                    </button>
+                    <button onClick={() => setAddingGuardianTo(primary)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
+                      + Add another guardian
+                    </button>
+                  </div>
                   {addingGuardianTo?.uid === primary.uid && (
                     <AddGuardianForm existingFamily={primary}
                       onSave={async (name, email, tempPassword) => {
@@ -3787,6 +3794,15 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           onDeleteStudent={(id) => { onDeleteStudent(id); setProfileStudent(null); }}
           onClose={() => setProfileStudent(null)} />
       )}
+
+      {viewingFamilyGroupId && (() => {
+        const group = activeFamilyGroups.find((g) => (g[0].familyGroupId || g[0].uid) === viewingFamilyGroupId);
+        if (!group) return null; // the family was just deleted/archived out from under this view — nothing left to show
+        return (
+          <AdminFamilyDetailView group={group} allStudentsForLinking={allStudentsForLinking} globalStudents={globalStudents}
+            onUpdateFamily={onUpdateFamily} onBack={() => setViewingFamilyGroupId(null)} />
+        );
+      })()}
 
       {openProgramId && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
@@ -4185,7 +4201,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
   const [genError, setGenError] = useState(false);
   const [attachFile, setAttachFile] = useState(null);
   const [attachPreview, setAttachPreview] = useState(null);
-  const [attachType, setAttachType] = useState(null); // "photo" | "video"
+  const [attachType, setAttachType] = useState(null); // "photo" | "video" | "file"
   const [attachError, setAttachError] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
@@ -4197,13 +4213,18 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
     if (!file) return;
     setAttachError(null);
     const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/");
     if (isVideo) {
       try { await validateVideoDuration(file); }
       catch (err) { setAttachError(err.message); return; }
     }
+    if (!isImage && file.size > MAX_FILE_ATTACHMENT_BYTES) {
+      setAttachError("File is too large — the limit is 20MB.");
+      return;
+    }
     setAttachFile(file);
-    setAttachType(isVideo ? "video" : "photo");
-    setAttachPreview(URL.createObjectURL(file));
+    setAttachType(isVideo ? "video" : isImage ? "photo" : "file");
+    setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
   };
   const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
 
@@ -4214,13 +4235,17 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
       let attachmentUrl = null;
       if (attachFile) {
         setUploadProgress(0);
-        const ext = attachType === "video" ? (attachFile.name || "").split(".").pop() || "mp4" : "jpg";
-        const path = `message-attachments/${threadKey}/${uid()}.${ext}`;
-        attachmentUrl = attachType === "video"
-          ? await uploadOneVideo(attachFile, path, setUploadProgress)
-          : await uploadOneImage(attachFile, path, setUploadProgress);
+        if (attachType === "video") {
+          const ext = (attachFile.name || "").split(".").pop() || "mp4";
+          attachmentUrl = await uploadOneVideo(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
+        } else if (attachType === "photo") {
+          attachmentUrl = await uploadOneImage(attachFile, `message-attachments/${threadKey}/${uid()}.jpg`, setUploadProgress);
+        } else {
+          const ext = (attachFile.name || "").split(".").pop() || "bin";
+          attachmentUrl = await uploadOneFile(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
+        }
       }
-      await onSend(text.trim(), attachmentUrl, attachType);
+      await onSend(text.trim(), attachmentUrl, attachType, attachType === "file" ? attachFile.name : null);
       setText("");
       clearAttachment();
     } catch (err) {
@@ -4272,6 +4297,13 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
                 {m.attachmentType === "video" && m.attachmentUrl && (
                   <video src={m.attachmentUrl} controls playsInline className="w-full max-h-64 bg-black mt-1" />
                 )}
+                {m.attachmentType === "file" && m.attachmentUrl && (
+                  <a href={m.attachmentUrl} target="_blank" rel="noopener noreferrer"
+                    className={`flex items-center gap-2 mx-3.5 mt-1 mb-1 px-3 py-2 rounded-lg border ${mine ? "border-teal-500 bg-teal-800/40" : "border-stone-200 bg-stone-50"}`}>
+                    <FileText size={18} className={mine ? "text-teal-100" : "text-stone-500"} />
+                    <span className={`text-xs font-semibold truncate ${mine ? "text-white" : "text-stone-700"}`}>{m.attachmentName || "Attached file"}</span>
+                  </a>
+                )}
                 <div className="px-3.5 pb-2.5 pt-1">
                   {m.text && <p className="text-sm whitespace-pre-wrap">{m.text}</p>}
                   <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
@@ -4311,6 +4343,13 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
             <button onClick={clearAttachment} className="absolute -top-1.5 -right-1.5 bg-stone-700 text-white rounded-full p-0.5"><X size={12} /></button>
           </div>
         )}
+        {attachType === "file" && attachFile && (
+          <div className="relative inline-flex items-center gap-1.5 mb-2 ml-11 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
+            <FileText size={15} className="text-stone-500" />
+            <span className="text-xs font-semibold text-stone-700 max-w-[10rem] truncate">{attachFile.name}</span>
+            <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+          </div>
+        )}
         {attachError && <p className="text-xs text-rose-600 mb-1.5 ml-11">{attachError}</p>}
         <div className="flex items-end gap-2">
           <button onClick={() => setShowGenerate((v) => !v)} title="Generate with AI"
@@ -4318,9 +4357,14 @@ function ConversationThreadView({ title, subtitle, messages, onSend, myRole, con
             <Sparkles size={17} />
           </button>
           <label title="Attach a photo or video"
-            className={`shrink-0 rounded-xl p-2.5 border cursor-pointer ${attachFile ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+            className={`shrink-0 rounded-xl p-2.5 border cursor-pointer ${attachType === "photo" || attachType === "video" ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
             <Camera size={17} />
             <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+          </label>
+          <label title="Attach a file"
+            className={`shrink-0 rounded-xl p-2.5 border cursor-pointer ${attachType === "file" ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+            <Paperclip size={17} />
+            <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
           </label>
           <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
@@ -4668,33 +4712,100 @@ function ParentBlogTabContent({ uniqueClasses, selectedIndex, onSelectIndex, fam
   );
 }
 
+// Per-child, not per-class like the blog switcher above — a parent thinks "my daughter's
+// homework," not "this class's homework," even on the rare case where two siblings share a
+// class and would see identical content either way.
+function ParentHomeworkView({ link }) {
+  const [posts, setPosts] = useState(null); // null = loading
+  useEffect(() => {
+    let cancelled = false;
+    setPosts(null);
+    loadJSON(`class:${link.classId}:homework`, [], true).then((p) => { if (!cancelled) setPosts(p); });
+    return () => { cancelled = true; };
+  }, [link.classId]);
+
+  if (posts === null) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
+  const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)); // newest first — homework is "what's due," not a scrollable history
+
+  return (
+    <div>
+      {sorted.length === 0 ? (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">No homework posted yet.</p>
+      ) : (
+        <div className="space-y-3">
+          {sorted.map((post) => (
+            <div key={post.id} className="bg-white border border-stone-200 rounded-xl p-4">
+              <p className="text-sm font-bold text-stone-900 mb-1.5">
+                {post.cadence === "weekly" ? "This week's homework" : "Today's homework"}
+                <span className="ml-2 text-[10px] font-semibold text-stone-400">{new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
+              </p>
+              {post.text && <p className="text-sm text-stone-700 whitespace-pre-wrap mb-2">{post.text}</p>}
+              {post.attachmentType === "photo" && post.attachmentUrl && (
+                <img src={post.attachmentUrl} alt="" className="w-full max-h-56 object-cover rounded-lg" />
+              )}
+              {post.attachmentType === "video" && post.attachmentUrl && (
+                <video src={post.attachmentUrl} controls playsInline className="w-full max-h-56 bg-black rounded-lg" />
+              )}
+              {post.attachmentType === "file" && post.attachmentUrl && (
+                <a href={post.attachmentUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-3 py-2 rounded-lg border border-stone-200 bg-stone-50">
+                  <FileText size={16} className="text-stone-500" />
+                  <span className="text-xs font-semibold text-stone-700 truncate">{post.attachmentName || "Attached file"}</span>
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ParentHomeworkTabContent({ links, selectedIndex, onSelectIndex, onMarkRead }) {
+  const selectedLink = links[selectedIndex] || links[0];
+  useEffect(() => {
+    if (selectedLink) onMarkRead(selectedLink.classId);
+  }, [selectedLink?.classId, selectedLink?.studentId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div>
+      {links.length > 1 && (
+        <ChildSwitcher labels={links.map((l) => l.studentName)} selectedIndex={selectedIndex} onSelect={onSelectIndex} />
+      )}
+      <ParentHomeworkView link={selectedLink} />
+    </div>
+  );
+}
+
 // A small reusable numbered pill — same shape every place a tab needs to show "N new things,"
 // on either side of the app.
 function TabBadge({ count }) {
   if (!count || count <= 0) return null;
   return (
-    <span className="absolute -top-1 right-[22%] min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[10px] font-bold leading-none">
+    <span className="absolute -top-1.5 -right-2.5 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[10px] font-bold leading-none">
       {count > 9 ? "9+" : count}
     </span>
   );
 }
 
-function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogCount = 0 }) {
+function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogCount = 0, unreadHomeworkCount = 0, showHomework = true }) {
   const tabs = [
     { id: "home", label: "Home", icon: HomeIcon },
     { id: "messages", label: "Messages", icon: MessageCircle, count: unreadMessagesCount },
     { id: "blog", label: "Blog", icon: Newspaper, count: unreadBlogCount },
+    ...(showHomework ? [{ id: "homework", label: "Homework", icon: FileText, count: unreadHomeworkCount }] : []),
   ];
   return (
-    <div className="flex">
+    <div className="flex overflow-x-auto no-scrollbar">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 relative flex items-center justify-center gap-1.5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 ${isActive ? "text-[#a8562f] border-[#a8562f]" : "text-stone-400 border-transparent"}`}>
-            <Icon size={16} /> {t.label}
-            <TabBadge count={t.count} />
+            className={`flex-1 shrink-0 flex items-center justify-center py-3 text-xs sm:text-sm font-semibold whitespace-nowrap border-b-2 px-1 ${isActive ? "text-[#a8562f] border-[#a8562f]" : "text-stone-400 border-transparent"}`}>
+            <span className="relative inline-flex items-center gap-1 sm:gap-1.5">
+              <Icon size={14} /> {t.label}
+              <TabBadge count={t.count} />
+            </span>
           </button>
         );
       })}
@@ -4722,6 +4833,34 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   };
   const [selectedChildIndex, setSelectedChildIndex] = useState(0); // which child's daily log shows on Home, when there's more than one
   const [selectedBlogClassIndex, setSelectedBlogClassIndex] = useState(0); // which class's blog shows, when linked to more than one
+  const [selectedHomeworkChildIndex, setSelectedHomeworkChildIndex] = useState(0);
+
+  // Blog and homework both only ever come from a student's full-time class — a part-time or
+  // specific-periods enrollment (combined with another room for a subject or two) doesn't carry
+  // homework or blog posts from that room, since that teacher isn't the one actually assigning
+  // it there. Scope lives on the live class roster, not on the family's own link, so this checks
+  // the current source of truth rather than a copy that could drift out of date. classType is
+  // fetched alongside it — homework specifically only ever applies to elementary classes, so this
+  // is what lets the tab tell an elementary link apart from a preschool one.
+  const [fullTimeStudentLinks, setFullTimeStudentLinks] = useState(null); // null = still loading
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const links = family?.studentLinks || [];
+      const results = [];
+      for (const link of links) {
+        const roster = await loadJSON(`class:${link.classId}:roster`, [], true); // eslint-disable-line no-await-in-loop
+        const scope = roster.find((s) => s.id === link.studentId)?.enrollmentScope;
+        if (!scope || scope === "full-time") {
+          const linkConfig = await loadJSON(`class:${link.classId}:config`, null, true); // eslint-disable-line no-await-in-loop
+          results.push({ ...link, classType: linkConfig?.classType || "elementary" });
+        }
+      }
+      if (!cancelled) setFullTimeStudentLinks(results);
+    })();
+    return () => { cancelled = true; };
+  }, [family]);
+
   const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
   // A scan doesn't perform anything by itself — it only unlocks the ability to act, which then
   // has to be used deliberately per child. Locks again the moment they leave this screen, so
@@ -4765,12 +4904,17 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   }, [family, myGroupId]);
 
   useEffect(() => { refreshUnreadThreads(); }, [refreshUnreadThreads]);
+  useEffect(() => {
+    const interval = setInterval(refreshUnreadThreads, 45000);
+    return () => clearInterval(interval);
+  }, [refreshUnreadThreads]);
 
   // Same read-state document as messages, just a different key shape per class
   // ("blog-{classId}" instead of "class-{classId}") — a post counts as new if it's newer than
   // the last time this class's blog was actually opened, not just newer than account creation.
   const refreshUnreadBlogCount = useCallback(async () => {
-    const uniqueClasses = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()];
+    if (!fullTimeStudentLinks) return;
+    const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
     const readState = await getReadState(family.uid);
     let total = 0;
     for (const l of uniqueClasses) {
@@ -4779,15 +4923,46 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       total += posts.filter((p) => !lastRead || new Date(p.timestamp) > new Date(lastRead)).length;
     }
     setUnreadBlogCount(total);
-  }, [family]);
+  }, [family, fullTimeStudentLinks]);
 
   useEffect(() => { refreshUnreadBlogCount(); }, [refreshUnreadBlogCount]);
+  useEffect(() => {
+    const interval = setInterval(refreshUnreadBlogCount, 45000);
+    return () => clearInterval(interval);
+  }, [refreshUnreadBlogCount]);
 
   const markBlogRead = async (classId) => {
     const posts = await loadJSON(`class:${classId}:blogPosts`, [], true);
     const latest = posts[posts.length - 1];
     if (latest) await markThreadRead(family.uid, `blog-${classId}`);
     refreshUnreadBlogCount();
+  };
+
+  const [unreadHomeworkCount, setUnreadHomeworkCount] = useState(0);
+  const refreshUnreadHomeworkCount = useCallback(async () => {
+    if (!fullTimeStudentLinks) return;
+    const uniqueClasses = [...new Map(fullTimeStudentLinks.filter((l) => l.classType !== "preschool").map((l) => [l.classId, l])).values()];
+    const readState = await getReadState(family.uid);
+    let total = 0;
+    for (const l of uniqueClasses) {
+      const posts = await loadJSON(`class:${l.classId}:homework`, [], true); // eslint-disable-line no-await-in-loop
+      const lastRead = readState[`homework-${l.classId}`];
+      total += posts.filter((p) => !lastRead || new Date(p.timestamp) > new Date(lastRead)).length;
+    }
+    setUnreadHomeworkCount(total);
+  }, [family, fullTimeStudentLinks]);
+
+  useEffect(() => { refreshUnreadHomeworkCount(); }, [refreshUnreadHomeworkCount]);
+  useEffect(() => {
+    const interval = setInterval(refreshUnreadHomeworkCount, 45000);
+    return () => clearInterval(interval);
+  }, [refreshUnreadHomeworkCount]);
+
+  const markHomeworkRead = async (classId) => {
+    const posts = await loadJSON(`class:${classId}:homework`, [], true);
+    const latest = posts[posts.length - 1];
+    if (latest) await markThreadRead(family.uid, `homework-${classId}`);
+    refreshUnreadHomeworkCount();
   };
 
   const dismissUnread = async (item) => {
@@ -4804,7 +4979,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     setMessagingClassId(classId);
     const thread = await loadJSON(`class:${classId}:messages:${myGroupId}`, { messages: [] }, true);
     setMessagingThread(thread || { messages: [] });
-    markThreadRead(family.uid, `class-${classId}`);
+    await markThreadRead(family.uid, `class-${classId}`);
   };
 
   // Not scoped to any class — this is a shared line to the office, not a specific classroom, so
@@ -4814,10 +4989,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     setMessagingAdmin(true);
     const thread = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
     setAdminThread(thread || { messages: [] });
-    markThreadRead(family.uid, `admin-${myGroupId}`);
+    await markThreadRead(family.uid, `admin-${myGroupId}`);
   };
 
   const [scanError, setScanError] = useState(null);
+  const [pendingDeepLinkClassId, setPendingDeepLinkClassId] = useState(null); // for "open=blog" links specifically — resolved once fullTimeStudentLinks finishes loading, see effect below
+  const [pendingHomeworkDeepLinkClassId, setPendingHomeworkDeepLinkClassId] = useState(null);
 
   // Deep-linking from a tapped push notification — reads the URL once on mount and jumps
   // straight to whatever the notification was actually about, instead of landing on Home and
@@ -4830,19 +5007,40 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const classId = params.get("classId");
     if (open === "messages") {
       setParentTab("messages");
-      if (classId) openMessagesFor(classId);
+      if (classId) openMessagesFor(classId).then(refreshUnreadThreads);
     } else if (open === "admin") {
       setParentTab("messages");
-      openAdminMessages();
+      openAdminMessages().then(refreshUnreadThreads);
     } else if (open === "blog" && classId) {
       setParentTab("blog");
-      const uniqueClasses = [...new Map((family.studentLinks || []).map((l) => [l.classId, l])).values()];
-      const idx = uniqueClasses.findIndex((l) => l.classId === classId);
-      if (idx !== -1) setSelectedBlogClassIndex(idx);
+      setPendingDeepLinkClassId(classId); // resolved below, once fullTimeStudentLinks is actually ready
+    } else if (open === "homework" && classId) {
+      setParentTab("homework");
+      setPendingHomeworkDeepLinkClassId(classId);
     }
     const cleanUrl = window.location.pathname + (params.get("portal") ? "?portal=parent" : "");
     window.history.replaceState({}, "", cleanUrl);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A blog deep link can arrive before the full-time-only class list has finished loading (that
+  // fetch is async and starts as null) — this resolves the actual tab index the moment that list
+  // is genuinely ready, rather than looking it up too early against an empty array.
+  useEffect(() => {
+    if (!pendingDeepLinkClassId || !fullTimeStudentLinks) return;
+    const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
+    const idx = uniqueClasses.findIndex((l) => l.classId === pendingDeepLinkClassId);
+    if (idx !== -1) setSelectedBlogClassIndex(idx);
+    setPendingDeepLinkClassId(null);
+  }, [pendingDeepLinkClassId, fullTimeStudentLinks]);
+
+  // Same reasoning as the blog resolver above, but against the un-deduped (per-child) list, since
+  // the homework switcher is per-child rather than per-class.
+  useEffect(() => {
+    if (!pendingHomeworkDeepLinkClassId || !fullTimeStudentLinks) return;
+    const idx = fullTimeStudentLinks.findIndex((l) => l.classId === pendingHomeworkDeepLinkClassId);
+    if (idx !== -1) setSelectedHomeworkChildIndex(idx);
+    setPendingHomeworkDeepLinkClassId(null);
+  }, [pendingHomeworkDeepLinkClassId, fullTimeStudentLinks]);
 
   const refreshCheckInStatus = useCallback(async () => {
     const today = todayISO();
@@ -4884,13 +5082,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // Same conversation the teacher side writes to — one thread per family per class, not per
   // child, so two kids in the same room share one conversation with it rather than splitting an
   // otherwise identical exchange in two.
-  const sendMessageToTeacher = async (classId, text, attachmentUrl, attachmentType) => {
+  const sendMessageToTeacher = async (classId, text, attachmentUrl, attachmentType, attachmentName) => {
     const key = `class:${classId}:messages:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || "Sent a photo", `/?open=messages&classId=${classId}&groupId=${myGroupId}`);
+    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?open=messages&classId=${classId}&groupId=${myGroupId}`);
     return next;
   };
 
@@ -4942,7 +5140,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         <GlobalAppStyles />
         <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
           onBack={() => setMessagingClassId(null)}
-          onSend={async (text, attachmentUrl, attachmentType) => { await sendMessageToTeacher(messagingClassId, text, attachmentUrl, attachmentType); await openMessagesFor(messagingClassId); }} />
+          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToTeacher(messagingClassId, text, attachmentUrl, attachmentType, attachmentName); await openMessagesFor(messagingClassId); }} />
       </div>
     );
   }
@@ -4978,7 +5176,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             text="Contact the office right from Home now — Messages is just for your classroom."
             onNext={advanceTour} onSkip={dismissTour}>
             <div className="bg-white border-t border-stone-200 max-w-lg mx-auto">
-              <ParentMainTabs active={parentTab} navigate={setParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount} />
+              <ParentMainTabs active={parentTab} navigate={setParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount}
+                unreadHomeworkCount={unreadHomeworkCount} showHomework={(fullTimeStudentLinks || []).some((l) => l.classType !== "preschool")} />
             </div>
           </TourHint>
         )}
@@ -5075,7 +5274,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         ) : parentTab === "messages" ? (
           <div className="space-y-3">
             {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
-              <button key={l.classId} onClick={() => openMessagesFor(l.classId)}
+              <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
                 className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-[#a8562f]">
                 <div>
                   <p className="font-semibold text-stone-900">{l.className}</p>
@@ -5086,18 +5285,32 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             ))}
           </div>
         ) : parentTab === "blog" ? (
-          (family?.studentLinks || []).length === 0 ? (
+          fullTimeStudentLinks === null ? (
+            <p className="text-sm text-stone-400 text-center py-8">Loading…</p>
+          ) : fullTimeStudentLinks.length === 0 ? (
             <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
           ) : (() => {
-            const uniqueClasses = [...new Map(family.studentLinks.map((l) => [l.classId, l])).values()];
+            const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
             return (
               <ParentBlogTabContent uniqueClasses={uniqueClasses} selectedIndex={selectedBlogClassIndex} onSelectIndex={setSelectedBlogClassIndex}
                 family={family} onMarkRead={markBlogRead} />
             );
           })()
+        ) : parentTab === "homework" ? (
+          fullTimeStudentLinks === null ? (
+            <p className="text-sm text-stone-400 text-center py-8">Loading…</p>
+          ) : (() => {
+            const elementaryLinks = fullTimeStudentLinks.filter((l) => l.classType !== "preschool");
+            return elementaryLinks.length === 0 ? (
+              <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
+            ) : (
+              <ParentHomeworkTabContent links={elementaryLinks} selectedIndex={selectedHomeworkChildIndex} onSelectIndex={setSelectedHomeworkChildIndex}
+                onMarkRead={markHomeworkRead} />
+            );
+          })()
         ) : (
           <>
-            <OfficeContactCard onViewUpdates={() => openAdminMessages()} />
+            <OfficeContactCard onViewUpdates={() => openAdminMessages().then(refreshUnreadThreads)} />
             {unreadThreads.length > 0 && (
               <div className="space-y-2 mb-4">
                 {unreadThreads.map((item) => (
@@ -5328,6 +5541,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [incidents, setIncidents] = useState([]);
   const [photos, setPhotos] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
+  const [homeworkPosts, setHomeworkPosts] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
   const [classPoints, setClassPoints] = useState({});
   const [monthlyReportState, setMonthlyReportState] = useState({ dismissedMonth: null });
@@ -5391,6 +5605,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     setCommUnreadFamilies(results);
   }, [classId, loggedInTeacher]);
   useEffect(() => { refreshCommUnread(); }, [refreshCommUnread]);
+  // A tab that's already open has no way to know a new message arrived elsewhere — there's no
+  // live sync in this app, only fetch-on-load. A light poll while the tab stays open closes that
+  // gap without needing a full real-time rebuild; 45s is often enough to feel current without
+  // adding meaningful read cost.
+  useEffect(() => {
+    const interval = setInterval(refreshCommUnread, 45000);
+    return () => clearInterval(interval);
+  }, [refreshCommUnread]);
   const [messageFlag, setMessageFlag] = useState(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
@@ -5411,6 +5633,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const inc = await loadC("incidents", []);
       const ph = await loadC("photos", []);
       const bp = await loadC("blogPosts", []);
+      const hw = await loadC("homework", []);
       const ca = await loadC("classAssessments", []);
       const cp = await loadC("classPoints", {});
       const mrs = await loadC("monthlyReportState", { dismissedMonth: null });
@@ -5482,10 +5705,20 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         finalConfig = { ...finalConfig, subjects: [...(finalConfig.subjects || []), ...subjectsToAdd] };
         saveC("config", finalConfig);
       }
+      // Fourth migration: keeps classType mirrored into this class's own config document, since a
+      // family account can read its linked classes' config but has no access at all to the
+      // school-wide class registry classType actually lives on — this is what lets the parent
+      // side tell an elementary class apart from a preschool one (homework only applies to the
+      // former) without needing any new permission grant.
+      if (finalConfig.classType !== classType) {
+        finalConfig = { ...finalConfig, classType };
+        saveC("config", finalConfig);
+      }
       setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: mergedPlanner });
       setIncidents(finalIncidents);
       setPhotos(ph);
       setBlogPosts(bp);
+      setHomeworkPosts(hw);
       setClassAssessments(finalCA);
       setClassPoints(finalCP);
       setMonthlyReportState(mrs);
@@ -5559,6 +5792,34 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistBlogPosts([...blogPosts, entry]);
     const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
     notifyClassFamilies(classId, `New post in ${className}`, (title || "").trim() || firstCaption || "Check out the new post", `/?portal=parent&open=blog&classId=${classId}`);
+    return entry;
+  };
+  const persistHomeworkPosts = (next) => { setHomeworkPosts(next); saveC("homework", next); };
+  // Cadence isn't just a label — it's what lets the parent side show a genuinely useful heading
+  // ("This week's homework" vs "Today's homework") without the teacher needing to type a title
+  // every single time. The attachment reuses the exact same upload pipeline as messages, since a
+  // homework post is really just a specialized, class-wide post with a cadence attached.
+  const submitHomework = async (cadence, text, attachFile, attachType) => {
+    const postId = uid();
+    let attachmentUrl = null;
+    let attachmentName = null;
+    if (attachFile) {
+      if (attachType === "video") {
+        attachmentUrl = await uploadOneVideo(attachFile, `homework/${classId}/${postId}.${(attachFile.name || "").split(".").pop() || "mp4"}`);
+      } else if (attachType === "photo") {
+        attachmentUrl = await uploadOneImage(attachFile, `homework/${classId}/${postId}.jpg`);
+      } else {
+        attachmentUrl = await uploadOneFile(attachFile, `homework/${classId}/${postId}.${(attachFile.name || "").split(".").pop() || "bin"}`);
+        attachmentName = attachFile.name;
+      }
+    }
+    const entry = withLogger({
+      id: postId, timestamp: new Date().toISOString(), cadence, text: (text || "").trim(),
+      ...(attachmentUrl ? { attachmentUrl, attachmentType: attachType, attachmentName } : {}),
+    });
+    persistHomeworkPosts([...homeworkPosts, entry]);
+    const heading = cadence === "weekly" ? "This week's homework" : "Today's homework";
+    notifyClassFamilies(classId, `${heading} — ${className}`, text?.trim() || "Check the homework section", `/?portal=parent&open=homework&classId=${classId}`);
     return entry;
   };
   const toggleBlogReaction = (postId, emoji, reactorId) => {
@@ -6140,13 +6401,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // One conversation per family per class — not per individual teacher, since a preschool room
   // often has more than one adult in it and a parent shouldn't need to know who's on duty today
   // to reach "the classroom." Any teacher assigned to this class reads and writes the same thread.
-  const sendMessageToFamily = async (familyUid, text, attachmentUrl, attachmentType) => {
+  const sendMessageToFamily = async (familyUid, text, attachmentUrl, attachmentType, attachmentName) => {
     const key = `class:${classId}:messages:${familyUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || "Sent a photo", `/?portal=parent&open=messages&classId=${classId}`);
+    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?portal=parent&open=messages&classId=${classId}`);
     return next;
   };
 
@@ -6341,7 +6602,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       </div>
 
       {view === "messages" && (
-        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} deepLinkGroupId={deepLinkGroupId} />
+        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} deepLinkGroupId={deepLinkGroupId} onCommRead={refreshCommUnread} />
       )}
 
       {view === "communication" && (
@@ -6360,6 +6621,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
       {view === "blog-compose" && (
         <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher} onSubmit={submitBlogPost} onBack={() => setView("blog")} />
+      )}
+
+      {view === "homework" && (
+        <TeacherHomeworkView posts={homeworkPosts} navigate={setView} />
+      )}
+
+      {view === "homework-compose" && (
+        <HomeworkComposeScreen classId={classId} onSubmit={submitHomework} onBack={() => setView("homework")} />
       )}
 
       {view === "tools" && (
@@ -6614,6 +6883,7 @@ function MainTabs({ active, navigate }) {
         { id: "points", label: "Points", icon: Star },
         { id: "communication", label: "Comm", icon: Mail, count: commUnreadCount },
         { id: "blog", label: "Blog", icon: Newspaper },
+        { id: "homework", label: "Homework", icon: FileText },
         { id: "planner", label: "Planner", icon: Calendar },
         { id: "tools", label: "Tools", icon: Wrench },
       ];
@@ -6624,9 +6894,11 @@ function MainTabs({ active, navigate }) {
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`relative flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-            <Icon size={14} /> {t.label}
-            <TabBadge count={t.count} />
+            className={`flex-1 flex items-center justify-center rounded-md py-1.5 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+            <span className="relative inline-flex items-center gap-1.5">
+              <Icon size={14} /> {t.label}
+              <TabBadge count={t.count} />
+            </span>
           </button>
         );
       })}
@@ -8508,6 +8780,142 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
           {posting ? `Posting… ${progress}%` : activeBlockCount > 1 ? "Post all parts together" : "Post"}
         </button>
       </div>
+    </div>
+  );
+}
+
+// Same reasoning as the blog feed's own compose button — placed at the bottom, right after the
+// newest post, so it's the next thing in view rather than requiring a scroll back to the top.
+function TeacherHomeworkView({ posts, navigate }) {
+  const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  return (
+    <div className={PAGE}>
+      <Header navigate={navigate} />
+      <MainTabs active="homework" navigate={navigate} />
+      <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-3">Homework</p>
+      <div className="md:w-[28rem]">
+        {sorted.length === 0 ? (
+          <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {sorted.map((post) => (
+              <div key={post.id} className="bg-white border border-stone-200 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wide text-teal-700 bg-teal-50 px-2 py-0.5 rounded-full">
+                    {post.cadence === "weekly" ? "Weekly" : "Daily"}
+                  </span>
+                  <span className="text-[10px] text-stone-400">{new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
+                </div>
+                {post.text && <p className="text-sm text-stone-700 whitespace-pre-wrap mb-2">{post.text}</p>}
+                {post.attachmentType === "photo" && post.attachmentUrl && (
+                  <img src={post.attachmentUrl} alt="" className="w-full max-h-56 object-cover rounded-lg" />
+                )}
+                {post.attachmentType === "video" && post.attachmentUrl && (
+                  <video src={post.attachmentUrl} controls playsInline className="w-full max-h-56 bg-black rounded-lg" />
+                )}
+                {post.attachmentType === "file" && post.attachmentUrl && (
+                  <a href={post.attachmentUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-3 py-2 rounded-lg border border-stone-200 bg-stone-50">
+                    <FileText size={16} className="text-stone-500" />
+                    <span className="text-xs font-semibold text-stone-700 truncate">{post.attachmentName || "Attached file"}</span>
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <button onClick={() => navigate("homework-compose")} className="w-full mt-4 text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800">
+          + New homework
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
+  const [cadence, setCadence] = useState("daily");
+  const [text, setText] = useState("");
+  const [attachFile, setAttachFile] = useState(null);
+  const [attachPreview, setAttachPreview] = useState(null);
+  const [attachType, setAttachType] = useState(null); // "photo" | "video" | "file"
+  const [attachError, setAttachError] = useState(null);
+  const [posting, setPosting] = useState(false);
+
+  const pickAttachment = async (file) => {
+    if (!file) return;
+    setAttachError(null);
+    const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/");
+    if (isVideo) {
+      try { await validateVideoDuration(file); }
+      catch (err) { setAttachError(err.message); return; }
+    }
+    if (!isImage && file.size > MAX_FILE_ATTACHMENT_BYTES) {
+      setAttachError("File is too large — the limit is 20MB.");
+      return;
+    }
+    setAttachFile(file);
+    setAttachType(isVideo ? "video" : isImage ? "photo" : "file");
+    setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
+  };
+  const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
+
+  const submit = async () => {
+    if (!text.trim() && !attachFile) return;
+    setPosting(true);
+    setAttachError(null);
+    try {
+      await onSubmit(cadence, text, attachFile, attachType);
+      onBack();
+    } catch (err) {
+      setAttachError(describeUploadError(err));
+      setPosting(false);
+    }
+  };
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-4">New homework</h1>
+
+      <label className="block text-xs font-medium text-stone-500 mb-1">How often does this repeat?</label>
+      <div className="flex gap-2 mb-4">
+        <button onClick={() => setCadence("daily")} className={`flex-1 text-sm font-semibold rounded-lg py-2 border ${cadence === "daily" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Daily</button>
+        <button onClick={() => setCadence("weekly")} className={`flex-1 text-sm font-semibold rounded-lg py-2 border ${cadence === "weekly" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Weekly</button>
+      </div>
+      <p className="text-xs text-stone-400 mb-4">Families will see this as "{cadence === "weekly" ? "This week's homework" : "Today's homework"}" — no need to type a title.</p>
+
+      <label className="block text-xs font-medium text-stone-500 mb-1">What's the homework?</label>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5} placeholder="e.g. Read chapter 4 and answer the review questions."
+        className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+
+      {attachPreview && (
+        <div className="relative inline-block mb-3">
+          {attachType === "video" ? <video src={attachPreview} className="h-24 rounded-lg" /> : <img src={attachPreview} alt="" className="h-24 rounded-lg" />}
+          <button onClick={clearAttachment} className="absolute -top-1.5 -right-1.5 bg-black/60 text-white rounded-full p-1"><X size={12} /></button>
+        </div>
+      )}
+      {attachType === "file" && attachFile && (
+        <div className="relative inline-flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
+          <FileText size={15} className="text-stone-500" />
+          <span className="text-xs font-semibold text-stone-700 max-w-[12rem] truncate">{attachFile.name}</span>
+          <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+        </div>
+      )}
+      <div className="flex gap-2 mb-4">
+        <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+          <Camera size={14} /> {attachType === "photo" || attachType === "video" ? "Change photo or video" : "Add a photo or video"}
+          <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+        </label>
+        <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+          <Paperclip size={14} /> {attachType === "file" ? "Change file" : "Add a file"}
+          <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+        </label>
+      </div>
+      {attachError && <p className="text-xs text-rose-600 mb-3">{attachError}</p>}
+
+      <button onClick={submit} disabled={posting || (!text.trim() && !attachFile)} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">
+        {posting ? "Posting…" : "Post homework"}
+      </button>
     </div>
   );
 }
@@ -10545,13 +10953,63 @@ function ReflectionHistoryView({ reflections, onOpenMonth, onBack, navigate }) {
 // need to track which staff member said what; it's the office, not a person).
 // Grouped by family the same way as the teacher's own message list, for the same reason — two
 // guardians on one family should read as one office conversation, not two.
-function AdminMessagesView({ families, navigate }) {
+function AdminMessagesView({ families, loggedInTeacher, navigate }) {
   const [threads, setThreads] = useState({});
   const [openGroup, setOpenGroup] = useState(null);
   const [mode, setMode] = useState("inbox"); // "inbox" | "broadcast"
   const [broadcastText, setBroadcastText] = useState("");
   const [broadcasting, setBroadcasting] = useState(false);
   const [broadcastSentTo, setBroadcastSentTo] = useState(null);
+
+  // Same optional-assist pattern as the classroom broadcast tool — the message box above is
+  // always directly typable, AI is a shortcut for turning a rough note into fuller wording, never
+  // a gate in front of sending.
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [roughNote, setRoughNote] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState(false);
+
+  const generate = async () => {
+    if (!roughNote.trim() || generating) return;
+    setGenerating(true);
+    setGenError(false);
+    try {
+      // No single class's config applies to a school-wide broadcast, so this runs with an empty
+      // one — every place that reads config is already null-safe for exactly this reason.
+      const text = await generateClassAnnouncementMessage(roughNote.trim(), {}, loggedInTeacher);
+      setBroadcastText(text || "");
+      setShowGenerate(false);
+      setRoughNote("");
+    } catch {
+      setGenError(true);
+    }
+    setGenerating(false);
+  };
+
+  const [attachFile, setAttachFile] = useState(null);
+  const [attachPreview, setAttachPreview] = useState(null);
+  const [attachType, setAttachType] = useState(null); // "photo" | "video" | "file"
+  const [attachError, setAttachError] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+
+  const pickAttachment = async (file) => {
+    if (!file) return;
+    setAttachError(null);
+    const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/");
+    if (isVideo) {
+      try { await validateVideoDuration(file); }
+      catch (err) { setAttachError(err.message); return; }
+    }
+    if (!isImage && file.size > MAX_FILE_ATTACHMENT_BYTES) {
+      setAttachError("File is too large — the limit is 20MB.");
+      return;
+    }
+    setAttachFile(file);
+    setAttachType(isVideo ? "video" : isImage ? "photo" : "file");
+    setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
+  };
+  const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
 
   const groups = useMemo(() => {
     const byGroup = {};
@@ -10570,26 +11028,45 @@ function AdminMessagesView({ families, navigate }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const sendToFamily = async (groupId, text, attachmentUrl, attachmentType) => {
+  const sendToFamily = async (groupId, text, attachmentUrl, attachmentType, attachmentName) => {
     const key = `admin-messages:${groupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType } : {}) };
+    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || "Sent a photo", "/?portal=parent&open=admin");
+    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), "/?portal=parent&open=admin");
     return next;
   };
 
   // One message, pushed into every family's own thread with the office at once — per family, not
-  // per student, so a household with two kids in the school still gets exactly one copy.
+  // per student, so a household with two kids in the school still gets exactly one copy. The
+  // attachment uploads once and every family's copy points at that same file, rather than
+  // re-uploading it once per family.
   const sendBroadcast = async () => {
-    if (!broadcastText.trim()) return;
+    if (!broadcastText.trim() && !attachFile) return;
     setBroadcasting(true);
-    for (const g of groups) {
-      await sendToFamily(g.groupId, broadcastText.trim()); // eslint-disable-line no-await-in-loop
+    setAttachError(null);
+    try {
+      let attachmentUrl = null;
+      if (attachFile) {
+        setUploadProgress(0);
+        if (attachType === "video") {
+          attachmentUrl = await uploadOneVideo(attachFile, `message-attachments/broadcast-admin/${uid()}.${(attachFile.name || "").split(".").pop() || "mp4"}`, setUploadProgress);
+        } else if (attachType === "photo") {
+          attachmentUrl = await uploadOneImage(attachFile, `message-attachments/broadcast-admin/${uid()}.jpg`, setUploadProgress);
+        } else {
+          attachmentUrl = await uploadOneFile(attachFile, `message-attachments/broadcast-admin/${uid()}.${(attachFile.name || "").split(".").pop() || "bin"}`, setUploadProgress);
+        }
+      }
+      for (const g of groups) {
+        await sendToFamily(g.groupId, broadcastText.trim(), attachmentUrl, attachType, attachType === "file" ? attachFile.name : null); // eslint-disable-line no-await-in-loop
+      }
+      await refresh();
+      setBroadcastSentTo(groups.length);
+    } catch (err) {
+      setAttachError(describeUploadError(err));
     }
-    await refresh();
-    setBroadcastSentTo(groups.length);
+    setUploadProgress(null);
     setBroadcasting(false);
   };
 
@@ -10602,7 +11079,7 @@ function AdminMessagesView({ families, navigate }) {
     return (
       <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
         onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text, attachmentUrl, attachmentType) => { await sendToFamily(openGroup.groupId, text, attachmentUrl, attachmentType); await refresh(); }} />
+        onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }} />
     );
   }
 
@@ -10615,7 +11092,7 @@ function AdminMessagesView({ families, navigate }) {
 
         <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
           <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-            <Mail size={14} /> Inbox
+            <Mail size={14} /> Messages
           </button>
           <button onClick={() => setMode("broadcast")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "broadcast" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
             <Plus size={14} /> Broadcast to all families
@@ -10625,13 +11102,67 @@ function AdminMessagesView({ families, navigate }) {
         {mode === "broadcast" ? (
           <div>
             <p className="text-xs text-stone-400 mb-3">Sent to every family in the school as one message in their School Office thread — once per family, not once per student.</p>
-            <textarea value={broadcastText} onChange={(e) => setBroadcastText(e.target.value)} rows={5} placeholder="What's this about?"
-              className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
-            <button onClick={sendBroadcast} disabled={!broadcastText.trim() || broadcasting || broadcastSentTo !== null}
-              className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${broadcastSentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
-              {broadcasting ? <Loader2 className="animate-spin" size={15} /> : broadcastSentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
-              {broadcasting ? "Sending…" : broadcastSentTo !== null ? `Sent to ${broadcastSentTo} famil${broadcastSentTo === 1 ? "y" : "ies"}` : "Send to every family"}
-            </button>
+
+            <div className="flex items-start gap-1.5 mb-1.5">
+              <textarea value={broadcastText} onChange={(e) => setBroadcastText(e.target.value)} rows={5} placeholder="Type your message, or use the sparkle button to draft one from a quick note"
+                className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+              <button onClick={() => setShowGenerate((v) => !v)} title="Draft with AI"
+                className={`shrink-0 rounded-lg p-2 border ${showGenerate ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+                <Sparkles size={16} />
+              </button>
+            </div>
+
+            {showGenerate && (
+              <div className="border border-teal-200 bg-teal-50/50 rounded-lg p-2 mb-3">
+                <div className="flex items-center gap-1.5">
+                  <input value={roughNote} onChange={(e) => setRoughNote(e.target.value)} placeholder="What's this about? I'll turn it into a full message."
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); generate(); } }}
+                    className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-xs" autoFocus />
+                  <button onClick={generate} disabled={!roughNote.trim() || generating}
+                    className="flex items-center gap-1 text-[11px] font-semibold text-white bg-teal-700 rounded-lg px-2.5 py-1.5 hover:bg-teal-800 disabled:opacity-40 shrink-0">
+                    {generating ? <Loader2 className="animate-spin" size={12} /> : <Sparkles size={12} />} {generating ? "…" : "Generate"}
+                  </button>
+                </div>
+                {genError && <p className="text-[11px] text-rose-600 mt-1">Couldn't generate right now — try again, or just type the message yourself.</p>}
+              </div>
+            )}
+
+            {attachPreview && (
+              <div className="relative inline-block mb-3">
+                {attachType === "video" ? (
+                  <video src={attachPreview} className="h-24 rounded-lg" />
+                ) : (
+                  <img src={attachPreview} alt="" className="h-24 rounded-lg" />
+                )}
+                <button onClick={clearAttachment} className="absolute -top-1.5 -right-1.5 bg-black/60 text-white rounded-full p-1"><X size={12} /></button>
+              </div>
+            )}
+            {attachType === "file" && attachFile && (
+              <div className="relative inline-flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
+                <FileText size={15} className="text-stone-500" />
+                <span className="text-xs font-semibold text-stone-700 max-w-[12rem] truncate">{attachFile.name}</span>
+                <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+              </div>
+            )}
+            <div className="flex gap-2 mb-4">
+              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+                <Camera size={14} /> {attachType === "photo" || attachType === "video" ? "Change photo or video" : "Add a photo or video"}
+                <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+              </label>
+              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+                <Paperclip size={14} /> {attachType === "file" ? "Change file" : "Add a file"}
+                <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+              </label>
+            </div>
+            {attachError && <p className="text-xs text-rose-600 mb-3">{attachError}</p>}
+
+            <div>
+              <button onClick={sendBroadcast} disabled={(!broadcastText.trim() && !attachFile) || broadcasting || broadcastSentTo !== null}
+                className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${broadcastSentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
+                {broadcasting ? <Loader2 className="animate-spin" size={15} /> : broadcastSentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
+                {broadcasting ? (uploadProgress !== null ? `Uploading… ${uploadProgress}%` : "Sending…") : broadcastSentTo !== null ? `Sent to ${broadcastSentTo} famil${broadcastSentTo === 1 ? "y" : "ies"}` : "Send to every family"}
+              </button>
+            </div>
           </div>
         ) : (
           <>
@@ -10681,7 +11212,7 @@ function AdminMessagesView({ families, navigate }) {
 // Grouped by family, not by individual login — two guardians on the same family share one row
 // and one conversation here, the same way they share it on their own side, rather than showing up
 // as two disconnected families that happen to have the same kids.
-function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, loggedByName, navigate, deepLinkGroupId }) {
+function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, loggedByName, navigate, deepLinkGroupId, onCommRead }) {
   const [groups, setGroups] = useState(null); // null = loading
   const [threads, setThreads] = useState({}); // groupId -> {messages}
   const [openGroup, setOpenGroup] = useState(null);
@@ -10712,7 +11243,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     const match = groups.find((g) => g.groupId === deepLinkGroupId);
     if (match) {
       setOpenGroup(match);
-      markThreadRead(loggedInTeacher.uid, `classroom-${match.groupId}`);
+      markThreadRead(loggedInTeacher.uid, `classroom-${match.groupId}`).then(() => onCommRead?.());
     }
   }, [deepLinkGroupId, groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -10723,7 +11254,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     return (
       <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
         onBack={() => { setOpenGroup(null); refresh(); }}
-        onSend={async (text, attachmentUrl, attachmentType) => { await sendMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType); await refresh(); }} />
+        onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }} />
     );
   }
 
@@ -10736,7 +11267,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
 
       <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
         <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-          <Mail size={14} /> Inbox
+          <Mail size={14} /> Messages
         </button>
         <button onClick={() => setMode("compose")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "compose" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
           <Plus size={14} /> New broadcast
@@ -10757,7 +11288,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
               const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
               return (
-                <button key={g.groupId} onClick={() => { setOpenGroup(g); markThreadRead(loggedInTeacher.uid, `classroom-${g.groupId}`); }} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                <button key={g.groupId} onClick={() => { setOpenGroup(g); markThreadRead(loggedInTeacher.uid, `classroom-${g.groupId}`).then(() => onCommRead?.()); }} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold text-stone-900">{guardianNames}</p>
                     {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
@@ -11064,6 +11595,30 @@ async function uploadOneVideo(file, path, onProgress) {
     );
   });
 }
+// Generic documents (PDF, Word, Excel, etc.) — no compression or format-specific validation the
+// way photos and videos get, just a straight upload with a size cap so one huge file can't stall
+// things indefinitely. The original filename is kept alongside the URL (Storage's own path is a
+// generated id, not something a person would recognize), so whoever receives it sees a real name
+// to download, not a meaningless string.
+const MAX_FILE_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
+async function uploadOneFile(file, path, onProgress) {
+  if (file.size > MAX_FILE_ATTACHMENT_BYTES) throw new Error("File is too large — the limit is 20MB.");
+  const fileRef = storageRef(storage, path);
+  return new Promise((resolve, reject) => {
+    const task = uploadBytesResumable(fileRef, file, { contentType: file.type || "application/octet-stream" });
+    const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 120000);
+    task.on("state_changed",
+      (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
+      (err) => { clearTimeout(timeoutId); reject(err); },
+      async () => {
+        clearTimeout(timeoutId);
+        try { resolve(await getDownloadURL(task.snapshot.ref)); }
+        catch (err) { reject(err); }
+      }
+    );
+  });
+}
+
 function compressImageFile(file, maxDimension = 2048, quality = 0.9) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -14455,25 +15010,57 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
 // classroom channel as the inbox, just the "write something new" side of it instead of "browse
 // what's there." No header of its own — the view embedding this provides that.
 function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, sendMessageToFamily }) {
-  const [topic, setTopic] = useState("");
+  const [draft, setDraft] = useState("");
   const [subject, setSubject] = useState("");
-  const [draft, setDraft] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
   const [sendingInApp, setSendingInApp] = useState(false);
   const [sentInAppTo, setSentInAppTo] = useState(null);
 
-  const run = async () => {
-    if (!topic.trim()) return;
-    setLoading(true); setError(false); setDraft(null); setSentInAppTo(null);
+  // AI is an optional assist, not a gate — the textarea above is always writable directly, this
+  // just offers a shortcut for turning a rough note into a fuller announcement when wanted.
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [roughNote, setRoughNote] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState(false);
+
+  const generate = async () => {
+    if (!roughNote.trim() || generating) return;
+    setGenerating(true);
+    setGenError(false);
     try {
-      const text = await generateClassAnnouncementMessage(topic.trim(), config, loggedInTeacher);
+      const text = await generateClassAnnouncementMessage(roughNote.trim(), config, loggedInTeacher);
       setDraft(text || "");
+      setShowGenerate(false);
+      setRoughNote("");
     } catch {
-      setError(true);
-      setDraft(""); // generation failed, but the teacher can still write and send it manually
-    } finally { setLoading(false); }
+      setGenError(true);
+    }
+    setGenerating(false);
   };
+
+  const [attachFile, setAttachFile] = useState(null);
+  const [attachPreview, setAttachPreview] = useState(null);
+  const [attachType, setAttachType] = useState(null); // "photo" | "video" | "file"
+  const [attachError, setAttachError] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+
+  const pickAttachment = async (file) => {
+    if (!file) return;
+    setAttachError(null);
+    const isVideo = file.type.startsWith("video/");
+    const isImage = file.type.startsWith("image/");
+    if (isVideo) {
+      try { await validateVideoDuration(file); }
+      catch (err) { setAttachError(err.message); return; }
+    }
+    if (!isImage && file.size > MAX_FILE_ATTACHMENT_BYTES) {
+      setAttachError("File is too large — the limit is 20MB.");
+      return;
+    }
+    setAttachFile(file);
+    setAttachType(isVideo ? "video" : isImage ? "photo" : "file");
+    setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
+  };
+  const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
 
   const [recipientMode, setRecipientMode] = useState("p1"); // "p1" | "p2" | "both" — which parent(s) get the emailed version
   const parentEmails = roster.flatMap((s) => [
@@ -14487,79 +15074,130 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
   });
 
   const sendInApp = async () => {
-    if (!draft?.trim()) return;
+    if (!draft.trim() && !attachFile) return;
     setSendingInApp(true);
-    const allFamilies = await loadAllWithPrefix("family:");
-    const relevant = allFamilies.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
-    const groupIds = new Set(relevant.map((f) => f.familyGroupId || f.uid));
-    for (const groupId of groupIds) {
-      await sendMessageToFamily(groupId, draft.trim()); // eslint-disable-line no-await-in-loop
+    setAttachError(null);
+    try {
+      let attachmentUrl = null;
+      if (attachFile) {
+        setUploadProgress(0);
+        if (attachType === "video") {
+          attachmentUrl = await uploadOneVideo(attachFile, `message-attachments/broadcast-${classId}/${uid()}.${(attachFile.name || "").split(".").pop() || "mp4"}`, setUploadProgress);
+        } else if (attachType === "photo") {
+          attachmentUrl = await uploadOneImage(attachFile, `message-attachments/broadcast-${classId}/${uid()}.jpg`, setUploadProgress);
+        } else {
+          attachmentUrl = await uploadOneFile(attachFile, `message-attachments/broadcast-${classId}/${uid()}.${(attachFile.name || "").split(".").pop() || "bin"}`, setUploadProgress);
+        }
+      }
+      const allFamilies = await loadAllWithPrefix("family:");
+      const relevant = allFamilies.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+      const groupIds = new Set(relevant.map((f) => f.familyGroupId || f.uid));
+      for (const groupId of groupIds) {
+        await sendMessageToFamily(groupId, draft.trim(), attachmentUrl, attachType, attachType === "file" ? attachFile.name : null); // eslint-disable-line no-await-in-loop
+      }
+      setSentInAppTo(groupIds.size);
+    } catch (err) {
+      setAttachError(describeUploadError(err));
     }
-    setSentInAppTo(groupIds.size);
+    setUploadProgress(null);
     setSendingInApp(false);
   };
 
   return (
     <div className="md:w-[32rem]">
-      <p className="text-stone-500 text-sm mb-4">A quick note in your own words, turned into a formal announcement to every family at once.</p>
-      <label className="block text-xs font-medium text-stone-500 mb-1">What's this about?</label>
-      <div className="flex items-start gap-1.5 mb-3">
-        <textarea value={topic} onChange={(e) => setTopic(e.target.value)} rows={3}
-          placeholder="e.g. Trip this Thursday — bring $10 and a labeled lunch. No school Friday for a teacher in-service day."
+      <p className="text-stone-500 text-sm mb-4">One message to every family in this class at once.</p>
+
+      <label className="block text-xs font-medium text-stone-500 mb-1">Message</label>
+      <div className="flex items-start gap-1.5 mb-1.5">
+        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={5} placeholder="Type your announcement, or use the sparkle button to draft one from a quick note"
           className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-        <MicButton onResult={(spoken) => setTopic((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+        <div className="flex flex-col gap-1.5 shrink-0">
+          <button onClick={() => setShowGenerate((v) => !v)} title="Draft with AI"
+            className={`rounded-lg p-2 border ${showGenerate ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+            <Sparkles size={16} />
+          </button>
+          <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+        </div>
       </div>
-      <button onClick={run} disabled={!topic.trim() || loading}
-        className="mb-5 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-        {loading ? <Loader2 className="animate-spin" size={16} /> : null} {draft ? "Regenerate" : "Generate announcement"}
-      </button>
 
-      {error && <p className="text-xs text-rose-600 mb-4">Couldn't generate a draft right now. Try again, or write the message yourself below.</p>}
-
-      {draft !== null && !loading && (
-        <>
-          <label className="block text-xs font-medium text-stone-500 mb-1">Message — edit before sending</label>
-          <div className="flex items-start gap-1.5 mb-4">
-            <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-            <MicButton onResult={(spoken) => setDraft((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-          </div>
-
-          <div className="border border-teal-200 bg-teal-50/40 rounded-xl p-3 mb-4">
-            <p className="text-xs font-semibold text-stone-700 mb-1">Send as an in-app message</p>
-            <p className="text-[11px] text-stone-400 mb-2">Goes to every family linked to this class as a separate message in their classroom thread — each family sees only their own copy.</p>
-            <button onClick={sendInApp} disabled={sendingInApp || sentInAppTo !== null}
-              className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2 ${sentInAppTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
-              {sendingInApp ? <Loader2 className="animate-spin" size={14} /> : sentInAppTo !== null ? <Check size={14} /> : <MessageCircle size={14} />}
-              {sendingInApp ? "Sending…" : sentInAppTo !== null ? `Sent to ${sentInAppTo} famil${sentInAppTo === 1 ? "y" : "ies"}` : "Send in-app to the whole class"}
+      {showGenerate && (
+        <div className="border border-teal-200 bg-teal-50/50 rounded-lg p-2 mb-3">
+          <div className="flex items-center gap-1.5">
+            <input value={roughNote} onChange={(e) => setRoughNote(e.target.value)} placeholder="What's this about? I'll turn it into a full announcement."
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); generate(); } }}
+              className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-xs" autoFocus />
+            <button onClick={generate} disabled={!roughNote.trim() || generating}
+              className="flex items-center gap-1 text-[11px] font-semibold text-white bg-teal-700 rounded-lg px-2.5 py-1.5 hover:bg-teal-800 disabled:opacity-40 shrink-0">
+              {generating ? <Loader2 className="animate-spin" size={12} /> : <Sparkles size={12} />} {generating ? "…" : "Generate"}
             </button>
           </div>
-
-          <p className="text-xs font-semibold text-stone-700 mb-1">Or send by email instead</p>
-          <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
-          <div className="flex gap-1.5 mb-2">
-            {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
-              <button key={val} onClick={() => setRecipientMode(val)}
-                className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
-                {label}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-stone-400 mb-1">
-            {parentEmails.length > 0
-              ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
-              : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
-          </p>
-          {missingEmail.length > 0 && (
-            <p className="text-xs text-amber-700 mb-3">
-              No parent email on file for: {missingEmail.map((s) => s.name).join(", ")} — add it in Settings for them to receive this.
-            </p>
-          )}
-          <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
-          <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
-          <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
-          <p className="text-xs text-stone-400 mt-3">Email doesn't send automatically — review the message, then send it yourself.</p>
-        </>
+          {genError && <p className="text-[11px] text-rose-600 mt-1">Couldn't generate right now — try again, or just type the message yourself.</p>}
+        </div>
       )}
+
+      {attachPreview && (
+        <div className="relative inline-block mb-3">
+          {attachType === "video" ? (
+            <video src={attachPreview} className="h-24 rounded-lg" />
+          ) : (
+            <img src={attachPreview} alt="" className="h-24 rounded-lg" />
+          )}
+          <button onClick={clearAttachment} className="absolute -top-1.5 -right-1.5 bg-black/60 text-white rounded-full p-1"><X size={12} /></button>
+        </div>
+      )}
+      {attachType === "file" && attachFile && (
+        <div className="relative inline-flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
+          <FileText size={15} className="text-stone-500" />
+          <span className="text-xs font-semibold text-stone-700 max-w-[12rem] truncate">{attachFile.name}</span>
+          <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+        </div>
+      )}
+      <div className="flex gap-2 mb-4">
+        <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+          <Camera size={14} /> {attachType === "photo" || attachType === "video" ? "Change photo or video" : "Add a photo or video"}
+          <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+        </label>
+        <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
+          <Paperclip size={14} /> {attachType === "file" ? "Change file" : "Add a file"}
+          <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
+        </label>
+      </div>
+      {attachError && <p className="text-xs text-rose-600 mb-3">{attachError}</p>}
+
+      <div className="border border-teal-200 bg-teal-50/40 rounded-xl p-3 mb-4">
+        <p className="text-xs font-semibold text-stone-700 mb-1">Send as an in-app message</p>
+        <p className="text-[11px] text-stone-400 mb-2">Goes to every family linked to this class as a separate message in their classroom thread — each family sees only their own copy.</p>
+        <button onClick={sendInApp} disabled={sendingInApp || sentInAppTo !== null || (!draft.trim() && !attachFile)}
+          className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2 ${sentInAppTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
+          {sendingInApp ? <Loader2 className="animate-spin" size={14} /> : sentInAppTo !== null ? <Check size={14} /> : <MessageCircle size={14} />}
+          {sendingInApp ? (uploadProgress !== null ? `Uploading… ${uploadProgress}%` : "Sending…") : sentInAppTo !== null ? `Sent to ${sentInAppTo} famil${sentInAppTo === 1 ? "y" : "ies"}` : "Send in-app to the whole class"}
+        </button>
+      </div>
+
+      <p className="text-xs font-semibold text-stone-700 mb-1">Or send by email instead</p>
+      <label className="block text-xs font-medium text-stone-500 mb-1">Send to</label>
+      <div className="flex gap-1.5 mb-2">
+        {[["p1", "Parent 1"], ["p2", "Parent 2"], ["both", "Both"]].map(([val, label]) => (
+          <button key={val} onClick={() => setRecipientMode(val)}
+            className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${recipientMode === val ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-stone-400 mb-1">
+        {parentEmails.length > 0
+          ? `Goes out to ${parentEmails.length} of ${roster.length} students' parent emails on file, privately bcc'd — no one sees anyone else's address.`
+          : "No parent emails are on file for this class yet — you can still copy the message and send it your own way."}
+      </p>
+      {missingEmail.length > 0 && (
+        <p className="text-xs text-amber-700 mb-3">
+          No parent email on file for: {missingEmail.map((s) => s.name).join(", ")} — add it in Settings for them to receive this.
+        </p>
+      )}
+      <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
+      <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+      <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
+      <p className="text-xs text-stone-400 mt-3">Email doesn't send automatically — review the message, then send it yourself.</p>
     </div>
   );
 }
@@ -14595,21 +15233,33 @@ function nextHebrewOccurrence(monthId, day, fromDate) {
 }
 
 // Fixed content, not AI-generated — login credentials need to be exact, not paraphrased, and the
-// feature list is the same for every family of a given type, so there's nothing here that
-// benefits from being written fresh each time. Preschool and elementary get genuinely different
-// feature descriptions, not just a relabeled list — elementary doesn't have check-in or a daily
-// log built for it yet, so the email doesn't promise those to an elementary parent.
-function buildParentLoginEmail(parentName, studentName, studentType, parentEmail, defaultPassword) {
+// feature list is the same for every family of a given makeup, so there's nothing here that
+// benefits from being written fresh each time. Takes every linked child at once (not one student
+// at a time), since a family with kids in different rooms should get one email covering all of
+// them, not a separate one per child. studentTypes is a parallel array (same order/length as
+// childNames) so preschool-specific features (check-in, daily log) only get promised to a family
+// that actually has a preschool-enrolled child, and homework only to one with an elementary child.
+function buildParentLoginEmail(parentName, childNames, studentTypes, parentEmail, defaultPassword) {
   const portalUrl = `${window.location.origin}${window.location.pathname}?portal=parent`;
-  const isPreschool = studentType === "preschool";
-  const featureList = isPreschool
-    ? `- Check ${studentName} in and out yourself by scanning the QR code posted at school\n- See a daily log of ${studentName}'s day — mood, meals, naps, diapers, and photos\n- Message ${studentName}'s classroom or the school office directly`
-    : `- Message ${studentName}'s classroom or the school office directly, right from your phone`;
+  const hasPreschool = studentTypes.includes("preschool");
+  const hasElementary = studentTypes.some((t) => t !== "preschool");
+  const namesList = childNames.join(", ");
 
-  const subject = `Your account for ${studentName}'s school app`;
+  const featureLines = [];
+  if (hasPreschool) {
+    featureLines.push("- Check your child in and out yourself by scanning the QR code posted at school");
+    featureLines.push("- See a daily log of your child's day — mood, meals, naps, diapers, and photos");
+  }
+  featureLines.push("- See new photos and updates from the classroom on the Class Blog");
+  if (hasElementary) {
+    featureLines.push("- See homework the moment a teacher posts it, organized by child");
+  }
+  featureLines.push("- Message your child's classroom, or the school office, directly from your phone");
+
+  const subject = `Your family's account for ${namesList}`;
   const body = `Hi ${parentName || "there"},
 
-You now have a parent account for ${studentName} on our school's app. Here's everything you need to get started.
+You now have a parent account for ${namesList} on our school's app. Here's everything you need to get started.
 
 GETTING STARTED
 Open this link on your phone: ${portalUrl}
@@ -14617,13 +15267,18 @@ Open this link on your phone: ${portalUrl}
 On iPhone: open it in Safari, tap the Share button, then "Add to Home Screen." This lets it work like a regular app, including notifications.
 On Android: open it in Chrome, tap the menu (⋮), then "Add to Home Screen" or "Install app."
 
+TURN ON NOTIFICATIONS — DON'T SKIP THIS STEP
+Once it's on your home screen, open it from that icon (not from Safari or Chrome directly), then tap the settings icon and turn notifications on. This is the only way you'll be alerted the moment there's a new message, a new blog post, or new homework — without it, you'd have to remember to check the app yourself.
+
 YOUR LOGIN
 Email: ${parentEmail}
 Password: ${defaultPassword}
 You can change this password anytime after signing in, under the settings icon.
 
 WHAT YOU CAN DO
-${featureList}
+${featureLines.join("\n")}
+
+This app is how we share what's happening in the classroom day to day — the more of it you use, the more connected you'll be to your child's day at school.
 
 If anything doesn't work or you have questions, just reach out to the school office.`;
 
@@ -14635,7 +15290,7 @@ function StudentContactFields({ student, onUpdateField }) {
   useEffect(() => { loadJSON("defaultParentPassword", "Welcome123", true).then(setDefaultPassword); }, []);
 
   const emailParent = (parentName, parentEmail) => {
-    const { subject, body } = buildParentLoginEmail(parentName, student.name, student.studentType, parentEmail, defaultPassword);
+    const { subject, body } = buildParentLoginEmail(parentName, [student.name], [student.studentType], parentEmail, defaultPassword);
     const link = document.createElement("a");
     link.href = `mailto:${encodeURIComponent(parentEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     link.click();
@@ -15224,13 +15879,6 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
-  const [newName, setNewName] = useState("");
-  const [newStudentType, setNewStudentType] = useState(classType);
-  const [newParent1Name, setNewParent1Name] = useState("");
-  const [newParent1Email, setNewParent1Email] = useState("");
-  const [newParent2Name, setNewParent2Name] = useState("");
-  const [newParent2Email, setNewParent2Email] = useState("");
-  const [showAddStudentDetails, setShowAddStudentDetails] = useState(false);
   const [classNameInput, setClassNameInput] = useState(className || "");
   const [newPw1, setNewPw1] = useState("");
   const [newPw2, setNewPw2] = useState("");
@@ -15260,11 +15908,6 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
   const update = (mutator) => setConfig(mutator(structuredClone(config)));
   const toggleCat = (id) => setExpandedCats((p) => ({ ...p, [id]: !p[id] }));
   const toggleStudent = (id) => setExpandedStudents((p) => ({ ...p, [id]: !p[id] }));
-  const submitNewStudent = () => {
-    addStudent(newName, newStudentType, newParent1Name, newParent1Email, newParent2Name, newParent2Email);
-    setNewName(""); setNewParent1Name(""); setNewParent1Email(""); setNewParent2Name(""); setNewParent2Email("");
-    setShowAddStudentDetails(false);
-  };
 
   const [previewSettingUp, setPreviewSettingUp] = useState(false);
   const [previewReady, setPreviewReady] = useState(false);
@@ -15470,35 +16113,9 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           )}
 
           <Section title="Students">
-            <div className="flex gap-2 mb-1">
-              <input value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !showAddStudentDetails && submitNewStudent()}
-                placeholder="Add a student's name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-              <button onClick={submitNewStudent} className="bg-teal-700 text-white rounded-lg px-3 py-1.5 flex items-center justify-center hover:bg-teal-800"><Plus size={16} /></button>
-            </div>
-            <button onClick={() => setShowAddStudentDetails((v) => !v)} className="text-xs font-semibold text-teal-700 mb-2">
-              {showAddStudentDetails ? "Hide type & parent info" : "+ Add type & parent info (creates parent accounts automatically)"}
-            </button>
-            {showAddStudentDetails && (
-              <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3 space-y-2">
-                <div>
-                  <label className="block text-xs font-medium text-stone-500 mb-1">Student type</label>
-                  <div className="flex gap-2">
-                    <button onClick={() => setNewStudentType("preschool")} className={`text-xs font-semibold px-3 py-1.5 rounded-lg border ${newStudentType === "preschool" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Preschool</button>
-                    <button onClick={() => setNewStudentType("elementary")} className={`text-xs font-semibold px-3 py-1.5 rounded-lg border ${newStudentType === "elementary" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Elementary / K–8</button>
-                  </div>
-                  <p className="text-[10px] text-stone-400 mt-1">Separate from this class's own type — used for features that depend on the student specifically, not the room they're in. Changeable later.</p>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <input value={newParent1Name} onChange={(e) => setNewParent1Name(e.target.value)} placeholder="Parent 1 name" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                  <input type="email" value={newParent1Email} onChange={(e) => setNewParent1Email(e.target.value)} placeholder="Parent 1 email" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                  <input value={newParent2Name} onChange={(e) => setNewParent2Name(e.target.value)} placeholder="Parent 2 name (optional)" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                  <input type="email" value={newParent2Email} onChange={(e) => setNewParent2Email(e.target.value)} placeholder="Parent 2 email (optional)" className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                </div>
-                <p className="text-[10px] text-stone-400">A parent account is created automatically for any email entered here — no separate step needed. If that email already has a family account (e.g. an older sibling), this child is just added to it.</p>
-              </div>
-            )}
+            <p className="text-xs text-stone-400 mb-3">New students are created by the school office, not from here — ask an admin to add one if they're not in the list yet. You can still pull any existing student into this class below.</p>
             <button onClick={() => setShowAddExisting((v) => !v)} className="text-xs font-semibold text-teal-700 mb-3">
-              {showAddExisting ? "Close" : "Or add an existing student from another class"}
+              {showAddExisting ? "Close" : "+ Add an existing student to this class"}
             </button>
             {showAddExisting && (
               <AddExistingStudentPanel globalStudents={globalStudents} roster={roster} config={config}
@@ -15993,6 +16610,129 @@ function MicButton({ onResult, className }) {
       className={className || `flex items-center justify-center rounded-full w-7 h-7 shrink-0 ${listening ? "bg-rose-500 text-white animate-pulse" : "bg-stone-100 text-stone-500 hover:bg-stone-200"}`}>
       <Mic size={13} />
     </button>
+  );
+}
+
+// Reachable directly from the family list itself, rather than needing to open one of the family's
+// students first to find any of this — name, guardians, linked children, and getting them their
+// login info are all things that belong to the family as a whole, not to any one child in it.
+function AdminFamilyDetailView({ group, allStudentsForLinking, globalStudents, onUpdateFamily, onBack }) {
+  const [primary] = group;
+  const [nameInput, setNameInput] = useState(primary.name);
+  const [nameSaved, setNameSaved] = useState(false);
+  const [showAddStudent, setShowAddStudent] = useState(false);
+  const [search, setSearch] = useState("");
+  const [emailSentFor, setEmailSentFor] = useState(null);
+
+  const saveName = async () => {
+    if (!nameInput.trim() || nameInput.trim() === primary.name) return;
+    await Promise.all(group.map((f) => onUpdateFamily(f.uid, { name: nameInput.trim() })));
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  const removeStudent = async (link) => {
+    const nextLinks = (primary.studentLinks || []).filter((l) => !(l.classId === link.classId && l.studentId === link.studentId));
+    await onUpdateFamily(primary.uid, { studentLinks: nextLinks });
+  };
+
+  const addStudent = async (student) => {
+    const already = (primary.studentLinks || []).some((l) => l.classId === student.classId && l.studentId === student.studentId);
+    if (already) return;
+    await onUpdateFamily(primary.uid, { studentLinks: [...(primary.studentLinks || []), student] });
+    setShowAddStudent(false);
+    setSearch("");
+  };
+
+  // Same content every family gets when first created, reachable here too — a family added a
+  // student to later, or one that never got the original email, shouldn't need a workaround to
+  // get the exact same login info any other family already received.
+  const sendWelcomeEmail = async (guardian) => {
+    const links = primary.studentLinks || [];
+    const uniqueChildren = [...new Map(links.map((l) => [l.studentId, l])).values()];
+    if (uniqueChildren.length === 0) return;
+    const childNames = uniqueChildren.map((l) => l.studentName);
+    const studentTypes = uniqueChildren.map((l) => globalStudents.find((gs) => gs.id === l.studentId)?.studentType || "elementary");
+    const defaultPassword = await loadJSON("defaultParentPassword", "Welcome123", true);
+    const { subject, body } = buildParentLoginEmail(guardian.name, childNames, studentTypes, guardian.email, defaultPassword);
+    const link = document.createElement("a");
+    link.href = `mailto:${encodeURIComponent(guardian.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    link.click();
+    setEmailSentFor(guardian.uid);
+    setTimeout(() => setEmailSentFor(null), 3000);
+  };
+
+  const alreadyLinkedKeys = new Set((primary.studentLinks || []).map((l) => `${l.classId}:${l.studentId}`));
+  const filtered = (search.trim() ? allStudentsForLinking.filter((s) => s.studentName.toLowerCase().includes(search.toLowerCase())) : allStudentsForLinking)
+    .filter((s) => !alreadyLinkedKeys.has(`${s.classId}:${s.studentId}`));
+
+  return (
+    <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
+      <div className="max-w-lg mx-auto px-4 py-8">
+        <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-4"><ChevronLeft size={16} /> Back to families</button>
+
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+          <label className="block text-xs font-semibold text-stone-700 mb-1">Family name</label>
+          <div className="flex gap-2">
+            <input value={nameInput} onChange={(e) => setNameInput(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+            <button onClick={saveName} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800 shrink-0">Save</button>
+          </div>
+          {nameSaved && <p className="text-xs text-emerald-700 mt-1">Saved</p>}
+        </div>
+
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+          <p className="text-xs font-semibold text-stone-700 mb-2">Guardians</p>
+          <div className="space-y-3">
+            {group.map((g) => (
+              <div key={g.uid} className="flex items-center justify-between gap-2 border-b border-stone-100 last:border-0 pb-3 last:pb-0">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-stone-800 truncate">{g.name}</p>
+                  <p className="text-xs text-stone-400 truncate">{g.email}</p>
+                </div>
+                <button onClick={() => sendWelcomeEmail(g)} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 hover:bg-teal-50 shrink-0">
+                  {emailSentFor === g.uid ? "Opened ✓" : "Send login info"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white border border-stone-200 rounded-xl p-4">
+          <p className="text-xs font-semibold text-stone-700 mb-2">Children linked to this family</p>
+          {(primary.studentLinks || []).length === 0 && <p className="text-xs text-stone-400 mb-3">No children linked yet.</p>}
+          <div className="space-y-1.5 mb-3">
+            {(primary.studentLinks || []).map((l) => (
+              <div key={`${l.classId}-${l.studentId}`} className="flex items-center justify-between bg-stone-50 rounded-lg px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-stone-800 truncate">{l.studentName}</p>
+                  <p className="text-[11px] text-stone-400 truncate">{l.className}</p>
+                </div>
+                <ConfirmDelete onConfirm={() => removeStudent(l)} size={13} label="Remove" />
+              </div>
+            ))}
+          </div>
+          {!showAddStudent ? (
+            <button onClick={() => setShowAddStudent(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1">
+              <Plus size={12} /> Add a student to this family
+            </button>
+          ) : (
+            <div className="border border-stone-200 rounded-lg p-2">
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search students…" autoFocus
+                className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+              <div className="max-h-48 overflow-y-auto space-y-1">
+                {filtered.length === 0 && <p className="text-xs text-stone-400 px-1">No matching students.</p>}
+                {filtered.map((s) => (
+                  <button key={`${s.classId}-${s.studentId}`} onClick={() => addStudent(s)} className="w-full text-left text-xs px-2 py-1.5 rounded-lg hover:bg-stone-100">
+                    <span className="font-semibold text-stone-800">{s.studentName}</span> <span className="text-stone-400">— {s.className}</span>
+                  </button>
+                ))}
+              </div>
+              <button onClick={() => { setShowAddStudent(false); setSearch(""); }} className="text-xs text-stone-500 mt-2">Cancel</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
