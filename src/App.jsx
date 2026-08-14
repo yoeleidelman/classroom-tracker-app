@@ -17,7 +17,7 @@
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
@@ -2091,20 +2091,36 @@ function AppInner() {
     await saveJSON("schoolClasses", next, true);
   };
 
+  // The code itself is now verified server-side (verify-substitute-code.js), not against
+  // schoolClasses read directly in the browser — that only ever worked because schoolClasses
+  // used to be readable before signing in, which was itself a real exposure (every class's
+  // plaintext password, visible to anyone) fixed as part of the security pass. A correct code
+  // now returns a real but narrowly-scoped sign-in: a custom token carrying a substituteClassId
+  // claim for exactly this one class, which the Firestore rules check directly.
   const enterSubstituteSession = async (code) => {
-    const reg = await loadJSON("schoolClasses", [], true);
-    const match = reg.find((c) => !c.archived && c.subCode && c.subCode.toUpperCase() === code.trim().toUpperCase());
-    if (!match) return { ok: false };
-    setClassId(match.id);
-    setClassName(match.name);
-    setIsSubstituteSession(true);
-    return { ok: true };
+    try {
+      const response = await fetch("/api/verify-substitute-code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.token) return { ok: false };
+      await signInWithCustomToken(auth, data.token);
+      setClassId(data.classId);
+      setClassName(data.className);
+      setIsSubstituteSession(true);
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
   };
 
   const exitSubstituteSession = () => {
     setIsSubstituteSession(false);
     setClassId(null);
     setClassName("");
+    signOut(auth);
   };
 
   const archiveClass = async () => {
@@ -5798,6 +5814,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // reasoning as the parent side's Messages/Blog badges.
   const [commUnreadFamilies, setCommUnreadFamilies] = useState([]);
   const refreshCommUnread = useCallback(async () => {
+    // Substitute sessions have no teacher record at all (by design — they're not a real staff
+    // account) and no messaging UI to show a badge on in the first place, so this entire
+    // computation is simply irrelevant for them, not just something to guard defensively.
+    if (!loggedInTeacher) return;
     const all = await loadAllWithPrefix("family:");
     const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
     const byGroup = {};
