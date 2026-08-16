@@ -54,6 +54,20 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  const db = getFirestore();
+
+  // Everything below that doesn't actually need the caller's identity to START (as opposed to to
+  // return) is kicked off immediately, in parallel with auth verification — this is the fix for
+  // the visible lag between classes (already in memory client-side) and teachers (this whole
+  // endpoint) on the parent Messages tab. The previous version ran every one of these Firestore
+  // reads one after another even though most of them don't actually depend on each other's
+  // result: the school's class registry doesn't depend on who's asking, and the staff query
+  // itself doesn't either — only the FILTERING of that query's results against this specific
+  // family's linked classes has to wait for the family record. Nothing sensitive is exposed by
+  // starting these reads early, since nothing is returned to the client until auth succeeds.
+  const classesPromise = db.collection("data").doc("schoolClasses").get();
+  const staffQueryPromise = db.collection("data").where("value.role", "in", ["teacher", "admin"]).get();
+
   let uid, family;
   try {
     ({ uid, family } = await requireActiveFamily(req));
@@ -67,13 +81,11 @@ export default async function handler(req, res) {
     return res.status(200).json({ teachers: [] });
   }
 
-  const db = getFirestore();
-
   // Needed to translate this family's linkedClassTypes overlap back into actual classIds (for
   // label lookup), and to know which of the family's own classes share a grade-level-reachable
   // person's type — the family record only stores the type list, not which specific class ids
   // produced it.
-  const classesSnap = await db.collection("data").doc("schoolClasses").get();
+  const classesSnap = await classesPromise;
   const allClasses = classesSnap.exists ? classesSnap.data().value || [] : [];
   const classTypeById = Object.fromEntries(allClasses.map((c) => [c.id, c.classType]));
 
@@ -82,6 +94,9 @@ export default async function handler(req, res) {
   const candidateClassIds = new Set(linkedClassIds);
   allClasses.forEach((c) => { if (linkedClassTypes.includes(c.classType)) candidateClassIds.add(c.id); });
 
+  // This is the one read that genuinely can't start until candidateClassIds is known, so it still
+  // runs after the two above — but it now overlaps with the in-flight staff query above instead
+  // of waiting for it to finish first.
   const labelDocs = await Promise.all(
     [...candidateClassIds].map((id) => db.collection("data").doc(`class:${id}:messagingLabels`).get())
   );
@@ -92,7 +107,7 @@ export default async function handler(req, res) {
   // individually reachable as a teacher-role one (assignedClassIds or messagingClassTypes work
   // the same way regardless of role), since role is about that person's own level of access
   // elsewhere in the app, not about whether parents may message them directly.
-  const snapshot = await db.collection("data").where("value.role", "in", ["teacher", "admin"]).get();
+  const snapshot = await staffQueryPromise;
   // Firestore's own query planner doesn't let us filter "array overlaps another array" server-
   // side the way it can for a fixed list, so the overlap check happens here instead — the query
   // above only narrows to actual staff records first, which keeps this from having to compare

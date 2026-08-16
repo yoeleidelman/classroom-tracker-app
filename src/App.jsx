@@ -194,6 +194,39 @@ const DEFAULT_CONFIG = {
     flagRule: { threshold: 3, windowDays: 7 },
     tierMessages: { 1: "Make a note, keep an eye on it", 2: "Send a note home", 3: "Schedule a parent meeting", 4: "Flag for admin" },
   },
+  // Deliberately separate from `incidents` above, not a preschool-specific override layered onto
+  // it — the elementary behavior/incident system (discipline, social/peer conflicts, lost
+  // schoolwork) has nothing to do with what a preschool teacher is actually documenting, and a
+  // shared category list meant a "Health Incident" tap in a preschool room to log a fall or a
+  // bump landed on a form still offering "Discipline" as an option. These two lists exist so
+  // fixing that never risks changing what elementary teachers see, and vice versa. Category sets
+  // grounded in what daycare/preschool incident-report guidance actually documents (falls and
+  // bumps, cuts and scrapes, bites, fever/illness, allergic reactions — the physical, medical
+  // side) versus care/behavioral situations that come up but aren't medical (a care instruction
+  // not followed, a difficult separation from a parent, a peer conflict, a lost item) — kept
+  // genuinely separate from each other too, matching the two distinct preschool tiles they serve.
+  preschoolHealthIncidents: {
+    categories: [
+      { id: "fall-bump", label: "Fall or bump", color: "cyan" },
+      { id: "cut-scrape", label: "Cut or scrape", color: "rose" },
+      { id: "bite", label: "Bite (from another child)", color: "amber" },
+      { id: "nosebleed", label: "Nosebleed", color: "rose" },
+      { id: "allergic-reaction", label: "Allergic reaction", color: "violet" },
+      { id: "fever-illness", label: "Fever or illness symptom", color: "orange" },
+      { id: "rash", label: "Rash or skin irritation", color: "fuchsia" },
+      { id: "other", label: "Other", color: "stone" },
+    ],
+  },
+  preschoolIncidents: {
+    categories: [
+      { id: "peer-conflict", label: "Peer conflict", color: "violet" },
+      { id: "difficult-separation", label: "Difficult drop-off or separation", color: "sky" },
+      { id: "care-instruction", label: "Care instruction not followed", color: "amber" },
+      { id: "toileting-accident", label: "Toileting accident", color: "teal" },
+      { id: "lost-item", label: "Lost or misplaced item", color: "stone" },
+      { id: "other", label: "Other", color: "stone" },
+    ],
+  },
   points: {
     categories: [],
     behaviorLog: {
@@ -5749,6 +5782,25 @@ function ChildDailyLogView({ link, onBack }) {
           {incidents.map((inc) => (
             <Card key={inc.id} color="cyan" title="Health / incident note" icon={HeartPulse}>
               {inc.description}
+              {(inc.media || []).length > 0 && (
+                <div className={`grid gap-1.5 mt-2 ${inc.media.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+                  {inc.media.map((m, i) => (
+                    <button key={i} onClick={() => setViewingPhoto({ url: m.url, caption: inc.description, type: m.type })}
+                      className="relative aspect-square rounded-lg overflow-hidden bg-white">
+                      {m.type === "video" ? (
+                        <>
+                          <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                            <div className="bg-white/90 rounded-full p-2"><Play size={14} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                          </div>
+                        </>
+                      ) : (
+                        <img src={m.url} alt="" className="w-full h-full object-cover" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
             </Card>
           ))}
           {photos.length > 0 && (
@@ -5765,7 +5817,7 @@ function ChildDailyLogView({ link, onBack }) {
         </div>
       )}
       {viewingPhoto && (
-        <PhotoLightbox url={viewingPhoto.url} caption={viewingPhoto.caption} onClose={() => setViewingPhoto(null)} />
+        <PhotoLightbox url={viewingPhoto.url} type={viewingPhoto.type || "photo"} caption={viewingPhoto.caption} onClose={() => setViewingPhoto(null)} />
       )}
     </div>
   );
@@ -6693,7 +6745,24 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               </div>
             </div>
 
-            {eligibleTeachers === null ? null : eligibleTeachers.length > 0 && (
+            {eligibleTeachers === null ? (
+              // A real, honest loading state — not hidden behind a timer, and not simply absent
+              // while the request is in flight. This is what actually addresses the "classes
+              // appear, then teachers pop in a second later" feeling: the section's presence is
+              // visible immediately, so what's happening reads as "still loading" rather than
+              // "missing," even though the fetch itself still takes the time it genuinely takes.
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
+                <div className="space-y-3">
+                  {[0, 1].map((i) => (
+                    <div key={i} className="bg-white border-2 border-teal-700/10 rounded-xl p-4 animate-pulse">
+                      <div className="h-4 bg-stone-200 rounded w-2/5 mb-2" />
+                      <div className="h-3 bg-stone-100 rounded w-3/5" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : eligibleTeachers.length > 0 && (
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
                 <div className="space-y-3">
@@ -8058,6 +8127,21 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
           openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
           openIncidentForm={(studentId, returnTo, categoryId) => openIncidentForm(studentId, returnTo || "daily-log", categoryId)}
+          onLogPreschoolIncident={async (entry) => {
+            addIncident(entry);
+            if (entry.notifyFamily) {
+              const families = await fetchClassFamilies(classId);
+              const groupIds = new Set(
+                families
+                  .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && entry.studentIds.includes(l.studentId)))
+                  .map((f) => f.familyGroupId || f.uid)
+              );
+              const names = entry.studentIds.map((sid) => roster.find((s) => s.id === sid)?.name).filter(Boolean).join(", ");
+              const title = entry.kind === "health" ? `Health note — ${names || "your child"}` : `New note — ${names || "your child"}`;
+              const body = entry.categoryLabel || "Check the app for details.";
+              groupIds.forEach((groupId) => notifyFamilyGroup(groupId, title, body, `/?portal=parent`));
+            }
+          }}
           classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={navigateView} />
       )}
 
@@ -8136,13 +8220,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "monthly-reports" && (
-        <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
+        <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType}
           onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
       {view === "range-report" && (
-        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
+        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType}
           onBack={() => navigateView("communication")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
@@ -9259,8 +9343,11 @@ const PRESCHOOL_TILES = [
   { id: "nap", label: "Nap", icon: Moon, color: "indigo", bulkDefault: "all" },
   { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "all" },
   { id: "bathroom", label: "Bathroom", icon: Droplets, color: "teal", bulkDefault: "none" },
-  { id: "health-incident", label: "Health incident", icon: HeartPulse, color: "cyan", bulkDefault: "none", special: "incident", categoryMatch: "health" },
-  { id: "incident", label: "Incident", icon: AlertTriangle, color: "amber", bulkDefault: "none", special: "incident" },
+  // These two open PreschoolIncidentForm directly (via screen === tile.id below), each with its
+  // own separate category list — never the shared elementary IncidentForm/config.incidents, and
+  // never each other's category list either.
+  { id: "health-incident", label: "Health incident", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
+  { id: "incident", label: "Incident", icon: AlertTriangle, color: "amber", bulkDefault: "none" },
   { id: "photos", label: "Photos", icon: Camera, color: "amber", bulkDefault: "none", special: "camera" },
 ];
 
@@ -9484,59 +9571,166 @@ function PreschoolScheduleSidebar({ periods, events, navigate }) {
   );
 }
 
-// Launches the device's own camera immediately, rather than a photo-picker screen — tapping the
-// tile should feel like reaching for a camera app, not opening a gallery. After a photo is taken,
-// offers a fast send: post it to the blog, or send it straight to specific families, right from
-// the moment it was captured, since a good candid is easy to lose momentum on if it means leaving
-// the app first to actually get to a camera.
+// A custom, in-app camera — not a handoff to the device's own camera app via <input capture>,
+// which is the app's OLD approach and has a hard, confirmed browser limitation: it only ever
+// returns one photo per invocation, closing itself after each shot, with no way to take a second
+// one without leaving the app and reopening it. That's fundamentally incompatible with "take
+// several photos in one continuous session," which is the whole point of this redesign. Built on
+// getUserMedia() + MediaRecorder instead — supported on every major browser including iOS Safari
+// (since Safari 14.5) — the same underlying API this app's own voice-note recording already uses
+// successfully, which is real evidence it holds up for this app's actual devices, not just in
+// theory. Recording is capped at the same 30 seconds already used for video attachments elsewhere
+// in the app — deliberately conservative, since long MediaRecorder sessions have documented crash
+// risk on iOS Safari specifically, and 30s is comfortably inside the safe range.
+//
+// One honest, unavoidable limitation: a web app cannot silently write files into the device's own
+// photo gallery — no browser exposes that capability to a website, for real security reasons (a
+// site silently populating your camera roll would itself be a serious privacy problem). What's
+// achievable, and what this offers, is a clearly-labeled, one-tap "Save to device" action per item
+// or for the whole batch at once — a side option a teacher can take whenever suits them, not a
+// gate that has to be resolved before anything else can happen.
 function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamily, onDone }) {
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState(null);
+  const [phase, setPhase] = useState("camera"); // "camera" | "gallery"
+  const [cameraError, setCameraError] = useState(null);
+  const [facingMode, setFacingMode] = useState("environment");
+  const [sessionItems, setSessionItems] = useState([]); // { id, blob, url, type: "photo"|"video" }
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [selectedIds, setSelectedIds] = useState(new Set()); // populated once items exist; defaults to "all"
+  const [savedIds, setSavedIds] = useState(new Set());
   const [caption, setCaption] = useState("");
-  const [recipientMode, setRecipientMode] = useState("blog"); // "blog" | "students"
+  const [recipientMode, setRecipientMode] = useState("blog");
   const [selectedStudentIds, setSelectedStudentIds] = useState([]);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState(null);
   const [sent, setSent] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const fileInputRef = useRef(null);
 
-  useEffect(() => { fileInputRef.current?.click(); }, []);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]);
+  const recordTimerRef = useRef(null);
 
-  // Cancelling a device's native photo picker doesn't reliably fire a change event in every
-  // browser, so this can't just silently wait forever — a visible retry keeps the screen from
-  // looking stuck if nothing comes back.
-  const handleFileSelected = (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFile(f);
-    setPreview(URL.createObjectURL(f));
+  const stopStream = () => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
   };
+
+  const startStream = async () => {
+    stopStream();
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode }, audio: true });
+      streamRef.current = stream;
+      if (videoRef.current) videoRef.current.srcObject = stream;
+    } catch (err) {
+      setCameraError(
+        err?.name === "NotAllowedError"
+          ? "Camera access was denied — check this site's camera permission in your browser settings and try again."
+          : "Couldn't open the camera on this device."
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (phase === "camera") startStream();
+    return () => { if (phase === "camera") stopStream(); };
+  }, [phase, facingMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => () => { stopStream(); clearInterval(recordTimerRef.current); }, []); // full cleanup on unmount
+
+  const addItem = (blob, type) => {
+    const id = uid();
+    const url = URL.createObjectURL(blob);
+    setSessionItems((prev) => [...prev, { id, blob, url, type }]);
+    setSelectedIds((prev) => new Set(prev).add(id)); // newly captured items start selected
+  };
+
+  const takePhoto = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    canvas.toBlob((blob) => { if (blob) addItem(blob, "photo"); }, "image/jpeg", 0.92);
+    if (navigator.vibrate) navigator.vibrate(15); // a light shutter-tap feel, matching a real camera
+  };
+
+  const startRecording = () => {
+    if (!streamRef.current) return;
+    chunksRef.current = [];
+    // Picks whatever this specific browser actually supports rather than assuming one mime type —
+    // Safari and Chromium-based browsers don't agree on this, and asking for an unsupported type
+    // throws immediately instead of falling back gracefully on its own.
+    const mimeType = ["video/webm;codecs=vp9,opus", "video/webm", "video/mp4"].find((t) => window.MediaRecorder?.isTypeSupported?.(t)) || "";
+    const recorder = new MediaRecorder(streamRef.current, mimeType ? { mimeType } : undefined);
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+    recorder.onstop = () => {
+      const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "video/webm" });
+      addItem(blob, "video");
+    };
+    recorder.start();
+    mediaRecorderRef.current = recorder;
+    setRecording(true);
+    setRecordSeconds(0);
+    recordTimerRef.current = setInterval(() => {
+      setRecordSeconds((s) => {
+        if (s + 1 >= MAX_VIDEO_SECONDS) { stopRecording(); return MAX_VIDEO_SECONDS; } // eslint-disable-line no-use-before-define
+        return s + 1;
+      });
+    }, 1000);
+  };
+
+  const stopRecording = () => {
+    clearInterval(recordTimerRef.current);
+    mediaRecorderRef.current?.stop();
+    setRecording(false);
+  };
+
+  const removeItem = (id) => {
+    setSessionItems((prev) => prev.filter((it) => it.id !== id));
+    setSelectedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+  };
+  const toggleSelected = (id) => setSelectedIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+
+  const finishSession = () => {
+    stopStream();
+    setPhase("gallery");
+  };
+
+  const saveOneToDevice = (item) => {
+    const a = document.createElement("a");
+    a.href = item.url;
+    a.download = `${item.type === "video" ? "video" : "photo"}-${item.id}.${item.type === "video" ? (item.blob.type.includes("mp4") ? "mp4" : "webm") : "jpg"}`;
+    a.click();
+    setSavedIds((prev) => new Set(prev).add(item.id));
+  };
+  const saveAllSelectedToDevice = () => { sessionItems.filter((it) => selectedIds.has(it.id)).forEach(saveOneToDevice); };
 
   const toggleStudent = (id) => setSelectedStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const saveToDevice = () => {
-    if (!file) return;
-    const a = document.createElement("a");
-    a.href = preview;
-    a.download = file.name || "photo.jpg";
-    a.click();
-    setSaved(true);
-  };
-
   const send = async () => {
-    if (!file) return;
+    const selected = sessionItems.filter((it) => selectedIds.has(it.id));
+    if (selected.length === 0) return;
     setSending(true);
     setSendError(null);
     try {
       if (recipientMode === "blog") {
-        await submitBlogPost(null, [{ id: uid(), text: caption, mediaItems: [{ id: uid(), file, type: "photo" }] }]);
+        const mediaItems = selected.map((it) => ({ id: it.id, file: it.blob, type: it.type }));
+        await submitBlogPost(null, [{ id: uid(), text: caption, mediaItems }]);
       } else {
-        const url = await uploadOneImage(file, `message-attachments/photo-quick-${classId}/${uid()}.jpg`);
         const allFamilies = await fetchClassFamilies(classId);
         for (const sid of selectedStudentIds) {
           const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === sid && l.classId === classId));
-          if (match) await sendMessageToFamily(match.familyGroupId || match.uid, caption, url, "photo"); // eslint-disable-line no-await-in-loop
+          if (!match) continue; // eslint-disable-line no-continue
+          for (const item of selected) {
+            const url = item.type === "video"
+              ? await uploadOneVideo(item.blob, `message-attachments/photo-quick-${classId}/${uid()}.webm`) // eslint-disable-line no-await-in-loop
+              : await uploadOneImage(item.blob, `message-attachments/photo-quick-${classId}/${uid()}.jpg`); // eslint-disable-line no-await-in-loop
+            await sendMessageToFamily(match.familyGroupId || match.uid, caption, url, item.type); // eslint-disable-line no-await-in-loop
+          }
         }
       }
       setSent(true);
@@ -9547,19 +9741,6 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     }
   };
 
-  if (!preview) {
-    return (
-      <div className="app-page text-center py-16">
-        <input ref={fileInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileSelected} />
-        <p className="text-sm text-stone-400 mb-4">Waiting for a photo…</p>
-        <button onClick={() => fileInputRef.current?.click()} className="text-sm font-semibold text-white bg-teal-700 rounded-lg px-4 py-2.5 hover:bg-teal-800 mb-3">
-          Open camera
-        </button>
-        <button onClick={onDone} className="block mx-auto text-xs font-semibold text-stone-500">Cancel</button>
-      </div>
-    );
-  }
-
   if (sent) {
     return (
       <div className="app-page text-center py-16">
@@ -9569,13 +9750,93 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     );
   }
 
+  if (phase === "camera") {
+    return (
+      <div className="fixed inset-0 z-50 bg-black flex flex-col">
+        <canvas ref={canvasRef} className="hidden" />
+        <div className="flex-1 relative overflow-hidden">
+          {cameraError ? (
+            <div className="h-full flex flex-col items-center justify-center px-6 text-center">
+              <p className="text-white text-sm mb-4">{cameraError}</p>
+              <button onClick={startStream} className="text-sm font-semibold text-white bg-teal-700 rounded-lg px-4 py-2.5">Try again</button>
+            </div>
+          ) : (
+            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+          )}
+          <button onClick={onDone} className="absolute top-4 left-4 text-white bg-black/50 rounded-full p-2"><X size={20} /></button>
+          <button onClick={() => setFacingMode((m) => (m === "environment" ? "user" : "environment"))}
+            className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2"><RefreshCw size={18} /></button>
+          {recording && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-black/60 text-white text-xs font-semibold rounded-full px-3 py-1.5">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> {recordSeconds}s / {MAX_VIDEO_SECONDS}s
+            </div>
+          )}
+          {sessionItems.length > 0 && (
+            <div className="absolute bottom-24 left-0 right-0 flex gap-1.5 px-4 overflow-x-auto no-scrollbar">
+              {sessionItems.map((it) => (
+                <div key={it.id} className="relative shrink-0 w-14 h-14 rounded-lg overflow-hidden border-2 border-white/70">
+                  {it.type === "video" ? (
+                    <video src={it.url} muted className="w-full h-full object-cover" />
+                  ) : (
+                    <img src={it.url} alt="" className="w-full h-full object-cover" />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="bg-black py-5 px-6 flex items-center justify-between">
+          <p className="text-white/70 text-xs font-semibold w-14">{sessionItems.length > 0 ? `${sessionItems.length} taken` : ""}</p>
+          <div className="flex items-center gap-5">
+            <button onClick={takePhoto} disabled={!!cameraError || recording}
+              className="w-16 h-16 rounded-full bg-white disabled:opacity-30 flex items-center justify-center">
+              <div className="w-14 h-14 rounded-full border-2 border-stone-800" />
+            </button>
+            <button onClick={recording ? stopRecording : startRecording} disabled={!!cameraError}
+              className={`w-12 h-12 rounded-full flex items-center justify-center disabled:opacity-30 ${recording ? "bg-red-600" : "bg-white/20 border-2 border-white"}`}>
+              {recording ? <div className="w-4 h-4 bg-white rounded-sm" /> : <div className="w-5 h-5 bg-red-500 rounded-full" />}
+            </button>
+          </div>
+          <button onClick={finishSession} disabled={sessionItems.length === 0}
+            className="w-14 text-right text-teal-400 text-sm font-bold disabled:opacity-30">Done</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Gallery / share phase — the camera has already been released at this point.
+  const selectedCount = sessionItems.filter((it) => selectedIds.has(it.id)).length;
   return (
     <div className="app-page">
-      <button onClick={onDone} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Discard</button>
-      <img src={preview} alt="" className="w-full aspect-square object-cover rounded-xl mb-3" />
-      <button onClick={saveToDevice} className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-teal-700 border border-teal-300 rounded-xl py-2 mb-3 hover:bg-teal-50">
-        {saved ? <><Check size={15} /> Saved to device</> : <><Download size={15} /> Save to device — send later</>}
+      <button onClick={() => setPhase("camera")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back to camera</button>
+      <p className="text-xs text-stone-400 mb-2">Tap to select or deselect — {selectedCount} of {sessionItems.length} selected.</p>
+      <div className="grid grid-cols-3 gap-1.5 mb-4">
+        {sessionItems.map((it) => {
+          const selected = selectedIds.has(it.id);
+          return (
+            <div key={it.id} className="relative aspect-square rounded-lg overflow-hidden">
+              <button onClick={() => toggleSelected(it.id)} className="w-full h-full block">
+                {it.type === "video" ? (
+                  <video src={it.url} muted className="w-full h-full object-cover" />
+                ) : (
+                  <img src={it.url} alt="" className="w-full h-full object-cover" />
+                )}
+                <div className={`absolute inset-0 ${selected ? "ring-4 ring-inset ring-teal-500" : "bg-black/40"}`} />
+                <div className={`absolute top-1.5 right-1.5 w-5 h-5 rounded-full border-2 border-white flex items-center justify-center ${selected ? "bg-teal-600" : "bg-black/30"}`}>
+                  {selected && <Check size={12} className="text-white" />}
+                </div>
+              </button>
+              <button onClick={() => removeItem(it.id)} className="absolute bottom-1.5 left-1.5 bg-black/60 text-white rounded-full p-1"><X size={11} /></button>
+            </div>
+          );
+        })}
+      </div>
+
+      <button onClick={saveAllSelectedToDevice} disabled={selectedCount === 0}
+        className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-teal-700 border border-teal-300 rounded-xl py-2 mb-3 hover:bg-teal-50 disabled:opacity-40">
+        <Download size={15} /> Save {selectedCount > 1 ? "selected to device" : "to device"} — optional, doesn't affect sending
       </button>
+
       <textarea value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Add a few words (optional)" rows={2}
         className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
       <div className="flex gap-1 mb-3 bg-stone-100 rounded-lg p-1">
@@ -9593,17 +9854,42 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
         </div>
       )}
       {sendError && <p className="text-xs text-rose-600 mb-3">{sendError}</p>}
-      <button onClick={send} disabled={sending || (recipientMode === "students" && selectedStudentIds.length === 0)}
-        className="w-full bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40">
-        {sending ? "Sending…" : "Send"}
+      <button onClick={send} disabled={sending || selectedCount === 0 || (recipientMode === "students" && selectedStudentIds.length === 0)}
+        className="w-full bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40 mb-2">
+        {sending ? "Sending…" : `Send ${selectedCount > 1 ? `(${selectedCount})` : ""}`}
+      </button>
+      <button onClick={onDone} className="block mx-auto text-xs font-semibold text-stone-500">
+        Done without sending{savedIds.size > 0 ? ` — ${savedIds.size} saved to device` : ""}
       </button>
     </div>
   );
 }
 
-function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, classId, submitBlogPost, sendMessageToFamily, navigate }) {
-  const [screen, setScreen] = useState(null); // null = dashboard grid
-  const openCameraCapture = () => setScreen("camera");
+function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, classId, submitBlogPost, sendMessageToFamily, navigate }) {
+  const [screen, setScreenRaw] = useState(null); // null = dashboard grid
+  // Pushes a real history entry for every preschool sub-screen — Diapers, Snack, a health
+  // incident form, and so on. This was the actual gap behind "Back sometimes leaves the class
+  // entirely": ClassApp's own top-level view already goes through navigateView and correctly
+  // tracks history, but this screen state is local to the preschool dashboard specifically, and
+  // was never wired into browser history at all — every one of the calls below used to just be a
+  // plain setScreen(...), invisible to the browser's own back button exactly the same way the
+  // elementary side's sub-screens were before that same fix was applied there.
+  const navigateScreen = (newScreen) => {
+    setScreenRaw(newScreen);
+    const url = new URL(window.location.href);
+    if (newScreen == null) url.searchParams.delete("screen");
+    else url.searchParams.set("screen", newScreen);
+    window.history.pushState({ screen: newScreen }, "", url);
+  };
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      setScreenRaw(params.get("screen") || null);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+  const openCameraCapture = () => navigateScreen("camera");
   const [date] = useState(todayISO());
   // Students not checked in today shouldn't be swept into a bulk "everyone ate lunch" action, or
   // logged for at all — a student who never came in shouldn't end up with a meal or nap record.
@@ -9637,15 +9923,10 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
               const st = TILE_STYLES[tile.color];
               const logged = tile.special ? null : loggedCountFor(tile.id);
               const handleTap = () => {
-                if (tile.special === "incident") {
-                  const matchedCategory = tile.categoryMatch
-                    ? config.incidents.categories.find((c) => c.id === tile.categoryMatch || c.label.toLowerCase().includes(tile.categoryMatch))?.id
-                    : null;
-                  openIncidentForm(null, "daily-log", matchedCategory);
-                } else if (tile.special === "camera") {
+                if (tile.special === "camera") {
                   openCameraCapture();
                 } else {
-                  setScreen(tile.id);
+                  navigateScreen(tile.id);
                 }
               };
               return (
@@ -9669,23 +9950,33 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
   const tile = PRESCHOOL_TILES.find((t) => t.id === screen);
 
   if (tile?.mealType) {
-    return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMealBulk={setMealBulk} onBack={() => setScreen(null)} />;
+    return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMealBulk={setMealBulk} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "nap") {
-    return <NapBulkScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setNapBulk={setNapBulk} onBack={() => setScreen(null)} />;
+    return <NapBulkScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setNapBulk={setNapBulk} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "mood") {
-    return <MoodScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMood={setMood} onBack={() => setScreen(null)} />;
+    return <MoodScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMood={setMood} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "diapers") {
-    return <DiaperBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} onBack={() => setScreen(null)} />;
+    return <DiaperBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "bathroom") {
     return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
-      logBulk={logBathroomBulk} removeLog={removeBathroomLog} onBack={() => setScreen(null)} />;
+      logBulk={logBathroomBulk} removeLog={removeBathroomLog} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "camera") {
-    return <CameraCaptureView roster={roster} classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} onDone={() => setScreen(null)} />;
+    return <CameraCaptureView roster={roster} classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} onDone={() => navigateScreen(null)} />;
+  }
+  if (screen === "health-incident" || screen === "incident") {
+    return (
+      <PreschoolIncidentForm variant={screen === "health-incident" ? "health" : "incident"} roster={roster} config={config}
+        onCancel={() => navigateScreen(null)}
+        onSave={async (entry) => {
+          await onLogPreschoolIncident(entry);
+          navigateScreen(null);
+        }} />
+    );
   }
   return null;
 }
@@ -10807,8 +11098,8 @@ function DayRecapView({ roster, studentData, incidents, behaviorLogData, planner
           <ul className="space-y-2">
             {todaysIncidents.map((inc) => (
               <li key={inc.id} className="text-xs border-l-2 border-stone-200 pl-2">
-                <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${catMap[inc.category]?.color || "stone"}-100 text-${catMap[inc.category]?.color || "stone"}-700`}>
-                  {catMap[inc.category]?.label || inc.category || "Uncategorized"}
+                <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${inc.categoryColor || catMap[inc.category]?.color || "stone"}-100 text-${inc.categoryColor || catMap[inc.category]?.color || "stone"}-700`}>
+                  {inc.categoryLabel || catMap[inc.category]?.label || inc.category || "Uncategorized"}
                 </span>
                 <span className="text-stone-600">{(inc.studentIds || []).map((id) => rosterMap[id]).filter(Boolean).join(", ")}</span>
                 {inc.description && <p className="text-stone-500 mt-0.5">{inc.description}</p>}
@@ -12387,8 +12678,8 @@ function StudentDetailView({ student, data, incidents, classAssessments, config,
                       <div className="flex items-center justify-between">
                         <span>
                           {inc.flaggedForAdmin && <Flag size={11} className="inline text-rose-600 fill-rose-600 mr-1 -mt-0.5" />}
-                          <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${catMap[inc.category]?.color || "stone"}-100 text-${catMap[inc.category]?.color || "stone"}-700`}>
-                            {catMap[inc.category]?.label || inc.category || "Uncategorized"}
+                          <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full mr-1 bg-${inc.categoryColor || catMap[inc.category]?.color || "stone"}-100 text-${inc.categoryColor || catMap[inc.category]?.color || "stone"}-700`}>
+                            {inc.categoryLabel || catMap[inc.category]?.label || inc.category || "Uncategorized"}
                           </span>
                           <span className="text-stone-400 text-xs">{inc.date}</span>
                           {inc.studentIds?.length > 1 && <span className="text-stone-400 text-xs"> · involved {inc.studentIds.length} students</span>}
@@ -13644,9 +13935,13 @@ function buildRangeFacts(student, data, incidents, classAssessments, config, sta
     const catMap = {};
     config.incidents.categories.forEach((c) => (catMap[c.id] = c.label));
     const incidentsInRange = (incidents || []).filter((i) => i.studentIds?.includes(student.id) && inRange(i.date));
+    // categoryLabel is stored directly on preschool-logged incidents (their own category ids,
+    // like "fall-bump", were never part of the elementary catMap above and would otherwise show
+    // as a raw id instead of a readable label) — prefer it when present, and fall back to catMap
+    // for older, elementary-style entries that only ever stored the bare category id.
     incidentLines = incidentsInRange.length === 0
       ? ["No incidents in this range."]
-      : incidentsInRange.map((i) => `${i.date} — ${catMap[i.category] || i.category}${i.description ? `: ${i.description}` : ""}`);
+      : incidentsInRange.map((i) => `${i.date} — ${i.categoryLabel || catMap[i.category] || i.category}${i.description ? `: ${i.description}` : ""}`);
   }
 
   let assessmentLines = null;
@@ -13740,8 +14035,9 @@ Write 2-3 short paragraphs weaving the exact figures above into natural sentence
   return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
-function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
+function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, onBack, onLogSent, onUpdateParentEmail }) {
   const now = new Date();
+  const isPreschool = classType === "preschool";
   const [year, setYear] = useState(now.getFullYear());
   const [monthIdx, setMonthIdx] = useState(now.getMonth());
   const [includeAttendance, setIncludeAttendance] = useState(true);
@@ -13749,7 +14045,11 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
   const [includeAssessments, setIncludeAssessments] = useState(false);
   const [reports, setReports] = useState({}); // studentId -> { loading, draft, dataUsed, email, logged }
   const label = monthLabel(year, monthIdx);
-  const opts = { attendance: includeAttendance, incidents: includeIncidents, assessments: includeAssessments };
+  // Assessment logging isn't in use for preschool rooms yet, so the option is hidden entirely
+  // below, not just defaulted off — but this stays doubly safe even if that ever drifts, since a
+  // preschool report can never actually pull in an assessment section regardless of what state
+  // says, the same way the checkbox itself can never be reached to turn it on.
+  const opts = { attendance: includeAttendance, incidents: includeIncidents, assessments: isPreschool ? false : includeAssessments };
 
   const generateOne = async (student) => {
     setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
@@ -13793,7 +14093,9 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
       <div className="flex flex-wrap gap-4 mb-5 bg-white border border-stone-200 rounded-lg px-3 py-2.5">
         <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAttendance} onChange={(e) => setIncludeAttendance(e.target.checked)} /> Attendance</label>
         <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeIncidents} onChange={(e) => setIncludeIncidents(e.target.checked)} /> Incidents</label>
-        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAssessments} onChange={(e) => setIncludeAssessments(e.target.checked)} /> Assessment activity</label>
+        {!isPreschool && (
+          <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAssessments} onChange={(e) => setIncludeAssessments(e.target.checked)} /> Assessment activity</label>
+        )}
       </div>
 
       <div className="space-y-3">
@@ -13840,8 +14142,9 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
   );
 }
 
-function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
+function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, onBack, onLogSent, onUpdateParentEmail }) {
   const today = todayISO();
+  const isPreschool = classType === "preschool";
   const [startDate, setStartDate] = useState(addDaysISO(today, -13));
   const [endDate, setEndDate] = useState(today);
   const [includeAttendance, setIncludeAttendance] = useState(true);
@@ -13849,7 +14152,7 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
   const [includeAssessments, setIncludeAssessments] = useState(false);
   const [reports, setReports] = useState({});
   const label = `${startDate} to ${endDate}`;
-  const opts = { attendance: includeAttendance, incidents: includeIncidents, assessments: includeAssessments };
+  const opts = { attendance: includeAttendance, incidents: includeIncidents, assessments: isPreschool ? false : includeAssessments };
 
   const generateOne = async (student) => {
     setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
@@ -13895,7 +14198,9 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
       <div className="flex flex-wrap gap-4 mb-5 bg-white border border-stone-200 rounded-lg px-3 py-2.5">
         <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAttendance} onChange={(e) => setIncludeAttendance(e.target.checked)} /> Attendance</label>
         <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeIncidents} onChange={(e) => setIncludeIncidents(e.target.checked)} /> Incidents</label>
-        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAssessments} onChange={(e) => setIncludeAssessments(e.target.checked)} /> Assessment activity</label>
+        {!isPreschool && (
+          <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAssessments} onChange={(e) => setIncludeAssessments(e.target.checked)} /> Assessment activity</label>
+        )}
       </div>
 
       <div className="space-y-3">
@@ -14786,7 +15091,12 @@ function IncidentDetailView({ incident, roster, classId, config, plannerDays, lo
 
   const catMap = {};
   config.incidents.categories.forEach((c) => (catMap[c.id] = c));
-  const cat = catMap[incident.category];
+  // Prefer what's stored directly on the incident itself — preschool-logged incidents carry their
+  // own categoryLabel/categoryColor, since their category ids (like "fall-bump") were never part
+  // of the elementary catMap above and would otherwise resolve to nothing here.
+  const cat = incident.categoryLabel
+    ? { label: incident.categoryLabel, color: incident.categoryColor || "cyan" }
+    : catMap[incident.category];
   const involvedStudents = (incident.studentIds || []).map((id) => roster.find((s) => s.id === id)).filter(Boolean);
 
   const generateFor = async (student) => {
@@ -16575,6 +16885,159 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
               {saving ? "Saving…" : "Save with these details"}
             </button>
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A separate form from IncidentForm above, on purpose — not a preschool-mode branch bolted onto
+// it. Sharing one component meant a preschool teacher tapping "Health incident" landed on a form
+// still offering "Discipline" and "Social / Peer" as category choices, since both tiles fed the
+// same elementary-oriented form and category list. Two real preschool concerns (a physical injury
+// or health event, versus a behavioral/care situation that isn't medical) get two real, separate,
+// preschool-grounded category lists (config.preschoolHealthIncidents / config.preschoolIncidents
+// — see their definitions in DEFAULT_CONFIG for the reasoning behind the specific categories
+// chosen), never mixed with elementary's discipline-and-schoolwork categories or with each other.
+// variant ("health" | "incident") picks which of those two lists and which title/framing to show.
+// Speed matters more here than almost anywhere else in the app — a teacher managing a room of
+// toddlers mid-incident needs this to take seconds, not a multi-field form — so category is a row
+// of one-tap pills (never a dropdown, which costs an extra tap to open), a student is usually
+// already selected coming in, and everything below the fold is optional, addable later.
+function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, onSave }) {
+  const isHealth = variant === "health";
+  const categories = (isHealth ? config.preschoolHealthIncidents : config.preschoolIncidents)?.categories || [];
+  const [category, setCategory] = useState("");
+  const [otherText, setOtherText] = useState("");
+  const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
+  const [description, setDescription] = useState("");
+  const [notifyFamily, setNotifyFamily] = useState(true);
+  const [mediaItems, setMediaItems] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [incidentId] = useState(() => uid());
+  const toggleStudent = (id) => setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const addMedia = async (fileList) => {
+    const files = Array.from(fileList || []);
+    for (const file of files) {
+      const isVideo = file.type.startsWith("video/");
+      const itemId = uid();
+      if (isVideo) {
+        try { await validateVideoDuration(file); }
+        catch (err) { setMediaItems((prev) => [...prev, { id: itemId, file: null, preview: null, type: "video", error: err.message }]); continue; } // eslint-disable-line no-continue
+      }
+      setMediaItems((prev) => [...prev, { id: itemId, file, preview: URL.createObjectURL(file), type: isVideo ? "video" : "photo", error: null }]);
+    }
+  };
+  const removeMedia = (itemId) => setMediaItems((prev) => prev.filter((m) => m.id !== itemId));
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const media = [];
+      for (const item of mediaItems.filter((m) => m.file)) {
+        const url = item.type === "video"
+          ? await uploadOneVideo(item.file, `incident-attachments/${incidentId}/${uid()}.${(item.file.name || "").split(".").pop() || "mp4"}`)
+          : await uploadOneImage(item.file, `incident-attachments/${incidentId}/${uid()}.jpg`);
+        media.push({ url, type: item.type });
+      }
+      const categoryLabel = category === "other" ? (otherText.trim() || "Other") : (categories.find((c) => c.id === category)?.label || "");
+      const categoryColor = categories.find((c) => c.id === category)?.color || "cyan";
+      onSave({
+        id: incidentId, kind: isHealth ? "health" : "incident", category, categoryLabel, categoryColor,
+        date: todayISO(), time: new Date().toTimeString().slice(0, 5),
+        description, studentIds, media, notifyFamily,
+      });
+    } catch (err) {
+      setSaveError(describeUploadError(err));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{isHealth ? "Log a health incident" : "Log an incident"}</h1>
+      <p className="text-xs text-stone-400 mb-5">{isHealth ? "A fall, a bump, anything physical or health-related." : "Anything else worth a note home — a rough drop-off, a peer conflict, and so on."}</p>
+      <div className="md:w-96">
+        <label className="block text-sm font-semibold text-stone-700 mb-1">Child{roster.length > 1 ? "ren" : ""} involved</label>
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {roster.map((s) => {
+            const selected = studentIds.includes(s.id);
+            return (
+              <button key={s.id} onClick={() => toggleStudent(s.id)}
+                className={`text-sm font-semibold px-3 py-2 rounded-full border ${selected ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                {s.name}
+              </button>
+            );
+          })}
+        </div>
+
+        <label className="block text-sm font-semibold text-stone-700 mb-1">What happened</label>
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {categories.map((c) => (
+            <button key={c.id} onClick={() => setCategory(c.id)}
+              className={`text-sm font-semibold px-3 py-2 rounded-full border ${category === c.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+        {category === "other" && (
+          <input value={otherText} onChange={(e) => setOtherText(e.target.value)} placeholder="Briefly describe what happened"
+            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
+        )}
+
+        <label className="block text-sm font-semibold text-stone-700 mb-1">Notes <span className="text-stone-400 font-normal">(optional)</span></label>
+        <div className="flex items-start gap-1.5 mb-4">
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" placeholder="Type, or use the mic" />
+          <MicButton onResult={(spoken) => setDescription((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
+        </div>
+
+        <label className="block text-sm font-semibold text-stone-700 mb-1">Photo or video <span className="text-stone-400 font-normal">(optional)</span></label>
+        {mediaItems.length > 0 && (
+          <div className={`grid gap-1 mb-1.5 ${mediaItems.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+            {mediaItems.map((m) => (
+              <div key={m.id} className="relative">
+                {m.error ? (
+                  <div className="w-full aspect-square rounded-lg bg-rose-50 border border-rose-200 flex items-center justify-center p-2">
+                    <p className="text-[10px] text-rose-600 text-center">{m.error}</p>
+                  </div>
+                ) : m.type === "video" ? (
+                  <video src={m.preview} className="w-full aspect-square object-cover rounded-lg" />
+                ) : (
+                  <img src={m.preview} alt="" className="w-full aspect-square object-cover rounded-lg" />
+                )}
+                <button onClick={() => removeMedia(m.id)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 mb-4 cursor-pointer">
+          + Add photo or video
+          <input type="file" accept="image/*,video/*" multiple onChange={(e) => { addMedia(e.target.files); e.target.value = ""; }} className="hidden" />
+        </label>
+
+        <button onClick={() => setNotifyFamily((v) => !v)}
+          className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 mb-4 text-left ${notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+          <Bell size={18} className={notifyFamily ? "text-teal-600" : "text-stone-400"} />
+          <span className={`text-sm font-semibold ${notifyFamily ? "text-teal-700" : "text-stone-600"}`}>
+            {notifyFamily ? "Family will be notified" : "Family will not be notified"}
+          </span>
+          <span className="text-xs text-stone-400 ml-auto">Tap to change</span>
+        </button>
+
+        {saveError && <p className="text-xs text-rose-600 mb-3">{saveError}</p>}
+
+        <button disabled={studentIds.length === 0 || !category || saving} onClick={save}
+          className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {saving ? "Saving…" : "Save"}
+        </button>
+        {(studentIds.length === 0 || !category) && (
+          <p className="text-xs text-stone-400 text-center mt-2">
+            {studentIds.length === 0 ? "Select at least one child" : "Select what happened"}
+          </p>
         )}
       </div>
     </div>
