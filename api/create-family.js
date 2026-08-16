@@ -103,10 +103,20 @@ export default async function handler(req, res) {
     // own uid — a second guardian added later passes the first guardian's uid here explicitly, so
     // both end up pointing at the same group without needing a separate id generator.
     const resolvedGroupId = familyGroupId || userRecord.uid;
+    // linkedClassTypes denormalizes each linked class's own type (elementary, preschool, ...)
+    // straight onto the family record, the same way linkedClassIds denormalizes the ids — a
+    // security rule can't loop over each class to look its type up, so this is what lets someone
+    // reachable by "every elementary parent" actually be reachable, without a per-class lookup.
+    let linkedClassTypes = [];
+    if (linkedClassIds.length > 0) {
+      const registrySnap = await db.collection("data").doc("schoolClasses").get();
+      const registry = registrySnap.exists ? registrySnap.data().value || [] : [];
+      linkedClassTypes = [...new Set(linkedClassIds.map((id) => registry.find((c) => c.id === id)?.classType).filter(Boolean))];
+    }
     await ref.set({
       value: {
         uid: userRecord.uid, name, email,
-        studentLinks: links, linkedClassIds, familyGroupId: resolvedGroupId, active: true,
+        studentLinks: links, linkedClassIds, linkedClassTypes, familyGroupId: resolvedGroupId, active: true,
       },
     });
 

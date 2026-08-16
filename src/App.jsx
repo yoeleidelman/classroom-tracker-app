@@ -17,7 +17,7 @@
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset } from "firebase/auth";
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
@@ -30,7 +30,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -293,6 +293,98 @@ function toItalicUnicode(str) {
   });
 }
 
+const URL_PATTERN = /(https?:\/\/[^\s]+|www\.[^\s]+\.[a-z]{2,}[^\s]*)/gi;
+
+// Finds the first URL in a block of text, with trailing punctuation stripped — used to decide
+// whether a message gets a rich preview card underneath it. Uses String.match() rather than
+// exec()/test() on this same global-flagged pattern deliberately: those two carry state
+// (lastIndex) between calls and give wrong answers on repeated use against a shared regex, the
+// same pitfall LinkifiedText below works around a different way.
+function extractFirstUrl(text) {
+  const matches = (text || "").match(URL_PATTERN);
+  if (!matches || matches.length === 0) return null;
+  const first = matches[0].replace(/[.,!?;:)]+$/, "");
+  return first.startsWith("http") ? first : `https://${first}`;
+}
+
+// Splits plain message text on URLs and renders each one as a real, clickable link — trailing
+// punctuation (a period ending the sentence, a comma, etc.) is peeled back off the link itself so
+// "check this out: example.com." doesn't swallow that final period into the href. Everything
+// that isn't a URL renders as plain text exactly as typed, same as today.
+// String.split() on a regex with a capturing group interleaves the matches back into the result
+// at every odd index — checking that directly, rather than re-running the (stateful, global-
+// flagged) regex against each piece, since re-testing a `g`-flagged regex advances its own
+// lastIndex between calls and produces wrong results on exactly this kind of repeated use.
+function LinkifiedText({ text, className, linkClassName }) {
+  const parts = (text || "").split(URL_PATTERN);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (!part) return null;
+        if (i % 2 === 0) return <span key={i}>{part}</span>;
+        const trailingMatch = part.match(/[.,!?;:)]+$/);
+        const trailing = trailingMatch ? trailingMatch[0] : "";
+        const urlPart = trailing ? part.slice(0, -trailing.length) : part;
+        const href = urlPart.startsWith("http") ? urlPart : `https://${urlPart}`;
+        return (
+          <span key={i}>
+            <a href={href} target="_blank" rel="noopener noreferrer" className={linkClassName || "underline"} onClick={(e) => e.stopPropagation()}>
+              {urlPart}
+            </a>
+            {trailing}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+// A rich preview card underneath a message that contains a link — title, description, and image
+// pulled from the page's own Open Graph tags via the backend (browsers can't fetch another site's
+// raw HTML directly, so this has to be server-side). Fails silently into rendering nothing at all
+// if the fetch doesn't work out: the plain, clickable link from LinkifiedText above is already a
+// complete, working fallback, so a failed preview should never look like a broken UI element.
+function LinkPreviewCard({ url }) {
+  const [preview, setPreview] = useState(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPreview(null);
+    setFailed(false);
+    (async () => {
+      try {
+        const headers = await authHeaders();
+        const res = await fetch(`/api/link-preview?url=${encodeURIComponent(url)}`, { headers });
+        if (!res.ok) throw new Error("preview fetch failed");
+        const data = await res.json();
+        if (!cancelled) setPreview(data);
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [url]);
+
+  if (failed || !preview) return null;
+  // A preview that's just the bare URL echoed back, with nothing else, doesn't add anything a
+  // person can't already see from the plain link text above it — skip rendering an empty-looking
+  // card in that case rather than show a mostly-blank box.
+  if (preview.title === url && !preview.description && !preview.image) return null;
+
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
+      className="block mt-1.5 rounded-lg border border-black/10 overflow-hidden bg-white/95 hover:bg-white max-w-xs">
+      {preview.image && <img src={preview.image} alt="" className="w-full h-32 object-cover" />}
+      <div className="px-2.5 py-2">
+        <p className="text-[10px] font-semibold text-stone-400 uppercase tracking-wide truncate">{preview.siteName}</p>
+        <p className="text-xs font-semibold text-stone-800 line-clamp-2">{preview.title}</p>
+        {preview.description && <p className="text-[11px] text-stone-500 line-clamp-2 mt-0.5">{preview.description}</p>}
+      </div>
+    </a>
+  );
+}
+
 function applyMessageDisclaimer(draftText, config, schoolLabel, teacherSignOff) {
   const style = config?.messageStyle || {};
   if (style.showDisclaimer === false) return draftText;
@@ -301,6 +393,44 @@ function applyMessageDisclaimer(draftText, config, schoolLabel, teacherSignOff) 
   const noteText = (teacherSignOff || "").trim() || `— ${label}, an automated update. No reply needed unless you have a question. —`;
   const note = toItalicUnicode(noteText);
   return style.disclaimerPosition === "top" ? `${note}\n\n${draftText}` : `${draftText}\n\n${note}`;
+}
+
+// The one central copy of this template — every place that sends a parent their account setup
+// email reads from here, so editing it in Settings actually changes what goes out, rather than
+// one of several hard-coded copies scattered through the code that a wording change would need
+// to be repeated in.
+const DEFAULT_PARENT_SETUP_EMAIL_TEMPLATE = `Hi {{parentName}},
+
+Welcome to the {{schoolName}} Parent Portal! You can now see updates, photos, and messages from {{studentName}}'s class right from your phone.
+
+To get started:
+1. Go to {{loginLink}}
+2. Sign in with:
+   Email: {{email}}
+   Password: {{tempPassword}}
+3. We recommend changing your password once you're in, under Settings.
+
+If you have any trouble getting in, just reach out to the office.
+
+Looking forward to keeping you in the loop!`;
+
+const PARENT_SETUP_EMAIL_PLACEHOLDERS = [
+  { key: "parentName", label: "Parent/guardian's name" },
+  { key: "studentName", label: "Student's name" },
+  { key: "schoolName", label: "School/app name" },
+  { key: "email", label: "Login email" },
+  { key: "tempPassword", label: "Temporary password" },
+  { key: "loginLink", label: "Sign-in link" },
+];
+
+// Straightforward {{placeholder}} substitution — deliberately simple rather than a templating
+// library, since this only ever needs flat key/value replacement, never loops or conditionals.
+function renderParentSetupEmail(template, vars) {
+  let result = template || "";
+  PARENT_SETUP_EMAIL_PLACEHOLDERS.forEach(({ key }) => {
+    result = result.replaceAll(`{{${key}}}`, vars?.[key] ?? "");
+  });
+  return result;
 }
 
 // Lets a teacher see exactly what their current style settings actually sound like — using
@@ -323,11 +453,84 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
+}
+
+// Single-reaction-per-person logic, shared by every place a post or a specific block within one
+// can be reacted to — picking a new reaction replaces whichever one that person already had
+// there rather than adding alongside it; picking the same one again removes it (toggle-off).
+// Works on whatever reactions map it's handed, so the same function serves both a whole post's
+// reactions and one specific block's, without duplicating this logic in either place.
+function computeSingleChoiceReactions(existingReactions, emoji, reactorId) {
+  const reactions = {};
+  Object.entries(existingReactions || {}).forEach(([key, ids]) => {
+    reactions[key] = (ids || []).filter((id) => id !== reactorId);
+  });
+  const alreadyHadThisOne = (existingReactions?.[emoji] || []).includes(reactorId);
+  if (!alreadyHadThisOne) reactions[emoji] = [...(reactions[emoji] || []), reactorId];
+  return reactions;
 }
 
 function uid() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
+
+// Route-aware notification suppression — the app being open at all is never, by itself, a reason
+// to suppress a notification (that's the whole point of this: WhatsApp-style behavior, not
+// "foregrounded = quiet"). The only thing that matters is whether the person is looking at the
+// EXACT content a given notification is about, checked against the simple global flag the
+// relevant screens themselves declare (see ConversationThreadView and ParentPortalApp).
+function isViewingNotificationTarget(url) {
+  if (!url) return false;
+  try {
+    const params = new URL(url, window.location.origin).searchParams;
+    const active = window.__activeContent || {};
+    const openType = params.get("open");
+    const classId = params.get("classId");
+    const groupId = params.get("groupId");
+
+    if (openType === "messages" && groupId) {
+      // A teacher's own view of one specific family's classroom thread. Deliberately not also
+      // checked against classId — the underlying threadKey format (classroom-{groupId}) never
+      // carried a classId to begin with, a pre-existing characteristic of how read-state and
+      // Storage attachment paths for this thread type already work elsewhere in the app, not
+      // something introduced here. The rare edge case this leaves open: a teacher assigned to two
+      // different classes that both happen to include the exact same family could see a
+      // notification for one suppressed while looking at the other. Narrowing that further would
+      // mean changing that shared key format itself, which is a larger, riskier change than this
+      // specific gap justifies.
+      return active.threadKey === `classroom-${groupId}`;
+    }
+    if (openType === "messages" && classId) {
+      // A family's own view of their class thread — this thread type only ever carries a
+      // classId, not a per-family id, which is a known, pre-existing limitation of that key's
+      // format elsewhere in the app (see the Storage rules), not something new here.
+      return active.threadKey === `class-${classId}`;
+    }
+    if (openType === "admin") {
+      // A family only ever has one admin thread — their own — so being on any admin-* thread at
+      // all is unambiguous.
+      return typeof active.threadKey === "string" && active.threadKey.startsWith("admin-");
+    }
+    if (openType === "blog") return active.tab === "blog";
+    if (openType === "homework") return active.tab === "homework";
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function todayISO() { return isoDate(new Date()); }
+
+// "Today," "Yesterday," or a short "Aug 14" style label — used wherever a date needs to read at a
+// glance rather than as a full MM/DD/YYYY value, like the compact date-nav control.
+function friendlyDateLabel(iso) {
+  if (iso === todayISO()) return "Today";
+  const d = new Date(iso + "T00:00:00");
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (iso === isoDate(yesterday)) return "Yesterday";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 // Replaces WhatsAppButton across every "generate a message about a student, then send" flow —
 // looks up that student's linked family account and sends straight into their classroom thread,
 // the same reliable, already-tested path used everywhere else in-app messaging happens, rather
@@ -971,6 +1174,12 @@ async function notifyClassTeachers(classId, title, body, url) {
   await sendPushNotification(uids, title, body, url);
 }
 
+// The individual-teacher counterpart to notifyClassTeachers above — reaches exactly the one
+// teacher a family messaged directly, never every teacher covering the shared classroom thread.
+async function notifySpecificTeacher(teacherUid, title, body, url) {
+  await sendPushNotification([teacherUid], title, body, url);
+}
+
 // Every family with a child actually linked to this class, on a full-time basis — used for blog
 // posts, which only apply to a student's main class, not a part-time or specific-periods
 // enrollment where a different teacher is the one actually posting for them.
@@ -1131,6 +1340,19 @@ function GlobalAppStyles() {
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Inter:wght@400;500;600;700&family=Frank+Ruhl+Libre:wght@500;700&display=swap');
         .display-font { font-family: 'Fraunces', serif; }
         .heb-font { font-family: 'Frank Ruhl Libre', serif; }
+
+        /* Reusable entrance for anything that expands/reveals in place — panels, menus,
+           collapsible sections. Plays automatically on mount (a CSS animation, not a
+           transition, so it needs no "before" state to trigger from) — quick and subtle by
+           design, not decorative. Respects reduced-motion: the animation is skipped entirely
+           rather than just shortened, so someone who's asked for less motion gets none here. */
+        @keyframes expandDown { from { opacity: 0; transform: translateY(-6px) scaleY(0.98); transform-origin: top; } to { opacity: 1; transform: translateY(0) scaleY(1); transform-origin: top; } }
+        .anim-expand-down { animation: expandDown 180ms ease-out; }
+        @keyframes expandUp { from { opacity: 0; transform: translateY(6px) scaleY(0.98); transform-origin: bottom; } to { opacity: 1; transform: translateY(0) scaleY(1); transform-origin: bottom; } }
+        .anim-expand-up { animation: expandUp 180ms ease-out; }
+        @media (prefers-reduced-motion: reduce) {
+          .anim-expand-down, .anim-expand-up { animation: none; }
+        }
 
         /* ===== SJA Classroom Tracker — "Warm Scholarly" design system ===== */
         /* Tailwind v4 exposes every color/radius utility through CSS custom properties
@@ -1420,6 +1642,13 @@ function AppInner() {
   const [isAdminSession, setIsAdminSession] = useState(false);
   const [isSubstituteSession, setIsSubstituteSession] = useState(false);
 
+  // Real Firebase password-reset links always carry these two params — captured once at mount so
+  // a later click elsewhere in the app (which could change the URL) doesn't lose track of it.
+  const [resetPasswordCode] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("mode") === "resetPassword" ? params.get("oobCode") : null;
+  });
+
   // Same one-time-read pattern as isParentPortal above — captured once at mount, before anything
   // strips these params off the URL. A plain ?classId= (no "open=") means "restore whatever class
   // was active before" — either a fresh reload of the same tab, or the OS having fully killed and
@@ -1459,8 +1688,11 @@ function AppInner() {
       if (!messaging) return;
       unsubscribe = onMessage(messaging, (payload) => {
         if (Notification.permission !== "granted") return;
+        // The one and only suppression rule — never "the app is open," always and only "this
+        // exact content is already on screen."
+        if (isViewingNotificationTarget(payload.data?.url)) return;
         const title = payload.data?.title || "New notification";
-        const n = new Notification(title, { body: payload.data?.body || "", badge: "/icons-badge/badge-96.png" });
+        const n = new Notification(title, { body: payload.data?.body || "", icon: "/icons/icon-192.png", badge: "/icons-badge/badge-96.png" });
         // Foreground notifications don't go through the service worker's notificationclick handler
         // at all — this is the separate path for making a tap actually go somewhere when the app
         // was already open at the moment it arrived.
@@ -1488,15 +1720,23 @@ function AppInner() {
             loadJSON(`teacher:${user.uid}`, null, true),
             loadJSON(`family:${user.uid}`, null, true),
           ]);
-          // Backfill for any family account created before linkedClassIds/familyGroupId existed —
-          // happens once, right when they actually sign in, rather than needing an admin to
-          // manually re-save every existing family. A family with no familyGroupId is, by
-          // definition, its own group of one — its own uid IS the correct group id for it.
+          // Backfill for any family account created before linkedClassIds/familyGroupId/
+          // linkedClassTypes existed — happens once, right when they actually sign in, rather
+          // than needing an admin to manually re-save every existing family. A family with no
+          // familyGroupId is, by definition, its own group of one — its own uid IS the correct
+          // group id for it. Fetches the class registry directly here rather than trusting the
+          // registry state variable, since that may not have finished loading yet this early in
+          // the app's own startup sequence.
           let effectiveFamily = myFamily;
-          if (myFamily && (!myFamily.linkedClassIds || !myFamily.familyGroupId)) {
+          if (myFamily && (!myFamily.linkedClassIds || !myFamily.familyGroupId || !myFamily.linkedClassTypes)) {
             const linkedClassIds = myFamily.linkedClassIds || [...new Set((myFamily.studentLinks || []).map((l) => l.classId))];
             const familyGroupId = myFamily.familyGroupId || user.uid;
-            effectiveFamily = { ...myFamily, linkedClassIds, familyGroupId };
+            let linkedClassTypes = myFamily.linkedClassTypes;
+            if (!linkedClassTypes) {
+              const freshRegistry = (await loadJSON("schoolClasses", [], true)) || [];
+              linkedClassTypes = [...new Set(linkedClassIds.map((id) => freshRegistry.find((c) => c.id === id)?.classType).filter(Boolean))];
+            }
+            effectiveFamily = { ...myFamily, linkedClassIds, familyGroupId, linkedClassTypes };
             saveJSON(`family:${user.uid}`, effectiveFamily, true);
           }
           setCurrentTeacher(mine);
@@ -1563,10 +1803,19 @@ function AppInner() {
   // security rule can check "is this value in this array" reliably, but can't safely search inside
   // an array of objects for one whose classId field matches. Recomputed here rather than trusted to
   // whatever caller passes in, so it can never quietly drift out of sync with the real links.
+  // linkedClassTypes is the same idea for a different lookup: a security rule can't loop over each
+  // linked class to ask the class registry "what type are you" (rules don't support that kind of
+  // per-element lookup), so the actual class types this family is connected to — elementary,
+  // preschool, whichever — are denormalized right onto the family record itself, recomputed here
+  // too. This is what lets someone like a curriculum coordinator be reachable by every elementary
+  // parent without being individually assigned to every elementary class one at a time.
   const updateFamilyRecord = async (uid, fields) => {
     const existing = await loadJSON(`family:${uid}`, {}, true);
     const next = { ...existing, ...fields };
-    if (fields.studentLinks) next.linkedClassIds = [...new Set(fields.studentLinks.map((l) => l.classId))];
+    if (fields.studentLinks) {
+      next.linkedClassIds = [...new Set(fields.studentLinks.map((l) => l.classId))];
+      next.linkedClassTypes = [...new Set(next.linkedClassIds.map((id) => registry.find((c) => c.id === id)?.classType).filter(Boolean))];
+    }
     await saveJSON(`family:${uid}`, next, true);
     setFamilies((prev) => prev.map((f) => (f.uid === uid ? next : f)));
   };
@@ -1595,7 +1844,7 @@ function AppInner() {
       const data = await response.json();
       if (!response.ok) return { ok: false, error: data.error || "Couldn't create the account." };
       await refreshFamilies();
-      return { ok: true, linkedExisting: data.linkedExisting };
+      return { ok: true, linkedExisting: data.linkedExisting, uid: data.uid };
     } catch {
       return { ok: false, error: "Couldn't reach the server — try again." };
     }
@@ -1608,6 +1857,19 @@ function AppInner() {
     return createFamilyAccount(name, email, tempPassword, existingFamily.studentLinks, existingFamily.familyGroupId || existingFamily.uid);
   };
 
+  // Lets admin add a brand-new student directly into a specific class's roster while setting up a
+  // family account — same record shape a teacher's own "add student" creates, so nothing about
+  // this student looks different once it's sitting in that class's roster. Returns the created
+  // student (with its real id) so the caller can immediately link it to the family being created,
+  // in the same flow, without a separate trip to the class itself first.
+  const createStudentInClass = async (classId, studentName) => {
+    const trimmed = (studentName || "").trim();
+    if (!trimmed || !classId) return { ok: false, error: "A class and a student name are both required." };
+    const roster = await loadJSON(`class:${classId}:roster`, [], true);
+    const newStudent = { id: uid(), name: trimmed, studentType: "full-time", parentEmail: "", parentPhone: "", notes: "", enrollmentScope: "full-time" };
+    await saveJSON(`class:${classId}:roster`, [...roster, newStudent], true);
+    return { ok: true, student: newStudent };
+  };
   const signInTeacher = async (email, password) => {
     try {
       await signInWithEmailAndPassword(auth, email, password);
@@ -1716,12 +1978,12 @@ function AppInner() {
   // credentials — it needs elevated, server-side access, so this calls a dedicated backend
   // function (same pattern as the AI report-drafting proxy: privileged credentials live only
   // on the server, never in the browser).
-  const createTeacherAccount = async (name, email, tempPassword, role, assignedClassIds, isSubstitute) => {
+  const createTeacherAccount = async (name, email, tempPassword, role, assignedClassIds, isSubstitute, messagingClassTypes) => {
     try {
       const response = await fetch("/api/create-teacher", {
         method: "POST",
         headers: await authHeaders(),
-        body: JSON.stringify({ name, email, password: tempPassword, role, assignedClassIds, isSubstitute }),
+        body: JSON.stringify({ name, email, password: tempPassword, role, assignedClassIds, isSubstitute, messagingClassTypes }),
       });
       const data = await response.json();
       if (!response.ok) return { ok: false, error: data.error || "Couldn't create the account." };
@@ -2336,6 +2598,13 @@ function AppInner() {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-teal-700" size={28} /></div>;
   }
 
+  // A password-reset link takes priority over everything else — whoever clicked it may not be
+  // signed in at all, or may be signed in as someone else entirely on a shared device, and either
+  // way this needs to run before any of that gets decided.
+  if (resetPasswordCode) {
+    return <ResetPasswordScreen oobCode={resetPasswordCode} onDone={() => { window.history.replaceState({}, "", window.location.pathname); window.location.reload(); }} />;
+  }
+
   const hasTeacherRole = Boolean(currentTeacher);
   const hasFamilyRole = Boolean(currentFamily);
   const canSwitchRoles = hasTeacherRole && hasFamilyRole;
@@ -2392,7 +2661,7 @@ function AppInner() {
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
-          families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
+          families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin}
           canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />;
@@ -2437,7 +2706,7 @@ function AppInner() {
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
-        families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
+        families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
         programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
     }
@@ -2570,10 +2839,13 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
   const [role, setRole] = useState("teacher");
   const [isSubstitute, setIsSubstitute] = useState(false);
   const [selectedClassIds, setSelectedClassIds] = useState([]);
+  const [messagingClassTypes, setMessagingClassTypes] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   const toggleClass = (id) => setSelectedClassIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const toggleMessagingClassType = (t) => setMessagingClassTypes((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
+  const availableClassTypes = [...new Set(classes.map((c) => c.classType).filter(Boolean))];
 
   const save = async () => {
     setError("");
@@ -2582,7 +2854,7 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
       return;
     }
     setSaving(true);
-    const result = await onSave(name.trim(), email.trim(), tempPassword, role, selectedClassIds, isSubstitute);
+    const result = await onSave(name.trim(), email.trim(), tempPassword, role, selectedClassIds, isSubstitute, messagingClassTypes);
     setSaving(false);
     if (!result.ok) setError(result.error);
   };
@@ -2617,6 +2889,23 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
           </button>
         ))}
       </div>
+
+      {availableClassTypes.length > 0 && (
+        <>
+          <label className="block text-xs font-semibold text-stone-700 mb-1">
+            Reachable by every parent in these grade levels
+            <span className="font-normal text-stone-400"> — for someone parents should be able to message even though they're not tied to specific classes (a curriculum coordinator, for example), without assigning them to every class one at a time. Separate from the class list above — this doesn't require picking any specific class.</span>
+          </label>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {availableClassTypes.map((t) => (
+              <button key={t} onClick={() => toggleMessagingClassType(t)}
+                className={`text-xs font-semibold px-2.5 py-1 rounded-full border capitalize ${messagingClassTypes.includes(t) ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
       {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
 
@@ -2668,14 +2957,22 @@ function AddGuardianForm({ existingFamily, onSave, onCancel }) {
   );
 }
 
-function FamilyAccountForm({ allStudents, onSave, onCancel }) {
+function FamilyAccountForm({ allStudents, activeClasses, onSave, onCreateStudentInClass, onCancel }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [tempPassword, setTempPassword] = useState("");
+  const [addSecondParent, setAddSecondParent] = useState(false);
+  const [name2, setName2] = useState("");
+  const [email2, setEmail2] = useState("");
+  const [tempPassword2, setTempPassword2] = useState("");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState([]); // [{classId, studentId, studentName, className}]
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [creatingStudent, setCreatingStudent] = useState(false);
+  const [newStudentClassId, setNewStudentClassId] = useState(activeClasses?.[0]?.id || "");
+  const [newStudentName, setNewStudentName] = useState("");
+  const [studentCreating, setStudentCreating] = useState(false);
 
   const toggleStudent = (s) => setSelected((prev) =>
     prev.some((x) => x.classId === s.classId && x.studentId === s.studentId)
@@ -2684,6 +2981,24 @@ function FamilyAccountForm({ allStudents, onSave, onCancel }) {
   );
   const isSelected = (s) => selected.some((x) => x.classId === s.classId && x.studentId === s.studentId);
 
+  // Creates the student directly in the chosen class's roster, then immediately links them to
+  // this family being set up — the whole point being one continuous flow instead of a separate
+  // trip into that class first, then back here to search for a student who now happens to exist.
+  const createAndLinkStudent = async () => {
+    setError("");
+    if (!newStudentClassId || !newStudentName.trim()) {
+      setError("Pick a class and enter the new student's name.");
+      return;
+    }
+    setStudentCreating(true);
+    const result = await onCreateStudentInClass(newStudentClassId, newStudentName.trim());
+    setStudentCreating(false);
+    if (!result.ok) { setError(result.error); return; }
+    const cls = activeClasses.find((c) => c.id === newStudentClassId);
+    setSelected((prev) => [...prev, { classId: newStudentClassId, studentId: result.student.id, studentName: result.student.name, className: cls?.name || "" }]);
+    setNewStudentName("");
+  };
+
   const filtered = search.trim()
     ? allStudents.filter((s) => s.studentName.toLowerCase().includes(search.toLowerCase()))
     : allStudents;
@@ -2691,7 +3006,11 @@ function FamilyAccountForm({ allStudents, onSave, onCancel }) {
   const save = async () => {
     setError("");
     if (!name.trim() || !email.trim() || tempPassword.length < 6) {
-      setError("Family name, email, and a temporary password of at least 6 characters are all required.");
+      setError("A name, email, and a temporary password of at least 6 characters are all required.");
+      return;
+    }
+    if (addSecondParent && (!name2.trim() || !email2.trim() || tempPassword2.length < 6)) {
+      setError("The second parent needs a name, email, and a temporary password of at least 6 characters too — or uncheck adding one.");
       return;
     }
     if (selected.length === 0) {
@@ -2699,17 +3018,36 @@ function FamilyAccountForm({ allStudents, onSave, onCancel }) {
       return;
     }
     setSaving(true);
-    const result = await onSave(name.trim(), email.trim(), tempPassword, selected);
+    const result = await onSave(name.trim(), email.trim(), tempPassword, selected,
+      addSecondParent ? { name: name2.trim(), email: email2.trim(), tempPassword: tempPassword2 } : null);
     setSaving(false);
     if (!result.ok) setError(result.error);
   };
 
   return (
     <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Family name (e.g. The Levi Family)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      <p className="text-xs font-semibold text-stone-700 mb-1">Parent 1</p>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Parent 1's name (e.g. David Cohen)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (this is their username)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       <input type="text" value={tempPassword} onChange={(e) => setTempPassword(e.target.value)} placeholder="Temporary password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       <p className="text-[10px] text-stone-400 mb-3">Share this password with them directly — there's no reset-email flow yet, so for now they'll sign in with exactly what you set here.</p>
+
+      {!addSecondParent ? (
+        <button onClick={() => setAddSecondParent(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+          <Plus size={12} /> Add a second parent
+        </button>
+      ) : (
+        <div className="border-t border-stone-200 pt-2.5 mb-3">
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs font-semibold text-stone-700">Parent 2</p>
+            <button onClick={() => { setAddSecondParent(false); setName2(""); setEmail2(""); setTempPassword2(""); }} className="text-stone-400 hover:text-stone-600"><X size={13} /></button>
+          </div>
+          <p className="text-[10px] text-stone-400 mb-1.5">A genuinely separate login — their own email and password, on their own device — linked to the same kids and the same conversations as Parent 1.</p>
+          <input value={name2} onChange={(e) => setName2(e.target.value)} placeholder="Parent 2's name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          <input type="email" value={email2} onChange={(e) => setEmail2(e.target.value)} placeholder="Parent 2's email" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          <input type="text" value={tempPassword2} onChange={(e) => setTempPassword2(e.target.value)} placeholder="Parent 2's temporary password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+        </div>
+      )}
 
       <label className="block text-xs font-semibold text-stone-700 mb-1">Link their child(ren)</label>
       {selected.length > 0 && (
@@ -2734,6 +3072,31 @@ function FamilyAccountForm({ allStudents, onSave, onCancel }) {
           </button>
         ))}
       </div>
+
+      {!creatingStudent ? (
+        <button onClick={() => setCreatingStudent(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+          <Plus size={12} /> Create a new student
+        </button>
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-lg p-2.5 mb-3">
+          <p className="text-xs font-semibold text-stone-700 mb-1.5">New student</p>
+          <div className="flex gap-2 mb-2">
+            <select value={newStudentClassId} onChange={(e) => setNewStudentClassId(e.target.value)}
+              className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm">
+              {(activeClasses || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <input value={newStudentName} onChange={(e) => setNewStudentName(e.target.value)} placeholder="Student's name"
+              onKeyDown={(e) => e.key === "Enter" && createAndLinkStudent()}
+              className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          </div>
+          <div className="flex gap-2">
+            <button onClick={createAndLinkStudent} disabled={studentCreating} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800 disabled:opacity-40">
+              {studentCreating ? "Creating..." : "Create & link"}
+            </button>
+            <button onClick={() => { setCreatingStudent(false); setNewStudentName(""); }} className="text-xs font-semibold text-stone-500 hover:text-stone-700">Cancel</button>
+          </div>
+        </div>
+      )}
 
       {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
 
@@ -3105,6 +3468,281 @@ function OfficeContactSettings() {
   );
 }
 
+// Lets admin edit the one central parent-setup-email template, with a live preview using sample
+// data so they can see exactly what a real parent would receive without needing to actually
+// create a test account to check it.
+function ParentSetupEmailSettings() {
+  const [template, setTemplate] = useState(DEFAULT_PARENT_SETUP_EMAIL_TEMPLATE);
+  const [draft, setDraft] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+
+  useEffect(() => {
+    loadJSON("schoolSettings", {}, true).then((s) => {
+      setTemplate(s?.parentSetupEmailTemplate || DEFAULT_PARENT_SETUP_EMAIL_TEMPLATE);
+      setLoaded(true);
+    });
+  }, []);
+
+  const startEditing = () => { setDraft(template); setEditing(true); setShowPreview(false); };
+
+  const save = async () => {
+    const existing = (await loadJSON("schoolSettings", {}, true)) || {};
+    await saveJSON("schoolSettings", { ...existing, parentSetupEmailTemplate: draft }, true);
+    setTemplate(draft);
+    setEditing(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  const resetToDefault = () => setDraft(DEFAULT_PARENT_SETUP_EMAIL_TEMPLATE);
+
+  const previewText = renderParentSetupEmail(editing ? draft : template, {
+    parentName: "Sarah Cohen", studentName: "Ezra", schoolName: "SJA", email: "sarah.cohen@example.com",
+    tempPassword: "Welcome123", loginLink: `${typeof window !== "undefined" ? window.location.origin : ""}/?portal=parent`,
+  });
+
+  if (!loaded) return null;
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-4 mb-6">
+      <p className="text-sm font-semibold text-stone-800 mb-1">Parent account setup email</p>
+      <p className="text-xs text-stone-400 mb-3">The email a new family gets with their login info. Edit the wording below — the bracketed placeholders get swapped for each family's real information when it's actually sent.</p>
+
+      {editing ? (
+        <>
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={10}
+            className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm font-mono mb-2 resize-none" />
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {PARENT_SETUP_EMAIL_PLACEHOLDERS.map((p) => (
+              <button key={p.key} onClick={() => setDraft((d) => d + `{{${p.key}}}`)} title={p.label}
+                className="text-[10px] font-mono font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-full px-2 py-1 hover:bg-teal-100">
+                {`{{${p.key}}}`}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <button onClick={save} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800">Save</button>
+            <button onClick={() => setEditing(false)} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50">Cancel</button>
+            <button onClick={resetToDefault} className="text-xs font-semibold text-stone-400 hover:text-stone-700">Reset to default wording</button>
+            <button onClick={() => setShowPreview((v) => !v)} className="text-xs font-semibold text-teal-700 hover:text-teal-900 ml-auto">
+              {showPreview ? "Hide preview" : "Preview with sample data"}
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3 mb-3">
+          <button onClick={startEditing} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-50">Edit wording</button>
+          <button onClick={() => setShowPreview((v) => !v)} className="text-xs font-semibold text-stone-500 hover:text-stone-800">
+            {showPreview ? "Hide preview" : "Preview with sample data"}
+          </button>
+          {saved && <span className="text-xs font-semibold text-emerald-700">Saved</span>}
+        </div>
+      )}
+
+      {showPreview && (
+        <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 whitespace-pre-wrap text-xs text-stone-700 leading-relaxed">
+          {previewText}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// A central place for admin to see across the whole school in one spot, rather than needing to
+// enter every class one at a time. Classroom threads: admin can open and post to any of them,
+// same access they'd already have by entering that class directly — this is just a faster way in.
+// Individual teacher threads: deliberately read-only here, matching the same restriction
+// everywhere else in the app — only the one specific teacher named in a thread can ever post to
+// it, so a parent's direct line to a teacher stays genuinely private even from admin's own view.
+// Lets admin describe, per class, what each individually-messageable person's actual role is
+// there — deliberately keyed by (class, person) rather than stored once on the account, since the
+// same person's role can genuinely differ by classroom (a Judaic Studies teacher in one room, a
+// General Studies teacher in another). A parent picking who to message sees this instead of
+// having to guess from a bare name; the account itself never carries a single fixed title.
+function ClassMessagingLabelsEditor({ activeClasses, teachers }) {
+  const [selectedClassId, setSelectedClassId] = useState(activeClasses[0]?.id || "");
+  const [labels, setLabels] = useState(null); // { [uid]: "label text" }
+  const [drafts, setDrafts] = useState({});
+  const [savedFor, setSavedFor] = useState(null);
+
+  const selectedClass = activeClasses.find((c) => c.id === selectedClassId);
+
+  // Everyone parents of THIS class can currently message individually — same eligibility rule
+  // the family-facing endpoint uses, just computed here directly since admin already has full
+  // read access to every teacher record.
+  const eligiblePeople = (teachers || []).filter((t) => {
+    if (t.active === false) return false;
+    const viaClass = (t.assignedClassIds || []).includes(selectedClassId);
+    const viaGradeLevel = selectedClass && (t.messagingClassTypes || []).includes(selectedClass.classType);
+    return viaClass || viaGradeLevel;
+  });
+
+  useEffect(() => {
+    (async () => {
+      setLabels(null);
+      if (!selectedClassId) { setLabels({}); return; }
+      const data = (await loadJSON(`class:${selectedClassId}:messagingLabels`, {}, true)) || {};
+      setLabels(data);
+      setDrafts(data);
+    })();
+  }, [selectedClassId]);
+
+  const saveLabel = async (uid) => {
+    const value = (drafts[uid] || "").trim();
+    const next = { ...labels, [uid]: value };
+    await saveJSON(`class:${selectedClassId}:messagingLabels`, next, true);
+    setLabels(next);
+    setSavedFor(uid);
+    setTimeout(() => setSavedFor(null), 2000);
+  };
+
+  return (
+    <div>
+      <select value={selectedClassId} onChange={(e) => setSelectedClassId(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3">
+        {activeClasses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+      </select>
+      <p className="text-xs text-stone-400 mb-3">This is what parents of {selectedClass?.name || "this class"} see under each person's name when choosing who to message — not the same thing as changing their account. Edit anytime; changes apply right away.</p>
+
+      {labels === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+      {labels !== null && eligiblePeople.length === 0 && <p className="text-sm text-stone-400 text-center py-8">Nobody is individually messageable for this class yet.</p>}
+      {labels !== null && (
+        <div className="space-y-2">
+          {eligiblePeople.map((t) => (
+            <div key={t.uid} className="bg-white border border-stone-200 rounded-xl p-3.5">
+              <p className="text-sm font-semibold text-stone-900 mb-1.5">{t.name}</p>
+              <div className="flex gap-2">
+                <input value={drafts[t.uid] ?? ""} onChange={(e) => setDrafts((d) => ({ ...d, [t.uid]: e.target.value }))}
+                  placeholder="e.g. Judaic Studies Teacher" className="flex-1 rounded-lg border border-stone-300 px-2.5 py-1.5 text-sm" />
+                <button onClick={() => saveLabel(t.uid)} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800 shrink-0">Save</button>
+              </div>
+              {savedFor === t.uid && <p className="text-xs text-emerald-700 mt-1">Saved</p>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, families }) {
+  const [section, setSection] = useState("classroom"); // "classroom" | "direct"
+  const [selectedClassId, setSelectedClassId] = useState(activeClasses[0]?.id || "");
+  const [selectedTeacherUid, setSelectedTeacherUid] = useState((teachers || []).find((t) => t.role !== "admin")?.uid || "");
+  const [groups, setGroups] = useState(null);
+  const [threads, setThreads] = useState({});
+  const [openGroup, setOpenGroup] = useState(null);
+
+  const nonAdminTeachers = (teachers || []).filter((t) => t.role !== "admin" && t.active !== false);
+
+  const refresh = useCallback(async () => {
+    setOpenGroup(null);
+    if (section === "classroom") {
+      if (!selectedClassId) { setGroups([]); return; }
+      const relevant = (families || []).filter((f) => (f.studentLinks || []).some((l) => l.classId === selectedClassId));
+      const byGroup = {};
+      relevant.forEach((f) => {
+        const groupId = f.familyGroupId || f.uid;
+        if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
+        byGroup[groupId].guardians.push(f);
+      });
+      const groupList = Object.values(byGroup);
+      setGroups(groupList);
+      const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`class:${selectedClassId}:messages:${g.groupId}`, { messages: [] }, true)]));
+      setThreads(Object.fromEntries(entries));
+    } else {
+      if (!selectedTeacherUid) { setGroups([]); return; }
+      const teacherClassIds = (teachers.find((t) => t.uid === selectedTeacherUid)?.assignedClassIds) || [];
+      const relevant = (families || []).filter((f) => (f.studentLinks || []).some((l) => teacherClassIds.includes(l.classId)));
+      const byGroup = {};
+      relevant.forEach((f) => {
+        const groupId = f.familyGroupId || f.uid;
+        if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
+        byGroup[groupId].guardians.push(f);
+      });
+      const groupList = Object.values(byGroup);
+      setGroups(groupList);
+      const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${selectedTeacherUid}:${g.groupId}`, { messages: [] }, true)]));
+      setThreads(Object.fromEntries(entries));
+    }
+  }, [section, selectedClassId, selectedTeacherUid, families, teachers]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const sendAsAdminToClass = async (familyGroupId, text) => {
+    const key = `class:${selectedClassId}:messages:${familyGroupId}`;
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const className = activeClasses.find((c) => c.id === selectedClassId)?.name || "the class";
+    const entry = { id: uid(), senderType: "teacher", senderName: currentTeacher?.name || "School Office", text, timestamp: new Date().toISOString() };
+    const next = { messages: [...existing.messages, entry] };
+    await saveJSON(key, next, true);
+    notifyFamilyGroup(familyGroupId, `Message from ${className}`, text?.trim() || "New message", `/?portal=parent&open=messages&classId=${selectedClassId}`);
+    return next;
+  };
+
+  if (openGroup) {
+    const thread = threads[openGroup.groupId] || { messages: [] };
+    const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
+    const childNames = (openGroup.studentLinks || []).map((l) => l.studentName).join(", ");
+    return (
+      <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages}
+        myRole={section === "classroom" ? "teacher" : "admin"} readOnly={section !== "classroom"}
+        threadKey={section === "classroom" ? `classroom-${openGroup.groupId}` : `teacher-direct-${openGroup.groupId}`}
+        onBack={() => { setOpenGroup(null); refresh(); }}
+        onSend={section === "classroom" ? async (text) => { await sendAsAdminToClass(openGroup.groupId, text); await refresh(); } : undefined} />
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
+        <button onClick={() => setSection("classroom")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${section === "classroom" ? "bg-white text-[#1c3453] shadow-sm" : "text-stone-500"}`}>Classroom threads</button>
+        <button onClick={() => setSection("direct")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${section === "direct" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Direct threads</button>
+      </div>
+
+      {section === "classroom" ? (
+        <>
+          <select value={selectedClassId} onChange={(e) => setSelectedClassId(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3">
+            {activeClasses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <p className="text-xs text-stone-400 mb-3">You can view and post here — same access you'd have by entering this class directly.</p>
+        </>
+      ) : (
+        <>
+          <select value={selectedTeacherUid} onChange={(e) => setSelectedTeacherUid(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3">
+            {nonAdminTeachers.map((t) => <option key={t.uid} value={t.uid}>{t.name}</option>)}
+          </select>
+          <p className="text-xs text-stone-400 mb-3">View-only — only {nonAdminTeachers.find((t) => t.uid === selectedTeacherUid)?.name || "this teacher"} can post in their own direct threads.</p>
+        </>
+      )}
+
+      {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+      {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No threads here yet.</p>}
+      <div className="space-y-2">
+        {(groups || []).map((g) => {
+          const thread = threads[g.groupId];
+          const last = thread?.messages?.[thread.messages.length - 1];
+          const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+          const childNames = (g.studentLinks || []).map((l) => l.studentName).join(", ");
+          return (
+            <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-stone-900">{guardianNames}</p>
+                {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+              </div>
+              <p className="text-xs text-stone-400 mb-1">{childNames}</p>
+              <p className="text-xs text-stone-500 truncate">{last ? last.text : "No messages yet"}</p>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // Same top-bar pattern as the classroom and parent sides — the admin page had grown into one
 // long scroll of every section stacked on top of each other; splitting it into destinations
 // makes each one reachable directly instead of scrolling past everything else to find it.
@@ -3133,7 +3771,7 @@ function AdminMainTabs({ active, navigate }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -3193,6 +3831,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showArchivedStudents, setShowArchivedStudents] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
+  const [showMessagesLookup, setShowMessagesLookup] = useState(false);
+  const [showLabelsEditor, setShowLabelsEditor] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
   const handleExport = async (params) => {
     const sheets = await onBuildExportData(params);
@@ -3230,7 +3870,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [defaultPwSaved, setDefaultPwSaved] = useState(false);
   useEffect(() => { loadJSON("defaultParentPassword", "Welcome123", true).then(setDefaultParentPassword); }, []);
   const [showAdminMessages, setShowAdminMessages] = useState(false);
-  const [familyCreatedNote, setFamilyCreatedNote] = useState("");
+  const [familyCreatedNote, setFamilyCreatedNote] = useState(null);
   const [showArchivedFamilies, setShowArchivedFamilies] = useState(false);
   const [addingGuardianTo, setAddingGuardianTo] = useState(null); // the family group currently getting a second guardian, or null
   const [viewingFamilyGroupId, setViewingFamilyGroupId] = useState(null);
@@ -3475,6 +4115,29 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
         {adminTab === "more" && (
         <>
+        <ParentSetupEmailSettings />
+        <div className="pt-1 mb-6">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Look up a conversation</p>
+          <p className="text-xs text-stone-400 mb-3">Not a feed to watch — this is here for when you need to check something specific: browse any class's messages, or view (read-only) a teacher's direct messages with a family.</p>
+          {!showMessagesLookup ? (
+            <button onClick={() => setShowMessagesLookup(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Look up messages
+            </button>
+          ) : (
+            <AdminMessagesMonitor activeClasses={activeClasses} teachers={teachers} currentTeacher={currentTeacher} families={families} />
+          )}
+        </div>
+        <div className="pt-1 mb-6">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Label who parents see, per class</p>
+          <p className="text-xs text-stone-400 mb-3">Pick a class, see everyone its parents can currently message individually, and give each of them a role label — "Judaic Studies Teacher," "General Studies Teacher," whatever fits. The same person can have a different label in a different class, since edited here per class, not attached to their account.</p>
+          {!showLabelsEditor ? (
+            <button onClick={() => setShowLabelsEditor(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Edit labels
+            </button>
+          ) : (
+            <ClassMessagingLabelsEditor activeClasses={activeClasses} teachers={teachers} />
+          )}
+        </div>
         <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
           <p className="text-xs text-stone-400 mb-3">Build a custom Excel report — pick who to include and what to include, and it downloads as one file with a sheet per type of data.</p>
@@ -3679,8 +4342,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
           {showTeacherForm && (
             <TeacherAccountForm classes={activeClasses}
-              onSave={async (name, email, tempPassword, role, classIds, isSubstitute) => {
-                const result = await onCreateTeacher(name, email, tempPassword, role, classIds, isSubstitute);
+              onSave={async (name, email, tempPassword, role, classIds, isSubstitute, messagingClassTypes) => {
+                const result = await onCreateTeacher(name, email, tempPassword, role, classIds, isSubstitute, messagingClassTypes);
                 if (result.ok) setShowTeacherForm(false);
                 return result;
               }} onCancel={() => setShowTeacherForm(false)} />
@@ -3726,6 +4389,26 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                           );
                         })}
                       </div>
+                      {[...new Set(activeClasses.map((c) => c.classType).filter(Boolean))].length > 0 && (
+                        <>
+                          <p className="text-[10px] text-stone-400 mb-1.5 mt-2.5">Reachable by every parent in these grade levels, regardless of specific class:</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {[...new Set(activeClasses.map((c) => c.classType).filter(Boolean))].map((ct) => {
+                              const enabled = (t.messagingClassTypes || []).includes(ct);
+                              return (
+                                <button key={ct}
+                                  onClick={() => {
+                                    const next = enabled ? (t.messagingClassTypes || []).filter((x) => x !== ct) : [...(t.messagingClassTypes || []), ct];
+                                    onUpdateTeacher(t.uid, { messagingClassTypes: next });
+                                  }}
+                                  className={`text-xs font-semibold px-2.5 py-1 rounded-full border capitalize ${enabled ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                                  {ct}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                     </div>
                   )}
                 </li>
@@ -3784,20 +4467,48 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </button>
           )}
           {familyCreatedNote && (
-            <p className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">{familyCreatedNote}</p>
+            <div className="mb-3">
+              <p className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-2">{familyCreatedNote.message}</p>
+              {!familyCreatedNote.linkedExisting && (
+                <div className="space-y-2">
+                  {familyCreatedNote.guardians.map((g, i) => (
+                    <div key={i}>
+                      {familyCreatedNote.guardians.length > 1 && <p className="text-[10px] font-semibold text-stone-400 mb-1">{g.name}'s setup email:</p>}
+                      <SendParentSetupEmailButton parentName={g.name} studentName={familyCreatedNote.studentName}
+                        email={g.email} tempPassword={g.tempPassword} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {showFamilyForm && (
-            <FamilyAccountForm allStudents={allStudentsForLinking}
-              onSave={async (name, email, tempPassword, studentLinks) => {
+            <FamilyAccountForm allStudents={allStudentsForLinking} activeClasses={activeClasses} onCreateStudentInClass={onCreateStudentInClass}
+              onSave={async (name, email, tempPassword, studentLinks, secondGuardian) => {
                 const result = await onCreateFamily(name, email, tempPassword, studentLinks);
-                if (result.ok) {
-                  setShowFamilyForm(false);
-                  setFamilyCreatedNote(result.linkedExisting
-                    ? `${name} was linked to ${email}'s existing teacher login — they'll sign in the same way as always, and can now switch between Teacher and Parent views.`
-                    : `${name}'s family account was created.`);
-                  setTimeout(() => setFamilyCreatedNote(""), 8000);
+                if (!result.ok) return result;
+                const guardians = [{ name, email, tempPassword }];
+                let secondGuardianError = null;
+                // The second guardian is a genuinely separate account, chained to the first via
+                // the uid createFamilyAccount just returned — same kids, same conversations,
+                // without asking the admin to pick the students a second time.
+                if (secondGuardian) {
+                  const secondResult = await onCreateFamily(secondGuardian.name, secondGuardian.email, secondGuardian.tempPassword, studentLinks, result.uid);
+                  if (secondResult.ok) guardians.push(secondGuardian);
+                  else secondGuardianError = secondResult.error;
                 }
+                setShowFamilyForm(false);
+                setFamilyCreatedNote({
+                  message: result.linkedExisting
+                    ? `${name} was linked to ${email}'s existing teacher login — they'll sign in the same way as always, and can now switch between Teacher and Parent views.`
+                    : secondGuardianError
+                    ? `${name}'s family account was created, but the second parent couldn't be added: ${secondGuardianError}`
+                    : `${name}'s family account was created${guardians.length > 1 ? ", with both parents linked" : ""}.`,
+                  guardians, linkedExisting: result.linkedExisting,
+                  studentName: (studentLinks || []).map((l) => l.studentName).join(" & "),
+                });
+                setTimeout(() => setFamilyCreatedNote(null), 20000);
                 return result;
               }} onCancel={() => setShowFamilyForm(false)} />
           )}
@@ -3939,6 +4650,135 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   );
 }
 
+// Triggered from either sign-in screen — one shared flow since a reset email works identically
+// regardless of whether the account is a teacher or a family. Deliberately shows the same
+// confirmation message whether or not the email actually has an account: revealing that
+// difference would let someone probe, one email at a time, for which addresses are registered —
+// a real privacy leak the standard "if an account exists, we've sent a link" phrasing avoids.
+function ForgotPasswordModal({ onClose }) {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const send = async () => {
+    if (!email.trim()) return;
+    setSending(true);
+    setError("");
+    try {
+      await sendPasswordResetEmail(auth, email.trim(), { url: window.location.origin + window.location.pathname });
+      setSent(true);
+    } catch (err) {
+      // auth/user-not-found is deliberately treated as success from here on out — see comment
+      // above the component.
+      if (err.code === "auth/user-not-found" || err.code === "auth/invalid-email") setSent(true);
+      else setError("Something went wrong sending that email. Try again in a moment.");
+    }
+    setSending(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-lg font-bold text-stone-900" style={{ fontFamily: "Georgia, serif" }}>Reset your password</p>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-600"><X size={20} /></button>
+        </div>
+        {sent ? (
+          <>
+            <p className="text-sm text-stone-600 mb-4">If an account exists for that email, a reset link is on its way — check your inbox (and spam folder) in the next few minutes.</p>
+            <button onClick={onClose} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Done</button>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-stone-600 mb-3">Enter the email on your account and we'll send you a link to set a new password.</p>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder="Email" autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-3 focus:border-teal-500 focus:outline-none" />
+            {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
+            <button onClick={send} disabled={sending || !email.trim()} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+              {sending ? "Sending..." : "Send reset link"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Shown when the app itself detects a real Firebase reset link (?mode=resetPassword&oobCode=...
+// in the URL) — this is what keeps the whole flow inside the app's own look, rather than
+// bouncing someone out to a generic, unbranded Firebase page mid-flow. All the actual security —
+// the code's validity, expiration, and single-use enforcement — is handled by Firebase itself;
+// this only ever displays what Firebase already told it.
+function ResetPasswordScreen({ oobCode, onDone }) {
+  const [status, setStatus] = useState("checking"); // "checking" | "ready" | "invalid" | "done"
+  const [email, setEmail] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    verifyPasswordResetCode(auth, oobCode)
+      .then((verifiedEmail) => { setEmail(verifiedEmail); setStatus("ready"); })
+      .catch(() => setStatus("invalid"));
+  }, [oobCode]);
+
+  const save = async () => {
+    if (newPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (newPassword !== confirm) { setError("Passwords don't match."); return; }
+    setError("");
+    setSaving(true);
+    try {
+      await confirmPasswordReset(auth, oobCode, newPassword);
+      setStatus("done");
+    } catch {
+      setError("That link has expired or was already used — request a new one from the sign-in screen.");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
+      <GlobalAppStyles />
+      <div className="max-w-sm w-full bg-white border border-stone-200 rounded-2xl p-5 shadow-sm">
+        {status === "checking" && <p className="text-sm text-stone-500 text-center py-6">Checking your link...</p>}
+
+        {status === "invalid" && (
+          <>
+            <p className="text-lg font-bold text-stone-900 mb-2" style={{ fontFamily: "Georgia, serif" }}>Link expired</p>
+            <p className="text-sm text-stone-600 mb-4">This reset link has expired or was already used. Head back to the sign-in screen and request a new one.</p>
+            <button onClick={onDone} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Back to sign in</button>
+          </>
+        )}
+
+        {status === "ready" && (
+          <>
+            <p className="text-lg font-bold text-stone-900 mb-1" style={{ fontFamily: "Georgia, serif" }}>Set a new password</p>
+            <p className="text-xs text-stone-400 mb-4">for {email}</p>
+            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="New password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none" />
+            <input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()}
+              placeholder="Confirm new password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-3 focus:border-teal-500 focus:outline-none" />
+            {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
+            <button onClick={save} disabled={saving} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+              {saving ? "Saving..." : "Set new password"}
+            </button>
+          </>
+        )}
+
+        {status === "done" && (
+          <>
+            <p className="text-lg font-bold text-stone-900 mb-2" style={{ fontFamily: "Georgia, serif" }}>Password updated</p>
+            <p className="text-sm text-stone-600 mb-4">You can now sign in with your new password.</p>
+            <button onClick={onDone} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Continue to sign in</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -3947,6 +4787,7 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
   const [showSubEntry, setShowSubEntry] = useState(false);
   const [subCode, setSubCode] = useState("");
   const [subError, setSubError] = useState("");
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
 
   const trySignIn = async () => {
     if (!email.trim() || !password) return;
@@ -3966,6 +4807,7 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
       <GlobalAppStyles />
+      {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
       <div className="max-w-sm w-full">
         <img src="/logo-transparent.png" alt="Classroom Tracker" className="w-48 mx-auto mb-5" />
         <h1 className="display-font text-2xl font-bold text-stone-900 text-center mb-1">Welcome back</h1>
@@ -3975,7 +4817,8 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
             placeholder="Email" autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
-            placeholder="Password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-3 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
+            placeholder="Password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
+          <button onClick={() => setShowForgotPassword(true)} className="text-xs font-semibold text-stone-400 hover:text-teal-700 mb-3">Forgot password?</button>
           {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
           <button onClick={trySignIn} disabled={signingIn} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
             {signingIn ? "Signing in..." : "Sign in"}
@@ -4038,6 +4881,7 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [signingIn, setSigningIn] = useState(false);
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
 
   const trySignIn = async () => {
     if (!email.trim() || !password) return;
@@ -4051,6 +4895,7 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
       <GlobalAppStyles />
+      {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
       <div className="max-w-sm w-full">
         <img src="/parent-logo-transparent.png" alt="Family Portal" className="w-48 mx-auto mb-5" />
         <h1 className="display-font text-2xl font-bold text-stone-900 text-center mb-1">Family sign in</h1>
@@ -4066,7 +4911,8 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
             placeholder="Email" autoComplete="username" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none" />
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
-            placeholder="Password" autoComplete="current-password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-3 focus:border-teal-500 focus:outline-none" />
+            placeholder="Password" autoComplete="current-password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none" />
+          <button onClick={() => setShowForgotPassword(true)} className="text-xs font-semibold text-stone-400 hover:text-teal-700 mb-3">Forgot password?</button>
           {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
           <button onClick={trySignIn} disabled={signingIn} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
             {signingIn ? "Signing in..." : "Sign in"}
@@ -4175,7 +5021,7 @@ function TourHint({ active, step, total, text, align = "left", onNext, onSkip, c
     <div className="relative">
       {children}
       {active && (
-        <div className={`absolute z-40 top-full mt-2 w-64 ${align === "right" ? "right-0" : "left-0"}`}>
+        <div className={`anim-expand-down absolute z-40 top-full mt-2 w-64 ${align === "right" ? "right-0" : "left-0"}`}>
           <div className={`absolute -top-1.5 w-3 h-3 bg-teal-800 rotate-45 ${align === "right" ? "right-6" : "left-6"}`} />
           <div className="bg-teal-800 text-white rounded-xl p-3 shadow-lg">
             <p className="text-sm mb-2.5 leading-snug">{text}</p>
@@ -4231,7 +5077,7 @@ function ContactOfficePanel({ onViewUpdates }) {
   if (loading || !digits) return null;
 
   return (
-    <div className="bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3">
+    <div className="anim-expand-down bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3">
       <div className="grid grid-cols-3 gap-2 mb-2">
         <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
           <Phone size={18} className="text-[#1c3453]" />
@@ -4295,7 +5141,7 @@ function ContactOfficeView({ adminThread, onBack }) {
           <div className="space-y-2">
             {messages.map((m) => (
               <div key={m.id} className="bg-white border border-stone-200 rounded-xl p-3.5">
-                <p className="text-sm text-stone-700 whitespace-pre-wrap">{m.text}</p>
+                <p className="text-sm text-stone-700 whitespace-pre-wrap"><LinkifiedText text={m.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>
                 <p className="text-[10px] text-stone-400 mt-1">{new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
               </div>
             ))}
@@ -4306,7 +5152,56 @@ function ContactOfficeView({ adminThread, onBack }) {
   );
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack }) {
+// A single "+" entry point for attaching anything — consolidates what used to be two or three
+// separate icon buttons (photo/video, file, audio) into one menu, the same pattern most modern
+// chat composers use (including this very interface). Opens upward since composers live at the
+// bottom of the screen. Each option triggers its own native file picker with the right accept
+// filter via a picker built on demand — still the browser's own file-selection UI underneath,
+// just reached through one consolidated button instead of several competing icons.
+function AttachmentMenuButton({ onPickFile }) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClickOutside = (e) => { if (wrapperRef.current && !wrapperRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [open]);
+
+  const pick = (accept) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.onchange = (e) => onPickFile(e.target.files?.[0]);
+    input.click();
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative shrink-0" ref={wrapperRef}>
+      <button type="button" onClick={() => setOpen((v) => !v)} title="Attach"
+        className={`shrink-0 rounded-full p-2 mb-0.5 ${open ? "bg-teal-50 text-teal-700" : "text-stone-400 hover:text-teal-700"}`}>
+        <Plus size={17} />
+      </button>
+      {open && (
+        <div className="anim-expand-up absolute bottom-full left-0 mb-2 bg-white border border-stone-200 rounded-xl shadow-lg py-1.5 w-48 z-20">
+          <button type="button" onClick={() => pick("image/*,video/*")} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
+            <Camera size={16} className="text-stone-500 shrink-0" /> Photo or video
+          </button>
+          <button type="button" onClick={() => pick("audio/*")} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
+            <Music size={16} className="text-stone-500 shrink-0" /> Audio
+          </button>
+          <button type="button" onClick={() => pick(".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv")} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
+            <Paperclip size={16} className="text-stone-500 shrink-0" /> File
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -4324,6 +5219,24 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   const [editDraft, setEditDraft] = useState("");
   const bottomRef = useRef(null);
   const composerRef = useRef(null);
+  // iOS Safari in particular doesn't shrink the layout viewport when the keyboard opens — it
+  // keeps the page the same overall size and just overlays the keyboard on top. A static 100vh
+  // container in that situation ends up taller than what's actually visible, which is what lets
+  // the whole page become slightly scrollable the moment the input is focused, even before
+  // anything's been typed. Tracking the real, visible height and sizing to that instead is what
+  // keeps this screen exactly as tall as the space actually available, keyboard included.
+  const viewportHeight = useVisualViewportHeight();
+
+  // A simple, explicit global flag — not something inferred by parsing the URL — declaring
+  // "this exact conversation is on screen right now." The foreground notification handler checks
+  // this before deciding whether to show a notification, matching the WhatsApp-style behavior of
+  // suppressing only for the exact content already being viewed, never just because the app
+  // happens to be open. Cleared on unmount so leaving the thread (even via the back button)
+  // immediately makes new messages here notify normally again.
+  useEffect(() => {
+    window.__activeContent = { ...(window.__activeContent || {}), threadKey };
+    return () => { window.__activeContent = { ...(window.__activeContent || {}), threadKey: null }; };
+  }, [threadKey]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "auto" }); }, [messages.length]);
 
@@ -4345,6 +5258,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
     setAttachError(null);
     const isVideo = file.type.startsWith("video/");
     const isImage = file.type.startsWith("image/");
+    const isAudio = file.type.startsWith("audio/");
     if (isVideo) {
       try { await validateVideoDuration(file); }
       catch (err) { setAttachError(err.message); return; }
@@ -4354,7 +5268,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
       return;
     }
     setAttachFile(file);
-    setAttachType(isVideo ? "video" : isImage ? "photo" : "file");
+    setAttachType(isVideo ? "video" : isImage ? "photo" : isAudio ? "audio" : "file");
     setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
   };
   const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
@@ -4371,12 +5285,15 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           attachmentUrl = await uploadOneVideo(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
         } else if (attachType === "photo") {
           attachmentUrl = await uploadOneImage(attachFile, `message-attachments/${threadKey}/${uid()}.jpg`, setUploadProgress);
+        } else if (attachType === "audio") {
+          const ext = (attachFile.name || "").split(".").pop() || "webm";
+          attachmentUrl = await uploadOneFile(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
         } else {
           const ext = (attachFile.name || "").split(".").pop() || "bin";
           attachmentUrl = await uploadOneFile(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
         }
       }
-      await onSend(text.trim(), attachmentUrl, attachType, attachType === "file" ? attachFile.name : null);
+      await onSend(text.trim(), attachmentUrl, attachType, attachType === "file" || attachType === "audio" ? attachFile.name : null);
       setText("");
       clearAttachment();
     } catch (err) {
@@ -4414,12 +5331,30 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
     setGenerating(false);
   };
 
+  // The teacher/admin side's page background is the app's own themed stone-50 (a warm parchment
+  // tone) throughout, and this screen already matches it correctly. The parent portal was later
+  // redesigned to a lighter, slightly different tone (#f6f5f1) as part of its own visual pass —
+  // this screen is shared between both sides, so it needs to pick up on which one it's actually
+  // in rather than always using the teacher-side tone, which is exactly what produced a visible,
+  // flat-beige mismatch against the parent portal's white-card, lighter-background look elsewhere.
+  const threadBg = myRole === "family" ? "#f6f5f1" : undefined;
+
   return (
-    <div className="app-page flex flex-col" style={{ minHeight: "100vh" }}>
+    <div className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh", ...(threadBg ? { background: threadBg } : {}) }}>
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-2 shrink-0"><ChevronLeft size={16} /> Back</button>
       <div className="mb-3 shrink-0">
         <h1 className="display-font text-lg font-bold text-stone-900">{title}</h1>
         {subtitle && <p className="text-xs text-stone-400">{subtitle}</p>}
+        {myRole === "admin" && !readOnly && (
+          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mt-1.5 inline-block">
+            One-way — this family sees your messages but can't reply here. They'll call, text, or WhatsApp the office instead.
+          </p>
+        )}
+        {readOnly && (
+          <p className="text-xs text-stone-500 bg-stone-100 border border-stone-200 rounded-lg px-2.5 py-1.5 mt-1.5 inline-block">
+            Viewing only — only the specific teacher this thread belongs to can post here.
+          </p>
+        )}
       </div>
 
       <div className="flex-1 space-y-2 overflow-y-auto mb-3">
@@ -4457,7 +5392,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                 </div>
 
                 {openActionsFor === m.id && (
-                  <div className="mx-3.5 mb-1.5 flex gap-1.5">
+                  <div className="anim-expand-down mx-3.5 mb-1.5 flex gap-1.5">
                     <button onClick={() => startEdit(m)} className={`text-[11px] font-semibold px-2 py-1 rounded-md ${mine ? "bg-teal-800 text-white hover:bg-teal-900" : "bg-stone-100 text-stone-700 hover:bg-stone-200"}`}>Edit</button>
                     <ConfirmDelete onConfirm={() => confirmDelete(m.id)} size={12} label="Delete" />
                   </div>
@@ -4481,6 +5416,14 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                     {m.attachmentType === "video" && m.attachmentUrl && (
                       <video src={m.attachmentUrl} controls playsInline className="w-full max-h-64 bg-black mt-1" />
                     )}
+                    {m.attachmentType === "audio" && m.attachmentUrl && (
+                      <div className="mt-1.5 mb-1 mx-3.5">
+                        {m.attachmentName && (
+                          <p className={`text-[11px] font-semibold truncate mb-1 ${mine ? "text-teal-100" : "text-stone-500"}`}>{m.attachmentName}</p>
+                        )}
+                        <audio src={m.attachmentUrl} controls className="w-full" style={{ height: "36px" }} />
+                      </div>
+                    )}
                     {m.attachmentType === "file" && m.attachmentUrl && (
                       <a href={m.attachmentUrl} target="_blank" rel="noopener noreferrer"
                         className={`flex items-center gap-2 mx-3.5 mt-1 mb-1 px-3 py-2 rounded-lg border ${mine ? "border-teal-500 bg-teal-800/40" : "border-stone-200 bg-stone-50"}`}>
@@ -4489,7 +5432,8 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                       </a>
                     )}
                     <div className="px-3.5 pb-2.5 pt-1">
-                      {m.text && <p className="text-sm whitespace-pre-wrap">{m.text}</p>}
+                      {m.text && <p className="text-sm whitespace-pre-wrap"><LinkifiedText text={m.text} linkClassName={mine ? "underline text-teal-100 hover:text-white" : "underline text-teal-700 hover:text-teal-900"} /></p>}
+                      {m.text && extractFirstUrl(m.text) && <LinkPreviewCard url={extractFirstUrl(m.text)} />}
                       <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
                         {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
                         {m.edited && <span className="italic"> · edited</span>}
@@ -4506,7 +5450,8 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
 
       {lightboxPhoto && <PhotoLightbox url={lightboxPhoto.url} onClose={() => setLightboxPhoto(null)} />}
 
-      <div className="shrink-0 sticky bottom-0 bg-stone-50 pt-2 pb-1">
+      {!readOnly && (
+      <div className={`shrink-0 sticky bottom-0 pt-2 ${threadBg ? "" : "bg-stone-50"}`} style={{ paddingBottom: "max(0.25rem, env(safe-area-inset-bottom))", ...(threadBg ? { background: threadBg } : {}) }}>
         {showGenerate && (
           <div className="border border-teal-200 bg-teal-50/50 rounded-xl p-2.5 mb-2">
             <div className="flex items-center gap-1.5">
@@ -4537,30 +5482,32 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
             <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
           </div>
         )}
+        {attachType === "audio" && attachFile && (
+          <div className="relative inline-flex items-center gap-1.5 mb-2 ml-11 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
+            <Music size={15} className="text-stone-500" />
+            <span className="text-xs font-semibold text-stone-700 max-w-[10rem] truncate">{attachFile.name}</span>
+            <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+          </div>
+        )}
         {attachError && <p className="text-xs text-rose-600 mb-1.5 ml-11">{attachError}</p>}
         <div className="flex items-end gap-2">
           <button onClick={() => setShowGenerate((v) => !v)} title="Generate with AI"
-            className={`shrink-0 rounded-xl p-2.5 border ${showGenerate ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+            className={`shrink-0 rounded-full p-2.5 mb-0.5 border ${showGenerate ? "bg-teal-50 border-teal-300 text-teal-700" : "bg-stone-50 border-stone-200 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
             <Sparkles size={17} />
           </button>
-          <label title="Attach a photo or video"
-            className={`shrink-0 rounded-xl p-2.5 border cursor-pointer ${attachType === "photo" || attachType === "video" ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
-            <Camera size={17} />
-            <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
-          </label>
-          <label title="Attach a file"
-            className={`shrink-0 rounded-xl p-2.5 border cursor-pointer ${attachType === "file" ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
-            <Paperclip size={17} />
-            <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
-          </label>
-          <textarea ref={composerRef} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            className="flex-1 rounded-xl border border-stone-300 px-3 py-2.5 text-sm resize-none overflow-y-auto" style={{ maxHeight: MAX_COMPOSER_HEIGHT }} />
-          <button onClick={send} disabled={(!text.trim() && !attachFile) || sending} className="bg-teal-700 text-white rounded-xl px-4 py-2.5 text-sm font-bold disabled:opacity-40 hover:bg-teal-800 shrink-0">
-            {sending ? (uploadProgress !== null ? `${uploadProgress}%` : "…") : "Send"}
-          </button>
+          <div className="flex-1 flex items-end gap-1 bg-white border border-stone-300 rounded-3xl pl-1 py-1 pr-2">
+            <AttachmentMenuButton onPickFile={pickAttachment} />
+            <textarea ref={composerRef} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              className="flex-1 bg-transparent border-none px-1.5 py-2 text-sm resize-none overflow-y-auto outline-none" style={{ maxHeight: MAX_COMPOSER_HEIGHT }} />
+            <button onClick={send} disabled={(!text.trim() && !attachFile) || sending} title="Send"
+              className="text-teal-700 hover:text-teal-800 disabled:opacity-30 shrink-0 flex items-center justify-center mb-1.5 p-1">
+              {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={19} />}
+            </button>
+          </div>
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -4687,10 +5634,14 @@ function ChildDailyLogView({ link, onBack }) {
     <div className="app-page">
       {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>}
 
-      <div className="flex items-center justify-center gap-3 mb-5 bg-white border border-stone-200 rounded-xl py-2">
-        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-[#1c3453] p-1"><ChevronLeft size={18} /></button>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} className="text-sm font-semibold text-stone-800 border-none text-center" />
-        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-[#1c3453] p-1 disabled:opacity-30"><ChevronRight size={18} /></button>
+      <div className="inline-flex items-center gap-0.5 mb-5">
+        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-[#1c3453] p-3 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous day"><ChevronLeft size={16} /></button>
+        <div className="relative py-3">
+          <span className="text-sm font-semibold text-stone-800 px-1.5 select-none whitespace-nowrap">{friendlyDateLabel(date)}</span>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()}
+            aria-label="Choose a date" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+        </div>
+        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-[#1c3453] p-3 -m-1 rounded-full hover:bg-stone-100 disabled:opacity-30" aria-label="Next day"><ChevronRight size={16} /></button>
       </div>
 
       {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
@@ -4791,12 +5742,20 @@ function ParentBlogView({ link, family, onBack }) {
 
   const persist = (next) => { setPosts(next); saveJSON(`class:${link.classId}:blogPosts`, next, true); };
 
-  const onReact = (postId, emoji) => {
+  // One reaction per person per post OR per block (blockId optional — omitted means "the whole
+  // post," matching the original behavior for any post that's just one simple block anyway).
+  // Reacting to a specific block is what actually lets someone react to just their own child's
+  // photo in a longer post with several parts, instead of only ever reacting to the post overall.
+  const onReact = (postId, emoji, blockId) => {
     const post = posts.find((p) => p.id === postId);
     if (!post) return;
-    const current = post.reactions?.[emoji] || [];
-    const nextForEmoji = current.includes(reactorId) ? current.filter((id) => id !== reactorId) : [...current, reactorId];
-    persist(posts.map((p) => (p.id === postId ? { ...p, reactions: { ...p.reactions, [emoji]: nextForEmoji } } : p)));
+    if (blockId) {
+      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId) } : b));
+      persist(posts.map((p) => (p.id === postId ? { ...p, blocks: nextBlocks } : p)));
+    } else {
+      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId);
+      persist(posts.map((p) => (p.id === postId ? { ...p, reactions } : p)));
+    }
   };
 
   const onComment = (postId, text) => {
@@ -4926,12 +5885,21 @@ function ParentHomeworkView({ link }) {
                 {post.cadence === "weekly" ? "This week's homework" : "Today's homework"}
                 <span className="ml-2 text-[10px] font-semibold text-stone-400">{new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
               </p>
-              {post.text && <p className="text-sm text-stone-700 whitespace-pre-wrap mb-2">{post.text}</p>}
+              {post.text && <p className="text-sm text-stone-700 whitespace-pre-wrap mb-2"><LinkifiedText text={post.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+              {post.text && extractFirstUrl(post.text) && <LinkPreviewCard url={extractFirstUrl(post.text)} />}
               {post.attachmentType === "photo" && post.attachmentUrl && (
                 <img src={post.attachmentUrl} alt="" className="w-full max-h-56 object-cover rounded-lg" />
               )}
               {post.attachmentType === "video" && post.attachmentUrl && (
                 <video src={post.attachmentUrl} controls playsInline className="w-full max-h-56 bg-black rounded-lg" />
+              )}
+              {post.attachmentType === "audio" && post.attachmentUrl && (
+                <div className="mb-1">
+                  {post.attachmentName && (
+                    <p className="text-[11px] font-semibold text-stone-500 truncate mb-1">{post.attachmentName}</p>
+                  )}
+                  <audio src={post.attachmentUrl} controls className="w-full" style={{ height: "36px" }} />
+                </div>
               )}
               {post.attachmentType === "file" && post.attachmentUrl && (
                 <a href={post.attachmentUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-3 py-2 rounded-lg border border-stone-200 bg-stone-50">
@@ -5024,6 +5992,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  // Same global "what's actually on screen right now" flag used by ConversationThreadView — kept
+  // in sync with parentTab directly here since Blog and Homework are simple tab switches within
+  // this same component, not separately-mounted screens with their own lifecycle to hook into.
+  useEffect(() => {
+    window.__activeContent = { ...(window.__activeContent || {}), tab: parentTab };
+  }, [parentTab]);
+
   const [showScanner, setShowScanner] = useState(false);
   const [contactPanelOpen, setContactPanelOpen] = useState(false);
   // Starts active on this account's first-ever login (no separate wizard, no explicit "start
@@ -5082,6 +6057,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const [messagingThread, setMessagingThread] = useState({ messages: [] });
   const [messagingAdmin, setMessagingAdmin] = useState(false);
   const [adminThread, setAdminThread] = useState({ messages: [] });
+  const [messagingTeacherUid, setMessagingTeacherUid] = useState(null); // uid of the individual teacher thread currently open, or null
+  const [teacherMessagingThread, setTeacherMessagingThread] = useState({ messages: [] });
+  const [eligibleTeachers, setEligibleTeachers] = useState(null); // null while loading; [] once loaded with none
   const [unreadThreads, setUnreadThreads] = useState([]); // [{ threadKey, kind, classId, title, preview, timestamp }]
   const [unreadBlogCount, setUnreadBlogCount] = useState(0); // total new posts across every linked class
 
@@ -5202,6 +6180,32 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     await markThreadRead(family.uid, `admin-${myGroupId}`);
   };
 
+  // Who this family is actually allowed to message one-on-one — computed server-side (families
+  // have no direct read access to teacher records) and deliberately deduplicated by teacher there,
+  // so a teacher covering two of this family's classes, or General Studies for a grade they don't
+  // otherwise teach, still shows up exactly once, not once per class they share.
+  useEffect(() => {
+    (async () => {
+      try {
+        const headers = await authHeaders();
+        const res = await fetch("/api/eligible-teachers", { headers });
+        const data = await res.json();
+        setEligibleTeachers(res.ok ? (data.teachers || []) : []);
+      } catch {
+        setEligibleTeachers([]);
+      }
+    })();
+  }, [myGroupId]);
+
+  // An individual teacher's own thread with this family — separate from any classroom thread, and
+  // never shared with any other teacher who happens to cover the same class.
+  const openTeacherMessages = async (teacherUid) => {
+    setMessagingTeacherUid(teacherUid);
+    const thread = await loadJSON(`teacher-messages:${teacherUid}:${myGroupId}`, { messages: [] }, true);
+    setTeacherMessagingThread(thread || { messages: [] });
+    await markThreadRead(family.uid, `teacher-${teacherUid}`);
+  };
+
   const [scanError, setScanError] = useState(null);
   const [pendingDeepLinkClassId, setPendingDeepLinkClassId] = useState(null); // for "open=blog" links specifically — resolved once fullTimeStudentLinks finishes loading, see effect below
   const [pendingHomeworkDeepLinkClassId, setPendingHomeworkDeepLinkClassId] = useState(null);
@@ -5302,6 +6306,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return next;
   };
 
+  // The individual-teacher counterpart to sendMessageToTeacher above — same shape, but written to
+  // that one teacher's own thread with this family, and notifying only them, never every teacher
+  // sharing the classroom.
+  const sendMessageToIndividualTeacher = async (teacherUid, text, attachmentUrl, attachmentType, attachmentName) => {
+    const key = `teacher-messages:${teacherUid}:${myGroupId}`;
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
+    const next = { messages: [...existing.messages, entry] };
+    await saveJSON(key, next, true);
+    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${myGroupId}`);
+    return next;
+  };
+
   // One shared code, posted at the school — not tied to any child or class. A correct scan proves
   // this parent is physically here right now and unlocks the action screen; it does not itself
   // check anyone in or out. What happens next is a deliberate tap per child, not automatic.
@@ -5355,6 +6372,20 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     );
   }
 
+  if (messagingTeacherUid) {
+    const activeTeacher = (eligibleTeachers || []).find((t) => t.uid === messagingTeacherUid);
+    const teacherName = activeTeacher?.name || "the teacher";
+    const teacherLabel = activeTeacher?.label;
+    return (
+      <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
+        <GlobalAppStyles />
+        <ConversationThreadView title={teacherName} subtitle={teacherLabel ? `Direct message · ${teacherLabel}` : "Direct message"} messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
+          onBack={() => setMessagingTeacherUid(null)}
+          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachmentUrl, attachmentType, attachmentName); await openTeacherMessages(messagingTeacherUid); }} />
+      </div>
+    );
+  }
+
   if (messagingAdmin) {
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
@@ -5370,7 +6401,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
         <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
-            <img src="/parent-logo-transparent.png" alt="" className="w-8 h-8 object-contain shrink-0" />
+            <img src="/sja-parent-portal-mark.png" alt="SJA Parent Portal" className="h-11 w-auto object-contain shrink-0" />
             <div className="min-w-0">
               <h1 className="display-font text-sm font-bold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
               {canSwitchToTeacher && (
@@ -5378,12 +6409,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               )}
             </div>
           </div>
-          <div className="flex items-center gap-3 shrink-0 pl-2">
+          <div className="flex items-start gap-5 shrink-0 pl-2 pr-1">
             <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#1c3453]/90 hover:text-[#1c3453]">
-              <Phone size={20} />
-              <span className="text-[10px] font-bold whitespace-nowrap leading-none">Contact office</span>
+              <Phone size={22} />
+              <span className="text-[10px] font-bold leading-none whitespace-nowrap">Contact office</span>
             </button>
-            <button onClick={() => navigateParentTab("settings")} className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={22} /></button>
+            <button onClick={() => navigateParentTab("settings")} aria-label="Settings" className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={22} /></button>
           </div>
         </div>
         {contactPanelOpen && (
@@ -5407,7 +6438,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <button onClick={() => navigateParentTab("home")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
             <p className="font-semibold text-stone-800 text-sm mb-3">My account</p>
-            <label className="block text-xs font-medium text-stone-500 mb-1">Family name</label>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Your name</label>
             <div className="flex gap-2 mb-4">
               <input value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
               <button onClick={saveName} className="bg-[#1c3453] text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-[#14283f]">Save</button>
@@ -5490,31 +6521,58 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <button onClick={() => setActionUnlocked(false)} className="w-full bg-stone-200 text-stone-700 rounded-xl py-3 text-sm font-bold hover:bg-stone-300">Done</button>
           </>
         ) : parentTab === "messages" ? (
-          <div className="space-y-3">
-            <button onClick={() => openAdminMessages().then(refreshUnreadThreads)}
-              className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
+          <div className="space-y-5">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wide text-[#1c3453]/70 mb-2 px-1">Classes</p>
+              <div className="space-y-3">
+                <button onClick={() => openAdminMessages().then(refreshUnreadThreads)}
+                  className="w-full text-left bg-white border-2 border-[#1c3453]/15 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
+                  <div>
+                    <p className="font-semibold text-stone-900">School Office</p>
+                    <p className="text-xs text-stone-400">Message the office directly</p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 ml-2">
+                    {unreadThreads.some((t) => t.kind === "admin") && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
+                    <ChevronRight size={16} className="text-stone-300" />
+                  </div>
+                </button>
+                {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
+                  <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
+                    className="w-full text-left bg-white border-2 border-[#1c3453]/15 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
+                    <div>
+                      <p className="font-semibold text-stone-900">{l.className}</p>
+                      <p className="text-xs text-stone-400">Message goes to every teacher in this class</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 ml-2">
+                      {unreadThreads.some((t) => t.threadKey === `class-${l.classId}`) && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
+                      <ChevronRight size={16} className="text-stone-300" />
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {eligibleTeachers === null ? null : eligibleTeachers.length > 0 && (
               <div>
-                <p className="font-semibold text-stone-900">School Office</p>
-                <p className="text-xs text-stone-400">Message the office directly</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0 ml-2">
-                {unreadThreads.some((t) => t.kind === "admin") && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
-                <ChevronRight size={16} className="text-stone-300" />
-              </div>
-            </button>
-            {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
-              <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
-                className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
-                <div>
-                  <p className="font-semibold text-stone-900">{l.className}</p>
-                  <p className="text-xs text-stone-400">Message the classroom</p>
+                <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
+                <div className="space-y-3">
+                  {eligibleTeachers.map((t) => (
+                    <button key={t.uid} onClick={() => openTeacherMessages(t.uid).then(refreshUnreadThreads)}
+                      className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
+                      <div>
+                        <p className="font-semibold text-stone-900">{t.name}</p>
+                        {t.label && <p className="text-xs font-semibold text-teal-700">{t.label}</p>}
+                        <p className="text-xs text-stone-400">Message goes only to {t.name}</p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0 ml-2">
+                        {unreadThreads.some((th) => th.threadKey === `teacher-${t.uid}`) && <span className="w-2 h-2 rounded-full bg-teal-700" />}
+                        <ChevronRight size={16} className="text-stone-300" />
+                      </div>
+                    </button>
+                  ))}
                 </div>
-                <div className="flex items-center gap-2 shrink-0 ml-2">
-                  {unreadThreads.some((t) => t.threadKey === `class-${l.classId}`) && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
-                  <ChevronRight size={16} className="text-stone-300" />
-                </div>
-              </button>
-            ))}
+              </div>
+            )}
           </div>
         ) : parentTab === "blog" ? (
           fullTimeStudentLinks === null ? (
@@ -5786,7 +6844,33 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
-  const [view, setView] = useState(() => (deepLinkGroupId ? "messages" : classType === "preschool" ? "daily-log" : "home"));
+  const [view, setView] = useState(() => {
+    if (deepLinkGroupId) return "messages";
+    // Restores whichever screen was open if the class itself was just restored from the URL too
+    // (a reload, or the OS having killed and restarted the page) — without this, that restore
+    // would always land back on Home even if the teacher was deep in Comm or Assessments.
+    const urlView = new URLSearchParams(window.location.search).get("view");
+    if (urlView) return urlView;
+    return classType === "preschool" ? "daily-log" : "home";
+  });
+  // Pushing a real history entry here is what lets the Android back button step back through a
+  // teacher's actual screens (Comm → Home, not straight to the class picker) instead of treating
+  // this level of navigation as invisible to the browser — the same reasoning and pattern as the
+  // class-selection and parent-tab history work already in place.
+  const navigateView = (newView) => {
+    setView(newView);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", newView);
+    window.history.pushState({ view: newView }, "", url);
+  };
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      setView(params.get("view") || (classType === "preschool" ? "daily-log" : "home"));
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [classType]);
   const [showPlan, setShowPlan] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -6010,10 +7094,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         if (item.type === "video") {
           const ext = (item.file.name || "").split(".").pop() || "mp4";
           url = await uploadOneVideo(item.file, `blog/${classId}/${postId}/${uid()}.${ext}`, reportProgress);
+        } else if (item.type === "audio") {
+          const ext = (item.file.name || "").split(".").pop() || "mp3";
+          url = await uploadOneFile(item.file, `blog/${classId}/${postId}/${uid()}.${ext}`, reportProgress);
         } else {
           url = await uploadOneImage(item.file, `blog/${classId}/${postId}/${uid()}.jpg`, reportProgress);
         }
-        media.push({ url, type: item.type });
+        media.push({ url, type: item.type, name: item.type === "audio" ? item.file.name : null });
         uploadedCount++;
         if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
       }
@@ -6056,12 +7143,19 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     notifyClassFamilies(classId, `${heading} — ${className}`, text?.trim() || "Check the homework section", `/?portal=parent&open=homework&classId=${classId}`);
     return entry;
   };
-  const toggleBlogReaction = (postId, emoji, reactorId) => {
+  // Same single-reaction-per-person-or-per-block logic as the parent-side version — see that one
+  // for the reasoning. reactorId is passed in here rather than closed over, since a teacher
+  // viewing their own class's posts can react as themselves too, using this same function.
+  const toggleBlogReaction = (postId, emoji, reactorId, blockId) => {
     const post = blogPosts.find((p) => p.id === postId);
     if (!post) return;
-    const current = post.reactions?.[emoji] || [];
-    const nextForEmoji = current.includes(reactorId) ? current.filter((id) => id !== reactorId) : [...current, reactorId];
-    persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, reactions: { ...p.reactions, [emoji]: nextForEmoji } } : p)));
+    if (blockId) {
+      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId) } : b));
+      persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, blocks: nextBlocks } : p)));
+    } else {
+      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId);
+      persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, reactions } : p)));
+    }
   };
   const addBlogComment = (postId, text, authorName, authorType) => {
     if (!text.trim()) return;
@@ -6645,6 +7739,20 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     return next;
   };
 
+  // This teacher's own individual thread with a family — deliberately separate storage from the
+  // classroom thread above, so only this specific teacher (never any colleague sharing the same
+  // class, never admin) can ever post here. That's what lets a parent trust a direct message is
+  // genuinely private between them and this one teacher.
+  const sendDirectMessageToFamily = async (familyGroupId, text, attachmentUrl, attachmentType, attachmentName) => {
+    const key = `teacher-messages:${loggedInTeacher.uid}:${familyGroupId}`;
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
+    const next = { messages: [...existing.messages, entry] };
+    await saveJSON(key, next, true);
+    notifyFamilyGroup(familyGroupId, `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
+    return next;
+  };
+
   const markNoHomeworkToday = (date) => {
     roster.forEach((s) => {
       const data = studentData[s.id] || emptyStudentData();
@@ -6763,7 +7871,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           setAttendance={setAttendance} setAttendanceTime={setAttendanceTime}
           setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
-          openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={setView}
+          openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
           monthlyReportState={monthlyReportState}
           onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
           reflectionState={reflectionState} reflections={reflections}
@@ -6782,11 +7890,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
       {view === "attendance" && (
         <PreschoolAttendanceView roster={roster} studentData={studentData}
-          toggleCheckInByTeacher={toggleCheckInByTeacher} config={config} plannerDays={plannerDays} navigate={setView} />
+          toggleCheckInByTeacher={toggleCheckInByTeacher} config={config} plannerDays={plannerDays} navigate={navigateView} />
       )}
 
       {view === "all-preschool-attendance" && (
-        <AllPreschoolAttendanceView loggedByName={loggedByName} navigate={setView} />
+        <AllPreschoolAttendanceView loggedByName={loggedByName} navigate={navigateView} />
       )}
 
       {view === "daily-log" && (
@@ -6797,7 +7905,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
           openDetail={(id) => { setCurrentId(id); setView("detail"); }}
           openIncidentForm={(studentId, returnTo, categoryId) => openIncidentForm(studentId, returnTo || "daily-log", categoryId)}
-          classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={setView} />
+          classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={navigateView} />
       )}
 
       {view === "segment-celebration-message" && celebratingSegment && (
@@ -6825,7 +7933,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
             <p className="font-semibold text-stone-800">Class Tools</p>
             <button onClick={() => setShowPlan(false)} className="text-stone-400 hover:text-stone-700 p-1"><ChevronRight size={20} /></button>
           </div>
-          <TodaysPlanPanel config={config} plannerDays={plannerDays} setPlannerDay={setPlannerDay} navigate={setView} />
+          <TodaysPlanPanel config={config} plannerDays={plannerDays} setPlannerDay={setPlannerDay} navigate={navigateView} />
           <TimerWidget />
           <RandomPickerWidget roster={roster} pickerData={randomPickerData} onPick={recordRandomPick} onReset={resetRandomPicker} />
           <ScratchpadWidget plannerDays={plannerDays} setPlannerDay={setPlannerDay} />
@@ -6836,11 +7944,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       </div>
 
       {view === "messages" && (
-        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} loggedByName={loggedByName} navigate={setView} deepLinkGroupId={deepLinkGroupId} onCommRead={refreshCommUnread} />
+        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} sendDirectMessageToFamily={sendDirectMessageToFamily} loggedByName={loggedByName} navigate={navigateView} deepLinkGroupId={deepLinkGroupId} onCommRead={refreshCommUnread} />
       )}
 
       {view === "communication" && (
-        <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={setView}
+        <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={navigateView}
           unreadFamilies={commUnreadFamilies} onRefreshUnread={refreshCommUnread}
           openStudent={(id) => { setCurrentId(id); setView("comm-entry"); }} />
       )}
@@ -6850,7 +7958,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           commentsEnabled={config.blogCommentsEnabled !== false}
           onReact={toggleBlogReaction}
           onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
-          navigate={setView} />
+          navigate={navigateView} />
       )}
 
       {view === "blog-compose" && (
@@ -6858,7 +7966,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "homework" && (
-        <TeacherHomeworkView posts={homeworkPosts} navigate={setView} />
+        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} />
       )}
 
       {view === "homework-compose" && (
@@ -6866,7 +7974,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "tools" && (
-        <ToolsView schoolTools={schoolTools} navigate={setView} />
+        <ToolsView schoolTools={schoolTools} navigate={navigateView} />
       )}
 
       {view === "comm-entry" && currentId && (
@@ -6893,7 +8001,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "reflection-history" && (
-        <ReflectionHistoryView reflections={reflections} navigate={setView}
+        <ReflectionHistoryView reflections={reflections} navigate={navigateView}
           onOpenMonth={(mk) => { setSelectedReflectionMonth(mk); setView("reflection-form"); }}
           onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} />
       )}
@@ -6911,7 +8019,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onOpenFluencyDetail={(studentId, entry) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
           onOpenSkillDetail={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedSkillCat(catId); setView("skill-detail"); }}
           initialStudentId={initialAssessmentStudentId}
-          navigate={setView} />
+          navigate={navigateView} />
       )}
 
       {view === "assessment-report" && selectedAssessmentId && (
@@ -6930,7 +8038,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       {view === "points" && !openProgramId && (
         <PointsView roster={roster} studentData={studentData} classPoints={classPoints} config={config}
           addPoints={addPoints} addClassPoints={addClassPointsFn} resetClassPoints={resetClassPointsFn}
-          onAddCategory={addPointsCategory} navigate={setView}
+          onAddCategory={addPointsCategory} navigate={navigateView}
           plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark}
           programs={programsInClass} onOpenProgram={openProgram} />
       )}
@@ -6941,13 +8049,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           studentData={Object.fromEntries(programRoster.map((s) => [s.id, { points: programPointsData[s.id] || {} }]))}
           classPoints={{}} config={programConfig}
           addPoints={addProgramPoints} addClassPoints={() => {}} resetClassPoints={() => {}}
-          onAddCategory={addProgramCategory} navigate={setView}
+          onAddCategory={addProgramCategory} navigate={navigateView}
           programMode programName={programsInClass.find((p) => p.id === openProgramId)?.name || "Program"}
           onBackFromProgram={closeProgram} />
       )}
 
       {view === "planner" && (
-        <PlannerView config={config} plannerDays={plannerDays} plannerEvents={effectivePlannerEvents} navigate={setView}
+        <PlannerView config={config} plannerDays={plannerDays} plannerEvents={effectivePlannerEvents} navigate={navigateView}
           setPlannerDay={setPlannerDay} clearPlannerDayType={clearPlannerDayType}
           bulkSetByWeekday={bulkSetByWeekday} bulkSetByRange={bulkSetByRange}
           addPlannerEvent={addPlannerEvent} removePlannerEvent={removePlannerEvent}
@@ -8691,7 +9799,85 @@ const BLOG_REACTIONS = [
   { key: "smile", emoji: "😊" },
   { key: "thumbsup", emoji: "👍" },
   { key: "clap", emoji: "👏" },
+  { key: "laugh", emoji: "😂" },
+  { key: "wow", emoji: "😮" },
+  { key: "pray", emoji: "🙏" },
 ];
+
+// One reaction per person, chosen from a picker instead of a permanently-visible row of buttons
+// — a short tap toggles the most common one (heart) on/off, a long-press (or, for anyone not on
+// a touch device, a regular click works too — never gate a feature behind a gesture some input
+// types can't perform) opens the full set to pick something more specific. The result then shows
+// as a single compact badge, not a row of every possible option someone might have picked.
+// Takes a plain reactions object and an onReact(emoji) callback rather than a post directly — the
+// caller decides what's actually being reacted to (the whole post, or one specific block within
+// it), so this same component works for both without needing to know which one it's rendering
+// for.
+function BlogReactionControl({ reactions, currentUserId, onReact }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pressTimer = useRef(null);
+  const longPressFired = useRef(false);
+  const wrapperRef = useRef(null);
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onClickOutside = (e) => { if (wrapperRef.current && !wrapperRef.current.contains(e.target)) setPickerOpen(false); };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [pickerOpen]);
+
+  const safeReactions = reactions || {};
+  const myReaction = BLOG_REACTIONS.find((r) => (safeReactions[r.key] || []).includes(currentUserId));
+  const summary = BLOG_REACTIONS
+    .map((r) => ({ ...r, count: (safeReactions[r.key] || []).length }))
+    .filter((r) => r.count > 0);
+  const totalCount = summary.reduce((sum, r) => sum + r.count, 0);
+
+  const startPress = () => {
+    longPressFired.current = false;
+    pressTimer.current = setTimeout(() => { longPressFired.current = true; setPickerOpen(true); }, 450);
+  };
+  const endPress = () => {
+    clearTimeout(pressTimer.current);
+    if (longPressFired.current) return; // the long-press already handled opening the picker
+    onReact(myReaction ? myReaction.key : "heart"); // quick tap: toggle the default (or your own current) reaction
+  };
+  const cancelPress = () => clearTimeout(pressTimer.current);
+
+  const choose = (key) => {
+    onReact(key);
+    setPickerOpen(false);
+  };
+
+  return (
+    <div className="relative inline-flex items-center gap-2" ref={wrapperRef}>
+      <button
+        onMouseDown={startPress} onMouseUp={endPress} onMouseLeave={cancelPress}
+        onTouchStart={startPress} onTouchEnd={endPress} onTouchCancel={cancelPress}
+        onContextMenu={(e) => e.preventDefault()} // suppress the browser's own long-press menu so it doesn't fight with ours
+        className={`flex items-center gap-1 text-sm font-semibold rounded-full px-3 py-1.5 border ${myReaction ? "bg-teal-50 text-teal-800 border-teal-300" : "text-stone-500 border-stone-200 hover:bg-stone-50"}`}>
+        <span className="leading-none">{myReaction ? myReaction.emoji : "🤍"}</span>
+        <span>{myReaction ? "Reacted" : "React"}</span>
+      </button>
+      {summary.length > 0 && (
+        <div className="flex items-center gap-0.5 text-xs text-stone-500 bg-stone-50 border border-stone-200 rounded-full px-2 py-1">
+          {summary.map((r) => <span key={r.key} className="leading-none">{r.emoji}</span>)}
+          <span className="font-semibold ml-0.5">{totalCount}</span>
+        </div>
+      )}
+      {pickerOpen && (
+        <div className="anim-expand-up absolute bottom-full left-0 mb-2 bg-white border border-stone-200 rounded-2xl shadow-lg px-2 py-1.5 flex items-center gap-0.5 z-20">
+          {BLOG_REACTIONS.map((r) => (
+            <button key={r.key} onClick={() => choose(r.key)}
+              className={`text-xl leading-none p-1.5 rounded-full hover:bg-stone-100 hover:scale-110 transition-transform ${myReaction?.key === r.key ? "bg-teal-50" : ""}`}>
+              {r.emoji}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia }) {
   const [commentDraft, setCommentDraft] = useState("");
@@ -8730,23 +9916,33 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
           return (
             <div key={block.id} className="py-3 first:pt-0 last:pb-0">
               {media.length === 1 && (
-                <div className="relative cursor-pointer" onClick={() => onOpenMedia(media[0].url)}>
-                  {media[0].type === "video" ? (
-                    <>
-                      <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                        <div className="bg-white/90 rounded-full p-3"><Play size={20} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
-                      </div>
-                    </>
-                  ) : (
-                    <img src={media[0].url} alt="" className="w-full aspect-[4/3] object-cover" />
-                  )}
-                </div>
+                media[0].type === "audio" ? (
+                  <div className="px-4 pt-3">
+                    <div className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 mb-1">
+                      <Music size={16} className="text-stone-400 shrink-0" />
+                      <p className="text-xs font-semibold text-stone-700 truncate">{media[0].name || "Audio"}</p>
+                    </div>
+                    <audio src={media[0].url} controls className="w-full" style={{ height: "36px" }} />
+                  </div>
+                ) : (
+                  <div className="relative cursor-pointer" onClick={() => onOpenMedia(media[0].url)}>
+                    {media[0].type === "video" ? (
+                      <>
+                        <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                          <div className="bg-white/90 rounded-full p-3"><Play size={20} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                        </div>
+                      </>
+                    ) : (
+                      <img src={media[0].url} alt="" className="w-full aspect-[4/3] object-cover" />
+                    )}
+                  </div>
+                )
               )}
               {media.length > 1 && (
                 <div className="grid grid-cols-2 gap-0.5">
                   {media.map((m, i) => (
-                    <div key={i} className="relative aspect-square cursor-pointer" onClick={() => onOpenMedia(m.url)}>
+                    <div key={i} className="relative aspect-square cursor-pointer" onClick={() => m.type !== "audio" && onOpenMedia(m.url)}>
                       {m.type === "video" ? (
                         <>
                           <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
@@ -8754,6 +9950,11 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                             <div className="bg-white/90 rounded-full p-2"><Play size={13} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
                           </div>
                         </>
+                      ) : m.type === "audio" ? (
+                        <div className="w-full h-full bg-stone-50 flex flex-col items-center justify-center gap-1.5 p-2 cursor-default">
+                          <Music size={20} className="text-stone-400" />
+                          <p className="text-[10px] font-semibold text-stone-600 text-center truncate w-full px-1">{m.name || "Audio"}</p>
+                        </div>
                       ) : (
                         <img src={m.url} alt="" className="w-full h-full object-cover" />
                       )}
@@ -8761,22 +9962,12 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                   ))}
                 </div>
               )}
-              {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3">{block.text}</p>}
+              {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+              {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
+              <div className="flex items-center px-4 pt-2.5">
+                <BlogReactionControl reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)} />
+              </div>
             </div>
-          );
-        })}
-      </div>
-
-      <div className="flex items-center gap-1 px-3 pt-3 pb-2">
-        {BLOG_REACTIONS.map((r) => {
-          const reactorIds = post.reactions?.[r.key] || [];
-          const active = reactorIds.includes(currentUserId);
-          return (
-            <button key={r.key} onClick={() => onReact(post.id, r.key)}
-              className={`flex items-center gap-1 text-xs font-semibold rounded-full px-2.5 py-1.5 ${active ? "bg-teal-50 text-teal-800 border border-teal-300" : "text-stone-500 border border-transparent hover:bg-stone-50"}`}>
-              <span className="text-sm leading-none">{r.emoji}</span>
-              {reactorIds.length > 0 && <span>{reactorIds.length}</span>}
-            </button>
           );
         })}
       </div>
@@ -8849,7 +10040,7 @@ function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, 
             <div className="space-y-4">
               {sorted.map((post) => (
                 <BlogPostCard key={post.id} post={post} currentUserId={currentUserId}
-                  onReact={(postId, emoji) => onReact(postId, emoji, currentUserId)}
+                  onReact={(postId, emoji, blockId) => onReact(postId, emoji, currentUserId, blockId)}
                   commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
               ))}
             </div>
@@ -8883,14 +10074,15 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
   const removeBlock = (id) => setBlocks((prev) => prev.filter((b) => b.id !== id));
   const updateText = (id, text) => setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, text } : b)));
 
-  // One mixed batch per part — any combination of photos and videos together, added in a single
-  // pick. Each video is checked for length right when it's added, independently of the others, so
-  // one too-long clip in a batch of ten photos doesn't block the rest.
+  // One mixed batch per part — any combination of photos, videos, and audio files together,
+  // added in a single pick. Each video is checked for length right when it's added, independently
+  // of the others, so one too-long clip in a batch of ten photos doesn't block the rest.
   const addMedia = async (blockId, fileList) => {
     const files = Array.from(fileList || []);
     if (files.length === 0) return;
     for (const file of files) {
       const isVideo = file.type.startsWith("video/");
+      const isAudio = file.type.startsWith("audio/");
       const itemId = uid();
       if (isVideo) {
         try {
@@ -8903,7 +10095,7 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
         }
       }
       setBlocks((prev) => prev.map((b) => (b.id === blockId
-        ? { ...b, mediaItems: [...b.mediaItems, { id: itemId, file, preview: URL.createObjectURL(file), type: isVideo ? "video" : "photo", error: null }] }
+        ? { ...b, mediaItems: [...b.mediaItems, { id: itemId, file, preview: isAudio ? null : URL.createObjectURL(file), type: isVideo ? "video" : isAudio ? "audio" : "photo", name: isAudio ? file.name : null, error: null }] }
         : b)));
     }
   };
@@ -8970,6 +10162,11 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
                         </div>
                       ) : m.type === "video" ? (
                         <video src={m.preview} className="w-full aspect-square object-cover rounded-lg" />
+                      ) : m.type === "audio" ? (
+                        <div className="w-full aspect-square rounded-lg bg-stone-50 border border-stone-200 flex flex-col items-center justify-center gap-2 p-2">
+                          <Music size={22} className="text-stone-400" />
+                          <p className="text-[10px] text-stone-600 font-semibold text-center truncate w-full px-1">{m.name}</p>
+                        </div>
                       ) : (
                         <img src={m.preview} alt="" className="w-full aspect-square object-cover rounded-lg" />
                       )}
@@ -8979,8 +10176,8 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
                 </div>
               )}
               <label className="inline-block text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 mb-1.5 cursor-pointer">
-                + Add photos or video
-                <input type="file" accept="image/*,video/*" multiple onChange={(e) => { addMedia(block.id, e.target.files); e.target.value = ""; }} className="hidden" />
+                + Add photos, video, or audio
+                <input type="file" accept="image/*,video/*,audio/*" multiple onChange={(e) => { addMedia(block.id, e.target.files); e.target.value = ""; }} className="hidden" />
               </label>
 
               {gs.open && (
@@ -8998,8 +10195,9 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
                 </div>
               )}
               <div className="flex items-start gap-1.5">
-                <textarea value={block.text} onChange={(e) => updateText(block.id, e.target.value)} placeholder="Add a caption..." rows={2}
-                  className="flex-1 text-sm rounded-lg border border-stone-200 px-2.5 py-1.5 outline-none focus:border-teal-400" />
+                <textarea value={block.text} onChange={(e) => updateText(block.id, e.target.value)} placeholder="Add a caption..."
+                  ref={(el) => { if (el) { el.style.height = "auto"; el.style.height = `${Math.min(el.scrollHeight, 280)}px`; } }}
+                  className="flex-1 text-sm rounded-lg border border-stone-200 px-2.5 py-1.5 outline-none focus:border-teal-400 resize-none overflow-y-auto" style={{ minHeight: "3.25rem" }} />
                 <button onClick={() => toggleGenerate(block.id)} title="Generate with AI"
                   className={`shrink-0 rounded-lg p-2 border ${gs.open ? "bg-teal-50 border-teal-300 text-teal-700" : "border-stone-300 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
                   <Sparkles size={15} />
@@ -9040,12 +10238,21 @@ function TeacherHomeworkView({ posts, navigate }) {
                   </span>
                   <span className="text-[10px] text-stone-400">{new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
                 </div>
-                {post.text && <p className="text-sm text-stone-700 whitespace-pre-wrap mb-2">{post.text}</p>}
+                {post.text && <p className="text-sm text-stone-700 whitespace-pre-wrap mb-2"><LinkifiedText text={post.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                {post.text && extractFirstUrl(post.text) && <LinkPreviewCard url={extractFirstUrl(post.text)} />}
                 {post.attachmentType === "photo" && post.attachmentUrl && (
                   <img src={post.attachmentUrl} alt="" className="w-full max-h-56 object-cover rounded-lg" />
                 )}
                 {post.attachmentType === "video" && post.attachmentUrl && (
                   <video src={post.attachmentUrl} controls playsInline className="w-full max-h-56 bg-black rounded-lg" />
+                )}
+                {post.attachmentType === "audio" && post.attachmentUrl && (
+                  <div className="mb-1">
+                    {post.attachmentName && (
+                      <p className="text-[11px] font-semibold text-stone-500 truncate mb-1">{post.attachmentName}</p>
+                    )}
+                    <audio src={post.attachmentUrl} controls className="w-full" style={{ height: "36px" }} />
+                  </div>
                 )}
                 {post.attachmentType === "file" && post.attachmentUrl && (
                   <a href={post.attachmentUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-3 py-2 rounded-lg border border-stone-200 bg-stone-50">
@@ -9070,7 +10277,7 @@ function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
   const [text, setText] = useState("");
   const [attachFile, setAttachFile] = useState(null);
   const [attachPreview, setAttachPreview] = useState(null);
-  const [attachType, setAttachType] = useState(null); // "photo" | "video" | "file"
+  const [attachType, setAttachType] = useState(null); // "photo" | "video" | "audio" | "file"
   const [attachError, setAttachError] = useState(null);
   const [posting, setPosting] = useState(false);
 
@@ -9079,6 +10286,7 @@ function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
     setAttachError(null);
     const isVideo = file.type.startsWith("video/");
     const isImage = file.type.startsWith("image/");
+    const isAudio = file.type.startsWith("audio/");
     if (isVideo) {
       try { await validateVideoDuration(file); }
       catch (err) { setAttachError(err.message); return; }
@@ -9088,7 +10296,7 @@ function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
       return;
     }
     setAttachFile(file);
-    setAttachType(isVideo ? "video" : isImage ? "photo" : "file");
+    setAttachType(isVideo ? "video" : isImage ? "photo" : isAudio ? "audio" : "file");
     setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
   };
   const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
@@ -9135,15 +10343,15 @@ function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
           <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
         </div>
       )}
-      <div className="flex gap-2 mb-4">
-        <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
-          <Camera size={14} /> {attachType === "photo" || attachType === "video" ? "Change photo or video" : "Add a photo or video"}
-          <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
-        </label>
-        <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
-          <Paperclip size={14} /> {attachType === "file" ? "Change file" : "Add a file"}
-          <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
-        </label>
+      {attachType === "audio" && attachFile && (
+        <div className="relative inline-flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
+          <Music size={15} className="text-stone-500" />
+          <span className="text-xs font-semibold text-stone-700 max-w-[12rem] truncate">{attachFile.name}</span>
+          <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+        </div>
+      )}
+      <div className="mb-4">
+        <AttachmentMenuButton onPickFile={pickAttachment} />
       </div>
       {attachError && <p className="text-xs text-rose-600 mb-3">{attachError}</p>}
 
@@ -11231,6 +12439,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
     setAttachError(null);
     const isVideo = file.type.startsWith("video/");
     const isImage = file.type.startsWith("image/");
+    const isAudio = file.type.startsWith("audio/");
     if (isVideo) {
       try { await validateVideoDuration(file); }
       catch (err) { setAttachError(err.message); return; }
@@ -11240,7 +12449,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
       return;
     }
     setAttachFile(file);
-    setAttachType(isVideo ? "video" : isImage ? "photo" : "file");
+    setAttachType(isVideo ? "video" : isImage ? "photo" : isAudio ? "audio" : "file");
     setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
   };
   const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
@@ -11255,6 +12464,28 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
     return Object.values(byGroup);
   }, [families]);
 
+  // Same reasoning and pattern as the teacher-side classroom messages history work — pushes a
+  // real entry so both the hardware back button and the in-app Back button (which now goes
+  // through history.back() rather than clearing state directly) step back to the conversation
+  // list instead of skipping past it.
+  const navigateToGroup = (group) => {
+    setOpenGroup(group);
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread", group.groupId);
+    window.history.pushState({ thread: group.groupId }, "", url);
+  };
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const threadId = params.get("thread");
+      if (!threadId) { setOpenGroup(null); return; }
+      const match = groups.find((g) => g.groupId === threadId);
+      if (match) setOpenGroup(match);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [groups]);
+
   const refresh = useCallback(async () => {
     const entries = await Promise.all(groups.map(async (g) => [g.groupId, await loadJSON(`admin-messages:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
@@ -11268,7 +12499,8 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
     const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), "/?portal=parent&open=admin");
+    const attachmentLabel = attachmentType === "file" ? "Sent a file" : attachmentType === "audio" ? "Sent an audio file" : attachmentType === "video" ? "Sent a video" : "Sent a photo";
+    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || attachmentLabel, "/?portal=parent&open=admin");
     return next;
   };
 
@@ -11293,7 +12525,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
         }
       }
       for (const g of groups) {
-        await sendToFamily(g.groupId, broadcastText.trim(), attachmentUrl, attachType, attachType === "file" ? attachFile.name : null); // eslint-disable-line no-await-in-loop
+        await sendToFamily(g.groupId, broadcastText.trim(), attachmentUrl, attachType, attachType === "file" || attachType === "audio" ? attachFile.name : null); // eslint-disable-line no-await-in-loop
       }
       await refresh();
       setBroadcastSentTo(groups.length);
@@ -11315,7 +12547,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
-          onBack={() => { setOpenGroup(null); refresh(); }}
+          onBack={() => { window.history.back(); refresh(); }}
           onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
@@ -11384,15 +12616,15 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
                 <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
               </div>
             )}
-            <div className="flex gap-2 mb-4">
-              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
-                <Camera size={14} /> {attachType === "photo" || attachType === "video" ? "Change photo or video" : "Add a photo or video"}
-                <input type="file" accept="image/*,video/*" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
-              </label>
-              <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 cursor-pointer">
-                <Paperclip size={14} /> {attachType === "file" ? "Change file" : "Add a file"}
-                <input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv" onChange={(e) => { pickAttachment(e.target.files?.[0]); e.target.value = ""; }} className="hidden" />
-              </label>
+            {attachType === "audio" && attachFile && (
+              <div className="relative inline-flex items-center gap-1.5 mb-3 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
+                <Music size={15} className="text-stone-500" />
+                <span className="text-xs font-semibold text-stone-700 max-w-[12rem] truncate">{attachFile.name}</span>
+                <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+              </div>
+            )}
+            <div className="mb-4">
+              <AttachmentMenuButton onPickFile={pickAttachment} />
             </div>
             {attachError && <p className="text-xs text-rose-600 mb-3">{attachError}</p>}
 
@@ -11413,7 +12645,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
                   const last = thread.messages[thread.messages.length - 1];
                   const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
                   return (
-                    <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                    <button key={g.groupId} onClick={() => navigateToGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
                       <div className="flex items-center justify-between gap-2">
                         <p className="font-semibold text-stone-900">{guardianNames}</p>
                         <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>
@@ -11430,7 +12662,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
                 <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">Start a conversation</p>
                 <div className="space-y-2">
                   {withoutThreads.map((g) => (
-                    <button key={g.groupId} onClick={() => setOpenGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-3 text-sm font-semibold text-stone-700 hover:border-teal-300">
+                    <button key={g.groupId} onClick={() => navigateToGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-3 text-sm font-semibold text-stone-700 hover:border-teal-300">
                       {g.guardians.map((gu) => gu.name).join(" & ")}
                     </button>
                   ))}
@@ -11452,11 +12684,39 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
 // Grouped by family, not by individual login — two guardians on the same family share one row
 // and one conversation here, the same way they share it on their own side, rather than showing up
 // as two disconnected families that happen to have the same kids.
-function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, loggedByName, navigate, deepLinkGroupId, onCommRead }) {
+function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, sendDirectMessageToFamily, loggedByName, navigate, deepLinkGroupId, onCommRead }) {
   const [groups, setGroups] = useState(null); // null = loading
   const [threads, setThreads] = useState({}); // groupId -> {messages}
   const [openGroup, setOpenGroup] = useState(null);
-  const [mode, setMode] = useState("inbox"); // "inbox" | "compose"
+  const [mode, setMode] = useState("inbox"); // "inbox" | "direct" | "compose"
+  const [directGroups, setDirectGroups] = useState(null); // families this teacher can message individually, across every class they teach
+  const [directThreads, setDirectThreads] = useState({}); // groupId -> {messages}
+  const [openDirectGroup, setOpenDirectGroup] = useState(null);
+
+  // Same reasoning as the class/tab history work — pushing a real entry here is what lets the
+  // Android back button (and the in-app Back button, which now goes through the same mechanism
+  // via history.back() rather than clearing state directly) step back to the conversation list
+  // instead of skipping past it. Groups aren't loaded yet on the very first render, so this can't
+  // safely capture a full group object up front — restoring from a reload just needs the groupId
+  // to know a conversation SHOULD reopen once groups finish loading; the effect below that
+  // already resolves deepLinkGroupId does exactly that.
+  const navigateToGroup = (group) => {
+    setOpenGroup(group);
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread", group.groupId);
+    window.history.pushState({ thread: group.groupId }, "", url);
+  };
+  useEffect(() => {
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const threadId = params.get("thread");
+      if (!threadId) { setOpenGroup(null); return; }
+      const match = (groups || []).find((g) => g.groupId === threadId);
+      if (match) setOpenGroup(match);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [groups]);
 
   const refresh = useCallback(async () => {
     const all = await loadAllWithPrefix("family:");
@@ -11475,6 +12735,29 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Every family this teacher can message one-on-one, across every class they teach — not just
+  // the one class currently open. A family with two of this teacher's students, or a family
+  // reachable through General Studies for a grade this teacher doesn't otherwise teach, still
+  // shows up here exactly once, mirroring how the parent side dedupes teachers the same way.
+  const assignedClassIds = loggedInTeacher?.assignedClassIds || [];
+  const refreshDirect = useCallback(async () => {
+    if (assignedClassIds.length === 0) { setDirectGroups([]); return; }
+    const all = await loadAllWithPrefix("family:");
+    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => assignedClassIds.includes(l.classId)));
+    const byGroup = {};
+    relevant.forEach((f) => {
+      const groupId = f.familyGroupId || f.uid;
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
+      byGroup[groupId].guardians.push(f);
+    });
+    const groupList = Object.values(byGroup);
+    setDirectGroups(groupList);
+    const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
+    setDirectThreads(Object.fromEntries(entries));
+  }, [assignedClassIds.join(","), loggedInTeacher?.uid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { if (mode === "direct") refreshDirect(); }, [mode, refreshDirect]);
+
   // Opens straight into the right family's thread the moment the inbox has actually loaded —
   // can't fire any earlier than that, since the specific group object this needs doesn't exist
   // until the fetch above completes.
@@ -11482,7 +12765,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     if (!deepLinkGroupId || !groups) return;
     const match = groups.find((g) => g.groupId === deepLinkGroupId);
     if (match) {
-      setOpenGroup(match);
+      navigateToGroup(match);
       markThreadRead(loggedInTeacher.uid, `classroom-${match.groupId}`).then(() => onCommRead?.());
     }
   }, [deepLinkGroupId, groups]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -11496,10 +12779,27 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
-          onBack={() => { setOpenGroup(null); refresh(); }}
+          onBack={() => { window.history.back(); refresh(); }}
           onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
+      </>
+    );
+  }
+
+  if (openDirectGroup) {
+    const thread = directThreads[openDirectGroup.groupId] || { messages: [] };
+    const childNames = (openDirectGroup.studentLinks || []).filter((l) => assignedClassIds.includes(l.classId)).map((l) => l.studentName).join(", ");
+    const guardianNames = openDirectGroup.guardians.map((g) => g.name).join(" & ");
+    const storageKey = `teacher-messages:${loggedInTeacher.uid}:${openDirectGroup.groupId}`;
+    return (
+      <>
+        <GlobalAppStyles />
+        <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`teacher-direct-${openDirectGroup.groupId}`}
+          onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
+          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refreshDirect(); }}
+          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refreshDirect(); }}
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refreshDirect(); }} />
       </>
     );
   }
@@ -11509,11 +12809,14 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
       <button onClick={() => navigate("communication")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-lg font-bold text-stone-900 mb-3">Classroom Messages</h1>
+      <h1 className="display-font text-lg font-bold text-stone-900 mb-3">{mode === "direct" ? "My Direct Messages" : "Classroom Messages"}</h1>
 
-      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
+      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[28rem]">
         <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-          <Mail size={14} /> Messages
+          <Mail size={14} /> Classroom
+        </button>
+        <button onClick={() => setMode("direct")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "direct" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <MessageCircle size={14} /> Direct
         </button>
         <button onClick={() => setMode("compose")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "compose" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
           <Plus size={14} /> New broadcast
@@ -11522,6 +12825,30 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
 
       {mode === "compose" ? (
         <ClassBroadcastComposer roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} />
+      ) : mode === "direct" ? (
+        <>
+          <p className="text-xs text-stone-400 mb-3">Only you see these — not any other teacher sharing a class with these families, and not admin (though admin can view for oversight).</p>
+          {directGroups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+          {directGroups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families linked to your classes yet.</p>}
+          <div className="space-y-2">
+            {(directGroups || []).map((g) => {
+              const thread = directThreads[g.groupId];
+              const last = thread?.messages?.[thread.messages.length - 1];
+              const childNames = (g.studentLinks || []).filter((l) => assignedClassIds.includes(l.classId)).map((l) => l.studentName).join(", ");
+              const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+              return (
+                <button key={g.groupId} onClick={() => { setOpenDirectGroup(g); markThreadRead(loggedInTeacher.uid, `teacher-direct-${g.groupId}`).then(() => onCommRead?.()); }} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-stone-900">{guardianNames}</p>
+                    {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                  </div>
+                  <p className="text-xs text-stone-400 mb-1">{childNames}</p>
+                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+                </button>
+              );
+            })}
+          </div>
+        </>
       ) : (
         <>
           {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
@@ -11534,7 +12861,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
               const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
               return (
-                <button key={g.groupId} onClick={() => { setOpenGroup(g); markThreadRead(loggedInTeacher.uid, `classroom-${g.groupId}`).then(() => onCommRead?.()); }} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                <button key={g.groupId} onClick={() => { navigateToGroup(g); markThreadRead(loggedInTeacher.uid, `classroom-${g.groupId}`).then(() => onCommRead?.()); }} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold text-stone-900">{guardianNames}</p>
                     {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
@@ -12151,7 +13478,7 @@ Write 2-3 short paragraphs weaving the exact figures above into natural sentence
     console.error(`[generateHybridReport] Empty text in successful response for ${student.name}. Raw response:`, JSON.stringify(data));
     console.error("[generateHybridReport] full prompt that produced an empty response:", prompt);
   }
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
@@ -12237,7 +13564,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
                   {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`Monthly report — ${label}`} body={r.draft} size="small" />
+                    <ParentSendActions student={s} subject={`Monthly report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -12339,7 +13666,7 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
                   {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`Report — ${label}`} body={r.draft} size="small" />
+                    <ParentSendActions student={s} subject={`Report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -12383,7 +13710,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
@@ -12441,7 +13768,7 @@ function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onB
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`${assessmentLabel} — Report`} body={r.draft} size="small" />
+                    <ParentSendActions student={s} subject={`${assessmentLabel} — Report`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -12539,7 +13866,7 @@ function SkillCategoryReportView({ category, roster, studentData, config, logged
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`${category.title} — Progress note`} body={r.draft} size="small" />
+                    <ParentSendActions student={s} subject={`${category.title} — Progress note`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -12581,7 +13908,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 function FluencyDetailView({ student, entry, classId, config, loggedInTeacher, sendMessageToFamily, onBack, onLogSent, onUpdateParentEmail }) {
@@ -12657,7 +13984,7 @@ function FluencyDetailView({ student, entry, classId, config, loggedInTeacher, s
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
-            {sendEmails && <MailActionButtons email={sendEmails} subject={`Fluency check — ${entry.date}`} body={draft} />}
+            {sendEmails && <MailActionButtons email={sendEmails} subject={`Fluency check — ${entry.date}`} body={applyMessageDisclaimer(draft, config, null, loggedInTeacher?.messageSignOff)} />}
             <SendInAppButton studentId={student.id} classId={classId} message={draft} sendMessage={sendMessageToFamily} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -12691,7 +14018,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 function GrowthChart({ timeline, color }) {
@@ -12802,7 +14129,7 @@ function SkillDetailView({ student, data, category, classId, config, loggedInTea
           </div>
           <div className="flex flex-wrap gap-2">
             <button onClick={generate} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
-            {sendEmails && <MailActionButtons email={sendEmails} subject={`${category.title} — Progress note`} body={draft} />}
+            {sendEmails && <MailActionButtons email={sendEmails} subject={`${category.title} — Progress note`} body={applyMessageDisclaimer(draft, config, null, loggedInTeacher?.messageSignOff)} />}
             <SendInAppButton studentId={student.id} classId={classId} message={draft} sendMessage={sendMessageToFamily} />
             <button onClick={logSent} disabled={logged} className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
               {logged ? <Check size={13} /> : null} {logged ? "Logged as sent" : "Log as sent"}
@@ -12840,7 +14167,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 // A class-wide announcement — not addressed to one student's parent, but to every parent in the
@@ -12866,7 +14193,7 @@ Write 2-3 sentences announcing this accomplishment to the class's families. Outp
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 // A general-purpose class-wide announcement — the teacher gives a rough topic in their own
@@ -12894,7 +14221,7 @@ Write a short, clear announcement — 2-4 sentences. Output only the message tex
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 // Drafts a reply within an ongoing conversation, given a quick rough note and the recent
@@ -12950,7 +14277,7 @@ Write a short, warm, clear reply — 1-3 sentences, matching the tone of a real 
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return isSchoolSide ? applyMessageDisclaimer(text, config, null, teacher?.messageSignOff) : text;
+  return text; // pure in-app AI-assist for the message composer — never has an email path, so never gets the disclaimer
 }
 async function generateStudentTopicMessage(topic, studentNames, config, teacher) {
   const teacherName = teacher?.name;
@@ -12974,7 +14301,7 @@ Write a short, warm, clear message — 2-4 sentences. Output only the message te
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 const REPORT_SECTIONS = [
@@ -13367,7 +14694,7 @@ function IncidentDetailView({ incident, roster, classId, config, plannerDays, lo
                         ].filter(Boolean);
                         return (
                           <>
-                            {sendEmails && <MailActionButtons email={sendEmails} subject={`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`} body={d.draft} size="small" />}
+                            {sendEmails && <MailActionButtons email={sendEmails} subject={`About ${s.name} — ${cat?.label || incident.category || "Uncategorized"}`} body={applyMessageDisclaimer(d.draft, config, null, loggedInTeacher?.messageSignOff)} size="small" />}
                             <SendInAppButton studentId={s.id} classId={classId} message={d.draft} sendMessage={sendMessageToFamily}
                               className="flex items-center gap-1 text-[10px] font-semibold text-white bg-teal-700 rounded-lg px-2 py-1 hover:bg-teal-800" />
                           </>
@@ -15091,7 +16418,7 @@ Keep it under 120 words, friendly but direct, no exaggeration. Output only the m
   });
   const data = await response.json();
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
-  return applyMessageDisclaimer(text, config, null, teacher?.messageSignOff);
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
 function MessageDraftView({ student, flag, classId, config, loggedInTeacher, sendMessageToFamily, onBack, onSaveParentEmail, onLogSent }) {
@@ -15166,7 +16493,7 @@ function MessageDraftView({ student, flag, classId, config, loggedInTeacher, sen
         )}
         <div className="flex flex-wrap gap-2 mb-2">
           <button onClick={run} className="flex items-center gap-1.5 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
-          {sendEmails && <MailActionButtons email={sendEmails} subject={subject} body={draft} />}
+          {sendEmails && <MailActionButtons email={sendEmails} subject={subject} body={applyMessageDisclaimer(draft, config, null, loggedInTeacher?.messageSignOff)} />}
           <SendInAppButton studentId={student.id} classId={classId} message={draft} sendMessage={sendMessageToFamily} />
           <button onClick={logSent} disabled={logged}
             className={`flex items-center gap-1.5 text-xs font-semibold rounded-lg px-3 py-2 ${logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
@@ -15245,7 +16572,7 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
         )}
         <div className="flex flex-wrap gap-2 mb-2">
           <button onClick={run} className="flex items-center gap-1.5 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={13} /> Regenerate</button>
-          <MailActionButtons bcc={parentEmails} subject={subject} body={draft} />
+          <MailActionButtons bcc={parentEmails} subject={subject} body={applyMessageDisclaimer(draft, config, null, loggedInTeacher?.messageSignOff)} />
         </div>
         <p className="text-xs text-stone-400 mb-4">Nothing sends automatically — review the message, then send it yourself.</p>
         <button onClick={onDone} className="text-xs font-semibold bg-teal-700 text-white rounded-lg px-4 py-2 hover:bg-teal-800">Done</button>
@@ -15445,7 +16772,7 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
       )}
       <label className="block text-xs font-medium text-stone-500 mb-1">Subject line</label>
       <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. This Thursday's trip" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
-      <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={draft} />
+      <MailActionButtons bcc={parentEmails} subject={subject || "A note from your child's teacher"} body={applyMessageDisclaimer(draft, config, null, loggedInTeacher?.messageSignOff)} />
       <p className="text-xs text-stone-400 mt-3">Email doesn't send automatically — review the message, then send it yourself.</p>
     </div>
   );
@@ -17039,7 +18366,7 @@ function AdminFamilyDetailView({ group, allStudentsForLinking, globalStudents, o
         <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-4"><ChevronLeft size={16} /> Back to families</button>
 
         <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
-          <label className="block text-xs font-semibold text-stone-700 mb-1">Family name</label>
+          <label className="block text-xs font-semibold text-stone-700 mb-1">Name on this account (this parent's own name — shown when they message a teacher)</label>
           <div className="flex gap-2">
             <input value={nameInput} onChange={(e) => setNameInput(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
             <button onClick={saveName} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800 shrink-0">Save</button>
@@ -17313,6 +18640,26 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
 // often doesn't unless one's been explicitly set, which is exactly why the same click can open
 // a real draft on one device and just a blank browser tab on another). "Copy message" is the
 // fallback that works everywhere regardless of that setup — paste into whatever's actually open.
+// Loads the admin's saved template, fills in this specific family's real information, and hands
+// it to the same Gmail-link-plus-copy-fallback component every other email action in the app
+// already uses — rather than a separate, one-off "send an email" mechanism just for this.
+function SendParentSetupEmailButton({ parentName, studentName, email, tempPassword }) {
+  const [template, setTemplate] = useState(null);
+
+  useEffect(() => {
+    loadJSON("schoolSettings", {}, true).then((s) => setTemplate(s?.parentSetupEmailTemplate || DEFAULT_PARENT_SETUP_EMAIL_TEMPLATE));
+  }, []);
+
+  if (!template) return null;
+
+  const body = renderParentSetupEmail(template, {
+    parentName, studentName, email, tempPassword,
+    schoolName: "SJA", loginLink: `${window.location.origin}/?portal=parent`,
+  });
+
+  return <MailActionButtons email={email} subject="Setting up your Parent Portal account" body={body} size="small" />;
+}
+
 function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
   const [copied, setCopied] = useState(false);
   const bccParam = bcc && bcc.length > 0 ? `&bcc=${encodeURIComponent(bcc.join(","))}` : "";
@@ -17361,7 +18708,7 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
 // email to both at once (a single "to" can hold multiple addresses). In-app sending goes to the
 // family as a whole regardless of which guardian's email was toggled on, since there's one shared
 // family account, not a separate one per guardian's contact method.
-function ParentSendActions({ student, classId, subject, body, sendMessageToFamily, size = "normal" }) {
+function ParentSendActions({ student, classId, subject, body, sendMessageToFamily, config, signOff, size = "normal" }) {
   const hasP2 = Boolean(student.parent2Email || student.parent2Phone);
   const [selected, setSelected] = useState(["p1"]);
   const toggle = (p) => setSelected((prev) => {
@@ -17374,6 +18721,10 @@ function ParentSendActions({ student, classId, subject, body, sendMessageToFamil
     selected.includes("p1") && student.parentEmail,
     selected.includes("p2") && student.parent2Email,
   ].filter(Boolean).join(", ");
+  // The disclaimer belongs only on the email copy — applied right here, at the one point where
+  // this shared component actually splits into two different channels, so the in-app send below
+  // always stays on the same clean draft the teacher actually saw and reviewed.
+  const emailBody = applyMessageDisclaimer(body, config, null, signOff);
 
   return (
     <div>
@@ -17390,7 +18741,7 @@ function ParentSendActions({ student, classId, subject, body, sendMessageToFamil
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        {emails && <MailActionButtons email={emails} subject={subject} body={body} size={size} />}
+        {emails && <MailActionButtons email={emails} subject={subject} body={emailBody} size={size} />}
         <SendInAppButton studentId={student.id} classId={classId} message={body} sendMessage={sendMessageToFamily}
           className={`flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg hover:bg-teal-800 ${size === "small" ? "px-2.5 py-1.5" : "px-3 py-2"}`} />
       </div>

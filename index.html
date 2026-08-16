@@ -2,26 +2,40 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
-<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
-<link id="apple-icon-link" rel="apple-touch-icon" href="/apple-touch-icon.png" />
-<link id="manifest-link" rel="manifest" href="/manifest.json" />    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta id="apple-title-meta" name="apple-mobile-web-app-title" content="Classroom" />
-    <meta id="theme-color-meta" name="theme-color" content="#2b2723" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      This determines which manifest/icons/title to use BEFORE the browser ever sees a
+      <link rel="manifest"> tag at all, instead of writing a default tag first and mutating it
+      with JavaScript afterward. The old approach left a real window where a browser — especially
+      at PWA-install time, which can happen very early in page load — could already commit to the
+      original teacher manifest before the later swap script ever ran. Different browser engines
+      handle that timing differently, which is consistent with this working correctly on one
+      Android phone and not another. document.write() from a synchronous, inline script (not
+      deferred, not an external file) executes as part of the initial HTML parse itself, so these
+      are the ONLY tags the browser's parser ever encounters — there is no wrong default to race
+      against, because a wrong default is never written in the first place.
+    -->
     <script>
       (function () {
         var isParent = new URLSearchParams(window.location.search).get("portal") === "parent";
-        if (!isParent) return;
-        document.getElementById("manifest-link").setAttribute("href", "/manifest-parent.json");
-        document.getElementById("apple-icon-link").setAttribute("href", "/icons-parent/icon-192.png");
-        document.getElementById("apple-title-meta").setAttribute("content", "SJA Parent");
-        document.getElementById("theme-color-meta").setAttribute("content", "#a8562f");
-        document.title = "SJA Parent Portal";
+        var manifestHref = isParent ? "/manifest-parent.json" : "/manifest.json";
+        var appleIconHref = isParent ? "/icons-parent/icon-192.png" : "/apple-touch-icon.png";
+        var appleTitle = isParent ? "SJA Parent" : "Classroom";
+        var themeColor = isParent ? "#1c3453" : "#2b2723";
+        var pageTitle = isParent ? "SJA Parent Portal" : "Classroom Tracker";
+        document.write(
+          '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />' +
+          '<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />' +
+          '<link rel="apple-touch-icon" href="' + appleIconHref + '" />' +
+          '<link rel="manifest" href="' + manifestHref + '" />' +
+          '<meta name="apple-mobile-web-app-capable" content="yes" />' +
+          '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />' +
+          '<meta name="apple-mobile-web-app-title" content="' + appleTitle + '" />' +
+          '<meta name="theme-color" content="' + themeColor + '" />' +
+          '<title>' + pageTitle + '</title>'
+        );
       })();
     </script>
-    <title>classroom-tracker-app</title>
   </head>
   <body>
     <div id="root"></div>

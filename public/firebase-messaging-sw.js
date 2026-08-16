@@ -28,11 +28,13 @@ messaging.onBackgroundMessage((payload) => {
   const title = payload.data?.title || "New notification";
   self.registration.showNotification(title, {
     body: payload.data?.body || "",
-    // No "icon" field here on purpose — that's the larger image shown next to the notification
-    // text, separate from "badge" below. On several Android phones the OS already shows its own
-    // icon or the badge itself on the left of a notification, so adding a second, larger icon on
-    // the right just looks like a duplicate. "badge" alone is what every other well-behaved app
-    // (WhatsApp, Mail, etc.) relies on for this.
+    // Both fields matter and serve genuinely different purposes, which is why removing one
+    // caused a worse problem than the one it was meant to fix. "icon" is the field every browser
+    // and Android version actually respects — omitting it is exactly what left some phones with
+    // nothing to fall back on except a generated default (the meaningless "C"). "badge" is the
+    // small, monochrome-masked status-bar treatment, but platform support for it varies far more
+    // by device — it was never a safe standalone replacement for icon, only a complement to it.
+    icon: "/icons/icon-192.png",
     badge: "/icons-badge/badge-96.png",
     data: payload.data || {},
   });

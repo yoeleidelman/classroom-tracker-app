@@ -52,7 +52,7 @@ export default async function handler(req, res) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
 
-  const { name, email, password, role, assignedClassIds, isSubstitute } = req.body || {};
+  const { name, email, password, role, assignedClassIds, isSubstitute, messagingClassTypes } = req.body || {};
   if (!name || !email || !password || password.length < 6) {
     return res.status(400).json({ error: "Name, email, and a password of at least 6 characters are required." });
   }
@@ -66,7 +66,11 @@ export default async function handler(req, res) {
     await ref.set({
       value: {
         uid: userRecord.uid, name, email, role: role || "teacher",
-        assignedClassIds: assignedClassIds || [], isSubstitute: !!isSubstitute, active: true,
+        assignedClassIds: assignedClassIds || [], isSubstitute: !!isSubstitute,
+        // Reaches every parent with a child in one of these grade levels, independent of any
+        // specific class assignment — how someone like a curriculum coordinator becomes
+        // individually messageable without being assigned to every matching class one by one.
+        messagingClassTypes: messagingClassTypes || [], active: true,
       },
     });
 
