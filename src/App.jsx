@@ -540,8 +540,8 @@ function SendInAppButton({ studentId, classId, message, sendMessage, className }
   const send = async () => {
     if (!message?.trim()) return;
     setState("sending");
-    const allFamilies = await loadAllWithPrefix("family:");
-    const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === studentId && l.classId === classId));
+    const relevant = await fetchClassFamilies(classId);
+    const match = relevant.find((f) => (f.studentLinks || []).some((l) => l.studentId === studentId && l.classId === classId));
     if (!match) { setState("no-family"); return; }
     await sendMessage(match.familyGroupId || match.uid, message.trim());
     setState("sent");
@@ -1111,6 +1111,28 @@ async function loadAllWithPrefix(prefix) {
   }
 }
 
+// The companion fix for a specific case loadAllWithPrefix("family:") can never reliably serve: a
+// signed-in TEACHER (not admin) needing every family linked to one of their own classes. Firestore
+// can't validate that as a client-side query at all — the rule that grants a teacher access to a
+// family depends on that family's own linkedClassIds field, and a security rule can only be
+// proven safe for an entire query's worth of results when it doesn't depend on each individual
+// document's own content. Reading one family at a time works fine under that same rule; querying
+// every family at once and filtering client-side does not, no matter how the rule is phrased. This
+// calls a small server-side endpoint instead, which does the same filtering with full privileges
+// and hands back only the relevant records.
+async function fetchClassFamilies(classId) {
+  try {
+    const headers = await authHeaders();
+    const res = await fetch(`/api/class-families?classId=${encodeURIComponent(classId)}`, { headers });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.families || [];
+  } catch (e) {
+    console.error("Class families fetch failed", classId, e);
+    return [];
+  }
+}
+
 // ============================================================================================
 // PUSH NOTIFICATIONS — everything below sends a real device notification. Three small, separate
 // pieces, kept deliberately apart so adding a new kind of notification later is a matter of
@@ -1186,7 +1208,7 @@ async function notifySpecificTeacher(teacherUid, title, body, url) {
 async function notifyClassFamilies(classId, title, body, url) {
   const roster = await loadJSON(`class:${classId}:roster`, [], true);
   const fullTimeStudentIds = new Set(roster.filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time").map((s) => s.id));
-  const allFamilies = await loadAllWithPrefix("family:");
+  const allFamilies = await fetchClassFamilies(classId);
   const uids = allFamilies
     .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && fullTimeStudentIds.has(l.studentId)))
     .map((f) => f.uid);
@@ -6902,8 +6924,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     // account) and no messaging UI to show a badge on in the first place, so this entire
     // computation is simply irrelevant for them, not just something to guard defensively.
     if (!loggedInTeacher) return;
-    const all = await loadAllWithPrefix("family:");
-    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+    const relevant = await fetchClassFamilies(classId);
     const byGroup = {};
     relevant.forEach((f) => {
       const groupId = f.familyGroupId || f.uid;
@@ -9380,7 +9401,7 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
         await submitBlogPost(null, [{ id: uid(), text: caption, mediaItems: [{ id: uid(), file, type: "photo" }] }]);
       } else {
         const url = await uploadOneImage(file, `message-attachments/photo-quick-${classId}/${uid()}.jpg`);
-        const allFamilies = await loadAllWithPrefix("family:");
+        const allFamilies = await fetchClassFamilies(classId);
         for (const sid of selectedStudentIds) {
           const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === sid && l.classId === classId));
           if (match) await sendMessageToFamily(match.familyGroupId || match.uid, caption, url, "photo"); // eslint-disable-line no-await-in-loop
@@ -12719,8 +12740,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   }, [groups]);
 
   const refresh = useCallback(async () => {
-    const all = await loadAllWithPrefix("family:");
-    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+    const relevant = await fetchClassFamilies(classId);
     const byGroup = {};
     relevant.forEach((f) => {
       const groupId = f.familyGroupId || f.uid;
@@ -12742,15 +12762,24 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   const assignedClassIds = loggedInTeacher?.assignedClassIds || [];
   const refreshDirect = useCallback(async () => {
     if (assignedClassIds.length === 0) { setDirectGroups([]); return; }
-    const all = await loadAllWithPrefix("family:");
-    const relevant = all.filter((f) => (f.studentLinks || []).some((l) => assignedClassIds.includes(l.classId)));
+    // Fetches per-class rather than in one shot — a teacher only ever has a couple of assigned
+    // classes, so this stays cheap, and it's what actually keeps each request within the rule
+    // fetchClassFamilies itself is built around (one specific, provably-owned class at a time).
+    const perClass = await Promise.all(assignedClassIds.map((id) => fetchClassFamilies(id)));
+    const all = perClass.flat();
     const byGroup = {};
-    relevant.forEach((f) => {
+    all.forEach((f) => {
       const groupId = f.familyGroupId || f.uid;
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
-      byGroup[groupId].guardians.push(f);
+      // A family reachable through two of this teacher's classes (two siblings, say) would
+      // otherwise show up twice, once per class fetch — this keeps each guardian counted once
+      // even though they may have appeared in more than one of the per-class results above.
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks, seenUids: new Set() };
+      if (!byGroup[groupId].seenUids.has(f.uid)) {
+        byGroup[groupId].guardians.push(f);
+        byGroup[groupId].seenUids.add(f.uid);
+      }
     });
-    const groupList = Object.values(byGroup);
+    const groupList = Object.values(byGroup).map(({ seenUids, ...g }) => g);
     setDirectGroups(groupList);
     const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
     setDirectThreads(Object.fromEntries(entries));
@@ -16665,8 +16694,7 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
           attachmentUrl = await uploadOneFile(attachFile, `message-attachments/broadcast-${classId}/${uid()}.${(attachFile.name || "").split(".").pop() || "bin"}`, setUploadProgress);
         }
       }
-      const allFamilies = await loadAllWithPrefix("family:");
-      const relevant = allFamilies.filter((f) => (f.studentLinks || []).some((l) => l.classId === classId));
+      const relevant = await fetchClassFamilies(classId);
       const groupIds = new Set(relevant.map((f) => f.familyGroupId || f.uid));
       for (const groupId of groupIds) {
         await sendMessageToFamily(groupId, draft.trim(), attachmentUrl, attachType, attachType === "file" ? attachFile.name : null); // eslint-disable-line no-await-in-loop
