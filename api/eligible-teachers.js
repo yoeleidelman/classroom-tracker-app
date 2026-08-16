@@ -87,12 +87,18 @@ export default async function handler(req, res) {
   // produced it.
   const classesSnap = await classesPromise;
   const allClasses = classesSnap.exists ? classesSnap.data().value || [] : [];
-  const classTypeById = Object.fromEntries(allClasses.map((c) => [c.id, c.classType]));
+  // A class created before classType existed as a field at all has no classType key in its
+  // stored record — defaulting the missing case to "elementary" here (matching the same default
+  // already used when a class is first created) is what keeps a class like that from being
+  // silently excluded from grade-level matching entirely. Without this, a family whose only
+  // linked class predates this field would never see any grade-level-reachable staff at all,
+  // since every comparison below would be checking against undefined instead of "elementary".
+  const classTypeById = Object.fromEntries(allClasses.map((c) => [c.id, c.classType || "elementary"]));
 
   // Every one of this family's linked classes, plus every other class sharing a type this family
   // is connected to — the full set of classIds whose messagingLabels could plausibly apply here.
   const candidateClassIds = new Set(linkedClassIds);
-  allClasses.forEach((c) => { if (linkedClassTypes.includes(c.classType)) candidateClassIds.add(c.id); });
+  allClasses.forEach((c) => { if (linkedClassTypes.includes(c.classType || "elementary")) candidateClassIds.add(c.id); });
 
   // This is the one read that genuinely can't start until candidateClassIds is known, so it still
   // runs after the two above — but it now overlaps with the in-flight staff query above instead

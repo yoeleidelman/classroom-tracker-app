@@ -495,6 +495,26 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
 function reactorIdOf(entry) { return typeof entry === "string" ? entry : entry?.id; }
 function reactorNameOf(entry) { return typeof entry === "string" ? null : entry?.name; }
 
+// The push-notification body text for a message that has one or more attachments and possibly no
+// typed text at all — used by every send function below instead of repeating this logic five
+// times. Counts by type rather than just saying "Sent an attachment," since "Sent 3 photos" is
+// more useful on a lock screen than a generic label, but falls back to a plain count for a mixed
+// batch rather than trying to enumerate every type combination.
+function describeAttachmentsForNotification(attachments) {
+  if (!attachments || attachments.length === 0) return "";
+  if (attachments.length === 1) {
+    const type = attachments[0].type;
+    return type === "video" ? "Sent a video" : type === "file" ? "Sent a file" : type === "audio" ? "Sent an audio file" : "Sent a photo";
+  }
+  const types = new Set(attachments.map((a) => a.type));
+  if (types.size === 1) {
+    const type = attachments[0].type;
+    const label = type === "video" ? "videos" : type === "file" ? "files" : type === "audio" ? "audio files" : "photos";
+    return `Sent ${attachments.length} ${label}`;
+  }
+  return `Sent ${attachments.length} attachments`;
+}
+
 // Single-reaction-per-person logic, shared by every place a post or a specific block within one
 // can be reacted to — picking a new reaction replaces whichever one that person already had
 // there rather than adding alongside it; picking the same one again removes it (toggle-off).
@@ -950,19 +970,25 @@ function wouldBeRepeatCheckIn(checkIns, date) {
 // a photo), spread across today and a couple of past days so the date picker has somewhere to go.
 // Parent emails are obviously-fake test addresses, never real ones, since this data (and the
 // parent accounts it can seed) is for internal preview only.
+// Same reasoning as buildSampleData below for the elementary side — generous, realistic, varied
+// data across every feature, not a bare minimum. Ten children, a full week of varied attendance
+// and daily-log entries, and incidents drawn from the actual preschool-specific categories (not
+// elementary's), so this also doubles as a working demonstration of that fix.
 function buildPreschoolSampleData() {
-  const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
-  const roster = [
-    { id: s1, name: "Chana G.", studentType: "preschool", parent1Name: "Test Parent One", parentEmail: "testparent1@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
-    { id: s2, name: "Mendel S.", studentType: "preschool", parent1Name: "Test Parent Two", parentEmail: "testparent2@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
-    { id: s3, name: "Yossi B.", studentType: "preschool", parent1Name: "Test Parent Three", parentEmail: "testparent3@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
-    { id: s4, name: "Rivka L.", studentType: "preschool", parent1Name: "Test Parent Four", parentEmail: "testparent4@example.com", parentPhone: "", notes: "", enrollmentScope: "full-time" },
-  ];
+  const students = [
+    { name: "Chana G." }, { name: "Mendel S." }, { name: "Yossi B." }, { name: "Rivka L." },
+    { name: "Levi K." }, { name: "Sarah T." }, { name: "Dovid P." }, { name: "Chaya M." },
+    { name: "Shneur F." }, { name: "Miriam R." },
+  ].map((s, i) => ({
+    ...s, id: uid(), studentType: "preschool", parent1Name: `Test Parent ${i + 1}`, parentEmail: `testparent${i + 1}@example.com`, parentPhone: "", notes: "", enrollmentScope: "full-time",
+  }));
+  const [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10] = students.map((s) => s.id);
+  const roster = students;
   const today = todayISO();
   const d = (n) => addDaysISO(today, -n);
   // A small, self-contained placeholder image — stands in for a real Storage upload so the parent
-  // Photos card has something real to render without needing an actual file.
-  const placeholderPhoto = "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="#d4a843"/><text x="100" y="105" font-size="18" fill="white" text-anchor="middle" font-family="sans-serif">Sample Photo</text></svg>');
+  // Photos card and blog have something real to render without needing an actual file.
+  const placeholderPhoto = (label, color) => "data:image/svg+xml;base64," + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><rect width="300" height="300" fill="${color}"/><text x="150" y="155" font-size="18" fill="white" text-anchor="middle" font-family="sans-serif">${label}</text></svg>`);
 
   const mkDay = (checkedIn, mood, lunchAmt, napTimes, diaper) => ({
     checkIns: checkedIn ? [{ id: uid(), date: checkedIn, checkInTime: "08:00", checkInBy: "Teacher", checkOutTime: checkedIn === today ? null : "15:30", checkOutBy: checkedIn === today ? null : "Teacher" }] : [],
@@ -978,84 +1004,164 @@ function buildPreschoolSampleData() {
     [s2]: { ...mkDay(today, "tired", "some", ["13:15", "14:00"], null), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
     [s3]: { checkIns: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], skills: {}, fluency: [], attendance: [], points: {}, communications: [] }, // absent today, on purpose
     [s4]: { ...mkDay(today, "happy", "all", ["13:00", "14:30"], "dry"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+    [s5]: { ...mkDay(today, "fussy", "some", ["12:45", "13:45"], "wet"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+    [s6]: { ...mkDay(today, "happy", "all", ["13:00", "14:00"], "dry"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+    [s7]: { ...mkDay(today, "happy", "most", ["13:15", "14:15"], "wet"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+    [s8]: { ...mkDay(today, "tired", "none", ["12:30", "14:00"], "bm"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
+    [s9]: { checkIns: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], skills: {}, fluency: [], attendance: [], points: {}, communications: [] }, // absent today
+    [s10]: { ...mkDay(today, "happy", "all", ["13:00", "14:20"], "dry"), skills: {}, fluency: [], attendance: [], points: {}, communications: [] },
   };
-  // A couple of past days for the date picker to have somewhere to go
-  const pastDayFor = (sid, dayOffset) => {
+  // Several past days so the date picker has somewhere real to go, not just today.
+  const pastDayFor = (sid, dayOffset, mood = "happy", lunch = "most") => {
     const date = d(dayOffset);
-    const entry = mkDay(date, "happy", "most", ["13:00", "14:15"], "wet");
+    const entry = mkDay(date, mood, lunch, ["13:00", "14:15"], "wet");
     studentData[sid].checkIns.push(...entry.checkIns);
     studentData[sid].mood.push(...entry.mood);
     studentData[sid].meals.push(...entry.meals);
     studentData[sid].naps.push(...entry.naps);
     if (entry.diapers.length) studentData[sid].diapers.push(...entry.diapers);
   };
-  pastDayFor(s1, 1);
-  pastDayFor(s2, 2);
+  [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10].forEach((sid) => { pastDayFor(sid, 1); pastDayFor(sid, 2, "tired", "some"); pastDayFor(sid, 3); });
 
+  // Drawn from the actual preschool-specific category lists (see DEFAULT_CONFIG), not elementary's
+  // — categoryLabel/categoryColor stored directly, matching what PreschoolIncidentForm itself saves.
   const incidents = [
-    { id: uid(), date: today, category: "health", description: "Small scrape on the knee during outdoor play, cleaned and bandaged.", studentIds: [s1] },
+    { id: uid(), kind: "health", category: "fall-bump", categoryLabel: "Fall or bump", categoryColor: "sky", date: today, time: "10:15", description: "Small bump on the knee during outdoor play, ice applied, resumed playing within minutes.", studentIds: [s1], media: [], notifyFamily: true },
+    { id: uid(), kind: "health", category: "bite", categoryLabel: "Bite (from another child)", categoryColor: "amber", date: d(2), time: "11:30", description: "Brief bite mark on forearm during a toy dispute, no skin broken, comforted and separated.", studentIds: [s5], media: [], notifyFamily: true, flaggedForAdmin: true },
+    { id: uid(), kind: "incident", category: "peer-conflict", categoryLabel: "Peer conflict", categoryColor: "violet", date: d(1), time: "09:45", description: "Brief disagreement over a shared toy, resolved with redirection.", studentIds: [s3, s7], media: [], notifyFamily: false },
+    { id: uid(), kind: "incident", category: "difficult-separation", categoryLabel: "Difficult drop-off or separation", categoryColor: "sky", date: today, time: "08:05", description: "Some tears at drop-off this morning, settled in within about ten minutes.", studentIds: [s9], media: [], notifyFamily: true },
   ];
   const photos = [
-    { id: uid(), date: today, url: placeholderPhoto, storagePath: "", studentIds: [s1, s2, s4], caption: "Morning circle time" },
+    { id: uid(), date: today, url: placeholderPhoto("Sample Photo", "#d4a843"), storagePath: "", studentIds: [s1, s2, s4, s6], caption: "Morning circle time" },
+    { id: uid(), date: d(2), url: placeholderPhoto("Sample Photo", "#0f766e"), storagePath: "", studentIds: [s5, s7, s10], caption: "Art project — handprint turkeys" },
   ];
   const plannerDays = {};
   const plannerEvents = [];
 
-  return { roster, studentData, incidents, photos, plannerDays, plannerEvents };
+  const blogPosts = [
+    {
+      id: uid(), timestamp: new Date(new Date(d(2)).setHours(13, 0)).toISOString(), authorType: "teacher", title: null, reactions: {}, comments: [],
+      blocks: [{ id: uid(), text: "A busy, happy morning in the Ducklings Room! Everyone enjoyed circle time and a fun art project today.", media: [{ url: placeholderPhoto("Sample Photo", "#0f766e"), type: "photo" }], reactions: {} }],
+    },
+    {
+      id: uid(), timestamp: new Date(new Date(d(1)).setHours(15, 30)).toISOString(), authorType: "teacher", title: "Reminder", reactions: {}, comments: [],
+      blocks: [{ id: uid(), text: "Just a reminder that we'll be outside for extra playtime tomorrow if the weather holds — please send a jacket!", media: [], reactions: {} }],
+    },
+  ];
+
+  return { roster, studentData, incidents, photos, plannerDays, plannerEvents, blogPosts };
 }
 
+// Deliberately generous, not just "enough to prove the feature exists" — this data doesn't just
+// verify the app works, it's what a teacher sees the very first time they're handed this app to
+// try, and what gets shown when presenting it to staff for training. A sparse 4-student sample
+// with one data point each doesn't give either audience anything real to click through; ten
+// students with real spread — some thriving, some flagged, some absent a lot, real variation
+// across every feature the app has — is what actually lets someone explore it the way they would
+// their own real classroom, not just confirm a button doesn't crash.
 function buildSampleData() {
-  const s1 = uid(), s2 = uid(), s3 = uid(), s4 = uid();
-  const roster = [
-    { id: s1, name: "Chana G.", parentEmail: "", parentPhone: "", notes: "" },
-    { id: s2, name: "Mendel S.", parentEmail: "", parentPhone: "", notes: "" },
-    { id: s3, name: "Yossi B.", parentEmail: "", parentPhone: "", notes: "" },
-    { id: s4, name: "Rivka L.", parentEmail: "", parentPhone: "", notes: "" },
-  ];
+  const students = [
+    { name: "Chana G." }, { name: "Mendel S." }, { name: "Yossi B." }, { name: "Rivka L." },
+    { name: "Levi K." }, { name: "Sarah T." }, { name: "Dovid P." }, { name: "Chaya M." },
+    { name: "Shneur F." }, { name: "Miriam R." },
+  ].map((s) => ({ ...s, id: uid(), parentEmail: "", parentPhone: "", notes: "" }));
+  const [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10] = students.map((s) => s.id);
+  const roster = students;
   const today = todayISO();
   const d = (n) => addDaysISO(today, -n);
+
+  // A realistic spread of attendance across a couple of weeks — not every student present every
+  // day, since a roster of all-green attendance doesn't show what the late/absent views actually
+  // look like in practice.
+  const attendanceDays = [9, 8, 7, 6, 5, 4, 3, 2, 1];
+  const attendanceFor = (pattern) => attendanceDays.map((n, i) => ({ date: d(n), status: pattern[i] || "present", time: pattern[i] === "late" ? `9:${10 + i}` : "" }));
 
   const studentData = {
     [s1]: {
       skills: {
         [skillKey("lname", "alef")]: { history: [{ date: d(10), result: "got-it" }, { date: d(5), result: "got-it" }], status: "mastered", flagCount: 0 },
         [skillKey("lname", "beis")]: { history: [{ date: d(6), result: "struggled" }, { date: d(2), result: "struggled" }], status: "flagged", flagCount: 1 },
+        [skillKey("lname", "gimmel")]: { history: [{ date: d(1), result: "got-it" }], status: "mastered", flagCount: 0 },
       },
       fluency: [{ date: d(3), wordsRead: 14, hesitation: "some", mode: "decoding", notes: "Improving steadily" }],
-      attendance: [{ date: d(9), status: "present", time: "" }, { date: d(8), status: "present", time: "" }, { date: d(7), status: "late", time: "9:12" }, { date: d(2), status: "present", time: "" }],
+      attendance: attendanceFor(["present", "present", "late", "present", "present", "present", "present", "present", "present"]),
       points: {}, communications: [],
     },
     [s2]: {
       skills: { [skillKey("lname", "alef")]: { history: [{ date: d(6), result: "got-it" }], status: "practicing", flagCount: 0 } },
       fluency: [],
-      attendance: [{ date: d(9), status: "present", time: "" }, { date: d(4), status: "absent", time: "" }],
+      attendance: attendanceFor(["present", "absent", "present", "present", "present", "present", "absent", "present", "present"]),
       points: {}, communications: [],
     },
     [s3]: {
       skills: {},
       fluency: [],
-      attendance: [{ date: d(9), status: "present", time: "" }, { date: d(7), status: "late", time: "9:20" }, { date: d(3), status: "late", time: "9:15" }, { date: d(1), status: "late", time: "9:08" }],
+      attendance: attendanceFor(["present", "late", "present", "late", "present", "late", "present", "late", "present"]),
       points: {}, communications: [],
     },
     [s4]: {
+      skills: { [skillKey("lname", "beis")]: { history: [{ date: d(4), result: "got-it" }], status: "practicing", flagCount: 0 } },
+      fluency: [{ date: d(1), wordsRead: 22, hesitation: "none", mode: "fluent", notes: "Reading well above grade level" }],
+      attendance: attendanceFor(["present", "present", "present", "present", "present", "present", "present", "present", "present"]),
+      points: {}, communications: [],
+    },
+    [s5]: {
+      skills: { [skillKey("lname", "alef")]: { history: [{ date: d(8), result: "struggled" }, { date: d(4), result: "struggled" }, { date: d(1), result: "struggled" }], status: "flagged", flagCount: 3 } },
+      fluency: [{ date: d(5), wordsRead: 6, hesitation: "a lot", mode: "decoding", notes: "Needs extra support with letter recognition" }],
+      attendance: attendanceFor(["present", "present", "present", "absent", "absent", "present", "present", "present", "late"]),
+      points: {}, communications: [],
+    },
+    [s6]: {
+      skills: {
+        [skillKey("lname", "alef")]: { history: [{ date: d(9), result: "got-it" }], status: "mastered", flagCount: 0 },
+        [skillKey("lname", "beis")]: { history: [{ date: d(5), result: "got-it" }], status: "mastered", flagCount: 0 },
+      },
+      fluency: [{ date: d(2), wordsRead: 18, hesitation: "some", mode: "decoding", notes: "" }],
+      attendance: attendanceFor(["present", "present", "present", "present", "present", "late", "present", "present", "present"]),
+      points: {}, communications: [],
+    },
+    [s7]: {
       skills: {}, fluency: [],
-      attendance: [{ date: d(9), status: "present", time: "" }],
+      attendance: attendanceFor(["present", "present", "absent", "present", "present", "present", "present", "absent", "present"]),
+      points: {}, communications: [],
+    },
+    [s8]: {
+      skills: { [skillKey("lname", "gimmel")]: { history: [{ date: d(3), result: "got-it" }], status: "practicing", flagCount: 0 } },
+      fluency: [],
+      attendance: attendanceFor(["present", "present", "present", "present", "late", "present", "present", "present", "present"]),
+      points: {}, communications: [],
+    },
+    [s9]: {
+      skills: {}, fluency: [],
+      attendance: attendanceFor(["present", "present", "present", "present", "present", "present", "present", "present", "present"]),
+      points: {}, communications: [],
+    },
+    [s10]: {
+      skills: { [skillKey("lname", "beis")]: { history: [{ date: d(6), result: "struggled" }], status: "flagged", flagCount: 1 } },
+      fluency: [{ date: d(4), wordsRead: 10, hesitation: "some", mode: "decoding", notes: "" }],
+      attendance: attendanceFor(["present", "present", "present", "late", "present", "present", "present", "present", "absent"]),
       points: {}, communications: [],
     },
   };
 
+  // A spread across every category the elementary incident system has, not just one — this is
+  // what actually shows a teacher what each category looks like once logged, not just that the
+  // feature exists at all.
   const incidents = [
     { id: uid(), date: d(5), category: "social", description: "Disagreement over supplies during table work", studentIds: [s2, s3] },
+    { id: uid(), date: d(3), category: "health", description: "Scraped knee at recess, cleaned and bandaged, resumed play.", studentIds: [s5] },
+    { id: uid(), date: d(2), category: "discipline", description: "Talking during Kriya after two reminders — quiet word, resolved.", studentIds: [s7] },
+    { id: uid(), date: d(1), category: "lost-item", description: "Left jacket on the bus, driver notified.", studentIds: [s9] },
   ];
   const classAssessments = [
-    { id: uid(), title: "Friday Parsha Quiz (sample)", date: d(2), results: { [s1]: "95%", [s2]: "Pass", [s3]: "82%", [s4]: "90%" } },
+    { id: uid(), title: "Friday Parsha Quiz (sample)", date: d(9), results: { [s1]: "95%", [s2]: "88%", [s3]: "82%", [s4]: "98%", [s5]: "65%", [s6]: "91%", [s7]: "79%", [s8]: "85%", [s9]: "93%", [s10]: "74%" } },
+    { id: uid(), title: "Kriya Spot-Check (sample)", date: d(4), results: { [s1]: "Pass", [s2]: "Pass", [s3]: "Retry", [s4]: "Pass", [s5]: "Retry", [s6]: "Pass", [s7]: "Pass", [s8]: "Pass", [s9]: "Pass", [s10]: "Retry" } },
+    { id: uid(), title: "Chumash Review (sample)", date: d(1), results: { [s1]: "90%", [s4]: "100%", [s6]: "87%", [s9]: "94%" } },
   ];
 
   const ptsCatId = uid();
-  studentData[s1].points = { [ptsCatId]: 6 };
-  studentData[s2].points = { [ptsCatId]: 3 };
-  studentData[s3].points = { [ptsCatId]: 8 };
-  studentData[s4].points = { [ptsCatId]: 4 };
+  const points = [7, 3, 8, 9, 2, 6, 4, 5, 8, 3];
+  students.forEach((s, i) => { studentData[s.id].points = { [ptsCatId]: points[i] }; });
 
   const period1 = uid(), period2 = uid(), period3 = uid();
   const sampleSchedule = [
@@ -1078,6 +1184,7 @@ function buildSampleData() {
   };
   const plannerEvents = [
     { id: uid(), date: addDaysISO(today, 5), title: "Sample: Kriya benchmark check-in", reminderLeadDays: 3 },
+    { id: uid(), date: addDaysISO(today, 12), title: "Sample: Rosh Chodesh assembly", reminderLeadDays: 2 },
   ];
   const benchmarkSubjects = [
     {
@@ -1087,10 +1194,41 @@ function buildSampleData() {
         { id: uid(), label: "Letters N–Z", startDate: d(5), endDate: addDaysISO(today, 15), color: "violet" },
       ],
     },
+    {
+      id: uid(), label: "Chumash (sample)",
+      segments: [
+        { id: uid(), label: "Bereishis", startDate: d(30), endDate: d(10), color: "amber" },
+        { id: uid(), label: "Noach", startDate: d(9), endDate: addDaysISO(today, 10), color: "emerald" },
+      ],
+    },
+  ];
+
+  // A small, self-contained placeholder image — stands in for a real Storage upload so blog
+  // posts have something real to render without needing an actual uploaded file.
+  const placeholderPhoto = (label, color) => "data:image/svg+xml;base64," + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="${color}"/><text x="200" y="155" font-size="20" fill="white" text-anchor="middle" font-family="sans-serif">${label}</text></svg>`);
+
+  const blogPosts = [
+    {
+      id: uid(), timestamp: new Date(new Date(d(6)).setHours(14, 30)).toISOString(), authorType: "teacher", title: null, reactions: {}, comments: [],
+      blocks: [{ id: uid(), text: "What a wonderful morning of tefillah! The class really came together for our davening this week.", media: [{ url: placeholderPhoto("Sample Photo", "#0f766e"), type: "photo" }], reactions: {} }],
+    },
+    {
+      id: uid(), timestamp: new Date(new Date(d(3)).setHours(11, 0)).toISOString(), authorType: "teacher", title: "Chumash Siyum!", reactions: {}, comments: [],
+      blocks: [{ id: uid(), text: "So proud of the class for completing Parshas Bereishis together — celebrated with a small siyum party!", media: [{ url: placeholderPhoto("Sample Photo", "#b45309"), type: "photo" }], reactions: {} }],
+    },
+    {
+      id: uid(), timestamp: new Date(new Date(d(1)).setHours(15, 45)).toISOString(), authorType: "teacher", title: null, reactions: {}, comments: [],
+      blocks: [{ id: uid(), text: "A quick note: we'll be reviewing this week's Kriya letters again tomorrow before Thursday's quiz. Extra practice at home always helps!", media: [], reactions: {} }],
+    },
+  ];
+
+  const homeworkPosts = [
+    { id: uid(), timestamp: new Date(new Date(d(1)).setHours(15, 0)).toISOString(), cadence: "daily", text: "Review Kriya cards for tomorrow's quiz — focus on Beis and Gimmel." },
+    { id: uid(), timestamp: new Date(new Date(d(4)).setHours(15, 0)).toISOString(), cadence: "weekly", text: "This week: read through Parshas Noach at home once with a parent, and practice writing the aleph-beis letters from this week's packet." },
   ];
 
   return {
-    roster, studentData, incidents, classAssessments, classPoints: {}, plannerDays, plannerEvents, benchmarkSubjects, sampleSchedule,
+    roster, studentData, incidents, classAssessments, classPoints: {}, plannerDays, plannerEvents, benchmarkSubjects, sampleSchedule, blogPosts, homeworkPosts,
     pointsCategory: { id: ptsCatId, label: "Diligence Points (sample)", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "Sample reward: extra recess" },
   };
 }
@@ -1148,6 +1286,23 @@ async function loadAllWithPrefix(prefix) {
     return snap.docs.map((d) => d.data().value);
   } catch (e) {
     console.error("Prefix load failed", prefix, e);
+    return [];
+  }
+}
+
+// A companion to loadAllWithPrefix above, for the rarer case something actually needs the
+// document IDs themselves rather than just their contents — deleting every matching document
+// being the obvious example, since deleteJSON needs a key to delete, not a value. Kept separate
+// rather than changing what loadAllWithPrefix itself returns, since that function is used
+// throughout the app by code that only ever wanted the values.
+async function loadAllKeysWithPrefix(prefix) {
+  try {
+    const col = collection(db, "data");
+    const q = query(col, where(documentId(), ">=", prefix), where(documentId(), "<", `${prefix}\uf8ff`));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => d.id);
+  } catch (e) {
+    console.error("Prefix key load failed", prefix, e);
     return [];
   }
 }
@@ -1814,7 +1969,17 @@ function AppInner() {
             let linkedClassTypes = myFamily.linkedClassTypes;
             if (!linkedClassTypes) {
               const freshRegistry = (await loadJSON("schoolClasses", [], true)) || [];
-              linkedClassTypes = [...new Set(linkedClassIds.map((id) => freshRegistry.find((c) => c.id === id)?.classType).filter(Boolean))];
+              // Same fix as availableClassTypes above (see that comment) — a class missing its
+              // classType field entirely defaults to elementary, rather than being silently
+              // dropped by a bare .filter(Boolean). A family linked only to an older-style
+              // elementary class would otherwise end up with an empty linkedClassTypes, unable to
+              // reach any grade-level-reachable staff at all — a real, not just cosmetic, gap.
+              linkedClassTypes = [...new Set(
+                linkedClassIds
+                  .map((id) => freshRegistry.find((c) => c.id === id))
+                  .filter(Boolean)
+                  .map((cls) => cls.classType || "elementary")
+              )];
             }
             effectiveFamily = { ...myFamily, linkedClassIds, familyGroupId, linkedClassTypes };
             saveJSON(`family:${user.uid}`, effectiveFamily, true);
@@ -1894,7 +2059,14 @@ function AppInner() {
     const next = { ...existing, ...fields };
     if (fields.studentLinks) {
       next.linkedClassIds = [...new Set(fields.studentLinks.map((l) => l.classId))];
-      next.linkedClassTypes = [...new Set(next.linkedClassIds.map((id) => registry.find((c) => c.id === id)?.classType).filter(Boolean))];
+      // Same fix as the two spots above computing this same denormalized field — a class missing
+      // classType entirely defaults to elementary rather than being silently dropped.
+      next.linkedClassTypes = [...new Set(
+        next.linkedClassIds
+          .map((id) => registry.find((c) => c.id === id))
+          .filter(Boolean)
+          .map((cls) => cls.classType || "elementary")
+      )];
     }
     await saveJSON(`family:${uid}`, next, true);
     setFamilies((prev) => prev.map((f) => (f.uid === uid ? next : f)));
@@ -2938,7 +3110,16 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
 
   const toggleClass = (id) => setSelectedClassIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const toggleMessagingClassType = (t) => setMessagingClassTypes((prev) => (prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]));
-  const availableClassTypes = [...new Set(classes.map((c) => c.classType).filter(Boolean))];
+  // classType defaults to "elementary" at class-creation time (see createClass), but that default
+  // only ever applied going forward — any class created before this field existed at all has no
+  // classType key in its stored record, not even an empty one, so a bare .filter(Boolean) here
+  // silently drops every one of those older classes rather than treating them as elementary. That
+  // was invisible until a school actually had a mix of both an old-style class missing the field
+  // and a newer preschool class that does have it set — at that point this list only ever showed
+  // "preschool," since every elementary entry had already been filtered out as falsy. Normalizing
+  // the missing case to "elementary" here, on read, is what actually fixes it — a one-time
+  // migration would only fix classes existing today, not explain why this could recur.
+  const availableClassTypes = [...new Set(classes.map((c) => c.classType || "elementary"))];
 
   const save = async () => {
     setError("");
@@ -3656,6 +3837,79 @@ function ParentSetupEmailSettings() {
 // same person's role can genuinely differ by classroom (a Judaic Studies teacher in one room, a
 // General Studies teacher in another). A parent picking who to message sees this instead of
 // having to guess from a bare name; the account itself never carries a single fixed title.
+// A narrow, specific cleanup tool — not a general "wipe messages" feature. Only ever touches
+// admin-messages:* documents (the School Office thread), never a classroom thread or an
+// individual teacher thread, since those aren't what test broadcasts get sent through and there's
+// no reason for this tool to be able to reach them at all. Requires an explicit two-step
+// confirmation (see the count first, then a second tap to actually delete) precisely because this
+// is irreversible — there's no undo for a deleted message thread.
+function ClearAdminMessagesTool() {
+  const [status, setStatus] = useState("idle"); // "idle" | "checking" | "confirming" | "deleting" | "done" | "empty"
+  const [count, setCount] = useState(0);
+  const [error, setError] = useState(null);
+  const keysRef = useRef([]);
+
+  const checkCount = async () => {
+    setStatus("checking");
+    setError(null);
+    const keys = await loadAllKeysWithPrefix("admin-messages:");
+    keysRef.current = keys;
+    setCount(keys.length);
+    setStatus(keys.length > 0 ? "confirming" : "empty");
+  };
+
+  const deleteAll = async () => {
+    setStatus("deleting");
+    try {
+      await Promise.all(keysRef.current.map((key) => deleteJSON(key)));
+      setStatus("done");
+    } catch {
+      setError("Something went wrong deleting one or more threads — check the count again to see what's left.");
+      setStatus("idle");
+    }
+  };
+
+  if (status === "done") {
+    return <p className="text-xs font-semibold text-emerald-700">Cleared {count} thread{count === 1 ? "" : "s"} with the School Office.</p>;
+  }
+  if (status === "empty") {
+    return <p className="text-xs text-stone-400">No School Office threads found — nothing to clear.</p>;
+  }
+  if (status === "confirming") {
+    return (
+      <div>
+        <p className="text-xs text-rose-600 font-semibold mb-2">
+          Found {count} existing thread{count === 1 ? "" : "s"} with the School Office. This permanently deletes all of them — there's no undo.
+        </p>
+        <div className="flex gap-2">
+          <button onClick={deleteAll} className="text-xs font-semibold text-white bg-red-600 rounded-lg px-3 py-2 hover:bg-red-700">
+            Yes, permanently delete {count} thread{count === 1 ? "" : "s"}
+          </button>
+          <button onClick={() => setStatus("idle")} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2">Cancel</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <button onClick={checkCount} disabled={status === "checking" || status === "deleting"}
+        className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50 disabled:opacity-50">
+        {status === "checking" ? "Checking…" : status === "deleting" ? "Deleting…" : "Check for messages to clear"}
+      </button>
+      {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
+
+// Individual teacher threads: deliberately read-only here, matching the same restriction
+// everywhere else in the app — only the one specific teacher named in a thread can ever post to
+// it, so a parent's direct line to a teacher stays genuinely private even from admin's own view.
+// Lets admin describe, per class, what each individually-messageable person's actual role is
+// there — deliberately keyed by (class, person) rather than stored once on the account, since the
+// same person's role can genuinely differ by classroom (a Judaic Studies teacher in one room, a
+// General Studies teacher in another). A parent picking who to message sees this instead of
+// having to guess from a bare name; the account itself never carries a single fixed title.
 function ClassMessagingLabelsEditor({ activeClasses, teachers }) {
   const [selectedClassId, setSelectedClassId] = useState(activeClasses[0]?.id || "");
   const [labels, setLabels] = useState(null); // { [uid]: "label text" }
@@ -4231,6 +4485,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             <ClassMessagingLabelsEditor activeClasses={activeClasses} teachers={teachers} />
           )}
         </div>
+        <div className="pt-1 mb-6">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Clear test broadcast messages</p>
+          <p className="text-xs text-stone-400 mb-3">Deletes every family's thread with the School Office — meant for clearing out messages sent while testing, before real families start using this. This does not touch classroom threads or individual teacher threads, and it's permanent: cleared threads can't be recovered. Every family's thread with the office is already completely private and separate from every other family's, so this is only about removing test content specifically, not something needed for privacy between families.</p>
+          <ClearAdminMessagesTool />
+        </div>
         <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
           <p className="text-xs text-stone-400 mb-3">Build a custom Excel report — pick who to include and what to include, and it downloads as one file with a sheet per type of data.</p>
@@ -4482,11 +4741,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                           );
                         })}
                       </div>
-                      {[...new Set(activeClasses.map((c) => c.classType).filter(Boolean))].length > 0 && (
+                      {[...new Set(activeClasses.map((c) => c.classType || "elementary"))].length > 0 && (
                         <>
                           <p className="text-[10px] text-stone-400 mb-1.5 mt-2.5">Reachable by every parent in these grade levels, regardless of specific class:</p>
                           <div className="flex flex-wrap gap-1.5">
-                            {[...new Set(activeClasses.map((c) => c.classType).filter(Boolean))].map((ct) => {
+                            {[...new Set(activeClasses.map((c) => c.classType || "elementary"))].map((ct) => {
                               const enabled = (t.messagingClassTypes || []).includes(ct);
                               return (
                                 <button key={ct}
@@ -5251,7 +5510,7 @@ function ContactOfficeView({ adminThread, onBack }) {
 // bottom of the screen. Each option triggers its own native file picker with the right accept
 // filter via a picker built on demand — still the browser's own file-selection UI underneath,
 // just reached through one consolidated button instead of several competing icons.
-function AttachmentMenuButton({ onPickFile }) {
+function AttachmentMenuButton({ onPickFile, onPickFiles }) {
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef(null);
 
@@ -5262,11 +5521,16 @@ function AttachmentMenuButton({ onPickFile }) {
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, [open]);
 
-  const pick = (accept) => {
+  // onPickFiles (plural) is the newer, multi-select-capable path — used where a composer can
+  // actually accept several photos in one message. onPickFile (singular) stays supported for the
+  // composers that haven't been converted to multi-attachment yet, so this one shared button
+  // keeps working correctly in both.
+  const pick = (accept, allowMultiple) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = accept;
-    input.onchange = (e) => onPickFile(e.target.files?.[0]);
+    if (allowMultiple && onPickFiles) input.multiple = true;
+    input.onchange = (e) => { if (onPickFiles) onPickFiles(e.target.files); else onPickFile(e.target.files?.[0]); };
     input.click();
     setOpen(false);
   };
@@ -5279,13 +5543,13 @@ function AttachmentMenuButton({ onPickFile }) {
       </button>
       {open && (
         <div className="anim-expand-up absolute bottom-full left-0 mb-2 bg-white border border-stone-200 rounded-xl shadow-lg py-1.5 w-48 z-20">
-          <button type="button" onClick={() => pick("image/*,video/*")} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
+          <button type="button" onClick={() => pick("image/*,video/*", true)} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
             <Camera size={16} className="text-stone-500 shrink-0" /> Photo or video
           </button>
-          <button type="button" onClick={() => pick("audio/*")} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
+          <button type="button" onClick={() => pick("audio/*", false)} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
             <Music size={16} className="text-stone-500 shrink-0" /> Audio
           </button>
-          <button type="button" onClick={() => pick(".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv")} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
+          <button type="button" onClick={() => pick(".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv", false)} className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-stone-700 hover:bg-stone-50 text-left">
             <Paperclip size={16} className="text-stone-500 shrink-0" /> File
           </button>
         </div>
@@ -5301,9 +5565,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   const [roughNote, setRoughNote] = useState("");
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState(false);
-  const [attachFile, setAttachFile] = useState(null);
-  const [attachPreview, setAttachPreview] = useState(null);
-  const [attachType, setAttachType] = useState(null); // "photo" | "video" | "file"
+  const [attachItems, setAttachItems] = useState([]); // { id, file, preview, type, name }
   const [attachError, setAttachError] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
@@ -5346,49 +5608,61 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
     el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
   }, [text]);
 
-  const pickAttachment = async (file) => {
-    if (!file) return;
+  // Multiple photos (or a mix of photos and other files) picked at once now go into one message,
+  // the same way the blog already lets several images live in one post — this is what actually
+  // fixes the old "one message per photo" pattern the camera's send-to-students flow used to fall
+  // back to, since there was previously no way to attach more than one thing to a single message
+  // at all. Photos and videos allow multiple selections at once; a document or audio attachment
+  // stays a single pick, since stacking several unrelated files onto one message note isn't the
+  // same use case multiple photos of the same moment is.
+  const pickAttachments = async (fileList) => {
+    const files = Array.from(fileList || []);
     setAttachError(null);
-    const isVideo = file.type.startsWith("video/");
-    const isImage = file.type.startsWith("image/");
-    const isAudio = file.type.startsWith("audio/");
-    if (isVideo) {
-      try { await validateVideoDuration(file); }
-      catch (err) { setAttachError(err.message); return; }
+    for (const file of files) {
+      const isVideo = file.type.startsWith("video/");
+      const isImage = file.type.startsWith("image/");
+      const isAudio = file.type.startsWith("audio/");
+      if (isVideo) {
+        try { await validateVideoDuration(file); } // eslint-disable-line no-await-in-loop
+        catch (err) { setAttachError(err.message); continue; } // eslint-disable-line no-continue
+      }
+      if (!isImage && file.size > MAX_FILE_ATTACHMENT_BYTES) {
+        setAttachError("File is too large — the limit is 20MB.");
+        continue; // eslint-disable-line no-continue
+      }
+      const type = isVideo ? "video" : isImage ? "photo" : isAudio ? "audio" : "file";
+      setAttachItems((prev) => [...prev, {
+        id: uid(), file, type, name: file.name,
+        preview: isImage || isVideo ? URL.createObjectURL(file) : null,
+      }]);
     }
-    if (!isImage && file.size > MAX_FILE_ATTACHMENT_BYTES) {
-      setAttachError("File is too large — the limit is 20MB.");
-      return;
-    }
-    setAttachFile(file);
-    setAttachType(isVideo ? "video" : isImage ? "photo" : isAudio ? "audio" : "file");
-    setAttachPreview(isImage || isVideo ? URL.createObjectURL(file) : null);
   };
-  const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
+  const removeAttachment = (id) => setAttachItems((prev) => prev.filter((a) => a.id !== id));
+  const clearAttachments = () => { setAttachItems([]); setAttachError(null); };
 
   const send = async () => {
-    if ((!text.trim() && !attachFile) || sending) return;
+    if ((!text.trim() && attachItems.length === 0) || sending) return;
     setSending(true);
     try {
-      let attachmentUrl = null;
-      if (attachFile) {
-        setUploadProgress(0);
-        if (attachType === "video") {
-          const ext = (attachFile.name || "").split(".").pop() || "mp4";
-          attachmentUrl = await uploadOneVideo(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
-        } else if (attachType === "photo") {
-          attachmentUrl = await uploadOneImage(attachFile, `message-attachments/${threadKey}/${uid()}.jpg`, setUploadProgress);
-        } else if (attachType === "audio") {
-          const ext = (attachFile.name || "").split(".").pop() || "webm";
-          attachmentUrl = await uploadOneFile(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
+      const attachments = [];
+      if (attachItems.length > 0) setUploadProgress(0);
+      for (let i = 0; i < attachItems.length; i++) {
+        const item = attachItems[i];
+        let url;
+        if (item.type === "video") {
+          const ext = (item.file.name || "").split(".").pop() || "mp4";
+          url = await uploadOneVideo(item.file, `message-attachments/${threadKey}/${uid()}.${ext}`, (p) => setUploadProgress(Math.round((i + p / 100) / attachItems.length * 100))); // eslint-disable-line no-await-in-loop
+        } else if (item.type === "photo") {
+          url = await uploadOneImage(item.file, `message-attachments/${threadKey}/${uid()}.jpg`, (p) => setUploadProgress(Math.round((i + p / 100) / attachItems.length * 100))); // eslint-disable-line no-await-in-loop
         } else {
-          const ext = (attachFile.name || "").split(".").pop() || "bin";
-          attachmentUrl = await uploadOneFile(attachFile, `message-attachments/${threadKey}/${uid()}.${ext}`, setUploadProgress);
+          const ext = (item.file.name || "").split(".").pop() || (item.type === "audio" ? "webm" : "bin");
+          url = await uploadOneFile(item.file, `message-attachments/${threadKey}/${uid()}.${ext}`, (p) => setUploadProgress(Math.round((i + p / 100) / attachItems.length * 100))); // eslint-disable-line no-await-in-loop
         }
+        attachments.push({ url, type: item.type, name: (item.type === "file" || item.type === "audio") ? item.name : null });
       }
-      await onSend(text.trim(), attachmentUrl, attachType, attachType === "file" || attachType === "audio" ? attachFile.name : null);
+      await onSend(text.trim(), attachments);
       setText("");
-      clearAttachment();
+      clearAttachments();
     } catch (err) {
       setAttachError(describeUploadError(err));
     }
@@ -5502,28 +5776,59 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                   </div>
                 ) : (
                   <>
-                    {m.attachmentType === "photo" && m.attachmentUrl && (
-                      <img src={m.attachmentUrl} alt="" onClick={() => setLightboxPhoto({ url: m.attachmentUrl })}
-                        className="w-full max-h-64 object-cover cursor-pointer mt-1" />
-                    )}
-                    {m.attachmentType === "video" && m.attachmentUrl && (
-                      <video src={m.attachmentUrl} controls playsInline className="w-full max-h-64 bg-black mt-1" />
-                    )}
-                    {m.attachmentType === "audio" && m.attachmentUrl && (
-                      <div className="mt-1.5 mb-1 mx-3.5">
-                        {m.attachmentName && (
-                          <p className={`text-[11px] font-semibold truncate mb-1 ${mine ? "text-teal-100" : "text-stone-500"}`}>{m.attachmentName}</p>
-                        )}
-                        <audio src={m.attachmentUrl} controls className="w-full" style={{ height: "36px" }} />
-                      </div>
-                    )}
-                    {m.attachmentType === "file" && m.attachmentUrl && (
-                      <a href={m.attachmentUrl} target="_blank" rel="noopener noreferrer"
-                        className={`flex items-center gap-2 mx-3.5 mt-1 mb-1 px-3 py-2 rounded-lg border ${mine ? "border-teal-500 bg-teal-800/40" : "border-stone-200 bg-stone-50"}`}>
-                        <FileText size={18} className={mine ? "text-teal-100" : "text-stone-500"} />
-                        <span className={`text-xs font-semibold truncate ${mine ? "text-white" : "text-stone-700"}`}>{m.attachmentName || "Attached file"}</span>
-                      </a>
-                    )}
+                    {/* Normalizes old and new message shapes into one list to render — an older
+                        message saved before this rewrite still has attachmentUrl/attachmentType
+                        directly on it rather than an attachments array, and needs to keep
+                        rendering exactly as it always has. */}
+                    {(() => {
+                      const atts = m.attachments || (m.attachmentUrl ? [{ url: m.attachmentUrl, type: m.attachmentType, name: m.attachmentName }] : []);
+                      const mediaAtts = atts.filter((a) => a.type === "photo" || a.type === "video");
+                      const otherAtts = atts.filter((a) => a.type === "audio" || a.type === "file");
+                      return (
+                        <>
+                          {mediaAtts.length === 1 && (
+                            mediaAtts[0].type === "photo" ? (
+                              <img src={mediaAtts[0].url} alt="" onClick={() => setLightboxPhoto({ url: mediaAtts[0].url })}
+                                className="w-full max-h-64 object-cover cursor-pointer mt-1" />
+                            ) : (
+                              <video src={mediaAtts[0].url} controls playsInline className="w-full max-h-64 bg-black mt-1" />
+                            )
+                          )}
+                          {mediaAtts.length > 1 && (
+                            <div className="grid grid-cols-2 gap-0.5 mt-1">
+                              {mediaAtts.map((a, i) => (
+                                <div key={i} className="relative aspect-square cursor-pointer" onClick={() => a.type === "photo" && setLightboxPhoto({ url: a.url })}>
+                                  {a.type === "video" ? (
+                                    <>
+                                      <video src={a.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
+                                      <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                                        <div className="bg-white/90 rounded-full p-1.5"><Play size={12} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <img src={a.url} alt="" className="w-full h-full object-cover" />
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {otherAtts.map((a, i) => (
+                            a.type === "audio" ? (
+                              <div key={i} className="mt-1.5 mb-1 mx-3.5">
+                                {a.name && <p className={`text-[11px] font-semibold truncate mb-1 ${mine ? "text-teal-100" : "text-stone-500"}`}>{a.name}</p>}
+                                <audio src={a.url} controls className="w-full" style={{ height: "36px" }} />
+                              </div>
+                            ) : (
+                              <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                                className={`flex items-center gap-2 mx-3.5 mt-1 mb-1 px-3 py-2 rounded-lg border ${mine ? "border-teal-500 bg-teal-800/40" : "border-stone-200 bg-stone-50"}`}>
+                                <FileText size={18} className={mine ? "text-teal-100" : "text-stone-500"} />
+                                <span className={`text-xs font-semibold truncate ${mine ? "text-white" : "text-stone-700"}`}>{a.name || "Attached file"}</span>
+                              </a>
+                            )
+                          ))}
+                        </>
+                      );
+                    })()}
                     <div className="px-3.5 pb-2.5 pt-1">
                       {m.text && <p className="text-sm whitespace-pre-wrap"><LinkifiedText text={m.text} linkClassName={mine ? "underline text-teal-100 hover:text-white" : "underline text-teal-700 hover:text-teal-900"} /></p>}
                       {m.text && extractFirstUrl(m.text) && <LinkPreviewCard url={extractFirstUrl(m.text)} />}
@@ -5560,26 +5865,23 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
             {genError && <p className="text-xs text-rose-600 mt-1.5">Couldn't generate a draft right now — try again, or just type your message.</p>}
           </div>
         )}
-        {attachPreview && (
-          <div className="relative inline-block mb-2 ml-11">
-            {attachType === "video"
-              ? <video src={attachPreview} className="h-20 rounded-lg" />
-              : <img src={attachPreview} alt="" className="h-20 rounded-lg" />}
-            <button onClick={clearAttachment} className="absolute -top-1.5 -right-1.5 bg-stone-700 text-white rounded-full p-0.5"><X size={12} /></button>
-          </div>
-        )}
-        {attachType === "file" && attachFile && (
-          <div className="relative inline-flex items-center gap-1.5 mb-2 ml-11 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
-            <FileText size={15} className="text-stone-500" />
-            <span className="text-xs font-semibold text-stone-700 max-w-[10rem] truncate">{attachFile.name}</span>
-            <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
-          </div>
-        )}
-        {attachType === "audio" && attachFile && (
-          <div className="relative inline-flex items-center gap-1.5 mb-2 ml-11 px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white">
-            <Music size={15} className="text-stone-500" />
-            <span className="text-xs font-semibold text-stone-700 max-w-[10rem] truncate">{attachFile.name}</span>
-            <button onClick={clearAttachment} className="text-stone-400 hover:text-stone-600 shrink-0"><X size={13} /></button>
+        {attachItems.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2 ml-11">
+            {attachItems.map((a) => (
+              <div key={a.id} className="relative">
+                {a.type === "video" ? (
+                  <video src={a.preview} className="h-20 w-20 object-cover rounded-lg" />
+                ) : a.type === "photo" ? (
+                  <img src={a.preview} alt="" className="h-20 w-20 object-cover rounded-lg" />
+                ) : (
+                  <div className="h-20 flex items-center gap-1.5 px-2.5 rounded-lg border border-stone-300 bg-white">
+                    {a.type === "audio" ? <Music size={15} className="text-stone-500" /> : <FileText size={15} className="text-stone-500" />}
+                    <span className="text-xs font-semibold text-stone-700 max-w-[8rem] truncate">{a.name}</span>
+                  </div>
+                )}
+                <button onClick={() => removeAttachment(a.id)} className="absolute -top-1.5 -right-1.5 bg-stone-700 text-white rounded-full p-0.5"><X size={12} /></button>
+              </div>
+            ))}
           </div>
         )}
         {attachError && <p className="text-xs text-rose-600 mb-1.5 ml-11">{attachError}</p>}
@@ -5589,11 +5891,11 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
             <Sparkles size={17} />
           </button>
           <div className="flex-1 flex items-end gap-1 bg-white border border-stone-300 rounded-3xl pl-1 py-1 pr-2">
-            <AttachmentMenuButton onPickFile={pickAttachment} />
+            <AttachmentMenuButton onPickFiles={pickAttachments} />
             <textarea ref={composerRef} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               className="flex-1 bg-transparent border-none px-1.5 py-2 text-sm resize-none overflow-y-auto outline-none" style={{ maxHeight: MAX_COMPOSER_HEIGHT }} />
-            <button onClick={send} disabled={(!text.trim() && !attachFile) || sending} title="Send"
+            <button onClick={send} disabled={(!text.trim() && attachItems.length === 0) || sending} title="Send"
               className="text-teal-700 hover:text-teal-800 disabled:opacity-30 shrink-0 flex items-center justify-center mb-1.5 p-1">
               {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={19} />}
             </button>
@@ -6123,26 +6425,66 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // most of what a finger does on a content-heavy page is scroll straight down, and a swipe
   // detector that fires on any diagonal wobble would fight that constantly instead of staying out
   // of its way.
+  //
+  // Tracks live position during the drag, not just the gesture's final result — this is what
+  // actually makes it slide with the finger instead of the old behavior, where nothing visible
+  // happened until the finger lifted and the next tab just appeared. dragOffsetPx follows the
+  // finger 1:1 while a drag is active (no CSS transition applied during that phase, so there's no
+  // lag behind the finger); on release, a short transition either finishes the slide the rest of
+  // the way (committing the tab change) or springs back to 0 (rejecting a swipe that didn't go far
+  // enough), and only THEN does dragTargetTab clear, so the incoming tab's placeholder stays
+  // visible through the whole animation instead of popping away mid-transition.
+  const [dragOffsetPx, setDragOffsetPx] = useState(0);
+  const [dragTargetTab, setDragTargetTab] = useState(null);
+  const [dragAnimating, setDragAnimating] = useState(false);
   const swipeStart = useRef(null);
+  const swipeTrackWidth = useRef(390);
+
   const onTabAreaTouchStart = (e) => {
-    swipeStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    if (parentTab === "settings" || dragAnimating) return; // My Account isn't part of the swipeable sequence
+    swipeStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, decided: false, horizontal: false };
+    swipeTrackWidth.current = e.currentTarget.getBoundingClientRect().width || window.innerWidth;
   };
-  const onTabAreaTouchEnd = (e) => {
+
+  const onTabAreaTouchMove = (e) => {
     if (!swipeStart.current) return;
-    const dx = e.changedTouches[0].clientX - swipeStart.current.x;
-    const dy = e.changedTouches[0].clientY - swipeStart.current.y;
+    const dx = e.touches[0].clientX - swipeStart.current.x;
+    const dy = e.touches[0].clientY - swipeStart.current.y;
+    if (!swipeStart.current.decided) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return; // too small yet to tell scroll from swipe apart
+      swipeStart.current.decided = true;
+      swipeStart.current.horizontal = Math.abs(dx) > Math.abs(dy) * 1.5;
+      if (swipeStart.current.horizontal) {
+        const currentIdx = swipeOrder.indexOf(parentTab);
+        const targetIdx = dx < 0 ? currentIdx + 1 : currentIdx - 1;
+        setDragTargetTab(targetIdx >= 0 && targetIdx < swipeOrder.length ? swipeOrder[targetIdx] : null);
+      }
+    }
+    if (!swipeStart.current.horizontal) return;
+    // Clamped so dragging past either end of the sequence (no adjacent tab to reveal) shows a
+    // little resistance instead of an empty gap sliding into view.
+    const clamped = dragTargetTab ? dx : dx * 0.25;
+    setDragOffsetPx(clamped);
+  };
+
+  const onTabAreaTouchEnd = () => {
+    if (!swipeStart.current?.horizontal) { swipeStart.current = null; return; }
     swipeStart.current = null;
-    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return; // too short, or too vertical to be a swipe
-    if (parentTab === "settings") return; // My Account isn't part of the swipeable tab sequence
-    const showHomeworkTab = (fullTimeStudentLinks || []).some((l) => l.classType !== "preschool");
-    const order = ["home", "messages", "blog", ...(showHomeworkTab ? ["homework"] : [])];
-    const currentIdx = order.indexOf(parentTab);
-    if (currentIdx === -1) return;
-    // Swiping left (finger moves right-to-left, dx negative) advances forward, matching the same
-    // "swipe left to go to the next page" convention as WhatsApp, iOS's own tab bars, and most
-    // other paged interfaces.
-    const nextIdx = dx < 0 ? currentIdx + 1 : currentIdx - 1;
-    if (nextIdx >= 0 && nextIdx < order.length) navigateParentTab(order[nextIdx]);
+    const committed = dragTargetTab && Math.abs(dragOffsetPx) > swipeTrackWidth.current * 0.3;
+    setDragAnimating(true);
+    if (committed) {
+      const finalOffset = dragOffsetPx < 0 ? -swipeTrackWidth.current : swipeTrackWidth.current;
+      setDragOffsetPx(finalOffset);
+      setTimeout(() => {
+        navigateParentTab(dragTargetTab);
+        setDragOffsetPx(0);
+        setDragTargetTab(null);
+        setDragAnimating(false);
+      }, 220);
+    } else {
+      setDragOffsetPx(0);
+      setTimeout(() => { setDragTargetTab(null); setDragAnimating(false); }, 220);
+    }
   };
 
   // Same global "what's actually on screen right now" flag used by ConversationThreadView — kept
@@ -6181,6 +6523,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // fetched alongside it — homework specifically only ever applies to elementary classes, so this
   // is what lets the tab tell an elementary link apart from a preschool one.
   const [fullTimeStudentLinks, setFullTimeStudentLinks] = useState(null); // null = still loading
+  // Declared here, after fullTimeStudentLinks rather than up with the rest of the swipe state —
+  // that earlier position caused a genuine crash: this line reads fullTimeStudentLinks, which
+  // hadn't been declared yet at that point in the component body. JavaScript's const/let bindings
+  // aren't hoisted the way var or function declarations are, so reading one before its own
+  // declaration line has executed throws, rather than just seeing undefined. Safe to reference
+  // from onTabAreaTouchMove above despite appearing after it in the file, since that function
+  // only actually runs on a real touch event — long after this whole render pass, this line
+  // included, has already completed.
+  const swipeOrder = ["home", "messages", "blog", ...((fullTimeStudentLinks || []).some((l) => l.classType !== "preschool") ? ["homework"] : [])];
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -6489,26 +6840,26 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // Same conversation the teacher side writes to — one thread per family per class, not per
   // child, so two kids in the same room share one conversation with it rather than splitting an
   // otherwise identical exchange in two.
-  const sendMessageToTeacher = async (classId, text, attachmentUrl, attachmentType, attachmentName) => {
+  const sendMessageToTeacher = async (classId, text, attachments) => {
     const key = `class:${classId}:messages:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?open=messages&classId=${classId}&groupId=${myGroupId}`);
+    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=messages&classId=${classId}&groupId=${myGroupId}`);
     return next;
   };
 
   // The individual-teacher counterpart to sendMessageToTeacher above — same shape, but written to
   // that one teacher's own thread with this family, and notifying only them, never every teacher
   // sharing the classroom.
-  const sendMessageToIndividualTeacher = async (teacherUid, text, attachmentUrl, attachmentType, attachmentName) => {
+  const sendMessageToIndividualTeacher = async (teacherUid, text, attachments) => {
     const key = `teacher-messages:${teacherUid}:${myGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${myGroupId}`);
+    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${myGroupId}`);
     return next;
   };
 
@@ -6560,7 +6911,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         <GlobalAppStyles />
         <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
           onBack={() => window.history.back()}
-          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToTeacher(messagingClassId, text, attachmentUrl, attachmentType, attachmentName); await openMessagesFor(messagingClassId); }} />
+          onSend={async (text, attachments) => { await sendMessageToTeacher(messagingClassId, text, attachments); await openMessagesFor(messagingClassId); }} />
       </div>
     );
   }
@@ -6574,7 +6925,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         <GlobalAppStyles />
         <ConversationThreadView title={teacherName} subtitle={teacherLabel ? `Direct message · ${teacherLabel}` : "Direct message"} messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
           onBack={() => window.history.back()}
-          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachmentUrl, attachmentType, attachmentName); await openTeacherMessages(messagingTeacherUid); }} />
+          onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); await openTeacherMessages(messagingTeacherUid); }} />
       </div>
     );
   }
@@ -6588,45 +6939,18 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     );
   }
 
-  return (
-    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
-      <GlobalAppStyles />
-      <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2 min-w-0">
-            <img src="/sja-parent-portal-mark.png" alt="SJA Parent Portal" className="h-11 w-auto object-contain shrink-0" />
-            <div className="min-w-0">
-              <h1 className="display-font text-sm font-bold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
-              {canSwitchToTeacher && (
-                <button onClick={onSwitchToTeacher} className="text-[10px] text-[#1c3453]/60 hover:text-[#1c3453]">Switch to Teacher view</button>
-              )}
-            </div>
-          </div>
-          <div className="flex items-start gap-5 shrink-0 pl-2 pr-1">
-            <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#1c3453]/90 hover:text-[#1c3453]">
-              <Phone size={22} />
-              <span className="text-[10px] font-bold leading-none whitespace-nowrap">Contact office</span>
-            </button>
-            <button onClick={() => navigateParentTab("settings")} aria-label="Settings" className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={22} /></button>
-          </div>
-        </div>
-        {contactPanelOpen && (
-          <ContactOfficePanel onViewUpdates={() => { setContactPanelOpen(false); openAdminMessages().then(refreshUnreadThreads); }} />
-        )}
-        {parentTab !== "settings" && (
-          <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
-            text="These tabs are how you get around — Messages, Blog, Homework, and more."
-            onNext={advanceTour} onSkip={dismissTour}>
-            <div className="bg-white border-t border-stone-200 max-w-lg mx-auto">
-              <ParentMainTabs active={parentTab} navigate={navigateParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount}
-                unreadHomeworkCount={unreadHomeworkCount} showHomework={(fullTimeStudentLinks || []).some((l) => l.classType !== "preschool")} />
-            </div>
-          </TourHint>
-        )}
-      </div>
-
-      <div className="max-w-lg mx-auto px-4 py-5" onTouchStart={onTabAreaTouchStart} onTouchEnd={onTabAreaTouchEnd}>
-        {parentTab === "settings" ? (
+      // Renders a tab's actual content, parameterized rather than reading the outer parentTab
+      // state directly — this is what lets the exact same rendering logic serve two purposes: the
+      // real, current tab below, and (during an active swipe) a second, live copy of whichever
+      // adjacent tab is being dragged toward, so that pane shows the genuine destination screen
+      // sliding into view instead of a placeholder icon standing in for it. `const parentTab =
+      // tabToRender` shadows the outer parentTab for everything inside this function only — every
+      // existing `parentTab === "..."` check below this point keeps working unchanged, now reading
+      // whichever tab was actually passed in rather than always the live one.
+      const renderTabContent = (tabToRender) => {
+        const parentTab = tabToRender;
+        return (
+        parentTab === "settings" ? (
           <>
             <button onClick={() => navigateParentTab("home")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
@@ -6877,7 +7201,68 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               </>
             )}
           </>
+        )
+        );
+      };
+  return (
+    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
+      <GlobalAppStyles />
+      <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0">
+            <img src="/sja-parent-portal-mark.png" alt="SJA Parent Portal" className="h-11 w-auto object-contain shrink-0" />
+            <div className="min-w-0">
+              <h1 className="display-font text-sm font-bold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
+              {canSwitchToTeacher && (
+                <button onClick={onSwitchToTeacher} className="text-[10px] text-[#1c3453]/60 hover:text-[#1c3453]">Switch to Teacher view</button>
+              )}
+            </div>
+          </div>
+          <div className="flex items-start gap-5 shrink-0 pl-2 pr-1">
+            <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#1c3453]/90 hover:text-[#1c3453]">
+              <Phone size={22} />
+              <span className="text-[10px] font-bold leading-none whitespace-nowrap">Contact office</span>
+            </button>
+            <button onClick={() => navigateParentTab("settings")} aria-label="Settings" className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={22} /></button>
+          </div>
+        </div>
+        {contactPanelOpen && (
+          <ContactOfficePanel onViewUpdates={() => { setContactPanelOpen(false); openAdminMessages().then(refreshUnreadThreads); }} />
         )}
+        {parentTab !== "settings" && (
+          <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
+            text="These tabs are how you get around — Messages, Blog, Homework, and more."
+            onNext={advanceTour} onSkip={dismissTour}>
+            <div className="bg-white border-t border-stone-200 max-w-lg mx-auto">
+              <ParentMainTabs active={parentTab} navigate={navigateParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount}
+                unreadHomeworkCount={unreadHomeworkCount} showHomework={(fullTimeStudentLinks || []).some((l) => l.classType !== "preschool")} />
+            </div>
+          </TourHint>
+        )}
+      </div>
+
+      <div className="max-w-lg mx-auto overflow-hidden relative" onTouchStart={onTabAreaTouchStart} onTouchMove={onTabAreaTouchMove} onTouchEnd={onTabAreaTouchEnd}>
+      <div className="px-4 py-5" style={{ transform: `translateX(${dragOffsetPx}px)`, transition: dragAnimating ? "transform 0.22s ease-out" : "none" }}>
+
+      {renderTabContent(parentTab)}
+      </div>
+      {dragTargetTab && (
+        // The genuine destination screen now, not a placeholder — sharing renderTabContent above
+        // with the real, current tab is what makes this an actual second live copy of that tab's
+        // content rather than a stand-in icon. pointer-events-none is deliberate: this pane is
+        // purely a visual preview mid-drag, and should never be tappable — any interaction should
+        // go to the real tab underneath (or, once the drag commits, to this same content after it
+        // becomes the genuine current tab and pointer events resume normally).
+        <div className="absolute top-0 left-0 right-0 px-4 py-5" style={{ pointerEvents: "none" }}>
+          <div
+            style={{
+              transform: `translateX(${dragOffsetPx + (dragOffsetPx < 0 ? swipeTrackWidth.current : -swipeTrackWidth.current)}px)`,
+              transition: dragAnimating ? "transform 0.22s ease-out" : "none",
+            }}>
+            {renderTabContent(dragTargetTab)}
+          </div>
+        </div>
+      )}
       </div>
       {showScanner && (
         <ParentQRScanner onResult={handleScanResult} onClose={() => setShowScanner(false)} />
@@ -7546,6 +7931,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       persistPhotos(sample.photos);
       persistPlannerDays(sample.plannerDays);
       persistPlannerEvents(sample.plannerEvents);
+      persistBlogPosts(sample.blogPosts.map((p) => withLogger(p)));
       // Sample students need a matching entry in the school-wide registry too, same as any
       // student added normally, or "add existing student from another class" wouldn't find them.
       loadJSON("globalStudents", [], true).then((gs) => {
@@ -7566,6 +7952,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistPlannerDays(sample.plannerDays);
     persistPlannerEvents(sample.plannerEvents);
     persistBenchmarkSubjects(sample.benchmarkSubjects);
+    persistBlogPosts(sample.blogPosts.map((p) => withLogger(p)));
+    persistHomeworkPosts(sample.homeworkPosts.map((h) => withLogger(h)));
     const existingSchedules = config.planner?.schedules || [];
     let samplePlanner = { ...config.planner };
     if (existingSchedules.length === 0) {
@@ -7951,13 +8339,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // One conversation per family per class — not per individual teacher, since a preschool room
   // often has more than one adult in it and a parent shouldn't need to know who's on duty today
   // to reach "the classroom." Any teacher assigned to this class reads and writes the same thread.
-  const sendMessageToFamily = async (familyUid, text, attachmentUrl, attachmentType, attachmentName) => {
+  const sendMessageToFamily = async (familyUid, text, attachments) => {
     const key = `class:${classId}:messages:${familyUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?portal=parent&open=messages&classId=${classId}`);
+    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=messages&classId=${classId}`);
     return next;
   };
 
@@ -7965,13 +8353,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // classroom thread above, so only this specific teacher (never any colleague sharing the same
   // class, never admin) can ever post here. That's what lets a parent trust a direct message is
   // genuinely private between them and this one teacher.
-  const sendDirectMessageToFamily = async (familyGroupId, text, attachmentUrl, attachmentType, attachmentName) => {
+  const sendDirectMessageToFamily = async (familyGroupId, text, attachments) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${familyGroupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyGroupId, `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || (attachmentType === "file" ? "Sent a file" : "Sent a photo"), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
+    notifyFamilyGroup(familyGroupId, `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
     return next;
   };
 
@@ -9759,15 +10147,21 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
         await submitBlogPost(null, [{ id: uid(), text: caption, mediaItems }]);
       } else {
         const allFamilies = await fetchClassFamilies(classId);
+        // Uploads every selected item once, then reuses those same URLs for every recipient — not
+        // once per student — before this fix, sending 3 photos to 2 students meant 6 separate
+        // messages arriving one after another; now it's exactly 2 messages, each carrying all 3
+        // photos together, matching how the blog has always let one post hold several images.
+        const attachments = [];
+        for (const item of selected) {
+          const url = item.type === "video"
+            ? await uploadOneVideo(item.blob, `message-attachments/photo-quick-${classId}/${uid()}.webm`) // eslint-disable-line no-await-in-loop
+            : await uploadOneImage(item.blob, `message-attachments/photo-quick-${classId}/${uid()}.jpg`); // eslint-disable-line no-await-in-loop
+          attachments.push({ url, type: item.type });
+        }
         for (const sid of selectedStudentIds) {
           const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === sid && l.classId === classId));
           if (!match) continue; // eslint-disable-line no-continue
-          for (const item of selected) {
-            const url = item.type === "video"
-              ? await uploadOneVideo(item.blob, `message-attachments/photo-quick-${classId}/${uid()}.webm`) // eslint-disable-line no-await-in-loop
-              : await uploadOneImage(item.blob, `message-attachments/photo-quick-${classId}/${uid()}.jpg`); // eslint-disable-line no-await-in-loop
-            await sendMessageToFamily(match.familyGroupId || match.uid, caption, url, item.type); // eslint-disable-line no-await-in-loop
-          }
+          await sendMessageToFamily(match.familyGroupId || match.uid, caption, attachments); // eslint-disable-line no-await-in-loop
         }
       }
       setSent(true);
@@ -13072,14 +13466,13 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const sendToFamily = async (groupId, text, attachmentUrl, attachmentType, attachmentName) => {
+  const sendToFamily = async (groupId, text, attachments) => {
     const key = `admin-messages:${groupId}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachmentUrl ? { attachmentUrl, attachmentType, attachmentName } : {}) };
+    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    const attachmentLabel = attachmentType === "file" ? "Sent a file" : attachmentType === "audio" ? "Sent an audio file" : attachmentType === "video" ? "Sent a video" : "Sent a photo";
-    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || attachmentLabel, "/?portal=parent&open=admin");
+    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin");
     return next;
   };
 
@@ -13104,7 +13497,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
         }
       }
       for (const g of groups) {
-        await sendToFamily(g.groupId, broadcastText.trim(), attachmentUrl, attachType, attachType === "file" || attachType === "audio" ? attachFile.name : null); // eslint-disable-line no-await-in-loop
+        await sendToFamily(g.groupId, broadcastText.trim(), attachmentUrl ? [{ url: attachmentUrl, type: attachType, name: attachType === "file" || attachType === "audio" ? attachFile.name : null }] : []); // eslint-disable-line no-await-in-loop
       }
       await refresh();
       setBroadcastSentTo(groups.length);
@@ -13127,7 +13520,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
           onBack={() => { window.history.back(); refresh(); }}
-          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }}
+          onSend={async (text, attachments) => { await sendToFamily(openGroup.groupId, text, attachments); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
       </>
@@ -13367,7 +13760,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
           onBack={() => { window.history.back(); refresh(); }}
-          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToFamily(openGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refresh(); }}
+          onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
       </>
@@ -13384,7 +13777,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`teacher-direct-${openDirectGroup.groupId}`}
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
-          onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachmentUrl, attachmentType, attachmentName); await refreshDirect(); }}
+          onSend={async (text, attachments) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments); await refreshDirect(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refreshDirect(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refreshDirect(); }} />
       </>
@@ -17440,7 +17833,7 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
       const relevant = await fetchClassFamilies(classId);
       const groupIds = new Set(relevant.map((f) => f.familyGroupId || f.uid));
       for (const groupId of groupIds) {
-        await sendMessageToFamily(groupId, draft.trim(), attachmentUrl, attachType, attachType === "file" ? attachFile.name : null); // eslint-disable-line no-await-in-loop
+        await sendMessageToFamily(groupId, draft.trim(), attachmentUrl ? [{ url: attachmentUrl, type: attachType, name: attachType === "file" ? attachFile.name : null }] : []); // eslint-disable-line no-await-in-loop
       }
       setSentInAppTo(groupIds.size);
     } catch (err) {
@@ -18338,6 +18731,10 @@ function SchoolwideQRCode() {
 function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, classId, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding, createFamilyAccount }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
+  // Matches by name, case- and whitespace-insensitively, against the two classes deliberately
+  // kept as dedicated demo rooms — every other class now has real students enrolled, so sample
+  // data (which overwrites a class's roster wholesale) has no legitimate use anywhere else.
+  const isSampleClass = ["sample", "sample preschool"].includes((className || "").trim().toLowerCase());
   const [expandedCats, setExpandedCats] = useState({});
   const [expandedSchedules, setExpandedSchedules] = useState({});
   const [expandedStudents, setExpandedStudents] = useState({});
@@ -18537,9 +18934,14 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           </Section>
 
           <Section title="Demo & data reset">
-            <p className="text-xs text-stone-400 mb-3">Useful when sharing this with another teacher for feedback, or starting fresh. Both replace your current roster, attendance, incidents, points, planner entries, and benchmarks — your Settings customizations (categories, thresholds, schedule templates) are kept either way.</p>
+            {isSampleClass && (
+              <>
+                <p className="text-xs text-stone-400 mb-3">This class is one of the two dedicated demo rooms (Sample / Sample Preschool) — the only classes where loading sample data is available, now that real students are enrolled everywhere else.</p>
+                <ConfirmDelete onConfirm={loadSampleData} label="Load sample data" className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 mb-3 inline-block" />
+              </>
+            )}
+            <p className="text-xs text-stone-400 mb-3">Clearing replaces this class's current roster, attendance, incidents, points, planner entries, and benchmarks — your Settings customizations (categories, thresholds, schedule templates) are kept.</p>
             <div className="flex flex-wrap gap-2">
-              <ConfirmDelete onConfirm={loadSampleData} label="Load sample data" className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50" />
               <ConfirmDelete onConfirm={clearAllData} label="Clear all data" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" />
             </div>
             {isPreschool && (
