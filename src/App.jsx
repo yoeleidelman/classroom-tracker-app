@@ -1861,6 +1861,17 @@ function AppInner() {
   const [programs, setPrograms] = useState([]);
   const [currentTeacher, setCurrentTeacher] = useState(null); // the signed-in teacher's own record, once real login exists
   const [currentFamily, setCurrentFamily] = useState(null); // the signed-in family's own record, for the parent portal
+  // Re-checks whether the signed-in uid now has a family record, without needing a full sign-out
+  // and back in. currentFamily is otherwise only ever set once, at the original auth listener —
+  // which is exactly what made the sample-data parent preview link feel broken the first time
+  // someone used it: linkSampleParentPreview can create that family record mid-session, but
+  // nothing was re-reading it afterward, so "Switch to Parent view" wouldn't appear until the
+  // next full reload even though the link genuinely existed already.
+  const refreshCurrentFamily = async () => {
+    if (!auth.currentUser) return;
+    const fam = await loadJSON(`family:${auth.currentUser.uid}`, null, true);
+    setCurrentFamily(fam);
+  };
   const [families, setFamilies] = useState([]); // every family account, for admin's management screen
   // The parent portal used to be a strictly separate entry point with zero path from the teacher
   // app — that stays true for accounts that are ONLY a family or ONLY a teacher, since each side
@@ -2938,7 +2949,7 @@ function AppInner() {
           subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
           loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
           canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
-          createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} />
+          createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} onFamilyLinked={refreshCurrentFamily} />
       );
     }
     // Real teacher — only ever sees classes they're actually assigned to.
@@ -2953,7 +2964,7 @@ function AppInner() {
         subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
         loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
         canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
-        createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord}
+        createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} onFamilyLinked={refreshCurrentFamily}
         deepLinkGroupId={pendingDeepLink?.classId === classId ? pendingDeepLink.groupId : null} />
     );
   }
@@ -7405,7 +7416,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, deepLinkGroupId }) {
+function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, onFamilyLinked, deepLinkGroupId }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -7921,6 +7932,52 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     });
   };
 
+  // Links the teacher's OWN existing login to one sample student as a family account too —
+  // reusing the exact same "already has a login, attach to it" path create-family.js already has
+  // for a teacher who's also a parent. Once that exists, the already-built "Switch to Parent
+  // view" link shows the real, live parent portal running against real (sample) data — not a
+  // separate mock rendering that could quietly drift from what parents actually see.
+  //
+  // Runs as part of loadSampleData itself now, every single time, rather than as a separate,
+  // one-time manual button — that was the actual bug behind "it's still showing the same four
+  // students from before, not linked to what's actually in the class now": sample student ids are
+  // freshly regenerated every time sample data loads, but the old, manual version only ever ran
+  // once and never re-synced, so the linked family record just kept pointing at whichever ids
+  // existed the first time someone clicked it, silently going stale the moment sample data was
+  // ever reloaded. Since create-family.js's own "reuse the existing login" behavior fully
+  // overwrites studentLinks on every call (not merges), simply calling this every time sample
+  // data loads is what keeps it permanently correct with zero separate step to remember.
+  //
+  // Linked to exactly ONE student, not the whole roster — a demo parent seeing all ten sample
+  // children as their own isn't what an actual parent's view looks like; one child (occasionally
+  // two, across the two different demo classes) is.
+  const linkSampleParentPreview = async (sampleRoster) => {
+    if (!loggedInTeacher?.email || sampleRoster.length === 0) return;
+    const demoStudent = sampleRoster[0];
+    const firstName = demoStudent.name.split(" ")[0];
+    // A distinct, realistic-sounding parent name for the family side of this account — not the
+    // teacher's own name reused, even though it's technically the same login underneath, since a
+    // demo meant to look like a real parent/teacher exchange shouldn't show the identical name on
+    // both sides of every message bubble.
+    const parentDisplayName = `${firstName}'s Family`;
+    const links = [{ classId, studentId: demoStudent.id, studentName: demoStudent.name, className }];
+    const result = await createFamilyAccount(parentDisplayName, loggedInTeacher.email, "preview-not-used", links);
+    if (!result?.ok || !result.uid) return;
+    // A short, realistic exchange — not just an empty thread — so "Switch to Parent view" has
+    // something real to show in Messages too, not just Blog and Homework.
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    await saveJSON(`class:${classId}:messages:${result.uid}`, {
+      messages: [
+        { id: uid(), senderType: "family", senderName: parentDisplayName, text: `Hi! Just wanted to check in — how is ${firstName} settling in this week?`, timestamp: twoDaysAgo.toISOString() },
+        { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text: `So great to hear from you! ${firstName} is doing wonderfully — settling in nicely and participating well.`, timestamp: new Date(twoDaysAgo.getTime() + 60 * 60 * 1000).toISOString() },
+      ],
+    }, true);
+    // Without this, "Switch to Parent view" wouldn't show up until a full sign-out and back in —
+    // the family record now genuinely exists, but the running session's own picture of "does this
+    // account have a family role" was fixed at sign-in time and had no reason to check again.
+    if (onFamilyLinked) onFamilyLinked();
+  };
+
   const loadSampleData = () => {
     if (classType === "preschool") {
       const sample = buildPreschoolSampleData();
@@ -7932,6 +7989,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       persistPlannerDays(sample.plannerDays);
       persistPlannerEvents(sample.plannerEvents);
       persistBlogPosts(sample.blogPosts.map((p) => withLogger(p)));
+      linkSampleParentPreview(sample.roster);
       // Sample students need a matching entry in the school-wide registry too, same as any
       // student added normally, or "add existing student from another class" wouldn't find them.
       loadJSON("globalStudents", [], true).then((gs) => {
@@ -7954,6 +8012,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistBenchmarkSubjects(sample.benchmarkSubjects);
     persistBlogPosts(sample.blogPosts.map((p) => withLogger(p)));
     persistHomeworkPosts(sample.homeworkPosts.map((h) => withLogger(h)));
+    linkSampleParentPreview(sample.roster);
     const existingSchedules = config.planner?.schedules || [];
     let samplePlanner = { ...config.planner };
     if (existingSchedules.length === 0) {
@@ -18768,24 +18827,6 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
   const toggleCat = (id) => setExpandedCats((p) => ({ ...p, [id]: !p[id] }));
   const toggleStudent = (id) => setExpandedStudents((p) => ({ ...p, [id]: !p[id] }));
 
-  const [previewSettingUp, setPreviewSettingUp] = useState(false);
-  const [previewReady, setPreviewReady] = useState(false);
-  // Links the teacher's OWN existing login to the sample students as a family account too —
-  // reusing the exact same "already has a login, attach to it" path create-family.js already has
-  // for a teacher who's also a parent. Once that exists, the already-built "Switch to Parent
-  // view" link shows the real, live parent portal running against real (sample) data — not a
-  // separate mock rendering that could quietly drift from what parents actually see. Requires
-  // sample data to already be loaded (rather than triggering it here) since loadSampleData
-  // doesn't update this component's own roster prop synchronously — reading it right after
-  // calling loadSampleData would still see the old, empty roster.
-  const setUpParentPreview = async () => {
-    setPreviewSettingUp(true);
-    const links = roster.map((s) => ({ classId, studentId: s.id, studentName: s.name, className }));
-    await createFamilyAccount(loggedInTeacher?.name || "Preview", loggedInTeacher.email, "preview-not-used", links);
-    setPreviewSettingUp(false);
-    setPreviewReady(true);
-  };
-
   useEffect(() => { if (onRefreshGlobalStudents) onRefreshGlobalStudents(); }, []); // eslint-disable-line
 
   const saveClassName = () => { if (classNameInput.trim() && onRenameClass) onRenameClass(classNameInput.trim()); };
@@ -18934,30 +18975,16 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           </Section>
 
           <Section title="Demo & data reset">
-            {isSampleClass && (
+            {isSampleClass ? (
               <>
-                <p className="text-xs text-stone-400 mb-3">This class is one of the two dedicated demo rooms (Sample / Sample Preschool) — the only classes where loading sample data is available, now that real students are enrolled everywhere else.</p>
-                <ConfirmDelete onConfirm={loadSampleData} label="Load sample data" className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 mb-3 inline-block" />
+                <p className="text-xs text-stone-400 mb-3">This class is one of the two dedicated demo rooms (Sample / Sample Preschool) — the only classes where loading sample data, or clearing a class's data outright, is available, now that real students are enrolled everywhere else. Loading sample data also automatically links your own login as a family account on one of the sample students, so "Switch to Parent view" (top of the class screen) shows the real, live parent portal running against this exact demo data — kept in sync every time sample data is reloaded, never a stale, separate mockup.</p>
+                <div className="flex flex-wrap gap-2">
+                  <ConfirmDelete onConfirm={loadSampleData} label="Load sample data" className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50" />
+                  <ConfirmDelete onConfirm={clearAllData} label="Clear all data" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" />
+                </div>
               </>
-            )}
-            <p className="text-xs text-stone-400 mb-3">Clearing replaces this class's current roster, attendance, incidents, points, planner entries, and benchmarks — your Settings customizations (categories, thresholds, schedule templates) are kept.</p>
-            <div className="flex flex-wrap gap-2">
-              <ConfirmDelete onConfirm={clearAllData} label="Clear all data" className="text-xs font-semibold text-red-600 border border-red-300 rounded-lg px-3 py-2 hover:bg-red-50" />
-            </div>
-            {isPreschool && (
-              <div className="mt-3 pt-3 border-t border-stone-200">
-                <p className="text-xs font-semibold text-stone-700 mb-1">Preview the parent experience</p>
-                <p className="text-[10px] text-stone-400 mb-2">Links your own login as a family account on the sample students, so "Switch to Parent view" shows the real, live parent portal — not a separate mockup. Needs sample data loaded first.</p>
-                {roster.length === 0 ? (
-                  <p className="text-xs text-stone-400">Load sample data above first.</p>
-                ) : previewReady ? (
-                  <p className="text-xs text-emerald-700 font-semibold">Ready — use "Switch to Parent view" up top to see it.</p>
-                ) : (
-                  <button onClick={setUpParentPreview} disabled={previewSettingUp} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 disabled:opacity-50">
-                    {previewSettingUp ? "Setting up…" : "Set up parent preview"}
-                  </button>
-                )}
-              </div>
+            ) : (
+              <p className="text-xs text-stone-400">Not available here — sample data, and clearing a class's data outright, are both limited to the two dedicated demo rooms (Sample / Sample Preschool), to keep this from ever being an option on a class with real, enrolled students.</p>
             )}
           </Section>
 
