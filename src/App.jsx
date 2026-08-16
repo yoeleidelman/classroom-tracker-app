@@ -5806,15 +5806,24 @@ function ParentBlogView({ link, family, onBack }) {
   // post," matching the original behavior for any post that's just one simple block anyway).
   // Reacting to a specific block is what actually lets someone react to just their own child's
   // photo in a longer post with several parts, instead of only ever reacting to the post overall.
-  const onReact = (postId, emoji, blockId) => {
-    const post = posts.find((p) => p.id === postId);
-    if (!post) return;
-    if (blockId) {
-      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId, family.name) } : b));
-      persist(posts.map((p) => (p.id === postId ? { ...p, blocks: nextBlocks } : p)));
-    } else {
-      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId, family.name);
-      persist(posts.map((p) => (p.id === postId ? { ...p, reactions } : p)));
+  // Goes through a backend endpoint rather than writing the reaction directly — a client-side
+  // write can't be trusted to honestly report who's reacting (the id and name are just fields in
+  // a request body, and Firestore's own rule for this document can only validate that the array's
+  // overall length doesn't change, not which specific entry changed or who's allowed to touch
+  // it), so this hands off to a server that determines identity itself, from the caller's own
+  // verified, signed-in account — never from anything the client sends.
+  const onReact = async (postId, emoji, blockId) => {
+    try {
+      const headers = await authHeaders();
+      const res = await fetch("/api/blog-react", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ classId: link.classId, postId, blockId, emoji }),
+      });
+      const data = await res.json();
+      if (res.ok) setPosts(data.posts);
+    } catch {
+      // best-effort — if this fails, the post simply doesn't show the reaction; nothing to roll back
     }
   };
 
@@ -7283,17 +7292,22 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     return entry;
   };
   // Same single-reaction-per-person-or-per-block logic as the parent-side version — see that one
-  // for the reasoning. reactorId is passed in here rather than closed over, since a teacher
-  // viewing their own class's posts can react as themselves too, using this same function.
-  const toggleBlogReaction = (postId, emoji, reactorId, blockId, reactorName) => {
-    const post = blogPosts.find((p) => p.id === postId);
-    if (!post) return;
-    if (blockId) {
-      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId, reactorName) } : b));
-      persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, blocks: nextBlocks } : p)));
-    } else {
-      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId, reactorName);
-      persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, reactions } : p)));
+  // for the reasoning on why this goes through a backend endpoint instead of writing directly:
+  // Firestore's own rule for this document can only validate the array's overall length, not
+  // which specific entry changed, so identity has to be determined server-side, from the
+  // caller's own verified account, never trusted from anything the client sends.
+  const toggleBlogReaction = async (postId, emoji, blockId) => {
+    try {
+      const headers = await authHeaders();
+      const res = await fetch("/api/blog-react", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ classId, postId, blockId, emoji }),
+      });
+      const data = await res.json();
+      if (res.ok) persistBlogPosts(data.posts);
+    } catch {
+      // best-effort — if this fails, the post simply doesn't show the reaction; nothing to roll back
     }
   };
   const addBlogComment = (postId, text, authorName, authorType) => {
@@ -10194,7 +10208,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
         </div>
 
         {commentsEnabled && (
-          <div className="border-t border-stone-100 px-4 py-2.5">
+          <div className="px-4 py-2.5">
             {comments.length > 0 && !commentsOpen && (
               <button onClick={() => setCommentsOpen(true)} className="text-xs text-stone-400 font-medium mb-1">
                 View {comments.length} comment{comments.length === 1 ? "" : "s"}
@@ -10277,7 +10291,7 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
             <div className="space-y-4">
               {sorted.map((post) => (
                 <BlogPostCard key={post.id} post={post} currentUserId={currentUserId}
-                  onReact={(postId, emoji, blockId) => onReact(postId, emoji, currentUserId, blockId, currentUserName)}
+                  onReact={onReact}
                   commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
               ))}
             </div>
