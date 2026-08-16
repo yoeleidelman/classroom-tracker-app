@@ -45,6 +45,17 @@ async function requireActiveAccount(req) {
 // all of them at once. A token that FCM reports as dead (uninstalled, permission revoked, etc.)
 // gets quietly removed from storage as part of the same call, so a stale device doesn't keep
 // costing a failed send forever.
+//
+// uids can ALSO be resolved server-side instead of passed in directly, via an optional `resolve`
+// field — { type: "classTeachers", classId } or { type: "familyGroup", groupId }. This exists
+// because the client-side lookups these two cases used to depend on (loadAllWithPrefix over every
+// teacher or family record) can never work as a genuine client-side query for a non-admin caller:
+// the rule that grants a regular teacher access to a family record depends on that family's own
+// linkedClassIds field, and Firestore can only prove a QUERY safe when the rule doesn't depend on
+// each individual result's own content — reading one such document at a time is fine under that
+// same rule, but listing many of them at once never validates, no matter how the rule is phrased.
+// A family has no rules-based access to teacher:* records at all, for the same underlying reason.
+// Resolving server-side sidesteps this entirely, since the Admin SDK isn't subject to these rules.
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -54,13 +65,36 @@ export default async function handler(req, res) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
 
-  const { uids, title, body, url, icon } = req.body || {};
-  if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: "uids must be a non-empty array." });
+  const { uids: providedUids, resolve, title, body, url, icon } = req.body || {};
   if (!title || !body) return res.status(400).json({ error: "title and body are required." });
 
-  try {
-    const db = getFirestore();
+  const db = getFirestore();
 
+  let uids = providedUids;
+  if (resolve?.type === "classTeachers" && resolve.classId) {
+    const snapshot = await db.collection("data").where("value.role", "in", ["teacher", "admin"]).get();
+    uids = [];
+    snapshot.forEach((doc) => {
+      const t = doc.data().value;
+      if (t && t.active !== false && (t.assignedClassIds || []).includes(resolve.classId)) uids.push(t.uid);
+    });
+  } else if (resolve?.type === "familyGroup" && resolve.groupId) {
+    const snapshot = await db.collection("data").where("value.familyGroupId", "==", resolve.groupId).get();
+    uids = [];
+    snapshot.forEach((doc) => {
+      if (!doc.id.startsWith("family:")) return;
+      const f = doc.data().value;
+      if (f) uids.push(f.uid);
+    });
+    // A lone guardian's own account may not have familyGroupId set to anything other than their
+    // own uid — the field defaults to their own uid at creation, but this covers it explicitly
+    // in case that group id IS just a bare uid with no separate family record carrying it.
+    if (uids.length === 0) uids = [resolve.groupId];
+  }
+
+  if (!Array.isArray(uids) || uids.length === 0) return res.status(400).json({ error: "uids must be a non-empty array." });
+
+  try {
     // Pulls every uid's token list in parallel, then flattens into one array while remembering
     // which uid and which position in that uid's own list each token came from — needed to write
     // the cleaned-up list back to the right document afterward.

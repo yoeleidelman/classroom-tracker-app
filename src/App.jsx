@@ -1178,22 +1178,39 @@ async function sendPushNotification(uids, title, body, url) {
   }
 }
 
+// Same idea as sendPushNotification above, but for the two cases that can never safely resolve
+// their own uids client-side (see the long comment on this same resolve mechanism in
+// api/send-push.js) — passes a description of who to notify instead of a pre-computed list, and
+// lets the backend, running with full privileges, work out who that actually is.
+async function sendPushNotificationResolved(resolve, title, body, url) {
+  try {
+    await fetch("/api/send-push", {
+      method: "POST",
+      headers: await authHeaders(),
+      body: JSON.stringify({ resolve, title, body, url }),
+    });
+  } catch {
+    // best-effort only — nothing to recover here
+  }
+}
+
 // A message addressed to "the family" may cover more than one actual guardian login sharing the
 // same group — either one may have their own device notifications turned on, so both get a
-// chance at it, not just whichever uid happens to be the group's own id.
+// chance at it, not just whichever uid happens to be the group's own id. Resolved server-side:
+// a regular (non-admin) teacher has no rules-based way to list every family record client-side to
+// find the other guardian in this same group, even though reading any ONE of them individually is
+// fine — see the resolve mechanism in api/send-push.js for why that's a real Firestore limitation,
+// not a gap in how the rule was written.
 async function notifyFamilyGroup(groupId, title, body, url) {
-  const allFamilies = await loadAllWithPrefix("family:");
-  const uids = allFamilies.filter((f) => (f.familyGroupId || f.uid) === groupId).map((f) => f.uid);
-  await sendPushNotification(uids, title, body, url);
+  await sendPushNotificationResolved({ type: "familyGroup", groupId }, title, body, url);
 }
 
 // A classroom thread is shared among everyone teaching that room, not one specific teacher — a
 // message from a family should be able to reach any of them, not just whoever happens to be
-// signed in when it arrives.
+// signed in when it arrives. Resolved server-side: a family account has no rules-based read
+// access to teacher:* records at all, so this could never have worked as a client-side lookup.
 async function notifyClassTeachers(classId, title, body, url) {
-  const allTeachers = await loadAllWithPrefix("teacher:");
-  const uids = allTeachers.filter((t) => (t.assignedClassIds || []).includes(classId) && t.active !== false).map((t) => t.uid);
-  await sendPushNotification(uids, title, body, url);
+  await sendPushNotificationResolved({ type: "classTeachers", classId }, title, body, url);
 }
 
 // The individual-teacher counterpart to notifyClassTeachers above — reaches exactly the one
@@ -1964,12 +1981,25 @@ function AppInner() {
     await signOutTeacher();
   };
 
+  // Genuinely goes BACK through history now, rather than pushing a fresh new entry that happens
+  // to look the same — this is exactly the class of bug behind "back sometimes skips two steps":
+  // every tap of this in-app button used to silently pad the history stack with one more entry
+  // than the visible navigation actually had, so the real depth of the stack quietly drifted out
+  // of sync with what the person on screen could see. Popping the entry enterAssignedClass already
+  // pushed, instead of layering a new one on top of it, is what keeps those back in sync.
   const backToTeacherClassPicker = () => {
-    setClassId(null);
-    setClassName("");
-    const url = new URL(window.location.href);
-    url.searchParams.delete("classId");
-    window.history.pushState({ classId: null }, "", url);
+    if (window.history.state?.classId) {
+      window.history.back();
+    } else {
+      // No class-entry to pop back through (e.g. this class was reached by a fresh page load
+      // rather than a tap from the picker) — fall back to clearing state directly rather than
+      // risk history.back() leaving the app entirely.
+      setClassId(null);
+      setClassName("");
+      const url = new URL(window.location.href);
+      url.searchParams.delete("classId");
+      window.history.replaceState({ classId: null }, "", url);
+    }
   };
 
   // The actual back-button handler — fires on the hardware/gesture back press, and on the
@@ -5993,17 +6023,20 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
   const [parentTab, setParentTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home"); // "home" | "messages" | "blog" | "homework" | "settings" — persistent top bar, not a toggled overlay
 
-  // Same reasoning as the teacher side's class-selection history — pushing a real entry here is
-  // what lets the Android back button step back to the previous tab instead of closing the app,
-  // and what lets a killed-and-reloaded page restore the same tab instead of always resetting to
-  // Home. Tab switches happen far more often than class switches, so this uses replaceState, not
-  // pushState — a real, individually poppable history entry for every single tap would make the
-  // back button feel like it's stepping through tabs one-by-one forever, not a scoped "go back."
+  // Every tab switch gets its own real, individually-poppable history entry now — a parent
+  // stepping back should always land exactly one step behind wherever they actually were, never
+  // skip past several taps at once or land outside the app entirely. An earlier version of this
+  // used replaceState instead, on the theory that a long session of tab-hopping would otherwise
+  // make the back button feel like it's replaying every tap one at a time — but the real-world
+  // cost of that turned out to be worse: with nothing but a single, constantly-overwritten history
+  // entry for the whole parent portal, pressing back from ANY tab could skip straight past the
+  // entire portal to whatever came before it, which is exactly the "sometimes it closes the app"
+  // behavior this exists to fix. Precise, one-step-at-a-time back navigation is worth the tradeoff.
   const navigateParentTab = (newTab) => {
     setParentTab(newTab);
     const url = new URL(window.location.href);
     url.searchParams.set("tab", newTab);
-    window.history.replaceState({ parentTab: newTab }, "", url);
+    window.history.pushState({ parentTab: newTab }, "", url);
   };
   useEffect(() => {
     const onPopState = () => {
@@ -12837,7 +12870,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     <div className={PAGE}>
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
-      <button onClick={() => navigate("communication")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <button onClick={() => window.history.back()} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-lg font-bold text-stone-900 mb-3">{mode === "direct" ? "My Direct Messages" : "Classroom Messages"}</h1>
 
       <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[28rem]">
