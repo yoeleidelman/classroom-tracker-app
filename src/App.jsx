@@ -456,18 +456,26 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
+// A reaction entry is either a bare reactor id (older posts, saved before names were stored
+// alongside them) or { id, name } (current shape) — this reads either correctly so nothing
+// already published needs migrating.
+function reactorIdOf(entry) { return typeof entry === "string" ? entry : entry?.id; }
+function reactorNameOf(entry) { return typeof entry === "string" ? null : entry?.name; }
+
 // Single-reaction-per-person logic, shared by every place a post or a specific block within one
 // can be reacted to — picking a new reaction replaces whichever one that person already had
 // there rather than adding alongside it; picking the same one again removes it (toggle-off).
 // Works on whatever reactions map it's handed, so the same function serves both a whole post's
-// reactions and one specific block's, without duplicating this logic in either place.
-function computeSingleChoiceReactions(existingReactions, emoji, reactorId) {
+// reactions and one specific block's, without duplicating this logic in either place. Stores the
+// reactor's name alongside their id (not just the id alone, as before) — that's what makes it
+// possible to show who reacted, not only how many did.
+function computeSingleChoiceReactions(existingReactions, emoji, reactorId, reactorName) {
   const reactions = {};
-  Object.entries(existingReactions || {}).forEach(([key, ids]) => {
-    reactions[key] = (ids || []).filter((id) => id !== reactorId);
+  Object.entries(existingReactions || {}).forEach(([key, entries]) => {
+    reactions[key] = (entries || []).filter((entry) => reactorIdOf(entry) !== reactorId);
   });
-  const alreadyHadThisOne = (existingReactions?.[emoji] || []).includes(reactorId);
-  if (!alreadyHadThisOne) reactions[emoji] = [...(reactions[emoji] || []), reactorId];
+  const alreadyHadThisOne = (existingReactions?.[emoji] || []).some((entry) => reactorIdOf(entry) === reactorId);
+  if (!alreadyHadThisOne) reactions[emoji] = [...(reactions[emoji] || []), { id: reactorId, name: reactorName }];
   return reactions;
 }
 
@@ -5802,10 +5810,10 @@ function ParentBlogView({ link, family, onBack }) {
     const post = posts.find((p) => p.id === postId);
     if (!post) return;
     if (blockId) {
-      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId) } : b));
+      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId, family.name) } : b));
       persist(posts.map((p) => (p.id === postId ? { ...p, blocks: nextBlocks } : p)));
     } else {
-      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId);
+      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId, family.name);
       persist(posts.map((p) => (p.id === postId ? { ...p, reactions } : p)));
     }
   };
@@ -6046,6 +6054,35 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  // Horizontal swipe between tabs, the same way WhatsApp's own Chats/Updates/Communities tabs
+  // work — same tab order as the bar itself, so swiping and tapping always agree about what
+  // "next" means. Deliberately requires the gesture to be clearly MORE horizontal than vertical
+  // (not just "moved sideways at all") before treating it as a tab swipe rather than a scroll —
+  // most of what a finger does on a content-heavy page is scroll straight down, and a swipe
+  // detector that fires on any diagonal wobble would fight that constantly instead of staying out
+  // of its way.
+  const swipeStart = useRef(null);
+  const onTabAreaTouchStart = (e) => {
+    swipeStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  };
+  const onTabAreaTouchEnd = (e) => {
+    if (!swipeStart.current) return;
+    const dx = e.changedTouches[0].clientX - swipeStart.current.x;
+    const dy = e.changedTouches[0].clientY - swipeStart.current.y;
+    swipeStart.current = null;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return; // too short, or too vertical to be a swipe
+    if (parentTab === "settings") return; // My Account isn't part of the swipeable tab sequence
+    const showHomeworkTab = (fullTimeStudentLinks || []).some((l) => l.classType !== "preschool");
+    const order = ["home", "messages", "blog", ...(showHomeworkTab ? ["homework"] : [])];
+    const currentIdx = order.indexOf(parentTab);
+    if (currentIdx === -1) return;
+    // Swiping left (finger moves right-to-left, dx negative) advances forward, matching the same
+    // "swipe left to go to the next page" convention as WhatsApp, iOS's own tab bars, and most
+    // other paged interfaces.
+    const nextIdx = dx < 0 ? currentIdx + 1 : currentIdx - 1;
+    if (nextIdx >= 0 && nextIdx < order.length) navigateParentTab(order[nextIdx]);
+  };
 
   // Same global "what's actually on screen right now" flag used by ConversationThreadView — kept
   // in sync with parentTab directly here since Blog and Homework are simple tab switches within
@@ -6527,7 +6564,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         )}
       </div>
 
-      <div className="max-w-lg mx-auto px-4 py-5">
+      <div className="max-w-lg mx-auto px-4 py-5" onTouchStart={onTabAreaTouchStart} onTouchEnd={onTabAreaTouchEnd}>
         {parentTab === "settings" ? (
           <>
             <button onClick={() => navigateParentTab("home")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
@@ -7248,14 +7285,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // Same single-reaction-per-person-or-per-block logic as the parent-side version — see that one
   // for the reasoning. reactorId is passed in here rather than closed over, since a teacher
   // viewing their own class's posts can react as themselves too, using this same function.
-  const toggleBlogReaction = (postId, emoji, reactorId, blockId) => {
+  const toggleBlogReaction = (postId, emoji, reactorId, blockId, reactorName) => {
     const post = blogPosts.find((p) => p.id === postId);
     if (!post) return;
     if (blockId) {
-      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId) } : b));
+      const nextBlocks = post.blocks.map((b) => (b.id === blockId ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId, reactorName) } : b));
       persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, blocks: nextBlocks } : p)));
     } else {
-      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId);
+      const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId, reactorName);
       persistBlogPosts(blogPosts.map((p) => (p.id === postId ? { ...p, reactions } : p)));
     }
   };
@@ -8056,7 +8093,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "blog" && (
-        <BlogFeedView posts={blogPosts} currentUserId={loggedInTeacher?.uid} currentUserType="teacher"
+        <BlogFeedView posts={blogPosts} currentUserId={loggedInTeacher?.uid} currentUserName={loggedByName} currentUserType="teacher"
           commentsEnabled={config.blogCommentsEnabled !== false}
           onReact={toggleBlogReaction}
           onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
@@ -9909,13 +9946,20 @@ const BLOG_REACTIONS = [
 // One reaction per person, chosen from a picker instead of a permanently-visible row of buttons
 // — a short tap toggles the most common one (heart) on/off, a long-press (or, for anyone not on
 // a touch device, a regular click works too — never gate a feature behind a gesture some input
-// types can't perform) opens the full set to pick something more specific. The result then shows
-// as a single compact badge, not a row of every possible option someone might have picked.
+// types can't perform) opens the full set to pick something more specific.
 // Takes a plain reactions object and an onReact(emoji) callback rather than a post directly — the
 // caller decides what's actually being reacted to (the whole post, or one specific block within
 // it), so this same component works for both without needing to know which one it's rendering
 // for.
-function BlogReactionControl({ reactions, currentUserId, onReact }) {
+// WhatsApp's actual pattern, confirmed by research before building this: long-press ANYWHERE on
+// the message/content itself opens the picker — there is no separate "React" button to find and
+// tap. The picker floats just above the content. The resulting badge itself is deliberately NOT
+// rendered here — it's rendered by the caller instead (see ReactionBadge below), specifically so
+// it can sit outside this content's own clipped boundary and overlap the true bottom edge of
+// whatever visual container it belongs to (the whole post card, not just this one block within
+// it) — a badge rendered as this component's own child could never escape past a parent that
+// clips its overflow, which a post card does, to keep photos correctly inside its rounded corners.
+function ReactableContent({ reactions, currentUserId, onReact, children }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const pressTimer = useRef(null);
   const longPressFired = useRef(false);
@@ -9929,22 +9973,29 @@ function BlogReactionControl({ reactions, currentUserId, onReact }) {
   }, [pickerOpen]);
 
   const safeReactions = reactions || {};
-  const myReaction = BLOG_REACTIONS.find((r) => (safeReactions[r.key] || []).includes(currentUserId));
-  const summary = BLOG_REACTIONS
-    .map((r) => ({ ...r, count: (safeReactions[r.key] || []).length }))
-    .filter((r) => r.count > 0);
-  const totalCount = summary.reduce((sum, r) => sum + r.count, 0);
+  const myReaction = BLOG_REACTIONS.find((r) => (safeReactions[r.key] || []).some((entry) => reactorIdOf(entry) === currentUserId));
 
   const startPress = () => {
     longPressFired.current = false;
-    pressTimer.current = setTimeout(() => { longPressFired.current = true; setPickerOpen(true); }, 450);
+    pressTimer.current = setTimeout(() => {
+      longPressFired.current = true;
+      if (navigator.vibrate) navigator.vibrate(10); // a light haptic tick, matching the native long-press feel
+      setPickerOpen(true);
+    }, 450);
   };
-  const endPress = () => {
-    clearTimeout(pressTimer.current);
-    if (longPressFired.current) return; // the long-press already handled opening the picker
-    onReact(myReaction ? myReaction.key : "heart"); // quick tap: toggle the default (or your own current) reaction
-  };
+  const endPress = () => clearTimeout(pressTimer.current);
   const cancelPress = () => clearTimeout(pressTimer.current);
+  // A long-press that already opened the picker shouldn't ALSO let the release be read as a tap on
+  // whatever's underneath (opening a photo's lightbox right as the picker appears, for instance) —
+  // this runs in the capture phase specifically so it can intercept before that child's own onClick
+  // ever sees the event.
+  const onClickCapture = (e) => {
+    if (longPressFired.current) {
+      e.preventDefault();
+      e.stopPropagation();
+      longPressFired.current = false;
+    }
+  };
 
   const choose = (key) => {
     onReact(key);
@@ -9952,23 +10003,18 @@ function BlogReactionControl({ reactions, currentUserId, onReact }) {
   };
 
   return (
-    <div className="relative inline-flex items-center gap-2" ref={wrapperRef}>
-      <button
+    <div className="relative" ref={wrapperRef}>
+      <div
         onMouseDown={startPress} onMouseUp={endPress} onMouseLeave={cancelPress}
         onTouchStart={startPress} onTouchEnd={endPress} onTouchCancel={cancelPress}
+        onClickCapture={onClickCapture}
         onContextMenu={(e) => e.preventDefault()} // suppress the browser's own long-press menu so it doesn't fight with ours
-        className={`flex items-center gap-1 text-sm font-semibold rounded-full px-3 py-1.5 border ${myReaction ? "bg-teal-50 text-teal-800 border-teal-300" : "text-stone-500 border-stone-200 hover:bg-stone-50"}`}>
-        <span className="leading-none">{myReaction ? myReaction.emoji : "🤍"}</span>
-        <span>{myReaction ? "Reacted" : "React"}</span>
-      </button>
-      {summary.length > 0 && (
-        <div className="flex items-center gap-0.5 text-xs text-stone-500 bg-stone-50 border border-stone-200 rounded-full px-2 py-1">
-          {summary.map((r) => <span key={r.key} className="leading-none">{r.emoji}</span>)}
-          <span className="font-semibold ml-0.5">{totalCount}</span>
-        </div>
-      )}
+      >
+        {children}
+      </div>
+
       {pickerOpen && (
-        <div className="anim-expand-up absolute bottom-full left-0 mb-2 bg-white border border-stone-200 rounded-2xl shadow-lg px-2 py-1.5 flex items-center gap-0.5 z-20">
+        <div className="anim-expand-up absolute bottom-full left-3 mb-2 bg-white border border-stone-200 rounded-2xl shadow-lg px-2 py-1.5 flex items-center gap-0.5 z-20">
           {BLOG_REACTIONS.map((r) => (
             <button key={r.key} onClick={() => choose(r.key)}
               className={`text-xl leading-none p-1.5 rounded-full hover:bg-stone-100 hover:scale-110 transition-transform ${myReaction?.key === r.key ? "bg-teal-50" : ""}`}>
@@ -9981,9 +10027,70 @@ function BlogReactionControl({ reactions, currentUserId, onReact }) {
   );
 }
 
+// The badge itself, deliberately separate from ReactableContent above (see the comment there for
+// why) — rendered by the post card at its own outer level so it can overlap the true bottom-left
+// edge of the whole card, half on and half off it, the same way WhatsApp's own reaction badges
+// overlap the edge of the message bubble they belong to.
+function ReactionBadge({ reactions, onOpen, className }) {
+  const safeReactions = reactions || {};
+  const summary = BLOG_REACTIONS
+    .map((r) => ({ ...r, entries: safeReactions[r.key] || [] }))
+    .filter((r) => r.entries.length > 0);
+  if (summary.length === 0) return null;
+  const totalCount = summary.reduce((sum, r) => sum + r.entries.length, 0);
+  return (
+    <button onClick={onOpen}
+      className={`flex items-center gap-0.5 text-xs bg-white border border-stone-200 rounded-full pl-1.5 pr-2 py-1 shadow-md ${className || ""}`}>
+      {summary.map((r) => <span key={r.key} className="leading-none">{r.emoji}</span>)}
+      {totalCount > 1 && <span className="font-semibold text-stone-600 ml-0.5">{totalCount}</span>}
+    </button>
+  );
+}
+
+// The names-by-emoji breakdown WhatsApp shows when you tap an existing reaction — a tab per emoji
+// used (an "All" tab first when more than one kind was used), each listing who's behind it.
+// Reactions saved before names were stored alongside them show as "Someone" rather than a blank
+// line, since there's no name on file for those older entries to fall back to.
+function WhoReactedSheet({ summary, onClose }) {
+  const allEntries = summary.flatMap((r) => r.entries.map((entry) => ({ ...r, name: reactorNameOf(entry) || "Someone" })));
+  const [activeKey, setActiveKey] = useState(summary.length > 1 ? "all" : summary[0]?.key);
+  const shown = activeKey === "all" ? allEntries : allEntries.filter((e) => e.key === activeKey);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end md:items-center md:justify-center bg-black/30" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl md:rounded-2xl w-full md:w-80 max-h-[70vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1 px-3 pt-3 pb-2 border-b border-stone-100 overflow-x-auto no-scrollbar">
+          {summary.length > 1 && (
+            <button onClick={() => setActiveKey("all")}
+              className={`shrink-0 text-xs font-semibold px-2.5 py-1.5 rounded-full ${activeKey === "all" ? "bg-stone-800 text-white" : "text-stone-500 hover:bg-stone-100"}`}>
+              All {allEntries.length}
+            </button>
+          )}
+          {summary.map((r) => (
+            <button key={r.key} onClick={() => setActiveKey(r.key)}
+              className={`shrink-0 flex items-center gap-1 text-xs font-semibold px-2.5 py-1.5 rounded-full ${activeKey === r.key ? "bg-stone-800 text-white" : "text-stone-500 hover:bg-stone-100"}`}>
+              <span>{r.emoji}</span> {r.entries.length}
+            </button>
+          ))}
+          <button onClick={onClose} className="ml-auto shrink-0 text-stone-400 hover:text-stone-600 p-1"><X size={18} /></button>
+        </div>
+        <div className="overflow-y-auto py-1">
+          {shown.map((entry, i) => (
+            <div key={i} className="flex items-center gap-2.5 px-4 py-2.5">
+              <span className="text-lg leading-none">{entry.emoji}</span>
+              <span className="text-sm text-stone-700">{entry.name}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia }) {
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
+  const [whoReactedBlockId, setWhoReactedBlockId] = useState(null);
   const comments = post.comments || [];
 
   const submitComment = () => {
@@ -9993,116 +10100,144 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
     setCommentsOpen(true);
   };
 
+  const reactedBlocks = post.blocks.filter((b) => Object.values(b.reactions || {}).some((entries) => (entries || []).length > 0));
+  const whoReactedBlock = whoReactedBlockId ? post.blocks.find((b) => b.id === whoReactedBlockId) : null;
+  const whoReactedSummary = whoReactedBlock ? BLOG_REACTIONS
+    .map((r) => ({ ...r, entries: (whoReactedBlock.reactions || {})[r.key] || [] }))
+    .filter((r) => r.entries.length > 0) : [];
+
   return (
-    <div className="bg-white border border-stone-200 rounded-2xl overflow-hidden">
-      <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-2.5">
-        <div className="w-8 h-8 rounded-full bg-teal-100 flex items-center justify-center text-teal-800 text-xs font-bold shrink-0">
-          {(post.loggedBy || "?").split(" ").map((w) => w[0]).slice(0, 2).join("")}
-        </div>
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-stone-900 truncate">{post.loggedBy || "Class"}</p>
-          <p className="text-[11px] text-stone-400 capitalize">{post.authorType} · {formatRelativeTime(post.timestamp)}</p>
-        </div>
-      </div>
-
-      {post.title && <p className="display-font text-base font-bold text-stone-900 px-4 pb-2">{post.title}</p>}
-
-      <div className="divide-y divide-stone-100">
-        {post.blocks.map((block) => {
-          // Falls back to the old separate photoUrls/videoUrl shape for posts saved before mixed
-          // batches existed, so nothing already published breaks or needs migrating.
-          const media = block.media || [
-            ...(block.photoUrls || []).map((url) => ({ url, type: "photo" })),
-            ...(block.videoUrl ? [{ url: block.videoUrl, type: "video" }] : []),
-          ];
-          return (
-            <div key={block.id} className="py-3 first:pt-0 last:pb-0">
-              {media.length === 1 && (
-                media[0].type === "audio" ? (
-                  <div className="px-4 pt-3">
-                    <div className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 mb-1">
-                      <Music size={16} className="text-stone-400 shrink-0" />
-                      <p className="text-xs font-semibold text-stone-700 truncate">{media[0].name || "Audio"}</p>
-                    </div>
-                    <audio src={media[0].url} controls className="w-full" style={{ height: "36px" }} />
-                  </div>
-                ) : (
-                  <div className="relative cursor-pointer" onClick={() => onOpenMedia(media[0].url)}>
-                    {media[0].type === "video" ? (
-                      <>
-                        <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                          <div className="bg-white/90 rounded-full p-3"><Play size={20} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
-                        </div>
-                      </>
-                    ) : (
-                      <img src={media[0].url} alt="" className="w-full aspect-[4/3] object-cover" />
-                    )}
-                  </div>
-                )
-              )}
-              {media.length > 1 && (
-                <div className="grid grid-cols-2 gap-0.5">
-                  {media.map((m, i) => (
-                    <div key={i} className="relative aspect-square cursor-pointer" onClick={() => m.type !== "audio" && onOpenMedia(m.url)}>
-                      {m.type === "video" ? (
-                        <>
-                          <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
-                          <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                            <div className="bg-white/90 rounded-full p-2"><Play size={13} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
-                          </div>
-                        </>
-                      ) : m.type === "audio" ? (
-                        <div className="w-full h-full bg-stone-50 flex flex-col items-center justify-center gap-1.5 p-2 cursor-default">
-                          <Music size={20} className="text-stone-400" />
-                          <p className="text-[10px] font-semibold text-stone-600 text-center truncate w-full px-1">{m.name || "Audio"}</p>
-                        </div>
-                      ) : (
-                        <img src={m.url} alt="" className="w-full h-full object-cover" />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
-              {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
-              <div className="flex items-center px-4 pt-2.5">
-                <BlogReactionControl reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)} />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {commentsEnabled && (
-        <div className="border-t border-stone-100 px-4 py-2.5">
-          {comments.length > 0 && !commentsOpen && (
-            <button onClick={() => setCommentsOpen(true)} className="text-xs text-stone-400 font-medium mb-1">
-              View {comments.length} comment{comments.length === 1 ? "" : "s"}
-            </button>
-          )}
-          {commentsOpen && (
-            <div className="space-y-1.5 mb-2">
-              {comments.map((c) => (
-                <p key={c.id} className="text-xs text-stone-600 leading-snug">
-                  <span className="font-semibold text-stone-800">{c.authorName}</span> {c.text}
-                </p>
-              ))}
-            </div>
-          )}
-          <div className="flex items-center gap-1.5">
-            <input value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submitComment()} placeholder="Write a comment..."
-              className="flex-1 text-xs rounded-full border border-stone-200 px-3 py-1.5 outline-none focus:border-teal-400" />
-            <button onClick={submitComment} className="text-xs font-semibold text-teal-700 px-2">Post</button>
+    // Deliberately NOT overflow-hidden at this outer level — that lives on the inner wrapper just
+    // below instead, so a reaction badge rendered as a sibling of it (further down) can overlap
+    // the true bottom-left edge of the WHOLE card — including past the comment box, the actual
+    // outer boundary of the white box a person sees — rather than being clipped the moment it
+    // tries to extend past whatever rounded-corner boundary is clipping the photos inside.
+    <div className="bg-white border border-stone-200 rounded-2xl relative">
+      <div className="rounded-2xl overflow-hidden">
+        <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-2.5">
+          <div className="w-8 h-8 rounded-full bg-teal-100 flex items-center justify-center text-teal-800 text-xs font-bold shrink-0">
+            {(post.loggedBy || "?").split(" ").map((w) => w[0]).slice(0, 2).join("")}
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-stone-900 truncate">{post.loggedBy || "Class"}</p>
+            <p className="text-[11px] text-stone-400 capitalize">{post.authorType} · {formatRelativeTime(post.timestamp)}</p>
           </div>
         </div>
+
+        {post.title && <p className="display-font text-base font-bold text-stone-900 px-4 pb-2">{post.title}</p>}
+
+        <div className="divide-y divide-stone-100">
+          {post.blocks.map((block) => {
+            // Falls back to the old separate photoUrls/videoUrl shape for posts saved before mixed
+            // batches existed, so nothing already published breaks or needs migrating.
+            const media = block.media || [
+              ...(block.photoUrls || []).map((url) => ({ url, type: "photo" })),
+              ...(block.videoUrl ? [{ url: block.videoUrl, type: "video" }] : []),
+            ];
+            return (
+              <div key={block.id} className="py-3 first:pt-0 last:pb-0">
+                <ReactableContent reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)}>
+                  {media.length === 1 && (
+                    media[0].type === "audio" ? (
+                      <div className="px-4 pt-3">
+                        <div className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 mb-1">
+                          <Music size={16} className="text-stone-400 shrink-0" />
+                          <p className="text-xs font-semibold text-stone-700 truncate">{media[0].name || "Audio"}</p>
+                        </div>
+                        <audio src={media[0].url} controls className="w-full" style={{ height: "36px" }} />
+                      </div>
+                    ) : (
+                      <div className="relative cursor-pointer" onClick={() => onOpenMedia(media[0].url)}>
+                        {media[0].type === "video" ? (
+                          <>
+                            <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                              <div className="bg-white/90 rounded-full p-3"><Play size={20} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                            </div>
+                          </>
+                        ) : (
+                          <img src={media[0].url} alt="" className="w-full aspect-[4/3] object-cover" />
+                        )}
+                      </div>
+                    )
+                  )}
+                  {media.length > 1 && (
+                    <div className="grid grid-cols-2 gap-0.5">
+                      {media.map((m, i) => (
+                        <div key={i} className="relative aspect-square cursor-pointer" onClick={() => m.type !== "audio" && onOpenMedia(m.url)}>
+                          {m.type === "video" ? (
+                            <>
+                              <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
+                              <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                                <div className="bg-white/90 rounded-full p-2"><Play size={13} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                              </div>
+                            </>
+                          ) : m.type === "audio" ? (
+                            <div className="w-full h-full bg-stone-50 flex flex-col items-center justify-center gap-1.5 p-2 cursor-default">
+                              <Music size={20} className="text-stone-400" />
+                              <p className="text-[10px] font-semibold text-stone-600 text-center truncate w-full px-1">{m.name || "Audio"}</p>
+                            </div>
+                          ) : (
+                            <img src={m.url} alt="" className="w-full h-full object-cover" />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                  {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
+                  {!media.length && !block.text && <div className="h-2" />}
+                </ReactableContent>
+              </div>
+            );
+          })}
+        </div>
+
+        {commentsEnabled && (
+          <div className="border-t border-stone-100 px-4 py-2.5">
+            {comments.length > 0 && !commentsOpen && (
+              <button onClick={() => setCommentsOpen(true)} className="text-xs text-stone-400 font-medium mb-1">
+                View {comments.length} comment{comments.length === 1 ? "" : "s"}
+              </button>
+            )}
+            {commentsOpen && (
+              <div className="space-y-1.5 mb-2">
+                {comments.map((c) => (
+                  <p key={c.id} className="text-xs text-stone-600 leading-snug">
+                    <span className="font-semibold text-stone-800">{c.authorName}</span> {c.text}
+                  </p>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center gap-1.5">
+              <input value={commentDraft} onChange={(e) => setCommentDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submitComment()} placeholder="Write a comment..."
+                className="flex-1 text-xs rounded-full border border-stone-200 px-3 py-1.5 outline-none focus:border-teal-400" />
+              <button onClick={submitComment} className="text-xs font-semibold text-teal-700 px-2">Post</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Rendered here, as a sibling of the overflow-hidden wrapper above rather than a descendant
+          of it — this is what actually lets it overlap the true outer edge of the whole card. One
+          badge per block that has reactions; almost always just one, since almost every post is a
+          single block, but a multi-part post gets one badge per part, spaced along the same edge
+          rather than stacked on top of each other. */}
+      {reactedBlocks.length > 0 && (
+        <div className="absolute -bottom-3 left-3 right-3 flex flex-wrap gap-1.5 z-10">
+          {reactedBlocks.map((block) => (
+            <ReactionBadge key={block.id} reactions={block.reactions} onOpen={() => setWhoReactedBlockId(block.id)} />
+          ))}
+        </div>
       )}
+
+      {whoReactedBlock && <WhoReactedSheet summary={whoReactedSummary} onClose={() => setWhoReactedBlockId(null)} />}
     </div>
   );
 }
 
-function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, onReact, onComment, navigate }) {
+function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, commentsEnabled, onReact, onComment, navigate }) {
   const bottomRef = useRef(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
@@ -10142,7 +10277,7 @@ function BlogFeedView({ posts, currentUserId, currentUserType, commentsEnabled, 
             <div className="space-y-4">
               {sorted.map((post) => (
                 <BlogPostCard key={post.id} post={post} currentUserId={currentUserId}
-                  onReact={(postId, emoji, blockId) => onReact(postId, emoji, currentUserId, blockId)}
+                  onReact={(postId, emoji, blockId) => onReact(postId, emoji, currentUserId, blockId, currentUserName)}
                   commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
               ))}
             </div>
