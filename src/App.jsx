@@ -6220,6 +6220,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
 
   const openMessagesFor = async (classId) => {
     setMessagingClassId(classId);
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread", `class:${classId}`);
+    window.history.pushState({ thread: `class:${classId}` }, "", url);
     const thread = await loadJSON(`class:${classId}:messages:${myGroupId}`, { messages: [] }, true);
     setMessagingThread(thread || { messages: [] });
     await markThreadRead(family.uid, `class-${classId}`);
@@ -6230,6 +6233,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // across. Key deliberately has no "class:" prefix, since it isn't one.
   const openAdminMessages = async () => {
     setMessagingAdmin(true);
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread", "admin");
+    window.history.pushState({ thread: "admin" }, "", url);
     const thread = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
     setAdminThread(thread || { messages: [] });
     await markThreadRead(family.uid, `admin-${myGroupId}`);
@@ -6256,10 +6262,44 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // never shared with any other teacher who happens to cover the same class.
   const openTeacherMessages = async (teacherUid) => {
     setMessagingTeacherUid(teacherUid);
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread", `teacher:${teacherUid}`);
+    window.history.pushState({ thread: `teacher:${teacherUid}` }, "", url);
     const thread = await loadJSON(`teacher-messages:${teacherUid}:${myGroupId}`, { messages: [] }, true);
     setTeacherMessagingThread(thread || { messages: [] });
     await markThreadRead(family.uid, `teacher-${teacherUid}`);
   };
+
+  // Restores whichever thread (or none) the URL says is open — fires on the hardware/gesture back
+  // press, same as every other history-aware navigation in the app. Previously, opening any one of
+  // these three thread types set state directly with no history entry at all, which is exactly the
+  // bug behind "back sometimes skips several steps or closes the app": a step the browser's own
+  // history never recorded can't be stepped back through one at a time.
+  useEffect(() => {
+    const onPopStateThread = () => {
+      const params = new URLSearchParams(window.location.search);
+      const thread = params.get("thread");
+      if (thread === "admin") {
+        setMessagingClassId(null);
+        setMessagingTeacherUid(null);
+        setMessagingAdmin(true);
+      } else if (thread?.startsWith("class:")) {
+        setMessagingAdmin(false);
+        setMessagingTeacherUid(null);
+        setMessagingClassId(thread.slice(6));
+      } else if (thread?.startsWith("teacher:")) {
+        setMessagingAdmin(false);
+        setMessagingClassId(null);
+        setMessagingTeacherUid(thread.slice(8));
+      } else {
+        setMessagingClassId(null);
+        setMessagingAdmin(false);
+        setMessagingTeacherUid(null);
+      }
+    };
+    window.addEventListener("popstate", onPopStateThread);
+    return () => window.removeEventListener("popstate", onPopStateThread);
+  }, []);
 
   const [scanError, setScanError] = useState(null);
   const [pendingDeepLinkClassId, setPendingDeepLinkClassId] = useState(null); // for "open=blog" links specifically — resolved once fullTimeStudentLinks finishes loading, see effect below
@@ -6421,7 +6461,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
         <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
-          onBack={() => setMessagingClassId(null)}
+          onBack={() => window.history.back()}
           onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToTeacher(messagingClassId, text, attachmentUrl, attachmentType, attachmentName); await openMessagesFor(messagingClassId); }} />
       </div>
     );
@@ -6435,7 +6475,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
         <ConversationThreadView title={teacherName} subtitle={teacherLabel ? `Direct message · ${teacherLabel}` : "Direct message"} messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
-          onBack={() => setMessagingTeacherUid(null)}
+          onBack={() => window.history.back()}
           onSend={async (text, attachmentUrl, attachmentType, attachmentName) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachmentUrl, attachmentType, attachmentName); await openTeacherMessages(messagingTeacherUid); }} />
       </div>
     );
@@ -6445,7 +6485,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ContactOfficeView adminThread={adminThread} onBack={() => setMessagingAdmin(false)} />
+        <ContactOfficeView adminThread={adminThread} onBack={() => window.history.back()} />
       </div>
     );
   }
@@ -6899,7 +6939,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
-  const [view, setView] = useState(() => {
+  const [view, setViewRaw] = useState(() => {
     if (deepLinkGroupId) return "messages";
     // Restores whichever screen was open if the class itself was just restored from the URL too
     // (a reload, or the OS having killed and restarted the page) — without this, that restore
@@ -6911,17 +6951,25 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // Pushing a real history entry here is what lets the Android back button step back through a
   // teacher's actual screens (Comm → Home, not straight to the class picker) instead of treating
   // this level of navigation as invisible to the browser — the same reasoning and pattern as the
-  // class-selection and parent-tab history work already in place.
+  // class-selection and parent-tab history work already in place. Every setView(...) call inside
+  // this component's own JSX goes through this now (not the raw state setter directly, which is
+  // renamed setViewRaw below and used only by this function and the popstate handler that restores
+  // from it) — previously only the top-level tab switches did, while the many sub-screens beneath
+  // them (a student's detail view, a comm entry form, and so on) set state directly and were
+  // completely invisible to the browser's own back button. That's what let a single back press
+  // skip straight past several visible steps at once: the browser's history stack and what was
+  // actually on screen could drift arbitrarily far out of sync from one another.
   const navigateView = (newView) => {
-    setView(newView);
+    setViewRaw(newView);
     const url = new URL(window.location.href);
-    url.searchParams.set("view", newView);
+    if (newView == null) url.searchParams.delete("view");
+    else url.searchParams.set("view", newView);
     window.history.pushState({ view: newView }, "", url);
   };
   useEffect(() => {
     const onPopState = () => {
       const params = new URLSearchParams(window.location.search);
-      setView(params.get("view") || (classType === "preschool" ? "daily-log" : "home"));
+      setViewRaw(params.get("view") || (classType === "preschool" ? "daily-log" : "home"));
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -6944,7 +6992,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [incidentCategoryPreset, setIncidentCategoryPreset] = useState(null);
   const [incidentReturn, setIncidentReturn] = useState("home");
   const [cameraReturn, setCameraReturn] = useState("home");
-  const openCameraCapture = (returnTo) => { setCameraReturn(returnTo || "home"); setView("camera-capture"); };
+  const openCameraCapture = (returnTo) => { setCameraReturn(returnTo || "home"); navigateView("camera-capture"); };
   const [periodAttPreset, setPeriodAttPreset] = useState(null);
   const [periodAttReturn, setPeriodAttReturn] = useState("home");
 
@@ -7547,7 +7595,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
   const removeStudent = (id) => {
     persistRoster(roster.filter((s) => s.id !== id));
-    if (currentId === id) { setView(classType === "preschool" ? "daily-log" : "home"); setCurrentId(null); }
+    if (currentId === id) { navigateView(classType === "preschool" ? "daily-log" : "home"); setCurrentId(null); }
   };
 
   const updateStudentField = (id, field, value) => {
@@ -7593,7 +7641,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     setCurrentId(roster[0].id);
     setSessionCat(catId);
     setSessionIdx(0);
-    setView("session");
+    navigateView("session");
   };
 
   const advanceClassSession = () => {
@@ -7603,7 +7651,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setClassSessionQueue(null);
       setClassSessionPos(0);
       setSelectedSkillReportCat(sessionCat);
-      setView("skill-category-report");
+      navigateView("skill-category-report");
       return;
     }
     setClassSessionPos(nextPos);
@@ -7877,15 +7925,15 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistConfig({ ...config, categories: [...config.categories, { ...newCat, id: uid(), active: true }] });
   };
 
-  const openIncidentForm = (studentId, returnTo, categoryId) => { setIncidentPreset(studentId); setIncidentCategoryPreset(categoryId || null); setIncidentReturn(returnTo); setView("incident"); };
-  const openPeriodAttendanceForm = (studentId, returnTo) => { setPeriodAttPreset(studentId); setPeriodAttReturn(returnTo); setView("period-attendance"); };
+  const openIncidentForm = (studentId, returnTo, categoryId) => { setIncidentPreset(studentId); setIncidentCategoryPreset(categoryId || null); setIncidentReturn(returnTo); navigateView("incident"); };
+  const openPeriodAttendanceForm = (studentId, returnTo) => { setPeriodAttPreset(studentId); setPeriodAttReturn(returnTo); navigateView("period-attendance"); };
   const todaysScheduleForForm = (() => {
     const todayStr = todayISO();
     const entry = plannerDays?.[todayStr];
     const dayType = (config.planner?.dayTypes || []).find((t) => t.id === entry?.dayType);
     return getScheduleForDate(todayStr, dayType, config, plannerDays);
   })();
-  const openMessageDraft = (flag) => { setMessageFlag(flag); setView("message-draft"); };
+  const openMessageDraft = (flag) => { setMessageFlag(flag); navigateView("message-draft"); };
 
   // Admin-created school events aren't copied into this class's own data — they're merged in
   // at read time, same pattern as the automatic Jewish holidays. That's what makes "edit once,
@@ -7924,18 +7972,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           removeStudent={removeStudent}
           setAttendance={setAttendance} setAttendanceTime={setAttendanceTime}
           setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
-          openDetail={(id) => { setCurrentId(id); setView("detail"); }}
+          openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
           openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
           monthlyReportState={monthlyReportState}
           onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
           reflectionState={reflectionState} reflections={reflections}
           onDismissReflectionReminder={(key) => persistReflectionState({ ...reflectionState, dismissedMonth: key })}
-          onOpenReflection={() => { setSelectedReflectionMonth(monthKey(new Date().getFullYear(), new Date().getMonth())); setView("reflection-form"); }}
+          onOpenReflection={() => { setSelectedReflectionMonth(monthKey(new Date().getFullYear(), new Date().getMonth())); navigateView("reflection-form"); }}
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setPlannerDay={setPlannerDay} addPoints={addPoints} behaviorLogData={behaviorLogData}
           birthdayDismissals={birthdayDismissals} onDismissBirthday={dismissBirthday} onCreateBirthdayEvent={createBirthdayEvent}
           benchmarkSubjects={benchmarkSubjects} segmentCelebrationDismissals={segmentCelebrationDismissals} onDismissSegmentCelebration={dismissSegmentCelebration}
-          onCelebrateSegment={(subjectLabel, segment) => { setCelebratingSegment({ subjectLabel, segment }); setView("segment-celebration-message"); }}
+          onCelebrateSegment={(subjectLabel, segment) => { setCelebratingSegment({ subjectLabel, segment }); navigateView("segment-celebration-message"); }}
           onAddPlannerEvent={addPlannerEvent}
           randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
           alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan}
@@ -7957,7 +8005,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
           logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
           logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
-          openDetail={(id) => { setCurrentId(id); setView("detail"); }}
+          openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
           openIncidentForm={(studentId, returnTo, categoryId) => openIncidentForm(studentId, returnTo || "daily-log", categoryId)}
           classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={navigateView} />
       )}
@@ -7965,18 +8013,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       {view === "segment-celebration-message" && celebratingSegment && (
         <SegmentCelebrationMessageView subjectLabel={celebratingSegment.subjectLabel} segmentLabel={celebratingSegment.segment.label}
           roster={roster} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")}
-          onDone={() => { dismissSegmentCelebration(celebratingSegment.segment.id); setView(classType === "preschool" ? "daily-log" : "home"); }} />
+          onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")}
+          onDone={() => { dismissSegmentCelebration(celebratingSegment.segment.id); navigateView(classType === "preschool" ? "daily-log" : "home"); }} />
       )}
 
       {view === "class-mode" && (
         <ClassModeView roster={roster} studentData={studentData} config={config} addPoints={addPoints}
-          openIncidentForm={(id) => openIncidentForm(id, "class-mode")} onExit={() => setView(classType === "preschool" ? "daily-log" : "home")} onOpenClassTools={() => setShowPlan(true)} />
+          openIncidentForm={(id) => openIncidentForm(id, "class-mode")} onExit={() => navigateView(classType === "preschool" ? "daily-log" : "home")} onOpenClassTools={() => setShowPlan(true)} />
       )}
 
       {view === "day-recap" && (
         <DayRecapView roster={roster} studentData={studentData} incidents={incidents} behaviorLogData={behaviorLogData}
-          plannerDays={plannerDays} config={config} onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} />
+          plannerDays={plannerDays} config={config} onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} />
       )}
 
       {/* Class Tools drawer — slides in from the right and pushes the roster over to share the screen (like a Gmail side panel) — never dims or blocks it, at any width. Lives here (not inside any one view) so both Home and Class Mode can open it. Position/transform/transition are inline styles deliberately, so they never depend on utility-CSS generation timing. */}
@@ -7991,7 +8039,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           <TimerWidget />
           <RandomPickerWidget roster={roster} pickerData={randomPickerData} onPick={recordRandomPick} onReset={resetRandomPicker} />
           <ScratchpadWidget plannerDays={plannerDays} setPlannerDay={setPlannerDay} />
-          <button onClick={() => setView("day-recap")} className="w-full flex items-center justify-center gap-2 bg-stone-800 text-white rounded-xl py-2.5 text-sm font-semibold hover:bg-stone-900">
+          <button onClick={() => navigateView("day-recap")} className="w-full flex items-center justify-center gap-2 bg-stone-800 text-white rounded-xl py-2.5 text-sm font-semibold hover:bg-stone-900">
             End of day recap <ArrowRight size={14} />
           </button>
         </div>
@@ -8004,7 +8052,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       {view === "communication" && (
         <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={navigateView}
           unreadFamilies={commUnreadFamilies} onRefreshUnread={refreshCommUnread}
-          openStudent={(id) => { setCurrentId(id); setView("comm-entry"); }} />
+          openStudent={(id) => { setCurrentId(id); navigateView("comm-entry"); }} />
       )}
 
       {view === "blog" && (
@@ -8016,7 +8064,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "blog-compose" && (
-        <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher} onSubmit={submitBlogPost} onBack={() => setView("blog")} />
+        <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher} onSubmit={submitBlogPost} onBack={() => navigateView("blog")} />
       )}
 
       {view === "homework" && (
@@ -8024,7 +8072,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "homework-compose" && (
-        <HomeworkComposeScreen classId={classId} onSubmit={submitHomework} onBack={() => setView("homework")} />
+        <HomeworkComposeScreen classId={classId} onSubmit={submitHomework} onBack={() => navigateView("homework")} />
       )}
 
       {view === "tools" && (
@@ -8033,58 +8081,58 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
       {view === "comm-entry" && currentId && (
         <CommunicationEntryView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
-          onBack={() => setView("communication")} onAddEntry={(entry) => addCommunication(currentId, entry)} />
+          onBack={() => navigateView("communication")} onAddEntry={(entry) => addCommunication(currentId, entry)} />
       )}
 
       {view === "monthly-reports" && (
         <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
+          onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
       {view === "range-report" && (
         <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView("communication")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
+          onBack={() => navigateView("communication")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
       {view === "reflection-form" && (
         <MonthlyReflectionForm monthKey={selectedReflectionMonth || monthKey(new Date().getFullYear(), new Date().getMonth())}
           existing={reflections.find((r) => r.monthKey === (selectedReflectionMonth || monthKey(new Date().getFullYear(), new Date().getMonth())))}
-          allReflections={reflections} onSave={saveReflection} onBack={() => setView("reflection-history")} />
+          allReflections={reflections} onSave={saveReflection} onBack={() => navigateView("reflection-history")} />
       )}
 
       {view === "reflection-history" && (
         <ReflectionHistoryView reflections={reflections} navigate={navigateView}
-          onOpenMonth={(mk) => { setSelectedReflectionMonth(mk); setView("reflection-form"); }}
-          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} />
+          onOpenMonth={(mk) => { setSelectedReflectionMonth(mk); navigateView("reflection-form"); }}
+          onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} />
       )}
 
       {view === "assessments" && (
         <AssessmentsListView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
-          openClassAssessment={() => setView("class-assessment-form")}
-          openAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
-          openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); setView("skill-category-report"); }}
+          openClassAssessment={() => navigateView("class-assessment-form")}
+          openAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
+          openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); navigateView("skill-category-report"); }}
           activateAssessment={activateAssessment} hideAssessment={hideAssessment} createCustomAssessment={createCustomAssessment}
           updateClassAssessmentResult={updateClassAssessmentResult}
-          onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); setView("session"); }}
-          onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setView("fluency"); }}
-          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
-          onOpenFluencyDetail={(studentId, entry) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
-          onOpenSkillDetail={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedSkillCat(catId); setView("skill-detail"); }}
+          onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); navigateView("session"); }}
+          onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); navigateView("fluency"); }}
+          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
+          onOpenFluencyDetail={(studentId, entry) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedFluencyEntry(entry); navigateView("fluency-detail"); }}
+          onOpenSkillDetail={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedSkillCat(catId); navigateView("skill-detail"); }}
           initialStudentId={initialAssessmentStudentId}
           navigate={navigateView} />
       )}
 
       {view === "assessment-report" && selectedAssessmentId && (
         <AssessmentReportView assessment={classAssessments.find((ca) => ca.id === selectedAssessmentId)} roster={roster} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView("assessments")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
+          onBack={() => navigateView("assessments")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
       {view === "skill-category-report" && selectedSkillReportCat && (
         <SkillCategoryReportView category={config.categories.find((c) => c.id === selectedSkillReportCat)} roster={roster} studentData={studentData} config={config} loggedInTeacher={loggedInTeacher}
-          onBack={() => setView("assessments")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
+          onBack={() => navigateView("assessments")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)}
           onStartClassSession={startClassSession} />
       )}
@@ -8122,57 +8170,57 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "class-assessment-form" && (
-        <ClassAssessmentForm roster={roster} config={config} onCancel={() => setView("assessments")}
-          onSave={(entry) => { addClassAssessment(entry); setView("assessments"); }} />
+        <ClassAssessmentForm roster={roster} config={config} onCancel={() => navigateView("assessments")}
+          onSave={(entry) => { addClassAssessment(entry); navigateView("assessments"); }} />
       )}
 
       {view === "detail" && currentId && (
         <StudentDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           incidents={incidents} classAssessments={classAssessments} config={config}
-          onBack={() => setView(classType === "preschool" ? "daily-log" : "home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
+          onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
           onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")}
-          onGoToAssessments={() => { setInitialAssessmentStudentId(currentId); setView("assessments"); }}
-          onExportReport={() => setView("print-report-options")}
+          onGoToAssessments={() => { setInitialAssessmentStudentId(currentId); navigateView("assessments"); }}
+          onExportReport={() => navigateView("print-report-options")}
           onDraftMessage={openMessageDraft} onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onUpdateField={(field, value) => updateStudentField(currentId, field, value)}
-          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); setView("assessment-report"); }}
-          onOpenFluencyDetail={(entry) => { setDetailReturnView("detail"); setSelectedFluencyEntry(entry); setView("fluency-detail"); }}
-          onOpenSkillDetail={(catId) => { setDetailReturnView("detail"); setSelectedSkillCat(catId); setView("skill-detail"); }}
-          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setIncidentDetailReturn("detail"); setView("incident-detail"); }}
+          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
+          onOpenFluencyDetail={(entry) => { setDetailReturnView("detail"); setSelectedFluencyEntry(entry); navigateView("fluency-detail"); }}
+          onOpenSkillDetail={(catId) => { setDetailReturnView("detail"); setSelectedSkillCat(catId); navigateView("skill-detail"); }}
+          onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setIncidentDetailReturn("detail"); navigateView("incident-detail"); }}
           onFetchCrossClassHistory={fetchCrossClassHistory} currentClassName={className} />
       )}
 
       {view === "print-report-options" && currentId && (
         <PrintReportOptionsView student={roster.find((s) => s.id === currentId)}
-          onBack={() => setView("detail")}
-          onGenerate={(sections) => { setReportSections(sections); setView("print-report"); }} />
+          onBack={() => navigateView("detail")}
+          onGenerate={(sections) => { setReportSections(sections); navigateView("print-report"); }} />
       )}
 
       {view === "print-report" && currentId && (
         <PrintableStudentReport student={roster.find((s) => s.id === currentId)} data={studentData[currentId] || emptyStudentData()}
           incidents={incidents} classAssessments={classAssessments} config={config} sections={reportSections}
-          currentClassName={className} onBack={() => setView("print-report-options")} />
+          currentClassName={className} onBack={() => navigateView("print-report-options")} />
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
         <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} classId={classId} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
-          onBack={() => setView(incidentDetailReturn)}
+          onBack={() => navigateView(incidentDetailReturn)}
           onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(studentId, email) => updateStudentField(studentId, "parentEmail", email)}
           onUpdateIncident={updateIncident}
-          onRemoveIncident={(id) => { removeIncident(id); setView(incidentDetailReturn); }} />
+          onRemoveIncident={(id) => { removeIncident(id); navigateView(incidentDetailReturn); }} />
       )}
 
       {view === "fluency-detail" && currentId && selectedFluencyEntry && (
         <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
-          onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
+          onBack={() => navigateView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
 
       {view === "skill-detail" && currentId && selectedSkillCat && (
         <SkillDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
           category={config.categories.find((c) => c.id === selectedSkillCat)} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
-          onBack={() => setView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
+          onBack={() => navigateView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
 
@@ -8180,41 +8228,41 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         <SessionView category={config.categories.find((c) => c.id === sessionCat)} config={config}
           idx={sessionIdx} setIdx={setSessionIdx}
           onGrade={(itemId, result) => gradeItem(sessionCat, itemId, result, classSessionDate)}
-          onFinish={() => (classSessionQueue ? advanceClassSession() : setView("assessments"))}
+          onFinish={() => (classSessionQueue ? advanceClassSession() : navigateView("assessments"))}
           studentName={roster.find((s) => s.id === currentId)?.name}
           classSessionProgress={classSessionQueue ? { pos: classSessionPos, total: classSessionQueue.length } : null} />
       )}
 
       {view === "fluency" && currentId && (
-        <FluencyForm student={roster.find((s) => s.id === currentId)} onCancel={() => setView("assessments")}
-          onSave={(entry) => { addFluencyEntry(currentId, entry); setView("assessments"); }} />
+        <FluencyForm student={roster.find((s) => s.id === currentId)} onCancel={() => navigateView("assessments")}
+          onSave={(entry) => { addFluencyEntry(currentId, entry); navigateView("assessments"); }} />
       )}
 
       {view === "incident" && (
         <IncidentForm roster={roster} config={config} presetId={incidentPreset} categoryPreset={incidentCategoryPreset}
-          onCancel={() => setView(incidentReturn)}
-          onSave={(entry) => { addIncident(entry); setView(incidentReturn); }} />
+          onCancel={() => navigateView(incidentReturn)}
+          onSave={(entry) => { addIncident(entry); navigateView(incidentReturn); }} />
       )}
 
       {view === "camera-capture" && (
         <CameraCaptureView roster={roster} classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily}
-          onDone={() => setView(cameraReturn)} />
+          onDone={() => navigateView(cameraReturn)} />
       )}
 
       {view === "period-attendance" && (
         <PeriodAttendanceForm roster={roster} config={config} presetId={periodAttPreset} todaysPeriods={todaysScheduleForForm}
-          onCancel={() => setView(periodAttReturn)}
-          onSave={(studentIds, entry) => { addPeriodAttendance(studentIds, entry); setView(periodAttReturn); }} />
+          onCancel={() => navigateView(periodAttReturn)}
+          onSave={(studentIds, entry) => { addPeriodAttendance(studentIds, entry); navigateView(periodAttReturn); }} />
       )}
 
       {view === "message-draft" && currentId && messageFlag && (
         <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
-          onBack={() => setView("detail")} onSaveParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
+          onBack={() => navigateView("detail")} onSaveParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onLogSent={(entry) => addCommunication(currentId, entry)} />
       )}
 
       {view === "settings" && (
-        <SettingsView config={config} setConfig={persistConfig} onBack={() => setView(classType === "preschool" ? "daily-log" : "home")}
+        <SettingsView config={config} setConfig={persistConfig} onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")}
           roster={roster} addStudent={addStudent} removeStudent={removeStudent} updateStudentField={updateStudentField}
           loadSampleData={loadSampleData} clearAllData={clearAllData}
           className={className} classId={classId} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
