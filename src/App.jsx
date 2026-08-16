@@ -207,12 +207,12 @@ const DEFAULT_CONFIG = {
   // genuinely separate from each other too, matching the two distinct preschool tiles they serve.
   preschoolHealthIncidents: {
     categories: [
-      { id: "fall-bump", label: "Fall or bump", color: "cyan" },
+      { id: "fall-bump", label: "Fall or bump", color: "sky" },
       { id: "cut-scrape", label: "Cut or scrape", color: "rose" },
       { id: "bite", label: "Bite (from another child)", color: "amber" },
-      { id: "nosebleed", label: "Nosebleed", color: "rose" },
+      { id: "nosebleed", label: "Nosebleed", color: "indigo" },
       { id: "allergic-reaction", label: "Allergic reaction", color: "violet" },
-      { id: "fever-illness", label: "Fever or illness symptom", color: "orange" },
+      { id: "fever-illness", label: "Fever or illness symptom", color: "teal" },
       { id: "rash", label: "Rash or skin irritation", color: "fuchsia" },
       { id: "other", label: "Other", color: "stone" },
     ],
@@ -9617,11 +9617,21 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     streamRef.current = null;
   };
 
+  // Requesting an explicit high resolution here is what actually fixes photo/video quality —
+  // without it, a bare { video: true } request lets the browser default to whatever it considers
+  // reasonable for its most common use case, which is video calling, not photography. That
+  // default is often far below what the camera hardware can actually do. "ideal" (not "exact") is
+  // what makes this safe to request everywhere: it asks for 4K and lets the browser negotiate down
+  // to the closest resolution the actual camera and browser support, rather than failing outright
+  // on a device or browser that can't hit 4K exactly.
   const startStream = async () => {
     stopStream();
     setCameraError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode }, audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode, width: { ideal: 3840 }, height: { ideal: 2160 } },
+        audio: true,
+      });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
     } catch (err) {
@@ -9647,15 +9657,36 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     setSelectedIds((prev) => new Set(prev).add(id)); // newly captured items start selected
   };
 
-  const takePhoto = () => {
+  // ImageCapture.takePhoto() is tried first — where it's available, it can pull a still at the
+  // camera's own full photo resolution, which is often meaningfully higher than whatever
+  // resolution the live video preview is actually streaming at (a camera sensor's still-photo
+  // capability and its video-streaming capability are genuinely different numbers). It's
+  // Chromium-only, though, with no Safari or Firefox support at all — grabbing a frame from the
+  // video stream via canvas is what every browser can do, so that's the fallback, not a lesser
+  // option reached only on error. Either path benefits from the higher-resolution stream now
+  // being requested above, since the canvas fallback's quality ceiling is exactly whatever
+  // resolution the video element itself is receiving.
+  const takePhoto = async () => {
+    if (navigator.vibrate) navigator.vibrate(15); // a light shutter-tap feel, matching a real camera
+    const track = streamRef.current?.getVideoTracks?.()[0];
+    if (track && window.ImageCapture) {
+      try {
+        const imageCapture = new window.ImageCapture(track);
+        const blob = await imageCapture.takePhoto();
+        addItem(blob, "photo");
+        return;
+      } catch {
+        // Falls through to the canvas path below — some devices/browsers advertise ImageCapture
+        // but still fail on takePhoto() for a specific camera or track state.
+      }
+    }
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas) return;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     canvas.getContext("2d").drawImage(video, 0, 0);
-    canvas.toBlob((blob) => { if (blob) addItem(blob, "photo"); }, "image/jpeg", 0.92);
-    if (navigator.vibrate) navigator.vibrate(15); // a light shutter-tap feel, matching a real camera
+    canvas.toBlob((blob) => { if (blob) addItem(blob, "photo"); }, "image/jpeg", 0.95);
   };
 
   const startRecording = () => {
@@ -9665,7 +9696,13 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     // Safari and Chromium-based browsers don't agree on this, and asking for an unsupported type
     // throws immediately instead of falling back gracefully on its own.
     const mimeType = ["video/webm;codecs=vp9,opus", "video/webm", "video/mp4"].find((t) => window.MediaRecorder?.isTypeSupported?.(t)) || "";
-    const recorder = new MediaRecorder(streamRef.current, mimeType ? { mimeType } : undefined);
+    // videoBitsPerSecond explicitly set rather than left to the browser's own default — the
+    // default a browser picks for MediaRecorder tends to be tuned for video calling (small,
+    // fast-changing frames, tolerant of heavy compression) rather than the sharper, more detailed
+    // footage an actual recorded clip benefits from. 8 Mbps is comfortably enough for a genuinely
+    // sharp 1080p-to-4K clip at the 30-second cap already in place, without producing an
+    // unreasonably large file for that short a recording.
+    const recorder = new MediaRecorder(streamRef.current, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 8_000_000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "video/webm" });
@@ -16912,6 +16949,7 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
   const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
   const [description, setDescription] = useState("");
   const [notifyFamily, setNotifyFamily] = useState(true);
+  const [flaggedForAdmin, setFlaggedForAdmin] = useState(false);
   const [mediaItems, setMediaItems] = useState([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -16948,7 +16986,7 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
       onSave({
         id: incidentId, kind: isHealth ? "health" : "incident", category, categoryLabel, categoryColor,
         date: todayISO(), time: new Date().toTimeString().slice(0, 5),
-        description, studentIds, media, notifyFamily,
+        description, studentIds, media, notifyFamily, flaggedForAdmin,
       });
     } catch (err) {
       setSaveError(describeUploadError(err));
@@ -17020,12 +17058,24 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
         </label>
 
         <button onClick={() => setNotifyFamily((v) => !v)}
-          className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 mb-4 text-left ${notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+          className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 mb-2.5 text-left ${notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
           <Bell size={18} className={notifyFamily ? "text-teal-600" : "text-stone-400"} />
           <span className={`text-sm font-semibold ${notifyFamily ? "text-teal-700" : "text-stone-600"}`}>
             {notifyFamily ? "Family will be notified" : "Family will not be notified"}
           </span>
           <span className="text-xs text-stone-400 ml-auto">Tap to change</span>
+        </button>
+
+        {/* Separate from — not a replacement for — notifying the family above. That happens as
+            part of logging the incident either way; this is an additional, optional escalation
+            for the cases that also need admin's attention specifically. */}
+        <button onClick={() => setFlaggedForAdmin((v) => !v)}
+          className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 mb-4 text-left ${flaggedForAdmin ? "bg-rose-50 border-rose-300" : "bg-white border-stone-300"}`}>
+          <Flag size={18} className={flaggedForAdmin ? "text-rose-600 fill-rose-600" : "text-stone-400"} />
+          <span className={`text-sm font-semibold ${flaggedForAdmin ? "text-rose-700" : "text-stone-600"}`}>
+            {flaggedForAdmin ? "Flagged for admin" : "Flag for admin"}
+          </span>
+          <span className="text-xs text-stone-400 ml-auto">{flaggedForAdmin ? "Shows on the admin overview" : "Tap to flag"}</span>
         </button>
 
         {saveError && <p className="text-xs text-rose-600 mb-3">{saveError}</p>}
@@ -18876,32 +18926,74 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           </div>
         </Section>
 
-        <Section title="Incident categories">
-          {config.incidents.categories.map((cat, i) => (
-            <div key={cat.id} className="flex items-center gap-2 mb-2">
-              <input value={cat.label} onChange={(e) => update((c) => { c.incidents.categories[i].label = e.target.value; return c; })} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-              <select value={cat.color} onChange={(e) => update((c) => { c.incidents.categories[i].color = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-1.5 py-1.5 text-xs bg-white">
-                {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <ConfirmDelete onConfirm={() => update((c) => { if (c.incidents.categories.length > 1) c.incidents.categories.splice(i, 1); return c; })} size={14} />
-            </div>
-          ))}
-          <button onClick={() => update((c) => { c.incidents.categories.push({ id: uid(), label: "New category", color: "stone" }); return c; })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add category</button>
-        </Section>
+        {!isPreschool && (
+          <>
+            <Section title="Incident categories">
+              {config.incidents.categories.map((cat, i) => (
+                <div key={cat.id} className="flex items-center gap-2 mb-2">
+                  <input value={cat.label} onChange={(e) => update((c) => { c.incidents.categories[i].label = e.target.value; return c; })} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  <select value={cat.color} onChange={(e) => update((c) => { c.incidents.categories[i].color = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-1.5 py-1.5 text-xs bg-white">
+                    {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <ConfirmDelete onConfirm={() => update((c) => { if (c.incidents.categories.length > 1) c.incidents.categories.splice(i, 1); return c; })} size={14} />
+                </div>
+              ))}
+              <button onClick={() => update((c) => { c.incidents.categories.push({ id: uid(), label: "New category", color: "stone" }); return c; })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add category</button>
+            </Section>
 
-        <Section title="Incident flag rule">
-          <label className="block text-xs font-medium text-stone-500 mb-1">Incidents within window before flagging</label>
-          <div className="flex gap-2 mb-3">
-            <input type="number" min={1} value={config.incidents.flagRule.threshold} onChange={(e) => update((c) => { c.incidents.flagRule.threshold = Math.max(1, Number(e.target.value) || 1); return c; })} className="w-1/2 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" placeholder="Count" />
-            <input type="number" min={1} value={config.incidents.flagRule.windowDays} onChange={(e) => update((c) => { c.incidents.flagRule.windowDays = Math.max(1, Number(e.target.value) || 1); return c; })} className="w-1/2 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" placeholder="Days" />
-          </div>
-          {[1, 2, 3, 4].map((tier) => (
-            <div key={tier} className="mb-2">
-              <label className="block text-xs font-medium text-stone-500 mb-1">Tier {tier}{tier === 4 ? "+" : ""}</label>
-              <input value={config.incidents.tierMessages[tier]} onChange={(e) => update((c) => { c.incidents.tierMessages[tier] = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-            </div>
-          ))}
-        </Section>
+            <Section title="Incident flag rule">
+              <label className="block text-xs font-medium text-stone-500 mb-1">Incidents within window before flagging</label>
+              <div className="flex gap-2 mb-3">
+                <input type="number" min={1} value={config.incidents.flagRule.threshold} onChange={(e) => update((c) => { c.incidents.flagRule.threshold = Math.max(1, Number(e.target.value) || 1); return c; })} className="w-1/2 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" placeholder="Count" />
+                <input type="number" min={1} value={config.incidents.flagRule.windowDays} onChange={(e) => update((c) => { c.incidents.flagRule.windowDays = Math.max(1, Number(e.target.value) || 1); return c; })} className="w-1/2 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" placeholder="Days" />
+              </div>
+              {[1, 2, 3, 4].map((tier) => (
+                <div key={tier} className="mb-2">
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Tier {tier}{tier === 4 ? "+" : ""}</label>
+                  <input value={config.incidents.tierMessages[tier]} onChange={(e) => update((c) => { c.incidents.tierMessages[tier] = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                </div>
+              ))}
+            </Section>
+          </>
+        )}
+
+        {/* Preschool's own, separate category lists — never config.incidents.categories, which is
+            elementary's discipline/social/lost-item list and has nothing to do with what a
+            preschool health note or regular incident is actually about. Editing these here is
+            what item 4 originally asked for but didn't yet have a way to do — the categories
+            PreschoolIncidentForm actually shows were fixed to sensible, research-grounded
+            defaults, but weren't customizable the way elementary's always have been. */}
+        {isPreschool && (
+          <>
+            <Section title="Health incident categories">
+              <p className="text-xs text-stone-400 mb-3">What you'll pick from when logging a health incident — a fall, a bite, a fever, and so on.</p>
+              {(config.preschoolHealthIncidents?.categories || []).map((cat, i) => (
+                <div key={cat.id} className="flex items-center gap-2 mb-2">
+                  <input value={cat.label} onChange={(e) => update((c) => { c.preschoolHealthIncidents.categories[i].label = e.target.value; return c; })} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  <select value={cat.color} onChange={(e) => update((c) => { c.preschoolHealthIncidents.categories[i].color = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-1.5 py-1.5 text-xs bg-white">
+                    {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <ConfirmDelete onConfirm={() => update((c) => { if (c.preschoolHealthIncidents.categories.length > 1) c.preschoolHealthIncidents.categories.splice(i, 1); return c; })} size={14} />
+                </div>
+              ))}
+              <button onClick={() => update((c) => { c.preschoolHealthIncidents.categories.push({ id: uid(), label: "New category", color: "stone" }); return c; })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add category</button>
+            </Section>
+
+            <Section title="Incident categories">
+              <p className="text-xs text-stone-400 mb-3">What you'll pick from when logging a non-health incident — a peer conflict, a rough drop-off, and so on.</p>
+              {(config.preschoolIncidents?.categories || []).map((cat, i) => (
+                <div key={cat.id} className="flex items-center gap-2 mb-2">
+                  <input value={cat.label} onChange={(e) => update((c) => { c.preschoolIncidents.categories[i].label = e.target.value; return c; })} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  <select value={cat.color} onChange={(e) => update((c) => { c.preschoolIncidents.categories[i].color = e.target.value; return c; })} className="rounded-lg border border-stone-300 px-1.5 py-1.5 text-xs bg-white">
+                    {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <ConfirmDelete onConfirm={() => update((c) => { if (c.preschoolIncidents.categories.length > 1) c.preschoolIncidents.categories.splice(i, 1); return c; })} size={14} />
+                </div>
+              ))}
+              <button onClick={() => update((c) => { c.preschoolIncidents.categories.push({ id: uid(), label: "New category", color: "stone" }); return c; })} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={12} /> Add category</button>
+            </Section>
+          </>
+        )}
 
         {!isPreschool && (
         <div className="md:col-span-2">
