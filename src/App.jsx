@@ -7187,10 +7187,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                   const isIn = status?.isIn;
                   const entries = status?.entries || [];
                   return (
-                    <TourHint active={tourStep === 2} step={3} total={TOUR_TOTAL_STEPS} align="left"
-                      text={`Your child's day shows right here — mood, meals, naps, and more, as their teacher logs it.`}
-                      onNext={advanceTour} onSkip={dismissTour}>
-                      <div>
+                    <div>
+                      {/* Wraps only the short check-in box, not the full (potentially long)
+                          daily-log content below it — the tour bubble positions itself right after
+                          whatever it wraps, so wrapping the whole block (including
+                          ChildDailyLogView, which can run long with mood/meals/naps/incidents/etc.)
+                          pushed the bubble itself far down the page, past the end of the visible
+                          content, where it had nothing left to actually be inside and rendered
+                          cut off. This keeps the pointer anchored to the specific thing the text
+                          is about — "your child's day shows right here" — right at the top of that
+                          section, regardless of how much the section itself contains. */}
+                      <TourHint active={tourStep === 2} step={3} total={TOUR_TOTAL_STEPS} align="left"
+                        text={`Your child's day shows right here — mood, meals, naps, and more, as their teacher logs it.`}
+                        onNext={advanceTour} onSkip={dismissTour}>
                         <div className={`rounded-xl p-4 border-2 mb-4 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
                           {entries.length === 0 ? (
                             <p className="text-xs font-semibold text-stone-400">Not checked in yet today — scan the QR code above to check in.</p>
@@ -7204,9 +7213,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                             </div>
                           )}
                         </div>
-                        <ChildDailyLogView link={link} />
-                      </div>
-                    </TourHint>
+                      </TourHint>
+                      <ChildDailyLogView link={link} />
+                    </div>
                   );
                 })()}
               </>
@@ -7951,17 +7960,28 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // Linked to exactly ONE student, not the whole roster — a demo parent seeing all ten sample
   // children as their own isn't what an actual parent's view looks like; one child (occasionally
   // two, across the two different demo classes) is.
+  // Linked per class, not per account — loading sample data for "Sample" and, separately, for
+  // "Sample Preschool" is meant to build up ONE demo family that has a child in each, the same
+  // way a real family with kids in two different rooms would. That only actually works if this
+  // merges with whatever's already linked from a DIFFERENT class rather than replacing it
+  // outright — createFamilyAccount's backend does a full overwrite of studentLinks on every call,
+  // by design (a real "add a second guardian" flow needs that), so the merging has to happen here,
+  // on the client, before calling it: read whatever's already linked, drop only this SAME class's
+  // own prior entry (so reloading sample data for the same class twice doesn't duplicate it), and
+  // add the fresh one back in alongside every other class's link untouched.
   const linkSampleParentPreview = async (sampleRoster) => {
     if (!loggedInTeacher?.email || sampleRoster.length === 0) return;
     const demoStudent = sampleRoster[0];
     const firstName = demoStudent.name.split(" ")[0];
-    // A distinct, realistic-sounding parent name for the family side of this account — not the
-    // teacher's own name reused, even though it's technically the same login underneath, since a
-    // demo meant to look like a real parent/teacher exchange shouldn't show the identical name on
-    // both sides of every message bubble.
-    const parentDisplayName = `${firstName}'s Family`;
-    const links = [{ classId, studentId: demoStudent.id, studentName: demoStudent.name, className }];
-    const result = await createFamilyAccount(parentDisplayName, loggedInTeacher.email, "preview-not-used", links);
+    const newLink = { classId, studentId: demoStudent.id, studentName: demoStudent.name, className };
+    const existing = await loadJSON(`family:${loggedInTeacher.uid}`, null, true);
+    const otherClassLinks = (existing?.studentLinks || []).filter((l) => l.classId !== classId);
+    const links = [...otherClassLinks, newLink];
+    // Keeps whatever name this preview family already had once it exists, rather than renaming it
+    // to just this one class's student every time sample data happens to be reloaded — a distinct,
+    // realistic-sounding name only gets picked fresh the very first time this account is created.
+    const parentDisplayName = existing?.name || `${firstName}'s Family`;
+    const result = await createFamilyAccount(parentDisplayName, loggedInTeacher.email, "preview-not-used", links, existing?.familyGroupId);
     if (!result?.ok || !result.uid) return;
     // A short, realistic exchange — not just an empty thread — so "Switch to Parent view" has
     // something real to show in Messages too, not just Blog and Homework.
