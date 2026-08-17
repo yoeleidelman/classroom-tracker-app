@@ -16908,10 +16908,18 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
   };
   const updateBlockLocal = (id, patch) => setBlocks((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
   const deleteBlock = (id) => { persistBlocks(blocks.filter((b) => b.id !== id)); setEditingId(null); };
+  // Same subject added for "every day" (or several days at once) becomes several independent
+  // blocks, one per day — removing just one, as deleteBlock above does, is correct when that's
+  // genuinely what's wanted, but it leaves the same subject sitting on every other day, which can
+  // look exactly like deleting silently failed if what was actually wanted was to clear it off the
+  // whole week. This removes every block that shares the tapped one's label, in one action.
+  const deleteBlockAllDays = (label) => { persistBlocks(blocks.filter((b) => b.label !== label)); setEditingId(null); };
 
   const [draggingId, setDraggingId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState("");
+  const [editStart, setEditStart] = useState("09:00");
+  const [editEnd, setEditEnd] = useState("09:30");
   const dragState = useRef(null);
 
   const onPointerDown = (e, block) => {
@@ -16950,6 +16958,8 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
       const block = blocks.find((b) => b.id === ds.id);
       setEditingId(ds.id);
       setEditValue(block.label);
+      setEditStart(minutesToTime(block.start));
+      setEditEnd(minutesToTime(block.end));
     } else {
       const patch = computePatch(ds, e.clientY);
       persistBlocks(blocks.map((b) => (b.id === ds.id ? { ...b, ...patch } : b)));
@@ -16957,17 +16967,24 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
     dragState.current = null;
     setDraggingId(null);
   };
-  const commitLabel = () => {
-    if (editingId && editValue.trim()) {
-      if (isElementary) {
-        const block = blocks.find((b) => b.id === editingId);
-        const { subjectId, nextSubjects } = resolveSubjectForLabel(editValue, config.subjects || [], block.trackAsSubject !== false);
-        persistBlocks(blocks.map((b) => (b.id === editingId ? { ...b, label: editValue.trim(), subjectId } : b)), nextSubjects);
-      } else {
-        persistBlocks(blocks.map((b) => (b.id === editingId ? { ...b, label: editValue.trim() } : b)));
-      }
+  const [editError, setEditError] = useState("");
+  // The typed-time counterpart to dragging a block — same end result (a new start/end on the one
+  // block being edited), just reachable without touching the calendar grid at all, which dragging
+  // on a phone screen can be fiddly to land precisely.
+  const commitEdit = () => {
+    if (!editingId || !editValue.trim()) { setEditError("Give this period a name first."); return; }
+    const s = timeToMinutes(editStart), e = timeToMinutes(editEnd);
+    if (e == null || s == null || e <= s) { setEditError("End time has to be after the start time."); return; }
+    const timePatch = { start: s, end: e };
+    if (isElementary) {
+      const block = blocks.find((b) => b.id === editingId);
+      const { subjectId, nextSubjects } = resolveSubjectForLabel(editValue, config.subjects || [], block.trackAsSubject !== false);
+      persistBlocks(blocks.map((b) => (b.id === editingId ? { ...b, label: editValue.trim(), subjectId, ...timePatch } : b)), nextSubjects);
+    } else {
+      persistBlocks(blocks.map((b) => (b.id === editingId ? { ...b, label: editValue.trim(), ...timePatch } : b)));
     }
     setEditingId(null);
+    setEditError("");
   };
 
   const [showAddForm, setShowAddForm] = useState(false);
@@ -17011,7 +17028,7 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
 
   return (
     <div>
-      <p className="text-xs text-stone-400 mb-2">Drag a block to shift its time, or drag its bottom edge to resize it. Tap a block to rename it.</p>
+      <p className="text-xs text-stone-400 mb-2">Drag a block to shift its time, or drag its bottom edge to resize it. Tap a block to rename, retype its time, or remove it.</p>
 
       {!showAddForm ? (
         <button onClick={openAddForm} className="w-full mb-3 text-sm font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50">
@@ -17081,7 +17098,6 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
               {blocks.filter((b) => b.day === dayIdx).map((b) => {
                 const st = TILE_STYLES[b.color] || TILE_STYLES.teal;
                 const isDragging = draggingId === b.id;
-                const isEditing = editingId === b.id;
                 return (
                   <div key={b.id}
                     onPointerDown={(e) => onPointerDown(e, b)}
@@ -17094,23 +17110,10 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
                     }}
                     className={`rounded-md border ${st.tileBorder} ${st.tileBg} px-1.5 py-0.5 select-none ${isDragging ? "shadow-md" : ""}`}
                   >
-                    {isEditing ? (
-                      <div>
-                        <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)}
-                          onBlur={commitLabel} onKeyDown={(e) => e.key === "Enter" && commitLabel()}
-                          onPointerDown={(e) => e.stopPropagation()}
-                          className={`w-full bg-transparent text-[11px] font-semibold ${st.labelText} outline-none`} />
-                        <button onPointerDown={(e) => e.stopPropagation()} onClick={() => deleteBlock(b.id)}
-                          className="text-[9px] text-rose-500 underline">Delete</button>
-                      </div>
-                    ) : (
-                      <p className={`text-[11px] font-semibold ${st.labelText} leading-tight truncate`}>{b.label}</p>
-                    )}
-                    {!isEditing && (
-                      <p className={`text-[10px] ${st.labelText} opacity-70 leading-tight`}>
-                        {formatTime12h(minutesToTime(b.start))}{isDragging ? "" : ` – ${formatTime12h(minutesToTime(b.end))}`}
-                      </p>
-                    )}
+                    <p className={`text-[11px] font-semibold ${st.labelText} leading-tight truncate`}>{b.label}</p>
+                    <p className={`text-[10px] ${st.labelText} opacity-70 leading-tight`}>
+                      {formatTime12h(minutesToTime(b.start))}{isDragging ? "" : ` – ${formatTime12h(minutesToTime(b.end))}`}
+                    </p>
                     <div onPointerDown={(e) => onResizePointerDown(e, b)}
                       style={{ position: "absolute", left: 0, right: 0, bottom: -4, height: 12, cursor: "ns-resize", touchAction: "none" }}
                       className="flex items-end justify-center pb-0.5">
@@ -17123,6 +17126,38 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
           ))}
         </div>
       </div>
+      {editingId && (() => {
+        const block = blocks.find((b) => b.id === editingId);
+        if (!block) return null;
+        const sameLabelCount = blocks.filter((b) => b.label === block.label).length;
+        return (
+          <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => { setEditingId(null); setEditError(""); }}>
+            <div className="bg-white rounded-2xl p-4 w-full max-w-sm shadow-lg" onClick={(e) => e.stopPropagation()}>
+              <p className="text-xs font-semibold text-stone-400 mb-2">{SCHEDULE_DAYS[block.day]}</p>
+              <input autoFocus value={editValue} onChange={(e) => setEditValue(e.target.value)}
+                list={isElementary ? "sched-label-options" : undefined}
+                placeholder={isElementary ? "Subject / period" : "Period"}
+                className="w-full rounded-lg border border-stone-300 px-2.5 py-2 text-sm mb-2" />
+              <div className="flex gap-2 items-center mb-2">
+                <input type="time" value={editStart} onChange={(e) => setEditStart(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-2.5 py-2 text-sm" />
+                <span className="text-xs text-stone-400">to</span>
+                <input type="time" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-2.5 py-2 text-sm" />
+              </div>
+              {editError && <p className="text-xs text-rose-600 mb-2">{editError}</p>}
+              <button onClick={commitEdit} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2 hover:bg-teal-800 mb-3">Save</button>
+              <div className="flex flex-col gap-1.5 pt-2 border-t border-stone-100">
+                <ConfirmDelete onConfirm={() => deleteBlock(block.id)}
+                  label={`Remove from ${SCHEDULE_DAYS[block.day]} only`} className="text-xs text-rose-600 hover:text-rose-800 text-left" size={13} />
+                {sameLabelCount > 1 && (
+                  <ConfirmDelete onConfirm={() => deleteBlockAllDays(block.label)}
+                    label={`Remove "${block.label}" from all ${sameLabelCount} days`} className="text-xs text-rose-600 hover:text-rose-800 text-left" size={13} />
+                )}
+              </div>
+              <button onClick={() => { setEditingId(null); setEditError(""); }} className="w-full text-xs font-semibold text-stone-400 mt-3">Cancel</button>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
