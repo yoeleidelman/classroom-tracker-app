@@ -131,7 +131,15 @@ export default async function handler(req, res) {
     const relevantClassIds = [...new Set([...eligibleViaClassIds, ...eligibleViaClassTypes])];
     if (relevantClassIds.length === 0) return;
     const label = relevantClassIds.map((id) => labelsByClassId[id]?.[t.uid]).find((l) => l && l.trim()) || "";
-    teachers.push({ uid: t.uid, name: t.name, label });
+    // One of the teacher's OWN assigned classes (not necessarily one shared with this family) —
+    // needed only so a tapped notification can deep-link into that teacher's app at all, since
+    // entering some class of theirs is a prerequisite their app has for showing any messages
+    // screen, including their "Direct" tab, which itself spans every class they teach. A teacher
+    // reachable only through messagingClassTypes (no assignedClassIds of their own at all) has
+    // none to offer here — the notification link falls back to opening the app normally instead
+    // of deep-linking straight to the thread, which is an acceptable, graceful degradation for
+    // that specific, narrower case rather than a broken link.
+    teachers.push({ uid: t.uid, name: t.name, label, deepLinkClassId: assigned[0] || null });
   });
 
   return res.status(200).json({ teachers });

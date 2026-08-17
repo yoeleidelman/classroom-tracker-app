@@ -1329,6 +1329,22 @@ async function fetchClassFamilies(classId) {
   }
 }
 
+// The counterpart to fetchClassFamilies above, for a staff member reachable only through
+// messagingClassTypes (grade-level reach) rather than any assignedClassIds of their own — used by
+// StaffMessagesHome, which has no class to ask about in the first place.
+async function fetchStaffReachableFamilies() {
+  try {
+    const headers = await authHeaders();
+    const res = await fetch("/api/staff-reachable-families", { headers });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.families || [];
+  } catch (e) {
+    console.error("Staff reachable-families fetch failed", e);
+    return [];
+  }
+}
+
 // ============================================================================================
 // PUSH NOTIFICATIONS — everything below sends a real device notification. Three small, separate
 // pieces, kept deliberately apart so adding a new kind of notification later is a matter of
@@ -1905,9 +1921,34 @@ function AppInner() {
     const params = new URLSearchParams(window.location.search);
     const urlClassId = params.get("classId");
     if (!urlClassId) return null;
-    return { classId: urlClassId, groupId: params.get("open") === "messages" ? params.get("groupId") || null : null };
+    const open = params.get("open");
+    return {
+      classId: urlClassId,
+      groupId: open === "messages" || open === "teacher-messages" ? params.get("groupId") || null : null,
+      // isDirect distinguishes "a family messaged the classroom" from "a family messaged ME
+      // individually" — same groupId shape either way, but they open a different tab and read
+      // from a different thread once inside TeacherMessagesView.
+      isDirect: open === "teacher-messages",
+    };
   });
   const [deepLinkClassEntered, setDeepLinkClassEntered] = useState(false); // guards against re-entering the class on every re-render
+
+  // The counterpart to pendingDeepLink above, specifically for a staff member with NO assigned
+  // classes at all (StaffMessagesHome) — their notification URL never has a classId in the first
+  // place (there's no class to enter), so pendingDeepLink itself would ignore it entirely. This
+  // needs no class-entry step at all: StaffMessagesHome is already reached automatically the
+  // moment such an account signs in, so all this has to carry is which specific thread to jump to
+  // once that page's own family list has loaded.
+  const [pendingStaffDeepLink] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("open") !== "teacher-messages" || params.get("classId")) return null;
+    return { groupId: params.get("groupId") || null };
+  });
+  useEffect(() => {
+    if (!pendingStaffDeepLink) return;
+    const cleanUrl = window.location.pathname;
+    window.history.replaceState({}, "", cleanUrl);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-enters the right class the moment it's available, skipping the manual picker entirely —
   // has to be an effect, not inline render logic, since entering a class means calling state
@@ -2196,6 +2237,14 @@ function AppInner() {
     // and they'd be wrong to carry forward into ongoing navigation/restore state.
     url.searchParams.delete("open");
     url.searchParams.delete("groupId");
+    // Also dropped — this is the actual root cause behind "a preschool class briefly (or
+    // persistently) looks like an elementary one right after switching into it." ClassApp reads a
+    // ?view= URL param first, before falling back to a classType-based default (preschool →
+    // "daily-log", elementary → "home") — so if the class just switched away from had set, say,
+    // ?view=home in the URL, entering a DIFFERENT class here without dropping that param first
+    // meant the new class inherited the previous one's screen regardless of its own type, showing
+    // exactly the wrong default until manually navigated away from.
+    url.searchParams.delete("view");
     window.history.pushState({ classId: cls.id }, "", url);
   };
 
@@ -2863,6 +2912,12 @@ function AppInner() {
     setClassId(cls.id);
     setClassName(cls.name);
     // deliberately not saved as selectedClassId — admin browsing shouldn't hijack this device's normal teacher login
+    // Same fix as enterAssignedClass above, for the same reason — a ?view= param left over from a
+    // previously-viewed class (of a possibly different type) would otherwise carry straight into
+    // this one too.
+    const url = new URL(window.location.href);
+    url.searchParams.delete("view");
+    window.history.replaceState(window.history.state, "", url);
   };
 
   const backToAdminDashboard = () => {
@@ -2955,6 +3010,13 @@ function AppInner() {
     // Real teacher — only ever sees classes they're actually assigned to.
     const myClasses = registry.filter((c) => !c.archived && (currentTeacher.assignedClassIds || []).includes(c.id));
     if (!classId || !myClasses.some((c) => c.id === classId)) {
+      // Zero assigned classes, but reachable by grade level (messagingClassTypes) — this is
+      // someone like a curriculum coordinator, not a classroom teacher. They get their own
+      // standalone messages page instead of an empty class picker with nowhere to go; there is
+      // deliberately no class list here at all, not even a placeholder one.
+      if (myClasses.length === 0 && (currentTeacher.messagingClassTypes || []).length > 0) {
+        return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff} deepLinkGroupId={pendingStaffDeepLink?.groupId} />;
+      }
       return <TeacherClassPicker teacherName={currentTeacher.name} classes={myClasses} onSelect={enterAssignedClass} onSignOut={signOutStaff} />;
     }
     return (
@@ -2965,7 +3027,8 @@ function AppInner() {
         loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
         canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
         createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} onFamilyLinked={refreshCurrentFamily}
-        deepLinkGroupId={pendingDeepLink?.classId === classId ? pendingDeepLink.groupId : null} />
+        deepLinkGroupId={pendingDeepLink?.classId === classId ? pendingDeepLink.groupId : null}
+        deepLinkIsDirect={pendingDeepLink?.classId === classId ? pendingDeepLink.isDirect : false} />
     );
   }
 
@@ -6349,6 +6412,53 @@ function ParentHomeworkView({ link }) {
   );
 }
 
+// The elementary counterpart to the preschool side's daily-log card on Home — shown instead of it
+// for a child whose class isn't preschool, since the QR check-in system and mood/meals/naps
+// logging are both preschool-specific and were previously shown (misleadingly) for every child
+// regardless of type. A compact preview of the most recent homework, not the full history — this
+// is meant to give an elementary-linked family something genuinely useful to land on rather than
+// an empty "nothing logged" card that never applied to their child in the first place, while the
+// full Homework tab (linked at the bottom) stays the place for anything beyond the latest post.
+function HomeworkPreviewCard({ link, onSeeAll }) {
+  const [posts, setPosts] = useState(null); // null = loading
+  useEffect(() => {
+    let cancelled = false;
+    setPosts(null);
+    loadJSON(`class:${link.classId}:homework`, [], true).then((p) => { if (!cancelled) setPosts(p); });
+    return () => { cancelled = true; };
+  }, [link.classId]);
+
+  if (posts === null) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
+  const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+  const latest = sorted[0];
+
+  return (
+    <div className="bg-white border-2 border-stone-200 rounded-xl p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-bold uppercase tracking-wide text-stone-400">Homework</p>
+        {sorted.length > 0 && (
+          <button onClick={onSeeAll} className="text-xs font-semibold text-teal-700 hover:text-teal-900">See all</button>
+        )}
+      </div>
+      {!latest ? (
+        <p className="text-sm text-stone-400">No homework posted yet.</p>
+      ) : (
+        <div>
+          <p className="text-sm font-bold text-stone-900 mb-1">
+            {latest.cadence === "weekly" ? "This week's homework" : "Today's homework"}
+            <span className="ml-2 text-[10px] font-semibold text-stone-400">{new Date(latest.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
+          </p>
+          {latest.text && <p className="text-sm text-stone-700 whitespace-pre-wrap line-clamp-3"><LinkifiedText text={latest.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+          {latest.attachmentType === "photo" && latest.attachmentUrl && (
+            <img src={latest.attachmentUrl} alt="" className="w-full max-h-40 object-cover rounded-lg mt-2" />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function ParentHomeworkTabContent({ links, selectedIndex, onSelectIndex, onMarkRead }) {
   const selectedLink = links[selectedIndex] || links[0];
   useEffect(() => {
@@ -6518,7 +6628,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     saveJSON(`family:${family.uid}`, { ...family, onboardingSeen: true }, true);
   };
   const advanceTour = () => {
-    if (tourStep === 1 && (family?.studentLinks || []).length === 0) { dismissTour(); return; } // nothing to point step 3 at
+    // Steps 2 and 3 (QR check-in, daily log) are both preschool-specific now — neither one has
+    // anything to attach to if the currently selected child isn't preschool, so this jumps
+    // straight to done from step 1 in that case, the same way it already did when there were no
+    // linked children at all to point at.
+    const selectedLink = (fullTimeStudentLinks || [])[selectedChildIndex] || (fullTimeStudentLinks || [])[0];
+    const noPreschoolChild = !selectedLink || selectedLink.classType !== "preschool";
+    if (tourStep === 0 && noPreschoolChild) { dismissTour(); return; }
     if (tourStep >= TOUR_TOTAL_STEPS - 1) dismissTour();
     else setTourStep((s) => s + 1);
   };
@@ -6780,6 +6896,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     } else if (open === "admin") {
       setParentTab("messages");
       openAdminMessages().then(refreshUnreadThreads);
+    } else if (open === "teacher-messages") {
+      setParentTab("messages");
+      const teacherUid = params.get("teacherUid");
+      if (teacherUid) openTeacherMessages(teacherUid).then(refreshUnreadThreads);
     } else if (open === "blog" && classId) {
       setParentTab("blog");
       setPendingDeepLinkClassId(classId); // resolved below, once fullTimeStudentLinks is actually ready
@@ -6870,7 +6990,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${myGroupId}`);
+    // deepLinkClassId lets the notification jump straight into this teacher's own app and open
+    // this exact thread — omitted when the teacher has no assignedClassIds of their own (reachable
+    // only via messagingClassTypes), since their app then has no class to deep-link into at all;
+    // the notification still arrives, it just opens the app normally instead of jumping straight in.
+    const deepLinkClassId = (eligibleTeachers || []).find((t) => t.uid === teacherUid)?.deepLinkClassId;
+    const deepLinkSuffix = deepLinkClassId ? `&classId=${deepLinkClassId}` : "";
+    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${myGroupId}${deepLinkSuffix}`);
     return next;
   };
 
@@ -7165,29 +7291,43 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 <button onClick={() => setScanError(null)} className="block text-xs font-normal underline mt-1">Dismiss</button>
               </div>
             )}
-            {(family?.studentLinks || []).length === 0 ? (
+            {fullTimeStudentLinks === null ? (
+              <p className="text-sm text-stone-400 text-center py-8">Loading…</p>
+            ) : fullTimeStudentLinks.length === 0 ? (
               <div className="bg-white border border-stone-200 rounded-xl p-5 text-center mb-4">
                 <p className="text-sm text-stone-400">No children linked to this account yet — check with the school if this doesn't look right.</p>
               </div>
-            ) : family.studentLinks.length > 1 && (
-              <ChildSwitcher labels={family.studentLinks.map((l) => l.studentName)} selectedIndex={selectedChildIndex} onSelect={setSelectedChildIndex} />
-            )}
-            <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
-              text="Scan the QR code posted at school to check your child in and out yourself."
-              onNext={advanceTour} onSkip={dismissTour}>
-              <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #1c3453 0%, #2c4d73 100%)" }}>
-                Scan QR code to check in or out
-              </button>
-            </TourHint>
-            {(family?.studentLinks || []).length > 0 && (
+            ) : (
               <>
+                {fullTimeStudentLinks.length > 1 && (
+                  <ChildSwitcher labels={fullTimeStudentLinks.map((l) => l.studentName)} selectedIndex={selectedChildIndex} onSelect={setSelectedChildIndex} />
+                )}
                 {(() => {
-                  const link = family.studentLinks[selectedChildIndex] || family.studentLinks[0];
+                  const link = fullTimeStudentLinks[selectedChildIndex] || fullTimeStudentLinks[0];
+                  const isPreschoolChild = link.classType === "preschool";
+                  // The QR check-in system, and the mood/meals/naps/diapers daily log below it,
+                  // are both specific to how preschool rooms actually run — there's no equivalent
+                  // check-in system for an elementary class, so showing this bar (and the "not
+                  // checked in yet" line under it) for an elementary-linked child was actively
+                  // misleading, not just irrelevant. Which one renders now depends on the
+                  // CURRENTLY SELECTED child specifically, not a single fixed choice for the whole
+                  // account — a family with one child in preschool and one in elementary sees this
+                  // section change to match whichever of their kids is selected above.
+                  if (!isPreschoolChild) {
+                    return <HomeworkPreviewCard link={link} onSeeAll={() => navigateParentTab("homework")} />;
+                  }
                   const status = checkInStatus[link.studentId];
                   const isIn = status?.isIn;
                   const entries = status?.entries || [];
                   return (
                     <div>
+                      <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
+                        text="Scan the QR code posted at school to check your child in and out yourself."
+                        onNext={advanceTour} onSkip={dismissTour}>
+                        <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #1c3453 0%, #2c4d73 100%)" }}>
+                          Scan QR code to check in or out
+                        </button>
+                      </TourHint>
                       {/* Wraps only the short check-in box, not the full (potentially long)
                           daily-log content below it — the tour bubble positions itself right after
                           whatever it wraps, so wrapping the whole block (including
@@ -7324,6 +7464,115 @@ function TeacherClassPicker({ teacherName, classes, onSelect, onSignOut }) {
   );
 }
 
+// The landing page (and entire app, for now) for a staff member with no assigned classroom of
+// their own — reachable only through messagingClassTypes (grade-level reach), like a curriculum
+// coordinator who oversees a subject across several grades without running any one classroom.
+// Deliberately NOT a class, and shows no class list or class-shaped UI at all — just their own
+// messages. More (subject-specific assessments and marks across the grades they oversee) is meant
+// to land here later; this is the foundation that gets built on, not the finished picture.
+function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParent, onSignOut, deepLinkGroupId }) {
+  const [families, setFamilies] = useState(null); // null = loading
+  const [threads, setThreads] = useState({});
+  const [openGroup, setOpenGroup] = useState(null);
+
+  const refresh = useCallback(async () => {
+    const relevant = await fetchStaffReachableFamilies();
+    const byGroup = {};
+    relevant.forEach((f) => {
+      const groupId = f.familyGroupId || f.uid;
+      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
+      byGroup[groupId].guardians.push(f);
+    });
+    const groupList = Object.values(byGroup);
+    setFamilies(groupList);
+    const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
+    setThreads(Object.fromEntries(entries));
+  }, [loggedInTeacher.uid]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Opens straight into the right family's thread the moment the family list has actually
+  // loaded — this page has no class-entry step to wait on first (unlike a classroom teacher's
+  // deep link), so the family list finishing is the only thing this needs to wait for.
+  useEffect(() => {
+    if (!deepLinkGroupId || !families) return;
+    const match = families.find((g) => g.groupId === deepLinkGroupId);
+    if (match) {
+      setOpenGroup(match);
+      markThreadRead(loggedInTeacher.uid, `teacher-direct-${match.groupId}`);
+    }
+  }, [deepLinkGroupId, families]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Same shape as ClassApp's own sendDirectMessageToFamily — this person has no classroom thread
+  // at all, only ever this one kind of message.
+  const sendMessage = async (familyGroupId, text, attachments) => {
+    const key = `teacher-messages:${loggedInTeacher.uid}:${familyGroupId}`;
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedInTeacher?.name || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    const next = { messages: [...existing.messages, entry] };
+    await saveJSON(key, next, true);
+    notifyFamilyGroup(familyGroupId, `Direct message from ${loggedInTeacher?.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
+    return next;
+  };
+
+  if (openGroup) {
+    const thread = threads[openGroup.groupId] || { messages: [] };
+    const childNames = (openGroup.studentLinks || []).map((l) => l.studentName).join(", ");
+    const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
+    const storageKey = `teacher-messages:${loggedInTeacher.uid}:${openGroup.groupId}`;
+    return (
+      <>
+        <GlobalAppStyles />
+        <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" teacher={loggedInTeacher} threadKey={`teacher-direct-${openGroup.groupId}`}
+          onBack={() => { setOpenGroup(null); refresh(); }}
+          onSend={async (text, attachments) => { await sendMessage(openGroup.groupId, text, attachments); await refresh(); }}
+          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
+      </>
+    );
+  }
+
+  return (
+    <div className={PAGE}>
+      <GlobalAppStyles />
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h1 className="display-font text-xl font-bold text-stone-900">Welcome, {loggedInTeacher?.name}</h1>
+          <p className="text-xs text-stone-400">Your messages</p>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          {canSwitchToParent && (
+            <button onClick={onSwitchToParent} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Switch to parent</button>
+          )}
+          <button onClick={onSignOut} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Sign out</button>
+        </div>
+      </div>
+
+      {families === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+      {families?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are reachable yet.</p>}
+      <div className="space-y-2">
+        {(families || []).map((g) => {
+          const thread = threads[g.groupId];
+          const last = thread?.messages?.[thread.messages.length - 1];
+          const childNames = (g.studentLinks || []).map((l) => l.studentName).join(", ");
+          const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+          return (
+            <button key={g.groupId} onClick={() => { setOpenGroup(g); markThreadRead(loggedInTeacher.uid, `teacher-direct-${g.groupId}`); }}
+              className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold text-stone-900">{guardianNames}</p>
+                {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+              </div>
+              <p className="text-xs text-stone-400 mb-1">{childNames}</p>
+              <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin }) {
   const [pendingClass, setPendingClass] = useState(null);
   const [pwInput, setPwInput] = useState("");
@@ -7425,7 +7674,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, onFamilyLinked, deepLinkGroupId }) {
+function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, onFamilyLinked, deepLinkGroupId, deepLinkIsDirect }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Only stamps a record when someone is actually signed in with a real account — the legacy
   // class-password flow has no real identity to attribute anything to, so records made that
@@ -8648,7 +8897,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       </div>
 
       {view === "messages" && (
-        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} sendDirectMessageToFamily={sendDirectMessageToFamily} loggedByName={loggedByName} navigate={navigateView} deepLinkGroupId={deepLinkGroupId} onCommRead={refreshCommUnread} />
+        <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} sendDirectMessageToFamily={sendDirectMessageToFamily} loggedByName={loggedByName} navigate={navigateView} deepLinkGroupId={deepLinkGroupId} deepLinkIsDirect={deepLinkIsDirect} onCommRead={refreshCommUnread} />
       )}
 
       {view === "communication" && (
@@ -13735,11 +13984,11 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
 // Grouped by family, not by individual login — two guardians on the same family share one row
 // and one conversation here, the same way they share it on their own side, rather than showing up
 // as two disconnected families that happen to have the same kids.
-function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, sendDirectMessageToFamily, loggedByName, navigate, deepLinkGroupId, onCommRead }) {
+function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, sendDirectMessageToFamily, loggedByName, navigate, deepLinkGroupId, deepLinkIsDirect, onCommRead }) {
   const [groups, setGroups] = useState(null); // null = loading
   const [threads, setThreads] = useState({}); // groupId -> {messages}
   const [openGroup, setOpenGroup] = useState(null);
-  const [mode, setMode] = useState("inbox"); // "inbox" | "direct" | "compose"
+  const [mode, setMode] = useState(deepLinkIsDirect ? "direct" : "inbox"); // "inbox" | "direct" | "compose"
   const [directGroups, setDirectGroups] = useState(null); // families this teacher can message individually, across every class they teach
   const [directThreads, setDirectThreads] = useState({}); // groupId -> {messages}
   const [openDirectGroup, setOpenDirectGroup] = useState(null);
@@ -13819,15 +14068,29 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
 
   // Opens straight into the right family's thread the moment the inbox has actually loaded —
   // can't fire any earlier than that, since the specific group object this needs doesn't exist
-  // until the fetch above completes.
+  // until the fetch above completes. Skipped for a direct-message deep link (handled by the
+  // matching effect below instead), since this one only ever looks at classroom groups.
   useEffect(() => {
-    if (!deepLinkGroupId || !groups) return;
+    if (!deepLinkGroupId || deepLinkIsDirect || !groups) return;
     const match = groups.find((g) => g.groupId === deepLinkGroupId);
     if (match) {
       navigateToGroup(match);
       markThreadRead(loggedInTeacher.uid, `classroom-${match.groupId}`).then(() => onCommRead?.());
     }
-  }, [deepLinkGroupId, groups]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [deepLinkGroupId, deepLinkIsDirect, groups]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The direct-message counterpart to the classroom resolver above — waits on directGroups
+  // instead, which only populates once mode is actually "direct" (see the effect above this one).
+  // Since mode is initialized to "direct" whenever deepLinkIsDirect is true, that fetch is already
+  // underway by the time this runs, so this just waits for it to land.
+  useEffect(() => {
+    if (!deepLinkGroupId || !deepLinkIsDirect || !directGroups) return;
+    const match = directGroups.find((g) => g.groupId === deepLinkGroupId);
+    if (match) {
+      setOpenDirectGroup(match);
+      markThreadRead(loggedInTeacher.uid, `teacher-direct-${match.groupId}`).then(() => onCommRead?.());
+    }
+  }, [deepLinkGroupId, deepLinkIsDirect, directGroups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (openGroup) {
     const thread = threads[openGroup.groupId] || { messages: [] };
