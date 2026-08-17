@@ -2793,10 +2793,20 @@ function AppInner() {
     return withDefaults.length;
   };
 
+  // Reads and writes the in-memory globalStudents state directly, rather than re-fetching it from
+  // the backend first — that re-fetch is what actually broke editing: every keystroke in a text
+  // field fired its own independent read-modify-write cycle, and typing faster than one full
+  // round trip meant a later keystroke's read could return a snapshot from BEFORE an earlier
+  // keystroke's write had landed, silently discarding it when that earlier write then finished
+  // second. The functional form of setGlobalStudents is what keeps this safe even when several
+  // calls do land close together — React applies each one against the true latest state in order,
+  // never against a state a call happened to close over when it was first invoked.
   const updateGlobalStudent = async (id, field, value) => {
-    const gs = await loadJSON("globalStudents", [], true);
-    const next = gs.map((s) => (s.id === id ? { ...s, [field]: value } : s));
-    setGlobalStudents(next);
+    let next;
+    setGlobalStudents((prev) => {
+      next = prev.map((s) => (s.id === id ? { ...s, [field]: value } : s));
+      return next;
+    });
     await saveJSON("globalStudents", next, true);
   };
 
@@ -4217,10 +4227,15 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [studentHistoryId, setStudentHistoryId] = useState(null);
   const [studentHistoryData, setStudentHistoryData] = useState(null);
   const [studentHistoryLoading, setStudentHistoryLoading] = useState(false);
-  const [profileStudent, setProfileStudent] = useState(null);
+  const [profileStudentId, setProfileStudentId] = useState(null);
   const [profileData, setProfileData] = useState(null);
+  // Looked up fresh from globalStudents on every render (by id) rather than storing a separate
+  // copy of the student object — a stored copy would freeze at whatever the student looked like
+  // the moment the profile was opened and never reflect an edit made afterward, even a
+  // successfully saved one, since nothing would ever tell that frozen copy to update.
+  const profileStudent = (globalStudents || []).find((s) => s.id === profileStudentId) || null;
   const openStudentProfile = (student) => {
-    setProfileStudent(student);
+    setProfileStudentId(student.id);
     setProfileData(null);
     onFetchStudentProfile(student.id).then(setProfileData);
   };
@@ -5034,9 +5049,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       {profileStudent && (
         <AdminStudentProfile student={profileStudent} profileData={profileData}
           onUpdateStudent={onUpdateStudent}
-          onArchiveStudent={(id) => { onArchiveStudent(id); setProfileStudent(null); }}
-          onDeleteStudent={(id) => { onDeleteStudent(id); setProfileStudent(null); }}
-          onClose={() => setProfileStudent(null)} />
+          onArchiveStudent={(id) => { onArchiveStudent(id); setProfileStudentId(null); }}
+          onDeleteStudent={(id) => { onDeleteStudent(id); setProfileStudentId(null); }}
+          onClose={() => setProfileStudentId(null)} />
       )}
 
       {viewingFamilyGroupId && (() => {
