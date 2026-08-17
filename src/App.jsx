@@ -16881,9 +16881,28 @@ const SCHEDULE_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"];
 const SCHED_DAY_START = 7 * 60;
 const SCHED_DAY_END = 16 * 60;
 const SCHED_SLOT_MIN = 5;
-const SCHED_PX_PER_MIN = 2;
+// Was 2 — bumped up so a real, fully-packed school day (ten-plus short back-to-back periods)
+// gives each block enough vertical room for its full label and time range without the two
+// wrapping into and visually colliding with each other. The whole grid simply runs longer/scrolls
+// more as a result, trading some overview-at-a-glance for actually being legible once it's busy.
+const SCHED_PX_PER_MIN = 3;
 const SCHED_HOURS = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 const SCHED_MIN_DURATION = 10;
+// A compact start–end format for the schedule grid specifically, where every character of width
+// counts: drops the redundant trailing AM/PM off the start time when both ends of the range fall
+// on the same side of noon (the overwhelmingly common case for any one period), and uses a single
+// lowercase letter instead of the full "AM"/"PM" — "7:45–8:15a" instead of "7:45 AM – 8:15 AM".
+// formatTime12h itself is left untouched since it's used in plenty of places outside this tight
+// grid where the fuller format reads better.
+function formatScheduleRange(startHHMM, endHHMM) {
+  const start = formatTime12h(startHHMM);
+  const end = formatTime12h(endHHMM);
+  const startPeriod = start.slice(-2);
+  const endPeriod = end.slice(-2);
+  const startShort = startPeriod === endPeriod ? start.slice(0, -3) : start.replace(" AM", "a").replace(" PM", "p");
+  const endShort = end.replace(" AM", "a").replace(" PM", "p");
+  return `${startShort}–${endShort}`;
+}
 
 function WeeklyScheduleEditor({ config, persistConfig, classType }) {
   const isElementary = classType !== "preschool";
@@ -17105,14 +17124,14 @@ function WeeklyScheduleEditor({ config, persistConfig, classType }) {
                     onPointerUp={onPointerUp}
                     style={{
                       position: "absolute", top: (b.start - SCHED_DAY_START) * SCHED_PX_PER_MIN,
-                      height: Math.max((b.end - b.start) * SCHED_PX_PER_MIN, 22), left: 2, right: 2,
+                      height: Math.max((b.end - b.start) * SCHED_PX_PER_MIN, 34), left: 2, right: 2,
                       touchAction: "none", cursor: "grab", zIndex: isDragging ? 20 : 1,
                     }}
                     className={`rounded-md border ${st.tileBorder} ${st.tileBg} px-1.5 py-0.5 select-none ${isDragging ? "shadow-md" : ""}`}
                   >
-                    <p className={`text-[11px] font-semibold ${st.labelText} leading-tight truncate`}>{b.label}</p>
-                    <p className={`text-[10px] ${st.labelText} opacity-70 leading-tight`}>
-                      {formatTime12h(minutesToTime(b.start))}{isDragging ? "" : ` – ${formatTime12h(minutesToTime(b.end))}`}
+                    <p className={`text-[11px] font-semibold ${st.labelText} leading-tight line-clamp-2 break-words`}>{b.label}</p>
+                    <p className={`text-[10px] ${st.labelText} opacity-70 leading-tight whitespace-nowrap`}>
+                      {isDragging ? formatTime12h(minutesToTime(b.start)) : formatScheduleRange(minutesToTime(b.start), minutesToTime(b.end))}
                     </p>
                     <div onPointerDown={(e) => onResizePointerDown(e, b)}
                       style={{ position: "absolute", left: 0, right: 0, bottom: -4, height: 12, cursor: "ns-resize", touchAction: "none" }}
