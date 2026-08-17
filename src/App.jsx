@@ -2847,6 +2847,12 @@ function AppInner() {
     return withDefaults.length;
   };
 
+  // The set of fields addExistingStudent (below) copies as a one-time snapshot when a student is
+  // first pulled into a class roster — every one of these needs to stay in sync afterward, or an
+  // edit here (a name's correct spelling, a fixed phone number) keeps showing the old value
+  // anywhere that already has its own copy: a class roster, a family search, anywhere a
+  // student's name gets displayed from roster data rather than from globalStudents itself.
+  const GLOBAL_STUDENT_SYNCED_FIELDS = ["name", "parentEmail", "parentPhone", "parent1Name", "parent2Name", "parent2Email", "parent2Phone", "homeAddress", "notes"];
   // Reads and writes the in-memory globalStudents state directly, rather than re-fetching it from
   // the backend first — that re-fetch is what actually broke editing: every keystroke in a text
   // field fired its own independent read-modify-write cycle, and typing faster than one full
@@ -2862,6 +2868,38 @@ function AppInner() {
       return next;
     });
     await saveJSON("globalStudents", next, true);
+    // Propagates into every class roster that already has its own copy of this same student —
+    // otherwise this edit only ever reaches globalStudents itself, and every place that reads a
+    // roster's own copy (a class's own roster view, the "search students" list used to link a
+    // family, cross-class history) keeps showing whatever was true at the moment that class first
+    // pulled this student in, no matter how many times it's corrected here afterward.
+    if (GLOBAL_STUDENT_SYNCED_FIELDS.includes(field)) {
+      const allClasses = await loadJSON("schoolClasses", [], true);
+      await Promise.all(allClasses.map(async (cls) => {
+        const rosterKey = `class:${cls.id}:roster`;
+        const clsRoster = await loadJSON(rosterKey, [], true);
+        if (!clsRoster.some((s) => s.linkedGlobalId === id || s.id === id)) return; // this class never had this student — nothing to update
+        const nextRoster = clsRoster.map((s) => ((s.linkedGlobalId === id || s.id === id) ? { ...s, [field]: value } : s));
+        await saveJSON(rosterKey, nextRoster, true);
+      }));
+    }
+    // A family's own studentLinks carries its own separate snapshot of just the child's name
+    // (studentLinks[].studentName) — the actual field the parent app reads to show a child's name
+    // at all, so a name correction needs to reach this too, not just the class roster copy above.
+    if (field === "name") {
+      const allFamilies = await loadAllWithPrefix("family:");
+      const affected = allFamilies.filter((f) => (f.studentLinks || []).some((l) => l.studentId === id));
+      await Promise.all(affected.map((f) => {
+        const nextLinks = f.studentLinks.map((l) => (l.studentId === id ? { ...l, studentName: value } : l));
+        return saveJSON(`family:${f.uid}`, { ...f, studentLinks: nextLinks }, true);
+      }));
+      if (affected.length > 0) {
+        const affectedUids = new Set(affected.map((f) => f.uid));
+        setFamilies((prev) => prev.map((f) => (affectedUids.has(f.uid)
+          ? { ...f, studentLinks: f.studentLinks.map((l) => (l.studentId === id ? { ...l, studentName: value } : l)) }
+          : f)));
+      }
+    }
   };
 
   const archiveGlobalStudent = async (id) => {
@@ -20123,13 +20161,19 @@ function AdminFamilyDetailView({ group, allStudentsForLinking, globalStudents, o
 
   const removeStudent = async (link) => {
     const nextLinks = (primary.studentLinks || []).filter((l) => !(l.classId === link.classId && l.studentId === link.studentId));
-    await onUpdateFamily(primary.uid, { studentLinks: nextLinks });
+    // Every guardian in this family has their own, completely separate family:{uid} record (a
+    // real second login, not a shared account) — updating only primary's here is exactly the bug
+    // that left a second guardian's own app showing none of a child just added (or still showing
+    // one just removed): admin's own view reads primary's record, which WAS correct, while the
+    // actual parent signed in as the other guardian never got the update at all.
+    await Promise.all(group.map((f) => onUpdateFamily(f.uid, { studentLinks: nextLinks })));
   };
 
   const addStudent = async (student) => {
     const already = (primary.studentLinks || []).some((l) => l.classId === student.classId && l.studentId === student.studentId);
     if (already) return;
-    await onUpdateFamily(primary.uid, { studentLinks: [...(primary.studentLinks || []), student] });
+    const nextLinks = [...(primary.studentLinks || []), student];
+    await Promise.all(group.map((f) => onUpdateFamily(f.uid, { studentLinks: nextLinks })));
     setShowAddStudent(false);
     setSearch("");
   };
