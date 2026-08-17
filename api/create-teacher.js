@@ -59,7 +59,23 @@ export default async function handler(req, res) {
 
   try {
     const auth = getAuth();
-    const userRecord = await auth.createUser({ email, password, displayName: name });
+    // Mirrors create-family.js's own handling of this same situation in the opposite direction:
+    // Firebase Auth allows exactly one account per email, and a person who's already a parent
+    // here (most commonly) shouldn't be blocked from also getting a teacher login, or forced into
+    // a second, separate login for the same person. If the email already belongs to an account,
+    // this attaches the new teacher record onto that same existing login instead of trying (and
+    // failing) to create a second one — before this fix, this direction had no such handling at
+    // all, so creating a teacher account for an existing parent email failed outright with "that
+    // email already has an account," and the two roles never linked.
+    let userRecord;
+    let linkedExisting = false;
+    try {
+      userRecord = await auth.createUser({ email, password, displayName: name });
+    } catch (err) {
+      if (err.code !== "auth/email-already-exists") throw err;
+      userRecord = await auth.getUserByEmail(email);
+      linkedExisting = true;
+    }
 
     const db = getFirestore();
     const ref = db.collection("data").doc(`teacher:${userRecord.uid}`);
@@ -74,9 +90,8 @@ export default async function handler(req, res) {
       },
     });
 
-    return res.status(200).json({ ok: true, uid: userRecord.uid });
+    return res.status(200).json({ ok: true, uid: userRecord.uid, linkedExisting });
   } catch (err) {
-    const message = err.code === "auth/email-already-exists" ? "That email already has an account." : (err.message || "Something went wrong creating the account.");
-    return res.status(500).json({ error: message });
+    return res.status(500).json({ error: err.message || "Something went wrong creating the account." });
   }
 }

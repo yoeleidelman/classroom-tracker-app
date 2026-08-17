@@ -16,7 +16,7 @@
 
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
-import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId } from "firebase/firestore";
+import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset } from "firebase/auth";
 import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
@@ -1255,6 +1255,60 @@ async function saveJSON(key, value, shared = false) {
   }
 }
 
+// The live counterpart to loadJSON above — instead of a one-time read, this keeps a standing
+// subscription open on the document and updates automatically the moment ANYONE writes to it
+// (this tab's own send, another device the same person is signed into, or the other side of a
+// conversation), the same way a real chat app updates without the person ever refreshing. Built
+// specifically for the highest-value case first: an open conversation thread, where a message
+// arriving with no visible sign of it is what actually breaks the back-and-forth flow of talking.
+// Deliberately NOT a wholesale replacement for loadJSON everywhere — most of the app's data
+// (points, assessments, planner) isn't being watched by someone in real time the way an open
+// conversation is, so a live listener there would just be paying an ongoing cost for no benefit
+// anyone would notice.
+// key === null/undefined is a valid, common case (no thread open yet) — returns fallback and
+// holds off subscribing to anything until a real key is passed in.
+function useLiveJSON(key, fallback) {
+  const [value, setValue] = useState(fallback);
+  useEffect(() => {
+    if (!key) { setValue(fallback); return; }
+    const ref = doc(db, "data", key);
+    const unsubscribe = onSnapshot(ref,
+      (snap) => setValue(snap.exists() ? snap.data().value : fallback),
+      (err) => console.error("Live subscription failed", key, err));
+    return () => unsubscribe();
+    // fallback deliberately excluded — callers often pass a fresh object/array literal
+    // (e.g. { messages: [] }) on every render, and re-subscribing every time that happens would
+    // defeat the point of a standing subscription without ever actually changing what it does.
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  return value;
+}
+
+// The multi-document counterpart to useLiveJSON above — for a teacher's own inbox list, where
+// every family's thread preview needs to stay current at once, not just whichever single thread
+// happens to be open right now. One onSnapshot subscription per key rather than a single query,
+// since these keys are scattered across the "data" collection by unrelated string prefixes
+// (class:X:messages:Y, teacher-messages:X:Y) rather than sharing anything a Firestore query could
+// filter on — a genuine collection of individually-addressed documents, watched individually.
+// Returns { [key]: value }; a key with nothing written yet is simply absent from the result
+// rather than present with some placeholder, so a caller can tell "hasn't loaded/sent anything"
+// apart from "loaded and is empty" if that distinction ever matters.
+function useLiveJSONMap(keys) {
+  const [values, setValues] = useState({});
+  const keysSignature = (keys || []).join("|");
+  useEffect(() => {
+    const activeKeys = keys || [];
+    if (activeKeys.length === 0) { setValues({}); return; }
+    const unsubscribes = activeKeys.map((key) => onSnapshot(doc(db, "data", key),
+      (snap) => setValues((prev) => ({ ...prev, [key]: snap.exists() ? snap.data().value : undefined })),
+      (err) => console.error("Live subscription failed", key, err)));
+    return () => unsubscribes.forEach((unsub) => unsub());
+    // keys itself deliberately excluded in favor of keysSignature — an array literal is a new
+    // reference every render even when its contents haven't actually changed, and re-subscribing
+    // every render would mean never keeping a subscription open long enough to be live at all.
+  }, [keysSignature]); // eslint-disable-line react-hooks/exhaustive-deps
+  return values;
+}
+
 // Every backend API route this calls (generate, send-push, create-teacher, create-family) now
 // requires a valid Firebase ID token in the Authorization header — a route handler running on
 // the server has no other way to tell a real signed-in user apart from anyone on the internet
@@ -2313,7 +2367,7 @@ function AppInner() {
       const data = await response.json();
       if (!response.ok) return { ok: false, error: data.error || "Couldn't create the account." };
       await refreshTeachers();
-      return { ok: true };
+      return { ok: true, linkedExisting: data.linkedExisting, uid: data.uid };
     } catch {
       return { ok: false, error: "Couldn't reach the server — try again." };
     }
@@ -4004,11 +4058,17 @@ function ClassMessagingLabelsEditor({ activeClasses, teachers }) {
 
   // Everyone parents of THIS class can currently message individually — same eligibility rule
   // the family-facing endpoint uses, just computed here directly since admin already has full
-  // read access to every teacher record.
+  // read access to every teacher record. Falls back to "elementary" for a class missing its own
+  // classType field (any class created before that field existed at all) — the exact same default
+  // eligible-teachers.js already applies for the real, parent-facing version of this same check.
+  // Without it, a class that predates classType would never match anyone's messagingClassTypes at
+  // all (undefined never equals a real type like "elementary"), silently hiding every
+  // grade-level-only person from this editor for that class — not because they're actually
+  // unreachable, just because this one screen couldn't see them.
   const eligiblePeople = (teachers || []).filter((t) => {
     if (t.active === false) return false;
     const viaClass = (t.assignedClassIds || []).includes(selectedClassId);
-    const viaGradeLevel = selectedClass && (t.messagingClassTypes || []).includes(selectedClass.classType);
+    const viaGradeLevel = selectedClass && (t.messagingClassTypes || []).includes(selectedClass.classType || "elementary");
     return viaClass || viaGradeLevel;
   });
 
@@ -4220,6 +4280,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showToolForm, setShowToolForm] = useState(false);
   const [editingToolId, setEditingToolId] = useState(null);
   const [showTeacherForm, setShowTeacherForm] = useState(false);
+  const [teacherCreatedNote, setTeacherCreatedNote] = useState(null);
   const [editingTeacherUid, setEditingTeacherUid] = useState(null);
   const [overviewDate, setOverviewDate] = useState(todayISO());
   const [overviewData, setOverviewData] = useState(null);
@@ -4781,11 +4842,20 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </button>
           )}
 
+          {teacherCreatedNote && (
+            <p className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 mb-3">{teacherCreatedNote}</p>
+          )}
           {showTeacherForm && (
             <TeacherAccountForm classes={activeClasses}
               onSave={async (name, email, tempPassword, role, classIds, isSubstitute, messagingClassTypes) => {
                 const result = await onCreateTeacher(name, email, tempPassword, role, classIds, isSubstitute, messagingClassTypes);
-                if (result.ok) setShowTeacherForm(false);
+                if (result.ok) {
+                  setShowTeacherForm(false);
+                  setTeacherCreatedNote(result.linkedExisting
+                    ? `${name} was linked to ${email}'s existing parent login — they'll sign in the same way as always, and can now switch between Teacher and Parent views.`
+                    : `${name}'s teacher account was created.`);
+                  setTimeout(() => setTeacherCreatedNote(null), 20000);
+                }
                 return result;
               }} onCancel={() => setShowTeacherForm(false)} />
           )}
@@ -6700,11 +6770,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const [actionUnlocked, setActionUnlocked] = useState(false);
   const [confirmingRepeatChild, setConfirmingRepeatChild] = useState(null);
   const [messagingClassId, setMessagingClassId] = useState(null); // classId of the conversation currently open, or null
-  const [messagingThread, setMessagingThread] = useState({ messages: [] });
   const [messagingAdmin, setMessagingAdmin] = useState(false);
-  const [adminThread, setAdminThread] = useState({ messages: [] });
   const [messagingTeacherUid, setMessagingTeacherUid] = useState(null); // uid of the individual teacher thread currently open, or null
-  const [teacherMessagingThread, setTeacherMessagingThread] = useState({ messages: [] });
   const [eligibleTeachers, setEligibleTeachers] = useState(null); // null while loading; [] once loaded with none
   const [unreadThreads, setUnreadThreads] = useState([]); // [{ threadKey, kind, classId, title, preview, timestamp }]
   const [unreadBlogCount, setUnreadBlogCount] = useState(0); // total new posts across every linked class
@@ -6715,6 +6782,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // back to this account's own uid for the (very common) case of a family that's never added a
   // second guardian, where the group id and the individual uid are the same thing anyway.
   const myGroupId = family.familyGroupId || family.uid;
+
+  // Live-subscribed, not loaded once — whichever of these three is actually open updates the
+  // instant a new message lands, on either side of the conversation, with nobody needing to back
+  // out and reopen the thread (or reload the whole app) to see it arrive. Only ever one of the
+  // three is actually open at a time, so the other two's key is null and they simply hold their
+  // fallback rather than run an idle subscription for a screen nobody's looking at.
+  const messagingThread = useLiveJSON(messagingClassId ? `class:${messagingClassId}:messages:${myGroupId}` : null, { messages: [] });
+  const adminThread = useLiveJSON(messagingAdmin ? `admin-messages:${myGroupId}` : null, { messages: [] });
+  const teacherMessagingThread = useLiveJSON(messagingTeacherUid ? `teacher-messages:${messagingTeacherUid}:${myGroupId}` : null, { messages: [] });
 
   // Checked fresh each time the home screen loads — there's no live push here, so "new message"
   // means "new since I last opened this app," not an instant alert the moment it's sent.
@@ -6814,8 +6890,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", `class:${classId}`);
     window.history.pushState({ thread: `class:${classId}` }, "", url);
-    const thread = await loadJSON(`class:${classId}:messages:${myGroupId}`, { messages: [] }, true);
-    setMessagingThread(thread || { messages: [] });
     await markThreadRead(family.uid, `class-${classId}`);
   };
 
@@ -6827,8 +6901,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", "admin");
     window.history.pushState({ thread: "admin" }, "", url);
-    const thread = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
-    setAdminThread(thread || { messages: [] });
     await markThreadRead(family.uid, `admin-${myGroupId}`);
   };
 
@@ -6856,8 +6928,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", `teacher:${teacherUid}`);
     window.history.pushState({ thread: `teacher:${teacherUid}` }, "", url);
-    const thread = await loadJSON(`teacher-messages:${teacherUid}:${myGroupId}`, { messages: [] }, true);
-    setTeacherMessagingThread(thread || { messages: [] });
     await markThreadRead(family.uid, `teacher-${teacherUid}`);
   };
 
@@ -7063,7 +7133,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         <GlobalAppStyles />
         <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
           onBack={() => window.history.back()}
-          onSend={async (text, attachments) => { await sendMessageToTeacher(messagingClassId, text, attachments); await openMessagesFor(messagingClassId); }} />
+          onSend={async (text, attachments) => { await sendMessageToTeacher(messagingClassId, text, attachments); }} />
       </div>
     );
   }
@@ -7077,7 +7147,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         <GlobalAppStyles />
         <ConversationThreadView title={teacherName} subtitle={teacherLabel ? `Direct message · ${teacherLabel}` : "Direct message"} messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
           onBack={() => window.history.back()}
-          onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); await openTeacherMessages(messagingTeacherUid); }} />
+          onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }} />
       </div>
     );
   }
@@ -7758,6 +7828,201 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, [classType]);
+  // Every main-tab view, addressable by its tab id — extracted from what used to be a flat
+  // sequence of inline {view === "X" && (...)} blocks so a given tab's content can be rendered
+  // twice at once (the real, current tab below, and — during an active swipe — a second live copy
+  // of whichever tab a finger is dragging toward), the same technique the parent portal's own
+  // swipe already uses. Deliberately covers ONLY the tabs MainTabs itself offers; every other
+  // view in this app (messages, settings, a student's detail page, blog/homework composers, and
+  // so on) replaces the whole screen when opened and was never part of a swipeable sequence to
+  // begin with, so those are untouched, still rendered exactly where they always were, outside
+  // this function entirely.
+  const renderMainTabContent = (tabId) => {
+    switch (tabId) {
+      case "home":
+        return (
+        <HomeView roster={roster} studentData={studentData} incidents={incidents} config={config}
+          removeStudent={removeStudent}
+          setAttendance={setAttendance} setAttendanceTime={setAttendanceTime}
+          setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
+          openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
+          openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
+          monthlyReportState={monthlyReportState}
+          onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
+          reflectionState={reflectionState} reflections={reflections}
+          onDismissReflectionReminder={(key) => persistReflectionState({ ...reflectionState, dismissedMonth: key })}
+          onOpenReflection={() => { setSelectedReflectionMonth(monthKey(new Date().getFullYear(), new Date().getMonth())); navigateView("reflection-form"); }}
+          plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
+          setPlannerDay={setPlannerDay} addPoints={addPoints} behaviorLogData={behaviorLogData}
+          birthdayDismissals={birthdayDismissals} onDismissBirthday={dismissBirthday} onCreateBirthdayEvent={createBirthdayEvent}
+          benchmarkSubjects={benchmarkSubjects} segmentCelebrationDismissals={segmentCelebrationDismissals} onDismissSegmentCelebration={dismissSegmentCelebration}
+          onCelebrateSegment={(subjectLabel, segment) => { setCelebratingSegment({ subjectLabel, segment }); navigateView("segment-celebration-message"); }}
+          onAddPlannerEvent={addPlannerEvent}
+          randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
+          alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan}
+          openCameraCapture={() => openCameraCapture("home")} />
+        );
+      case "attendance":
+        return (
+        <PreschoolAttendanceView roster={roster} studentData={studentData}
+          toggleCheckInByTeacher={toggleCheckInByTeacher} config={config} plannerDays={plannerDays} navigate={navigateView} />
+        );
+      case "daily-log":
+        return (
+        <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} photos={photos} config={config}
+          plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
+          setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
+          logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
+          logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
+          openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
+          openIncidentForm={(studentId, returnTo, categoryId) => openIncidentForm(studentId, returnTo || "daily-log", categoryId)}
+          onLogPreschoolIncident={async (entry) => {
+            addIncident(entry);
+            if (entry.notifyFamily) {
+              const families = await fetchClassFamilies(classId);
+              const groupIds = new Set(
+                families
+                  .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && entry.studentIds.includes(l.studentId)))
+                  .map((f) => f.familyGroupId || f.uid)
+              );
+              const names = entry.studentIds.map((sid) => roster.find((s) => s.id === sid)?.name).filter(Boolean).join(", ");
+              const title = entry.kind === "health" ? `Health note — ${names || "your child"}` : `New note — ${names || "your child"}`;
+              const body = entry.categoryLabel || "Check the app for details.";
+              groupIds.forEach((groupId) => notifyFamilyGroup(groupId, title, body, `/?portal=parent`));
+            }
+          }}
+          classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={navigateView} />
+        );
+      case "communication":
+        return (
+        <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={navigateView}
+          unreadFamilies={commUnreadFamilies} onRefreshUnread={refreshCommUnread}
+          openStudent={(id) => { setCurrentId(id); navigateView("comm-entry"); }} />
+        );
+      case "blog":
+        return (
+        <BlogFeedView posts={blogPosts} currentUserId={loggedInTeacher?.uid} currentUserName={loggedByName} currentUserType="teacher"
+          commentsEnabled={config.blogCommentsEnabled !== false}
+          onReact={toggleBlogReaction}
+          onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
+          navigate={navigateView} />
+        );
+      case "homework":
+        return (
+        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} />
+        );
+      case "tools":
+        return (
+        <ToolsView schoolTools={schoolTools} navigate={navigateView} />
+        );
+      case "assessments":
+        return (
+        <AssessmentsListView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
+          openClassAssessment={() => navigateView("class-assessment-form")}
+          openAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
+          openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); navigateView("skill-category-report"); }}
+          activateAssessment={activateAssessment} hideAssessment={hideAssessment} createCustomAssessment={createCustomAssessment}
+          updateClassAssessmentResult={updateClassAssessmentResult}
+          onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); navigateView("session"); }}
+          onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); navigateView("fluency"); }}
+          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
+          onOpenFluencyDetail={(studentId, entry) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedFluencyEntry(entry); navigateView("fluency-detail"); }}
+          onOpenSkillDetail={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedSkillCat(catId); navigateView("skill-detail"); }}
+          initialStudentId={initialAssessmentStudentId}
+          navigate={navigateView} />
+        );
+      case "points":
+        return openProgramId ? (
+        <PointsView
+          roster={programRoster}
+          studentData={Object.fromEntries(programRoster.map((s) => [s.id, { points: programPointsData[s.id] || {} }]))}
+          classPoints={{}} config={programConfig}
+          addPoints={addProgramPoints} addClassPoints={() => {}} resetClassPoints={() => {}}
+          onAddCategory={addProgramCategory} navigate={navigateView}
+          programMode programName={programsInClass.find((p) => p.id === openProgramId)?.name || "Program"}
+          onBackFromProgram={closeProgram} />
+        ) : (
+        <PointsView roster={roster} studentData={studentData} classPoints={classPoints} config={config}
+          addPoints={addPoints} addClassPoints={addClassPointsFn} resetClassPoints={resetClassPointsFn}
+          onAddCategory={addPointsCategory} navigate={navigateView}
+          plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark}
+          programs={programsInClass} onOpenProgram={openProgram} />
+        );
+      case "planner":
+        return (
+        <PlannerView config={config} plannerDays={plannerDays} plannerEvents={effectivePlannerEvents} navigate={navigateView}
+          setPlannerDay={setPlannerDay} clearPlannerDayType={clearPlannerDayType}
+          bulkSetByWeekday={bulkSetByWeekday} bulkSetByRange={bulkSetByRange}
+          addPlannerEvent={addPlannerEvent} removePlannerEvent={removePlannerEvent}
+          importSchoolCalendar={importSchoolCalendar}
+          benchmarkSubjects={benchmarkSubjects} addBenchmarkSubject={addBenchmarkSubject}
+          removeBenchmarkSubject={removeBenchmarkSubject} addBenchmarkSegment={addBenchmarkSegment}
+          addBenchmarkSegmentBySubjectLabel={addBenchmarkSegmentBySubjectLabel}
+          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment}
+          toggleSubjectHiddenFromPlanner={toggleSubjectHiddenFromPlanner} />
+        );
+      default:
+        return null;
+    }
+  };
+
+  // Horizontal swipe between main tabs, the same way the parent portal's own Home/Messages/Blog
+  // tabs already work — see that implementation's own comments for the full reasoning (scroll vs.
+  // swipe disambiguation, live drag tracking, spring-back on a swipe that didn't go far enough).
+  // swipeOrder mirrors MainTabs' own tab list exactly, split the same way by classType, so
+  // swiping and tapping the bar always agree about what "next" means.
+  const swipeOrder = classType === "preschool"
+    ? ["attendance", "daily-log", "communication", "blog", "planner"]
+    : ["home", "assessments", "points", "communication", "blog", "homework", "planner", "tools"];
+  const [dragOffsetPx, setDragOffsetPx] = useState(0);
+  const [dragTargetTab, setDragTargetTab] = useState(null);
+  const [dragAnimating, setDragAnimating] = useState(false);
+  const swipeStart = useRef(null);
+  const swipeTrackWidth = useRef(390);
+
+  const onTabAreaTouchStart = (e) => {
+    if (!swipeOrder.includes(view) || dragAnimating) return; // not currently on a swipeable tab at all
+    swipeStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, decided: false, horizontal: false };
+    swipeTrackWidth.current = e.currentTarget.getBoundingClientRect().width || window.innerWidth;
+  };
+  const onTabAreaTouchMove = (e) => {
+    if (!swipeStart.current) return;
+    const dx = e.touches[0].clientX - swipeStart.current.x;
+    const dy = e.touches[0].clientY - swipeStart.current.y;
+    if (!swipeStart.current.decided) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      swipeStart.current.decided = true;
+      swipeStart.current.horizontal = Math.abs(dx) > Math.abs(dy) * 1.5;
+      if (swipeStart.current.horizontal) {
+        const currentIdx = swipeOrder.indexOf(view);
+        const targetIdx = dx < 0 ? currentIdx + 1 : currentIdx - 1;
+        setDragTargetTab(targetIdx >= 0 && targetIdx < swipeOrder.length ? swipeOrder[targetIdx] : null);
+      }
+    }
+    if (!swipeStart.current.horizontal) return;
+    const clamped = dragTargetTab ? dx : dx * 0.25;
+    setDragOffsetPx(clamped);
+  };
+  const onTabAreaTouchEnd = () => {
+    if (!swipeStart.current?.horizontal) { swipeStart.current = null; return; }
+    swipeStart.current = null;
+    const committed = dragTargetTab && Math.abs(dragOffsetPx) > swipeTrackWidth.current * 0.3;
+    setDragAnimating(true);
+    if (committed) {
+      const finalOffset = dragOffsetPx < 0 ? -swipeTrackWidth.current : swipeTrackWidth.current;
+      setDragOffsetPx(finalOffset);
+      setTimeout(() => {
+        navigateView(dragTargetTab);
+        setDragOffsetPx(0);
+        setDragTargetTab(null);
+        setDragAnimating(false);
+      }, 220);
+    } else {
+      setDragOffsetPx(0);
+      setTimeout(() => { setDragTargetTab(null); setDragAnimating(false); }, 220);
+    }
+  };
+
   const [showPlan, setShowPlan] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -8818,63 +9083,31 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       }} />
       <GlobalAppStyles />
 
-      {view === "home" && (
-        <HomeView roster={roster} studentData={studentData} incidents={incidents} config={config}
-          removeStudent={removeStudent}
-          setAttendance={setAttendance} setAttendanceTime={setAttendanceTime}
-          setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
-          openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
-          openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
-          monthlyReportState={monthlyReportState}
-          onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
-          reflectionState={reflectionState} reflections={reflections}
-          onDismissReflectionReminder={(key) => persistReflectionState({ ...reflectionState, dismissedMonth: key })}
-          onOpenReflection={() => { setSelectedReflectionMonth(monthKey(new Date().getFullYear(), new Date().getMonth())); navigateView("reflection-form"); }}
-          plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
-          setPlannerDay={setPlannerDay} addPoints={addPoints} behaviorLogData={behaviorLogData}
-          birthdayDismissals={birthdayDismissals} onDismissBirthday={dismissBirthday} onCreateBirthdayEvent={createBirthdayEvent}
-          benchmarkSubjects={benchmarkSubjects} segmentCelebrationDismissals={segmentCelebrationDismissals} onDismissSegmentCelebration={dismissSegmentCelebration}
-          onCelebrateSegment={(subjectLabel, segment) => { setCelebratingSegment({ subjectLabel, segment }); navigateView("segment-celebration-message"); }}
-          onAddPlannerEvent={addPlannerEvent}
-          randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
-          alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan}
-          openCameraCapture={() => openCameraCapture("home")} />
+      {swipeOrder.includes(view) && (
+        <div className="relative overflow-hidden" onTouchStart={onTabAreaTouchStart} onTouchMove={onTabAreaTouchMove} onTouchEnd={onTabAreaTouchEnd}>
+          <div style={{ transform: `translateX(${dragOffsetPx}px)`, transition: dragAnimating ? "transform 0.22s ease-out" : "none" }}>
+            {renderMainTabContent(view)}
+          </div>
+          {dragTargetTab && (
+            <div className="absolute top-0 left-0 right-0" style={{ pointerEvents: "none" }}>
+              <div
+                style={{
+                  transform: `translateX(${dragOffsetPx + (dragOffsetPx < 0 ? swipeTrackWidth.current : -swipeTrackWidth.current)}px)`,
+                  transition: dragAnimating ? "transform 0.22s ease-out" : "none",
+                }}>
+                {renderMainTabContent(dragTargetTab)}
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
-      {view === "attendance" && (
-        <PreschoolAttendanceView roster={roster} studentData={studentData}
-          toggleCheckInByTeacher={toggleCheckInByTeacher} config={config} plannerDays={plannerDays} navigate={navigateView} />
-      )}
+
 
       {view === "all-preschool-attendance" && (
         <AllPreschoolAttendanceView loggedByName={loggedByName} navigate={navigateView} />
       )}
 
-      {view === "daily-log" && (
-        <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} photos={photos} config={config}
-          plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
-          setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
-          logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
-          logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
-          openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
-          openIncidentForm={(studentId, returnTo, categoryId) => openIncidentForm(studentId, returnTo || "daily-log", categoryId)}
-          onLogPreschoolIncident={async (entry) => {
-            addIncident(entry);
-            if (entry.notifyFamily) {
-              const families = await fetchClassFamilies(classId);
-              const groupIds = new Set(
-                families
-                  .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && entry.studentIds.includes(l.studentId)))
-                  .map((f) => f.familyGroupId || f.uid)
-              );
-              const names = entry.studentIds.map((sid) => roster.find((s) => s.id === sid)?.name).filter(Boolean).join(", ");
-              const title = entry.kind === "health" ? `Health note — ${names || "your child"}` : `New note — ${names || "your child"}`;
-              const body = entry.categoryLabel || "Check the app for details.";
-              groupIds.forEach((groupId) => notifyFamilyGroup(groupId, title, body, `/?portal=parent`));
-            }
-          }}
-          classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={navigateView} />
-      )}
 
       {view === "segment-celebration-message" && celebratingSegment && (
         <SegmentCelebrationMessageView subjectLabel={celebratingSegment.subjectLabel} segmentLabel={celebratingSegment.segment.label}
@@ -8915,35 +9148,17 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         <TeacherMessagesView classId={classId} roster={roster} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} sendDirectMessageToFamily={sendDirectMessageToFamily} loggedByName={loggedByName} navigate={navigateView} deepLinkGroupId={deepLinkGroupId} deepLinkIsDirect={deepLinkIsDirect} onCommRead={refreshCommUnread} />
       )}
 
-      {view === "communication" && (
-        <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={navigateView}
-          unreadFamilies={commUnreadFamilies} onRefreshUnread={refreshCommUnread}
-          openStudent={(id) => { setCurrentId(id); navigateView("comm-entry"); }} />
-      )}
 
-      {view === "blog" && (
-        <BlogFeedView posts={blogPosts} currentUserId={loggedInTeacher?.uid} currentUserName={loggedByName} currentUserType="teacher"
-          commentsEnabled={config.blogCommentsEnabled !== false}
-          onReact={toggleBlogReaction}
-          onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
-          navigate={navigateView} />
-      )}
 
       {view === "blog-compose" && (
         <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher} onSubmit={submitBlogPost} onBack={() => navigateView("blog")} />
       )}
 
-      {view === "homework" && (
-        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} />
-      )}
 
       {view === "homework-compose" && (
         <HomeworkComposeScreen classId={classId} onSubmit={submitHomework} onBack={() => navigateView("homework")} />
       )}
 
-      {view === "tools" && (
-        <ToolsView schoolTools={schoolTools} navigate={navigateView} />
-      )}
 
       {view === "comm-entry" && currentId && (
         <CommunicationEntryView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
@@ -8974,21 +9189,6 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} />
       )}
 
-      {view === "assessments" && (
-        <AssessmentsListView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config}
-          openClassAssessment={() => navigateView("class-assessment-form")}
-          openAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
-          openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); navigateView("skill-category-report"); }}
-          activateAssessment={activateAssessment} hideAssessment={hideAssessment} createCustomAssessment={createCustomAssessment}
-          updateClassAssessmentResult={updateClassAssessmentResult}
-          onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); navigateView("session"); }}
-          onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); navigateView("fluency"); }}
-          onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
-          onOpenFluencyDetail={(studentId, entry) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedFluencyEntry(entry); navigateView("fluency-detail"); }}
-          onOpenSkillDetail={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setDetailReturnView("assessments"); setSelectedSkillCat(catId); navigateView("skill-detail"); }}
-          initialStudentId={initialAssessmentStudentId}
-          navigate={navigateView} />
-      )}
 
       {view === "assessment-report" && selectedAssessmentId && (
         <AssessmentReportView assessment={classAssessments.find((ca) => ca.id === selectedAssessmentId)} roster={roster} config={config} loggedInTeacher={loggedInTeacher}
@@ -9003,37 +9203,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onStartClassSession={startClassSession} />
       )}
 
-      {view === "points" && !openProgramId && (
-        <PointsView roster={roster} studentData={studentData} classPoints={classPoints} config={config}
-          addPoints={addPoints} addClassPoints={addClassPointsFn} resetClassPoints={resetClassPointsFn}
-          onAddCategory={addPointsCategory} navigate={navigateView}
-          plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark}
-          programs={programsInClass} onOpenProgram={openProgram} />
-      )}
 
-      {view === "points" && openProgramId && (
-        <PointsView
-          roster={programRoster}
-          studentData={Object.fromEntries(programRoster.map((s) => [s.id, { points: programPointsData[s.id] || {} }]))}
-          classPoints={{}} config={programConfig}
-          addPoints={addProgramPoints} addClassPoints={() => {}} resetClassPoints={() => {}}
-          onAddCategory={addProgramCategory} navigate={navigateView}
-          programMode programName={programsInClass.find((p) => p.id === openProgramId)?.name || "Program"}
-          onBackFromProgram={closeProgram} />
-      )}
 
-      {view === "planner" && (
-        <PlannerView config={config} plannerDays={plannerDays} plannerEvents={effectivePlannerEvents} navigate={navigateView}
-          setPlannerDay={setPlannerDay} clearPlannerDayType={clearPlannerDayType}
-          bulkSetByWeekday={bulkSetByWeekday} bulkSetByRange={bulkSetByRange}
-          addPlannerEvent={addPlannerEvent} removePlannerEvent={removePlannerEvent}
-          importSchoolCalendar={importSchoolCalendar}
-          benchmarkSubjects={benchmarkSubjects} addBenchmarkSubject={addBenchmarkSubject}
-          removeBenchmarkSubject={removeBenchmarkSubject} addBenchmarkSegment={addBenchmarkSegment}
-          addBenchmarkSegmentBySubjectLabel={addBenchmarkSegmentBySubjectLabel}
-          updateBenchmarkSegment={updateBenchmarkSegment} removeBenchmarkSegment={removeBenchmarkSegment}
-          toggleSubjectHiddenFromPlanner={toggleSubjectHiddenFromPlanner} />
-      )}
 
       {view === "class-assessment-form" && (
         <ClassAssessmentForm roster={roster} config={config} onCancel={() => navigateView("assessments")}
@@ -9198,7 +9369,7 @@ function MainTabs({ active, navigate }) {
         { id: "tools", label: "Tools", icon: Wrench },
       ];
   return (
-    <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-[36rem] overflow-x-auto no-scrollbar">
+    <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-full overflow-x-auto no-scrollbar">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = active === t.id;
@@ -14001,12 +14172,27 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
 // as two disconnected families that happen to have the same kids.
 function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, sendDirectMessageToFamily, loggedByName, navigate, deepLinkGroupId, deepLinkIsDirect, onCommRead }) {
   const [groups, setGroups] = useState(null); // null = loading
-  const [threads, setThreads] = useState({}); // groupId -> {messages}
   const [openGroup, setOpenGroup] = useState(null);
   const [mode, setMode] = useState(deepLinkIsDirect ? "direct" : "inbox"); // "inbox" | "direct" | "compose"
   const [directGroups, setDirectGroups] = useState(null); // families this teacher can message individually, across every class they teach
-  const [directThreads, setDirectThreads] = useState({}); // groupId -> {messages}
   const [openDirectGroup, setOpenDirectGroup] = useState(null);
+
+  // Live-subscribed for whichever ONE conversation is actually open right now, AND (via
+  // useLiveJSONMap below) for every family's preview in the inbox list at once — a message
+  // arriving with no visible sign of it, whether that's the thread someone has open or just its
+  // preview sitting in the list, is exactly what breaks the back-and-forth of a real conversation.
+  const liveOpenGroupThread = useLiveJSON(openGroup ? `class:${classId}:messages:${openGroup.groupId}` : null, { messages: [] });
+  const liveOpenDirectThread = useLiveJSON(openDirectGroup ? `teacher-messages:${loggedInTeacher.uid}:${openDirectGroup.groupId}` : null, { messages: [] });
+
+  // Every family's classroom-thread preview, live — keyed back to plain groupId (matching how the
+  // rest of this component already reads threads[groupId]) rather than the raw storage key
+  // useLiveJSONMap itself returns, so switching to live subscriptions here didn't require
+  // reshaping every call site that reads from this object.
+  const liveThreadsByStorageKey = useLiveJSONMap((groups || []).map((g) => `class:${classId}:messages:${g.groupId}`));
+  const threads = Object.fromEntries((groups || []).map((g) => [g.groupId, liveThreadsByStorageKey[`class:${classId}:messages:${g.groupId}`] || { messages: [] }]));
+
+  const liveDirectThreadsByStorageKey = useLiveJSONMap((directGroups || []).map((g) => `teacher-messages:${loggedInTeacher.uid}:${g.groupId}`));
+  const directThreads = Object.fromEntries((directGroups || []).map((g) => [g.groupId, liveDirectThreadsByStorageKey[`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`] || { messages: [] }]));
 
   // Same reasoning as the class/tab history work — pushing a real entry here is what lets the
   // Android back button (and the in-app Back button, which now goes through the same mechanism
@@ -14041,10 +14227,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
       byGroup[groupId].guardians.push(f);
     });
-    const groupList = Object.values(byGroup);
-    setGroups(groupList);
-    const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`class:${classId}:messages:${g.groupId}`, { messages: [] }, true)]));
-    setThreads(Object.fromEntries(entries));
+    setGroups(Object.values(byGroup));
   }, [classId]);
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -14073,10 +14256,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         byGroup[groupId].seenUids.add(f.uid);
       }
     });
-    const groupList = Object.values(byGroup).map(({ seenUids, ...g }) => g);
-    setDirectGroups(groupList);
-    const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
-    setDirectThreads(Object.fromEntries(entries));
+    setDirectGroups(Object.values(byGroup).map(({ seenUids, ...g }) => g));
   }, [assignedClassIds.join(","), loggedInTeacher?.uid]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { if (mode === "direct") refreshDirect(); }, [mode, refreshDirect]);
@@ -14108,7 +14288,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   }, [deepLinkGroupId, deepLinkIsDirect, directGroups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (openGroup) {
-    const thread = threads[openGroup.groupId] || { messages: [] };
+    const thread = liveOpenGroupThread;
     const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
     const storageKey = `class:${classId}:messages:${openGroup.groupId}`;
@@ -14117,15 +14297,15 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
           onBack={() => { window.history.back(); refresh(); }}
-          onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); await refresh(); }}
-          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
-          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
+          onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); }}
+          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }} />
       </>
     );
   }
 
   if (openDirectGroup) {
-    const thread = directThreads[openDirectGroup.groupId] || { messages: [] };
+    const thread = liveOpenDirectThread;
     const childNames = (openDirectGroup.studentLinks || []).filter((l) => assignedClassIds.includes(l.classId)).map((l) => l.studentName).join(", ");
     const guardianNames = openDirectGroup.guardians.map((g) => g.name).join(" & ");
     const storageKey = `teacher-messages:${loggedInTeacher.uid}:${openDirectGroup.groupId}`;
@@ -14134,9 +14314,9 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`teacher-direct-${openDirectGroup.groupId}`}
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
-          onSend={async (text, attachments) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments); await refreshDirect(); }}
-          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refreshDirect(); }}
-          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refreshDirect(); }} />
+          onSend={async (text, attachments) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments); }}
+          onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }} />
       </>
     );
   }
