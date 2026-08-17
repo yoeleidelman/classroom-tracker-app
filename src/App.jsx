@@ -1930,7 +1930,7 @@ function AppInner() {
   const [teachers, setTeachers] = useState([]);
   const [programs, setPrograms] = useState([]);
   const [currentTeacher, setCurrentTeacher] = useState(null); // the signed-in teacher's own record, once real login exists
-  const [currentFamily, setCurrentFamily] = useState(null); // the signed-in family's own record, for the parent portal
+  const [authResolvedFamily, setAuthResolvedFamily] = useState(null); // set once, at sign-in (including the one-time backfill below) — currentFamily itself is derived further down, live, once authUser is known
   // Re-checks whether the signed-in uid now has a family record, without needing a full sign-out
   // and back in. currentFamily is otherwise only ever set once, at the original auth listener —
   // which is exactly what made the sample-data parent preview link feel broken the first time
@@ -1940,7 +1940,7 @@ function AppInner() {
   const refreshCurrentFamily = async () => {
     if (!auth.currentUser) return;
     const fam = await loadJSON(`family:${auth.currentUser.uid}`, null, true);
-    setCurrentFamily(fam);
+    setAuthResolvedFamily(fam);
   };
   const [families, setFamilies] = useState([]); // every family account, for admin's management screen
   // The parent portal used to be a strictly separate entry point with zero path from the teacher
@@ -1953,6 +1953,14 @@ function AppInner() {
   const [isParentPortal] = useState(() => new URLSearchParams(window.location.search).get("portal") === "parent");
   const [activeMode, setActiveMode] = useState(() => (isParentPortal ? "parent" : null)); // "teacher" | "parent" | null (null = not yet resolved, or a dual-role account still choosing)
   const [authUser, setAuthUser] = useState(null); // the raw Firebase Auth user object
+  // The signed-in family's own record, for the parent portal — live-subscribed rather than the
+  // one-time fetch authResolvedFamily itself is, so a change made from the admin side (a newly
+  // added child, a corrected name) reaches an already-open parent session the moment it's saved,
+  // the same way a message now does, instead of needing a manual reload or a full sign-out and
+  // back in to notice anything changed at all. Falls back to authResolvedFamily (which still
+  // carries the one-time backfill logic above) until the live subscription's own first snapshot
+  // has actually landed, so there's no flash of "no family" while that's still in flight.
+  const currentFamily = useLiveJSON(authUser?.uid ? `family:${authUser.uid}` : null, authResolvedFamily);
   const [classId, setClassId] = useState(null);
   const [className, setClassName] = useState("");
   const [isAdminSession, setIsAdminSession] = useState(false);
@@ -2091,7 +2099,7 @@ function AppInner() {
             saveJSON(`family:${user.uid}`, effectiveFamily, true);
           }
           setCurrentTeacher(mine);
-          setCurrentFamily(effectiveFamily);
+          setAuthResolvedFamily(effectiveFamily);
           // Auto-resolve when there's only one possible side; a genuinely dual-role account keeps
           // whatever mode it's already in (its ?portal=parent seed, or a choice already made this
           // session) — it only falls through to "unresolved" the very first time both exist and
@@ -2100,7 +2108,7 @@ function AppInner() {
           else if (myFamily && !mine) setActiveMode("parent");
         } else {
           setCurrentTeacher(null);
-          setCurrentFamily(null);
+          setAuthResolvedFamily(null);
           setActiveMode(isParentPortal ? "parent" : null);
         }
         setAuthChecked(true);
@@ -2266,7 +2274,7 @@ function AppInner() {
   const changeMyFamilyName = async (newName) => {
     if (!currentFamily) return;
     await updateFamilyRecord(currentFamily.uid, { name: newName });
-    setCurrentFamily((prev) => ({ ...prev, name: newName }));
+    setAuthResolvedFamily((prev) => ({ ...prev, name: newName }));
   };
 
   const changeMySignOff = async (newSignOff) => {
@@ -4172,13 +4180,15 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
     if (section === "classroom") {
       if (!selectedClassId) { setGroups([]); return; }
       const relevant = (families || []).filter((f) => (f.studentLinks || []).some((l) => l.classId === selectedClassId));
-      const byGroup = {};
+      // One row per GUARDIAN, not per family group — classroom threads are now a private,
+      // per-guardian conversation too (see the matching comment in TeacherMessagesView's own
+      // refresh for the full reasoning), so admin's oversight view needs to show each one
+      // distinctly, the same way it already does for the direct-messages section below.
+      const byGuardian = {};
       relevant.forEach((f) => {
-        const groupId = f.familyGroupId || f.uid;
-        if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
-        byGroup[groupId].guardians.push(f);
+        if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f], studentLinks: f.studentLinks };
       });
-      const groupList = Object.values(byGroup);
+      const groupList = Object.values(byGuardian);
       setGroups(groupList);
       const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`class:${selectedClassId}:messages:${g.groupId}`, { messages: [] }, true)]));
       setThreads(Object.fromEntries(entries));
@@ -4186,13 +4196,15 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
       if (!selectedTeacherUid) { setGroups([]); return; }
       const teacherClassIds = (teachers.find((t) => t.uid === selectedTeacherUid)?.assignedClassIds) || [];
       const relevant = (families || []).filter((f) => (f.studentLinks || []).some((l) => teacherClassIds.includes(l.classId)));
-      const byGroup = {};
+      // One row per GUARDIAN here, not per family group — an individual teacher thread is a
+      // separate, private conversation per guardian (see sendDirectMessageToFamily's own comment
+      // for the full reasoning), so admin's oversight view needs to show each one distinctly too,
+      // rather than implying one merged thread that doesn't actually exist.
+      const byGuardian = {};
       relevant.forEach((f) => {
-        const groupId = f.familyGroupId || f.uid;
-        if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
-        byGroup[groupId].guardians.push(f);
+        if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f], studentLinks: f.studentLinks };
       });
-      const groupList = Object.values(byGroup);
+      const groupList = Object.values(byGuardian);
       setGroups(groupList);
       const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${selectedTeacherUid}:${g.groupId}`, { messages: [] }, true)]));
       setThreads(Object.fromEntries(entries));
@@ -4201,14 +4213,14 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const sendAsAdminToClass = async (familyGroupId, text) => {
-    const key = `class:${selectedClassId}:messages:${familyGroupId}`;
+  const sendAsAdminToClass = async (guardianUid, text) => {
+    const key = `class:${selectedClassId}:messages:${guardianUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const className = activeClasses.find((c) => c.id === selectedClassId)?.name || "the class";
     const entry = { id: uid(), senderType: "teacher", senderName: currentTeacher?.name || "School Office", text, timestamp: new Date().toISOString() };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyGroupId, `Message from ${className}`, text?.trim() || "New message", `/?portal=parent&open=messages&classId=${selectedClassId}`);
+    sendPushNotification([guardianUid], `Message from ${className}`, text?.trim() || "New message", `/?portal=parent&open=messages&classId=${selectedClassId}`);
     return next;
   };
 
@@ -4421,6 +4433,55 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       return groups;
     }, {})
   );
+  // Catches the specific data-integrity gap a prior bug could leave behind: two guardians who are
+  // genuinely the same household (linked to the exact same child) but ended up with two different
+  // familyGroupIds — most commonly from adding a new student with both parents' emails filled in
+  // at once, where each parent's account was created independently with no shared group at all.
+  // The practical effect was severe: the classroom messaging list groups strictly by
+  // familyGroupId, so a split pair like this wouldn't show as one family with two guardians —
+  // it'd show as two entirely separate, single-guardian entries, or (worse) one guardian's
+  // messages would go to a thread the other guardian's own account could never read. Detected via
+  // union-find over shared student links (two groupIds ever linked to the exact same
+  // classId+studentId almost certainly belong together, even if the overlap chains through a
+  // third record), not just simple pairwise matching, so this still catches it in more tangled
+  // cases.
+  const possibleFamilyMerges = useMemo(() => {
+    const parent = {};
+    const find = (x) => { let root = x; while (parent[root] && parent[root] !== root) root = parent[root]; return root; };
+    const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+    const guardiansByGroupId = {};
+    activeFamilies.forEach((f) => {
+      const gid = f.familyGroupId || f.uid;
+      if (!parent[gid]) parent[gid] = gid;
+      (guardiansByGroupId[gid] = guardiansByGroupId[gid] || []).push(f);
+    });
+    const groupIdsByStudentKey = {};
+    activeFamilies.forEach((f) => {
+      const gid = f.familyGroupId || f.uid;
+      (f.studentLinks || []).forEach((l) => {
+        const key = `${l.classId}:${l.studentId}`;
+        (groupIdsByStudentKey[key] = groupIdsByStudentKey[key] || []).push(gid);
+      });
+    });
+    Object.values(groupIdsByStudentKey).forEach((gids) => {
+      for (let i = 1; i < gids.length; i++) union(gids[0], gids[i]);
+    });
+    const clusters = {};
+    Object.keys(guardiansByGroupId).forEach((gid) => {
+      const root = find(gid);
+      (clusters[root] = clusters[root] || new Set()).add(gid);
+    });
+    return Object.values(clusters)
+      .filter((gidSet) => gidSet.size > 1)
+      .map((gidSet) => ({ groupIds: [...gidSet], guardians: [...gidSet].flatMap((gid) => guardiansByGroupId[gid]) }));
+  }, [activeFamilies]);
+  const [mergingCluster, setMergingCluster] = useState(null); // index of a merge currently in flight, for a per-row spinner/disabled state
+  const mergeFamilyGroups = async (cluster, index) => {
+    setMergingCluster(index);
+    const canonicalGroupId = cluster.groupIds[0];
+    await Promise.all(cluster.guardians.map((g) => onUpdateFamily(g.uid, { familyGroupId: canonicalGroupId })));
+    setMergingCluster(null);
+  };
   const [allStudentsForLinking, setAllStudentsForLinking] = useState([]);
   useEffect(() => { onFetchAllStudentsForLinking().then(setAllStudentsForLinking); }, [registry]); // eslint-disable-line
 
@@ -4675,7 +4736,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         </div>
         <div className="pt-1 mb-6">
           <p className="text-sm font-semibold text-stone-800 mb-1">Clear test broadcast messages</p>
-          <p className="text-xs text-stone-400 mb-3">Deletes every family's thread with the School Office — meant for clearing out messages sent while testing, before real families start using this. This does not touch classroom threads or individual teacher threads, and it's permanent: cleared threads can't be recovered. Every family's thread with the office is already completely private and separate from every other family's, so this is only about removing test content specifically, not something needed for privacy between families.</p>
+          <p className="text-xs text-stone-400 mb-3">Deletes every guardian's thread with the School Office — meant for clearing out messages sent while testing, before real families start using this. This does not touch classroom threads or individual teacher threads, and it's permanent: cleared threads can't be recovered. Every guardian's thread with the office is already completely private and separate — from every other family's, and from any other guardian in their own household — so this is only about removing test content specifically, not something needed for privacy.</p>
           <ClearAdminMessagesTool />
         </div>
         <div className="pt-1">
@@ -5071,6 +5132,26 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                 setTimeout(() => setFamilyCreatedNote(null), 20000);
                 return result;
               }} onCancel={() => setShowFamilyForm(false)} />
+          )}
+
+          {possibleFamilyMerges.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
+              <p className="text-xs font-semibold text-amber-800 mb-1">
+                {possibleFamilyMerges.length === 1 ? "Found a family that may be split into two accounts" : `Found ${possibleFamilyMerges.length} families that may be split into separate accounts`}
+              </p>
+              <p className="text-[11px] text-amber-700 mb-2">These guardians are linked to the exact same child but ended up as separate, unconnected accounts — most likely from adding a student with both parents' emails at once. Merging makes them one joint family: both guardians see the classroom thread together, and each still keeps their own separate login and their own private messages with any teacher.</p>
+              <div className="space-y-2">
+                {possibleFamilyMerges.map((cluster, i) => (
+                  <div key={i} className="bg-white border border-amber-200 rounded-lg p-2.5 flex items-center justify-between gap-2">
+                    <p className="text-xs text-stone-700">{cluster.guardians.map((g) => g.name).join(" & ")}</p>
+                    <button onClick={() => mergeFamilyGroups(cluster, i)} disabled={mergingCluster === i}
+                      className="text-xs font-semibold text-white bg-amber-700 rounded-lg px-3 py-1.5 hover:bg-amber-800 disabled:opacity-50 shrink-0">
+                      {mergingCluster === i ? "Merging…" : "Merge into one family"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           {activeFamilies.length === 0 && !showFamilyForm && <p className="text-xs text-stone-400">No family accounts yet.</p>}
@@ -6848,9 +6929,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // out and reopen the thread (or reload the whole app) to see it arrive. Only ever one of the
   // three is actually open at a time, so the other two's key is null and they simply hold their
   // fallback rather than run an idle subscription for a screen nobody's looking at.
-  const messagingThread = useLiveJSON(messagingClassId ? `class:${messagingClassId}:messages:${myGroupId}` : null, { messages: [] });
-  const adminThread = useLiveJSON(messagingAdmin ? `admin-messages:${myGroupId}` : null, { messages: [] });
-  const teacherMessagingThread = useLiveJSON(messagingTeacherUid ? `teacher-messages:${messagingTeacherUid}:${myGroupId}` : null, { messages: [] });
+  // Keyed by family.uid — this login's own uid — not myGroupId. Classroom messages are now a
+  // private line between this specific guardian and the classroom's teachers, the same way an
+  // individual teacher thread already was: two guardians of the same family get two separate
+  // conversations, neither seeing what the other sent or received, even though both still see the
+  // same classroom, the same roster, and the same children.
+  const messagingThread = useLiveJSON(messagingClassId ? `class:${messagingClassId}:messages:${family.uid}` : null, { messages: [] });
+  // Keyed by family.uid, not myGroupId — the office thread is now private per guardian too, the
+  // same reasoning as messagingThread above.
+  const adminThread = useLiveJSON(messagingAdmin ? `admin-messages:${family.uid}` : null, { messages: [] });
+  // Keyed by family.uid — this specific login's own uid. Every conversation thread (classroom,
+  // office, individual teacher) is now a private line for this one guardian — myGroupId is used
+  // only for things genuinely still shared across the whole family, like linking students.
+  const teacherMessagingThread = useLiveJSON(messagingTeacherUid ? `teacher-messages:${messagingTeacherUid}:${family.uid}` : null, { messages: [] });
 
   // Checked fresh each time the home screen loads — there's no live push here, so "new message"
   // means "new since I last opened this app," not an instant alert the moment it's sent.
@@ -6859,19 +6950,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const readState = await getReadState(family.uid);
     const results = [];
     for (const l of classLinks) {
-      const thread = await loadJSON(`class:${l.classId}:messages:${myGroupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const thread = await loadJSON(`class:${l.classId}:messages:${family.uid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
       const last = thread?.messages?.[thread.messages.length - 1];
       if (isThreadUnread(readState, `class-${l.classId}`, last, "family")) {
         results.push({ threadKey: `class-${l.classId}`, kind: "class", classId: l.classId, title: l.className, preview: last.text, senderName: last.senderName, timestamp: last.timestamp });
       }
     }
-    const adminThreadData = await loadJSON(`admin-messages:${myGroupId}`, { messages: [] }, true);
+    const adminThreadData = await loadJSON(`admin-messages:${family.uid}`, { messages: [] }, true);
     const lastAdmin = adminThreadData?.messages?.[adminThreadData.messages.length - 1];
-    if (isThreadUnread(readState, `admin-${myGroupId}`, lastAdmin, "family")) {
-      results.push({ threadKey: `admin-${myGroupId}`, kind: "admin", title: "School Office", preview: lastAdmin.text, senderName: lastAdmin.senderName, timestamp: lastAdmin.timestamp });
+    if (isThreadUnread(readState, `admin-${family.uid}`, lastAdmin, "family")) {
+      results.push({ threadKey: `admin-${family.uid}`, kind: "admin", title: "School Office", preview: lastAdmin.text, senderName: lastAdmin.senderName, timestamp: lastAdmin.timestamp });
     }
     setUnreadThreads(results);
-  }, [family, myGroupId]);
+  }, [family]);
 
   useEffect(() => { refreshUnreadThreads(); }, [refreshUnreadThreads]);
   useEffect(() => {
@@ -6961,7 +7052,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", "admin");
     window.history.pushState({ thread: "admin" }, "", url);
-    await markThreadRead(family.uid, `admin-${myGroupId}`);
+    await markThreadRead(family.uid, `admin-${family.uid}`);
   };
 
   // Who this family is actually allowed to message one-on-one — computed server-side (families
@@ -7113,24 +7204,25 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return result;
   };
 
-  // Same conversation the teacher side writes to — one thread per family per class, not per
-  // child, so two kids in the same room share one conversation with it rather than splitting an
-  // otherwise identical exchange in two.
+  // Keyed by family.uid, not myGroupId — this guardian's own private line with the classroom's
+  // teachers now, the same way an individual teacher thread already was. See the matching comment
+  // on messagingThread above for the full reasoning.
   const sendMessageToTeacher = async (classId, text, attachments) => {
-    const key = `class:${classId}:messages:${myGroupId}`;
+    const key = `class:${classId}:messages:${family.uid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=messages&classId=${classId}&groupId=${myGroupId}`);
+    notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=messages&classId=${classId}&groupId=${family.uid}`);
     return next;
   };
 
   // The individual-teacher counterpart to sendMessageToTeacher above — same shape, but written to
-  // that one teacher's own thread with this family, and notifying only them, never every teacher
+  // that one teacher's own thread with THIS SPECIFIC GUARDIAN (family.uid, not myGroupId — see the
+  // comment on teacherMessagingThread above for why), and notifying only them, never every teacher
   // sharing the classroom.
   const sendMessageToIndividualTeacher = async (teacherUid, text, attachments) => {
-    const key = `teacher-messages:${teacherUid}:${myGroupId}`;
+    const key = `teacher-messages:${teacherUid}:${family.uid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
@@ -7141,7 +7233,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     // the notification still arrives, it just opens the app normally instead of jumping straight in.
     const deepLinkClassId = (eligibleTeachers || []).find((t) => t.uid === teacherUid)?.deepLinkClassId;
     const deepLinkSuffix = deepLinkClassId ? `&classId=${deepLinkClassId}` : "";
-    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${myGroupId}${deepLinkSuffix}`);
+    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${family.uid}${deepLinkSuffix}`);
     return next;
   };
 
@@ -7622,13 +7714,14 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
 
   const refresh = useCallback(async () => {
     const relevant = await fetchStaffReachableFamilies();
-    const byGroup = {};
+    // One row per GUARDIAN, not per family — two guardians of the same family are two separate,
+    // private threads with this person (same reasoning as the equivalent fix in TeacherMessagesView),
+    // so each needs its own entry to actually choose between them.
+    const byGuardian = {};
     relevant.forEach((f) => {
-      const groupId = f.familyGroupId || f.uid;
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
-      byGroup[groupId].guardians.push(f);
+      if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f], studentLinks: f.studentLinks };
     });
-    const groupList = Object.values(byGroup);
+    const groupList = Object.values(byGuardian);
     setFamilies(groupList);
     const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
@@ -7649,14 +7742,17 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   }, [deepLinkGroupId, families]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Same shape as ClassApp's own sendDirectMessageToFamily — this person has no classroom thread
-  // at all, only ever this one kind of message.
-  const sendMessage = async (familyGroupId, text, attachments) => {
-    const key = `teacher-messages:${loggedInTeacher.uid}:${familyGroupId}`;
+  // at all, only ever this one kind of message. guardianUid is deliberately the specific
+  // guardian's own uid (see sendDirectMessageToFamily's own comment for the full reasoning) —
+  // sendPushNotification with an explicit single-uid list, not notifyFamilyGroup, is what keeps
+  // this notification as private as the thread itself.
+  const sendMessage = async (guardianUid, text, attachments) => {
+    const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "teacher", senderName: loggedInTeacher?.name || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyGroupId, `Direct message from ${loggedInTeacher?.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
+    sendPushNotification([guardianUid], `Direct message from ${loggedInTeacher?.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
     return next;
   };
 
@@ -8115,15 +8211,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     // computation is simply irrelevant for them, not just something to guard defensively.
     if (!loggedInTeacher) return;
     const relevant = await fetchClassFamilies(classId);
-    const byGroup = {};
-    relevant.forEach((f) => {
-      const groupId = f.familyGroupId || f.uid;
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [] };
-      byGroup[groupId].guardians.push(f);
-    });
+    // One row per guardian, matching the classroom thread itself now being per-guardian rather
+    // than per-family — otherwise this would ask about class:*:messages:{familyGroupId}, a key
+    // nothing writes to anymore now that each guardian has their own.
+    const byGuardian = {};
+    relevant.forEach((f) => { if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f] }; });
     const readState = await getReadState(loggedInTeacher.uid);
     const results = [];
-    for (const g of Object.values(byGroup)) {
+    for (const g of Object.values(byGuardian)) {
       const thread = await loadJSON(`class:${classId}:messages:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
       const last = thread?.messages?.[thread.messages.length - 1];
       const threadKey = `classroom-${g.groupId}`;
@@ -8664,9 +8759,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // their existing studentLinks with just this one new child, losing the sibling. So this checks
   // for an existing account by email first, and if one exists, appends to it instead of
   // recreating it.
-  const autoCreateOrLinkParentAccount = async (parentName, parentEmail, newLink) => {
+  // Returns the resolved familyGroupId — whatever group this parent ended up in, whether that's
+  // an existing account's group or a brand-new one — so a second parent added right alongside the
+  // first (see addStudent below) can be told to join that same group explicitly, rather than each
+  // one silently ending up in its own separate group of one.
+  const autoCreateOrLinkParentAccount = async (parentName, parentEmail, newLink, joinGroupId) => {
     const email = (parentEmail || "").trim().toLowerCase();
-    if (!email) return;
+    if (!email) return null;
     const allFamilies = await loadAllWithPrefix("family:");
     const existing = allFamilies.find((f) => (f.email || "").toLowerCase() === email);
     if (existing) {
@@ -8675,10 +8774,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         const nextLinks = [...(existing.studentLinks || []), newLink];
         await updateFamilyRecord(existing.uid, { studentLinks: nextLinks });
       }
-      return;
+      return existing.familyGroupId || existing.uid;
     }
     const defaultPassword = await loadJSON("defaultParentPassword", "Welcome123", true);
-    await createFamilyAccount(parentName || newLink.studentName, parentEmail.trim(), defaultPassword, [newLink]);
+    const result = await createFamilyAccount(parentName || newLink.studentName, parentEmail.trim(), defaultPassword, [newLink], joinGroupId);
+    return joinGroupId || result?.uid || null;
   };
 
   const addStudent = async (name, studentType, parent1Name, parentEmail, parent2Name, parent2Email) => {
@@ -8701,8 +8801,16 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     setGlobalStudentsInClass(nextGs);
 
     const link = { classId, studentId: id, studentName: trimmed, className };
-    if (parentEmail) await autoCreateOrLinkParentAccount(parent1Name, parentEmail, link);
-    if (parent2Email) await autoCreateOrLinkParentAccount(parent2Name, parent2Email, link);
+    // The second parent joins whatever group the first parent resolved to — same family, same
+    // group — rather than each independently defaulting to their own group of one. Previously
+    // neither call knew about the other at all, so a student added with both parents' emails
+    // filled in from the start silently created two entirely separate single-guardian families
+    // instead of one joint one: broke the classroom messaging list (each guardian showed up as
+    // their own unrelated "family" rather than grouped together) and any future guardian-linking
+    // logic that assumes a shared familyGroupId means what it says.
+    let resolvedGroupId = null;
+    if (parentEmail) resolvedGroupId = await autoCreateOrLinkParentAccount(parent1Name, parentEmail, link);
+    if (parent2Email) await autoCreateOrLinkParentAccount(parent2Name, parent2Email, link, resolvedGroupId);
   };
 
   const refreshGlobalStudentsInClass = async () => {
@@ -9004,16 +9112,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     return result;
   };
 
-  // One conversation per family per class — not per individual teacher, since a preschool room
-  // often has more than one adult in it and a parent shouldn't need to know who's on duty today
-  // to reach "the classroom." Any teacher assigned to this class reads and writes the same thread.
+  // One conversation per guardian per class now, not per family — each guardian's message with
+  // the classroom is private to them, so this notifies only the specific guardian who's actually
+  // part of this thread (a direct, single-uid notification) rather than notifyFamilyGroup, which
+  // would fan out to every guardian sharing this family's group regardless of which one the
+  // message was actually for.
   const sendMessageToFamily = async (familyUid, text, attachments) => {
     const key = `class:${classId}:messages:${familyUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyUid, `Message from ${className}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=messages&classId=${classId}`);
+    sendPushNotification([familyUid], `Message from ${className}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=messages&classId=${classId}`);
     return next;
   };
 
@@ -9021,13 +9131,21 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // classroom thread above, so only this specific teacher (never any colleague sharing the same
   // class, never admin) can ever post here. That's what lets a parent trust a direct message is
   // genuinely private between them and this one teacher.
-  const sendDirectMessageToFamily = async (familyGroupId, text, attachments) => {
-    const key = `teacher-messages:${loggedInTeacher.uid}:${familyGroupId}`;
+  //
+  // guardianUid — deliberately the specific guardian's own uid, not a family group id. Two
+  // guardians of the same family are two separate, private threads (see the matching comment on
+  // teacherMessagingThread on the parent side for why); notifying via notifyFamilyGroup here would
+  // reach BOTH guardians about a message meant for only one of them, since that helper exists
+  // specifically to fan a notification out to every login sharing a group. sendPushNotification
+  // with an explicit single-element list is what actually keeps this notification as private as
+  // the thread itself.
+  const sendDirectMessageToFamily = async (guardianUid, text, attachments) => {
+    const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(familyGroupId, `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
+    sendPushNotification([guardianUid], `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
     return next;
   };
 
@@ -14001,14 +14119,16 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
   };
   const clearAttachment = () => { setAttachFile(null); setAttachPreview(null); setAttachType(null); setAttachError(null); };
 
+  // One row per GUARDIAN, not per family — the office thread is now a private line per guardian
+  // too, the same reasoning as classroom and individual-teacher messages: two guardians of the
+  // same household get two separate conversations with the office, neither seeing what the other
+  // sent or received.
   const groups = useMemo(() => {
-    const byGroup = {};
+    const byGuardian = {};
     (families || []).forEach((f) => {
-      const groupId = f.familyGroupId || f.uid;
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [] };
-      byGroup[groupId].guardians.push(f);
+      if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f] };
     });
-    return Object.values(byGroup);
+    return Object.values(byGuardian);
   }, [families]);
 
   // Same reasoning and pattern as the teacher-side classroom messages history work — pushes a
@@ -14046,14 +14166,13 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
     const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    notifyFamilyGroup(groupId, "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin");
+    sendPushNotification([groupId], "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin");
     return next;
   };
 
-  // One message, pushed into every family's own thread with the office at once — per family, not
-  // per student, so a household with two kids in the school still gets exactly one copy. The
-  // attachment uploads once and every family's copy points at that same file, rather than
-  // re-uploading it once per family.
+  // One message, pushed into every GUARDIAN's own thread with the office at once — per guardian
+  // now, not per family, so two guardians of the same household each get their own private copy
+  // and can't see whether the other one read or replied to it.
   const sendBroadcast = async () => {
     if (!broadcastText.trim() && !attachFile) return;
     setBroadcasting(true);
@@ -14119,7 +14238,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
 
         {mode === "broadcast" ? (
           <div>
-            <p className="text-xs text-stone-400 mb-3">Sent to every family in the school as one message in their School Office thread — once per family, not once per student.</p>
+            <p className="text-xs text-stone-400 mb-3">Sent to every guardian in the school as their own message in their own School Office thread — once per guardian, not once per family or per student, so two parents in the same household each get their own private copy.</p>
 
             <div className="flex items-start gap-1.5 mb-1.5">
               <textarea value={broadcastText} onChange={(e) => setBroadcastText(e.target.value)} rows={5} placeholder="Type your message, or use the sparkle button to draft one from a quick note"
@@ -14178,7 +14297,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
               <button onClick={sendBroadcast} disabled={(!broadcastText.trim() && !attachFile) || broadcasting || broadcastSentTo !== null}
                 className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2.5 ${broadcastSentTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
                 {broadcasting ? <Loader2 className="animate-spin" size={15} /> : broadcastSentTo !== null ? <Check size={15} /> : <MessageCircle size={15} />}
-                {broadcasting ? (uploadProgress !== null ? `Uploading… ${uploadProgress}%` : "Sending…") : broadcastSentTo !== null ? `Sent to ${broadcastSentTo} famil${broadcastSentTo === 1 ? "y" : "ies"}` : "Send to every family"}
+                {broadcasting ? (uploadProgress !== null ? `Uploading… ${uploadProgress}%` : "Sending…") : broadcastSentTo !== null ? `Sent to ${broadcastSentTo} guardian${broadcastSentTo === 1 ? "" : "s"}` : "Send to every family"}
               </button>
             </div>
           </div>
@@ -14279,23 +14398,27 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     return () => window.removeEventListener("popstate", onPopState);
   }, [groups]);
 
+  // One row per GUARDIAN, not per family — classroom messages are now a private line between each
+  // individual guardian and the classroom's teachers, the same way the Direct tab below already
+  // works. Two guardians of the same family show up here as two separate conversations.
   const refresh = useCallback(async () => {
     const relevant = await fetchClassFamilies(classId);
-    const byGroup = {};
+    const byGuardian = {};
     relevant.forEach((f) => {
-      const groupId = f.familyGroupId || f.uid;
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks };
-      byGroup[groupId].guardians.push(f);
+      if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f], studentLinks: f.studentLinks };
     });
-    setGroups(Object.values(byGroup));
+    setGroups(Object.values(byGuardian));
   }, [classId]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Every family this teacher can message one-on-one, across every class they teach — not just
-  // the one class currently open. A family with two of this teacher's students, or a family
-  // reachable through General Studies for a grade this teacher doesn't otherwise teach, still
-  // shows up here exactly once, mirroring how the parent side dedupes teachers the same way.
+  // Every GUARDIAN this teacher can message one-on-one, across every class they teach — not just
+  // the one class currently open, and deliberately one row per guardian, not one per family. Two
+  // guardians of the same family are two genuinely separate, private threads with this teacher
+  // (see the matching comment on the parent side's teacherMessagingThread for why), so each needs
+  // its own entry here for the teacher to actually choose between them — a family reachable
+  // through two of this teacher's classes (two siblings, say) still shows each guardian exactly
+  // once, not once per class they happen to share.
   const assignedClassIds = loggedInTeacher?.assignedClassIds || [];
   const refreshDirect = useCallback(async () => {
     if (assignedClassIds.length === 0) { setDirectGroups([]); return; }
@@ -14304,19 +14427,13 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     // fetchClassFamilies itself is built around (one specific, provably-owned class at a time).
     const perClass = await Promise.all(assignedClassIds.map((id) => fetchClassFamilies(id)));
     const all = perClass.flat();
-    const byGroup = {};
+    const byGuardian = {};
     all.forEach((f) => {
-      const groupId = f.familyGroupId || f.uid;
-      // A family reachable through two of this teacher's classes (two siblings, say) would
-      // otherwise show up twice, once per class fetch — this keeps each guardian counted once
-      // even though they may have appeared in more than one of the per-class results above.
-      if (!byGroup[groupId]) byGroup[groupId] = { groupId, guardians: [], studentLinks: f.studentLinks, seenUids: new Set() };
-      if (!byGroup[groupId].seenUids.has(f.uid)) {
-        byGroup[groupId].guardians.push(f);
-        byGroup[groupId].seenUids.add(f.uid);
-      }
+      // Same guardian can appear once per matching class fetch above (two kids, two classes,
+      // same teacher) — keyed by their own uid this keeps them counted once regardless.
+      if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f], studentLinks: f.studentLinks };
     });
-    setDirectGroups(Object.values(byGroup).map(({ seenUids, ...g }) => g));
+    setDirectGroups(Object.values(byGuardian));
   }, [assignedClassIds.join(","), loggedInTeacher?.uid]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { if (mode === "direct") refreshDirect(); }, [mode, refreshDirect]);
@@ -16942,7 +17059,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
               </div>
             )}
             {showDocImport && (
-              <DocumentImportPanel mode="benchmark"
+              <DocumentImportPanel mode="benchmark" destinationLabel={active.label}
                 onApplyBenchmark={(items) => {
                   items.forEach((it, i) => {
                     const newSeg = { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(active.segments.length + i) % COLOR_CHOICES.length] };
@@ -16959,7 +17076,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
   );
 }
 
-function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBenchmark, onClose }) {
+function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCalendar, onApplyBenchmark, onClose }) {
   const [rawText, setRawText] = useState("");
   const [pdfBase64, setPdfBase64] = useState(null);
   const [fileName, setFileName] = useState("");
@@ -17021,7 +17138,10 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
   return (
     <div className="bg-white border border-teal-200 rounded-xl p-4 mt-3">
       <p className="text-sm font-semibold text-stone-800 mb-1">Import from a document</p>
-      <p className="text-xs text-stone-400 mb-3">Paste the text, or upload a plain text/CSV file or a PDF. Nothing is applied until you review it below.</p>
+      <p className="text-xs text-stone-400 mb-3">
+        Paste the text, or upload a plain text/CSV file or a PDF.
+        {destinationLabel ? <> Whatever's found will be added to <strong className="text-stone-600">{destinationLabel}</strong>'s benchmark segments — nothing else, and nothing is applied until you review it below.</> : " Nothing is applied until you review it below."}
+      </p>
 
       {items === null && (
         <>
@@ -17047,7 +17167,9 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
 
       {items !== null && (
         <>
-          <p className="text-xs font-semibold text-stone-500 uppercase mb-2">Review before applying — {items.length} found</p>
+          <p className="text-xs font-semibold text-stone-500 uppercase mb-2">
+            Review before applying — {items.length} found{destinationLabel ? <> for <span className="normal-case font-semibold text-teal-700">{destinationLabel}</span></> : ""}
+          </p>
           <ul className="space-y-1.5 mb-3 max-h-72 overflow-y-auto">
             {items.map((it) => (
               <li key={it.id} className="flex items-center gap-1.5 bg-stone-50 rounded-lg p-2">
@@ -17066,7 +17188,7 @@ function DocumentImportPanel({ mode, dayTypeOptions, onApplyCalendar, onApplyBen
           </ul>
           <div className="flex gap-2">
             <button onClick={apply} disabled={items.length === 0} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-              Apply {items.length} item{items.length === 1 ? "" : "s"}
+              {destinationLabel ? `Add ${items.length} item${items.length === 1 ? "" : "s"} to ${destinationLabel}` : `Apply ${items.length} item${items.length === 1 ? "" : "s"}`}
             </button>
             <button onClick={() => setItems(null)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Start over</button>
           </div>
