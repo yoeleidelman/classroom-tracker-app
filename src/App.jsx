@@ -4865,6 +4865,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             {activeTeachers.map((t) => {
               const classNames = (t.assignedClassIds || []).map((cid) => activeClasses.find((c) => c.id === cid)?.name).filter(Boolean);
               const isEditing = editingTeacherUid === t.uid;
+              // Same uid on both a teacher and a family record IS what "linked" means here — one
+              // Firebase Auth login, two roles. Looked up directly against the two lists admin
+              // already has in memory rather than trusting any one-time "was this linked at
+              // creation" message, since that message is long gone on every visit after the one
+              // where the account was actually created.
+              const linkedFamily = (families || []).find((f) => f.uid === t.uid && f.active !== false);
               return (
                 <li key={t.uid} className="bg-white border border-stone-200 rounded-lg p-2.5">
                   <div className="flex items-center justify-between gap-2">
@@ -4880,6 +4886,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                     </div>
                   </div>
                   <p className="text-xs text-stone-400 mt-0.5">{t.email}{classNames.length > 0 ? ` · ${classNames.join(", ")}` : " · No classes assigned yet"}</p>
+                  {linkedFamily && (
+                    <p className="text-[11px] font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-md px-2 py-1 mt-1.5 inline-block">
+                      ↔ Same login also signs in as a parent — {linkedFamily.name}
+                    </p>
+                  )}
 
                   {isEditing && (
                     <div className="mt-2 pt-2 border-t border-stone-100">
@@ -5030,15 +5041,26 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               const [primary, ...others] = group;
               return (
                 <li key={primary.uid} className="bg-white border border-stone-200 rounded-lg p-2.5">
-                  {group.map((f) => (
+                  {group.map((f) => {
+                    // Mirrors the same check on the Teachers list, in the opposite direction —
+                    // this guardian's own uid matching a teacher record's uid IS the link, looked
+                    // up fresh each time rather than relying on a one-time creation message.
+                    const linkedTeacher = (teachers || []).find((t) => t.uid === f.uid && t.active !== false);
+                    return (
                     <div key={f.uid} className={f !== primary ? "mt-2 pt-2 border-t border-stone-100" : ""}>
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-sm font-semibold text-stone-800">{f.name}</span>
                         <ArchiveOrDeleteMenu onArchive={() => onDeactivateFamily(f.uid)} onDeletePermanently={() => onDeleteFamily(f.uid)} size={14} />
                       </div>
                       <p className="text-xs text-stone-400 mt-0.5">{f.email}</p>
+                      {linkedTeacher && (
+                        <p className="text-[11px] font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-md px-2 py-1 mt-1 inline-block">
+                          ↔ Same login also signs in as {linkedTeacher.role === "admin" ? "an admin" : "a teacher"} — {linkedTeacher.name}
+                        </p>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                   <p className="text-xs text-stone-400 mt-1.5">
                     {(primary.studentLinks || []).length === 0 ? "No children linked" : (primary.studentLinks || []).map((l) => l.studentName).join(", ")}
                   </p>
