@@ -604,7 +604,10 @@ function SendInAppButton({ studentId, classId, message, sendMessage, className }
     const relevant = await fetchClassFamilies(classId);
     const match = relevant.find((f) => (f.studentLinks || []).some((l) => l.studentId === studentId && l.classId === classId));
     if (!match) { setState("no-family"); return; }
-    await sendMessage(match.familyGroupId || match.uid, message.trim());
+    // This specific guardian's own uid — same reasoning as the two sibling fixes on the photo
+    // quick-share and broadcast tools: familyGroupId would silently misroute to whichever
+    // guardian happens to be that shared group's "primary" instead of the one actually matched.
+    await sendMessage(match.uid, message.trim());
     setState("sent");
   };
   if (state === "sent") return <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><Check size={13} /> Sent in-app</span>;
@@ -1628,6 +1631,28 @@ async function isThisDeviceEnabled(uid) {
   }
 }
 
+// The service worker keeps its own simple counter for the app icon badge, since it has no access
+// to this app's own React state when a push arrives while the app is fully closed — it can only
+// increment, not compute an accurate total. Whenever the app itself is open and sets the REAL
+// badge count from its own genuinely current unread state, that counter needs resetting to match
+// (to 0, since being open and setting a fresh, correct value is itself what "caught up" means) —
+// otherwise a later background push would increment from a stale, too-high base the next time the
+// app is closed again. Same store, same key, as the one the service worker writes to.
+async function resetBackgroundBadgeCounter() {
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open("badge-store", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    db.transaction("kv", "readwrite").objectStore("kv").put(0, "count");
+  } catch {
+    // Best-effort — worst case, a future background push increments from a stale base until the
+    // app is next opened, which corrects the actually-displayed badge regardless.
+  }
+}
+
 const ClassContext = createContext({ className: "", onSwitchClass: () => {}, classType: "elementary", commUnreadCount: 0 });
 // For an account that holds both a teacher and a family record — lets Header (rendered
 // independently by many different screens, not passed props from one shared parent) offer a
@@ -1981,6 +2006,13 @@ function AppInner() {
   // groupId once ClassApp itself has mounted.
   const [pendingDeepLink] = useState(() => {
     const params = new URLSearchParams(window.location.search);
+    // Same reasoning as pendingStaffDeepLink's own portal=parent check just above — this is the
+    // teacher-side interpretation of the URL, and needs to stay out of the way entirely when the
+    // link is actually a parent-side one instead. Matters most for exactly the kind of account
+    // most likely to hit it: someone who holds both a teacher and a family record, where
+    // currentTeacher being truthy doesn't mean they're the one this particular notification, or
+    // this particular moment, is actually for.
+    if (params.get("portal") === "parent") return null;
     const urlClassId = params.get("classId");
     if (!urlClassId) return null;
     const open = params.get("open");
@@ -2003,7 +2035,17 @@ function AppInner() {
   // once that page's own family list has loaded.
   const [pendingStaffDeepLink] = useState(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("open") !== "teacher-messages" || params.get("classId")) return null;
+    // portal=parent is the one unambiguous signal this is actually a PARENT-side link, not a
+    // staff one — both shapes use the identical open=teacher-messages value (a parent messaging
+    // one specific teacher directly, and a staff member with no assigned classes receiving a
+    // direct message, are genuinely different notifications that happen to share this same open
+    // type), and this component mounts unconditionally regardless of which side is about to load.
+    // Without this check, a PARENT's own deep link — portal=parent, open=teacher-messages,
+    // teacherUid=X — was being misread as a staff one, and the effect below was wiping the entire
+    // URL (including portal=parent and teacherUid) before the parent-side handler downstream ever
+    // got a chance to read any of it, silently destroying a real notification tap and leaving it
+    // to land on the plain home screen instead of the specific conversation.
+    if (params.get("open") !== "teacher-messages" || params.get("classId") || params.get("portal") === "parent") return null;
     return { groupId: params.get("groupId") || null };
   });
   useEffect(() => {
@@ -2026,29 +2068,43 @@ function AppInner() {
   }, [pendingDeepLink, deepLinkClassEntered, currentTeacher, classId, registry]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A push that arrives while this tab is the active, focused one doesn't go through the service
-  // worker at all (that only handles background/closed-tab delivery) — this is the separate path
-  // for "the app was already open when it happened." Shows the same kind of native notification
-  // either way, so it doesn't matter to the person which path it came through. Reads from
+  // worker's OWN onBackgroundMessage listener at all (that only fires for background/closed-tab
+  // delivery) — this is the separate path Firebase provides for "the app was already open when it
+  // happened." Still routed through registration.showNotification() rather than the simpler
+  // `new Notification()` constructor, though — that constructor is well known to be unreliable
+  // specifically on Android/Chrome, where a page calling it directly can silently produce nothing
+  // visible at all rather than a real system banner; going through the service worker instead is
+  // the same, already-proven-reliable mechanism the background path already uses, so a foreground
+  // notification is now exactly as dependable as a background one, not a separate, weaker copy of
+  // it. This also means a tap is handled by the exact same notificationclick listener in the
+  // service worker either way — no separate onclick logic needed here anymore. Reads from
   // payload.data, not payload.notification, matching the backend's deliberately data-only payload
   // — see the service worker for why.
   useEffect(() => {
     let unsubscribe = () => {};
     messagingPromise.then((messaging) => {
       if (!messaging) return;
-      unsubscribe = onMessage(messaging, (payload) => {
+      unsubscribe = onMessage(messaging, async (payload) => {
         if (Notification.permission !== "granted") return;
         // The one and only suppression rule — never "the app is open," always and only "this
         // exact content is already on screen."
         if (isViewingNotificationTarget(payload.data?.url)) return;
         const title = payload.data?.title || "New notification";
-        const n = new Notification(title, { body: payload.data?.body || "", icon: "/icons/icon-192.png", badge: "/icons-badge/badge-96.png" });
-        // Foreground notifications don't go through the service worker's notificationclick handler
-        // at all — this is the separate path for making a tap actually go somewhere when the app
-        // was already open at the moment it arrived.
-        n.onclick = () => {
-          window.focus();
-          if (payload.data?.url) window.location.href = payload.data.url;
-        };
+        try {
+          const registration = await navigator.serviceWorker.ready;
+          await registration.showNotification(title, {
+            body: payload.data?.body || "",
+            icon: "/icons/icon-192.png",
+            badge: "/icons-badge/badge-96.png",
+            data: { url: payload.data?.url || "/" },
+          });
+        } catch {
+          // No service worker available in this browser (or it isn't ready yet) — falling back to
+          // the direct constructor is still strictly better than showing nothing at all, even on
+          // the platforms where it's the less reliable of the two options.
+          const n = new Notification(title, { body: payload.data?.body || "", icon: "/icons/icon-192.png", badge: "/icons-badge/badge-96.png" });
+          n.onclick = () => { window.focus(); if (payload.data?.url) window.location.href = payload.data.url; };
+        }
       });
     });
     return () => unsubscribe();
@@ -2245,7 +2301,17 @@ function AppInner() {
     }
   };
 
-  const signOutTeacher = () => signOut(auth);
+  // De-registers this device's push token before actually signing out — without this, the token
+  // stays registered under the account that's leaving, so if a different person signs in on this
+  // same device afterward and turns notifications on, both accounts end up sharing the same
+  // device token: whichever one is currently signed in would receive push notifications meant for
+  // BOTH of them, since FCM has no way to know only one person is actually using the device right
+  // now. Best-effort — if this fails for any reason, sign-out still proceeds; a stray token is a
+  // far smaller problem than someone being unable to sign out at all.
+  const signOutTeacher = async () => {
+    if (authUser) { try { await disableNotificationsFor(authUser.uid); } catch { /* best-effort */ } }
+    return signOut(auth);
+  };
 
   // Self-service password change — Firebase requires a "recent" sign-in for security-sensitive
   // operations like this, so we re-authenticate with their current password first (proving they
@@ -3060,7 +3126,7 @@ function AppInner() {
     if (!authUser || !currentFamily) {
       return <ParentSignInScreen onSignIn={signInTeacher} isSignedInAsSomethingElse={Boolean(authUser && !currentFamily)} />;
     }
-    return <ParentPortalApp family={currentFamily} onSignOut={() => signOut(auth)} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword}
+    return <ParentPortalApp family={currentFamily} onSignOut={async () => { if (authUser) { try { await disableNotificationsFor(authUser.uid); } catch { /* best-effort */ } } return signOut(auth); }} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword}
       canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} />;
   }
 
@@ -6437,11 +6503,12 @@ function ChildDailyLogView({ link, onBack }) {
 // Self-contained, like ChildDailyLogView — fetches directly by classId rather than depending on
 // ClassApp's own closures, since a parent isn't inside any one class's context and may have
 // children in several different classes at once.
-function ParentBlogView({ link, family, onBack }) {
+function ParentBlogView({ link, family, onBack, isRealActiveTab }) {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState([]);
   const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [lightboxIndex, setLightboxIndex] = useState(null);
+  const bottomRef = useRef(null);
   const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
   const authorName = family.name || "A family";
 
@@ -6459,6 +6526,17 @@ function ParentBlogView({ link, family, onBack }) {
     });
     return () => { cancelled = true; };
   }, [link.classId]);
+
+  // Lands on the newest post automatically, so a parent never has to scroll down to reach it —
+  // but only for the genuinely real, settled tab. isRealActiveTab is false while this is only
+  // rendering as a live preview of wherever an in-progress swipe is headed, which is exactly the
+  // case that used to cause a visible jump: that preview pane's own data load could finish and
+  // fire this scroll before the swipe had even committed to landing on Blog at all, and doing so
+  // moves the actual page itself, not some contained corner of it. Smooth rather than an instant
+  // jump, so arriving at the bottom reads as a deliberate landing rather than another jolt.
+  useEffect(() => {
+    if (!loading && isRealActiveTab) bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [loading, isRealActiveTab]);
 
   const persist = (next) => { setPosts(next); saveJSON(`class:${link.classId}:blogPosts`, next, true); };
 
@@ -6539,6 +6617,7 @@ function ParentBlogView({ link, family, onBack }) {
           </div>
         </>
       )}
+      <div ref={bottomRef} />
       {lightboxIndex !== null && allMedia[lightboxIndex] && (
         <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
           mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
@@ -6655,14 +6734,15 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
   }, [measureAndFit]);
 
   return (
-    // Sticky, not just sitting in the normal scroll flow — on a long blog feed or a homework list,
-    // switching to a different child previously meant scrolling all the way back up first just to
-    // reach this bar again. The top offset accounts for both the sticky header above it (measured
-    // directly: logo row + tab row together render at 122px) and env(safe-area-inset-top), which
-    // varies by device (a notch adds real height to that header above, so a fixed number alone
-    // would drift out of sync with it on exactly the phones most likely to need it).
-    <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4 sticky z-[15]"
-      style={{ top: "calc(env(safe-area-inset-top) + 122px)" }}>
+    // No longer sticky itself — this now lives inside the main header, which is already sticky at
+    // the page level, so a second, independent sticky position here would just be redundant. This
+    // is also exactly what fixes a real bug the old placement had: during an active swipe,
+    // renderTabContent runs twice at once (the real tab, and a live preview of wherever the drag
+    // is headed), and each one was rendering its OWN sticky copy of this bar independently — which
+    // is what produced two overlapping bars mid-drag instead of one settled one. A single instance
+    // living in the header can't be duplicated that way, and never moves during a swipe at all,
+    // since it was never part of the swiped content to begin with.
+    <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden">
       {displayLabels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
           className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
@@ -6676,20 +6756,13 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
 // Split out from an inline expression specifically so it can use its own effect — marking a
 // class's blog as read has to happen when THAT class is actually the one being looked at, and
 // needs to re-fire every time the switcher changes which one that is.
-function ParentBlogTabContent({ uniqueClasses, selectedIndex, onSelectIndex, family, onMarkRead }) {
+function ParentBlogTabContent({ uniqueClasses, selectedIndex, family, onMarkRead, isRealActiveTab }) {
   const selectedLink = uniqueClasses[selectedIndex] || uniqueClasses[0];
   useEffect(() => {
     if (selectedLink) onMarkRead(selectedLink.classId);
   }, [selectedLink?.classId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return (
-    <div>
-      {uniqueClasses.length > 1 && (
-        <ChildSwitcher labels={uniqueClasses.map((l) => l.studentName)} selectedIndex={selectedIndex} onSelect={onSelectIndex} />
-      )}
-      <ParentBlogView link={selectedLink} family={family} />
-    </div>
-  );
+  return <ParentBlogView link={selectedLink} family={family} isRealActiveTab={isRealActiveTab} />;
 }
 
 // Per-child, not per-class like the blog switcher above — a parent thinks "my daughter's
@@ -6796,20 +6869,13 @@ function HomeworkPreviewCard({ link, onSeeAll }) {
 }
 
 
-function ParentHomeworkTabContent({ links, selectedIndex, onSelectIndex, onMarkRead }) {
+function ParentHomeworkTabContent({ links, selectedIndex, onMarkRead }) {
   const selectedLink = links[selectedIndex] || links[0];
   useEffect(() => {
     if (selectedLink) onMarkRead(selectedLink.classId);
   }, [selectedLink?.classId, selectedLink?.studentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return (
-    <div>
-      {links.length > 1 && (
-        <ChildSwitcher labels={links.map((l) => l.studentName)} selectedIndex={selectedIndex} onSelect={onSelectIndex} />
-      )}
-      <ParentHomeworkView link={selectedLink} />
-    </div>
-  );
+  return <ParentHomeworkView link={selectedLink} />;
 }
 
 // A small reusable numbered pill — same shape every place a tab needs to show "N new things,"
@@ -7170,6 +7236,24 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     refreshUnreadHomeworkCount();
   };
 
+  // The app icon's own badge count — separate from an actual popup notification, and previously
+  // never set at all (neither here nor in the service worker), so the icon itself never reflected
+  // whether there was anything unread. This is what makes it self-correcting rather than just an
+  // increment-on-arrival counter that could drift out of sync with reality: every time any of the
+  // three unread counts actually changes, for any reason (a new message arrives, something gets
+  // marked read, a whole thread gets dismissed), the badge is recomputed from scratch against
+  // this account's own genuinely current unread state and set to match exactly — cleared
+  // entirely, via clearAppBadge, only when the true total is zero.
+  useEffect(() => {
+    if (!("setAppBadge" in navigator)) return;
+    const total = unreadThreads.length + unreadBlogCount + unreadHomeworkCount;
+    try {
+      if (total > 0) navigator.setAppBadge(total);
+      else navigator.clearAppBadge();
+    } catch { /* Badging API not available on this platform — nothing to fall back to */ }
+    resetBackgroundBadgeCounter();
+  }, [unreadThreads.length, unreadBlogCount, unreadHomeworkCount]);
+
   const dismissUnread = async (item) => {
     await markThreadRead(family.uid, item.threadKey);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
@@ -7439,11 +7523,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   if (messagingTeacherUid) {
     const activeTeacher = (eligibleTeachers || []).find((t) => t.uid === messagingTeacherUid);
     const teacherName = activeTeacher?.name || "the teacher";
-    const teacherLabel = activeTeacher?.label;
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ConversationThreadView title={teacherName} subtitle={teacherLabel ? `Direct message · ${teacherLabel}` : "Direct message"} messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
+        {/* No label here, deliberately — the same teacher can show a different label per child
+            (their role genuinely differs by classroom), but this is the one single conversation
+            with them regardless of which child's context led here, so showing whichever label
+            happened to be picked would read as contradicting whichever one the person actually
+            tapped through from. */}
+        <ConversationThreadView title={teacherName} subtitle="Direct message" messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
           onBack={() => window.history.back()}
           onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }} />
       </div>
@@ -7467,7 +7555,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       // tabToRender` shadows the outer parentTab for everything inside this function only — every
       // existing `parentTab === "..."` check below this point keeps working unchanged, now reading
       // whichever tab was actually passed in rather than always the live one.
+      // Captured under its own name here, before renderTabContent's own internal `const parentTab
+      // = tabToRender` has a chance to shadow it — referencing the plain name `parentTab` from
+      // inside that function, even on the line right before its own local declaration, hits its
+      // temporal dead zone and throws, it does not fall through to this outer value the way a
+      // different-named capture like this one does.
+      const committedParentTab = parentTab;
       const renderTabContent = (tabToRender) => {
+        // True only for the genuinely current, settled screen — false for a live preview of
+        // wherever an in-progress swipe is headed. That distinction matters for anything that
+        // should only ever happen once, for the real thing, on arrival — like the blog jumping to
+        // its newest post, which used to fire from the preview pane too, before the swipe had even
+        // committed to anything.
+        const isRealActiveTab = tabToRender === committedParentTab;
         const parentTab = tabToRender;
         return (
         parentTab === "settings" ? (
@@ -7582,24 +7682,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           );
           return (
           <div className="space-y-5">
-            {uniqueChildren.length > 1 && (
-              <ChildSwitcher labels={uniqueChildren.map((l) => l.studentName)} selectedIndex={selectedMessagesChildIndex}
-                onSelect={(i) => setSelectedStudentId(uniqueChildren[i]?.studentId)} />
-            )}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wide text-[#5F9F9E]/80 mb-2 px-1">Classes</p>
               <div className="space-y-3">
-                <button onClick={() => openAdminMessages().then(refreshUnreadThreads)}
-                  className="w-full text-left bg-white border-2 border-[#5F9F9E]/20 rounded-xl p-4 flex items-center justify-between hover:border-[#5F9F9E]">
-                  <div>
-                    <p className="font-semibold text-stone-900">School Office</p>
-                    <p className="text-xs text-stone-400">Message the office directly</p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0 ml-2">
-                    {unreadThreads.some((t) => t.kind === "admin") && <span className="w-2 h-2 rounded-full bg-[#5F9F9E]" />}
-                    <ChevronRight size={16} className="text-stone-300" />
-                  </div>
-                </button>
                 {filteredClasses.map((l) => (
                   <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
                     className="w-full text-left bg-white border-2 border-[#5F9F9E]/20 rounded-xl p-4 flex items-center justify-between hover:border-[#5F9F9E]">
@@ -7637,12 +7722,20 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
                 <div className="space-y-3">
-                  {filteredTeachers.map((t) => (
+                  {filteredTeachers.map((t) => {
+                    // Whichever of THIS teacher's labels matches one of the selected child's own
+                    // classes — a teacher whose admin-assigned role genuinely differs by classroom
+                    // (Judaic Studies for one of a family's kids, General Studies for another)
+                    // shows each child their own correct title here, on the outside, while still
+                    // opening the exact same single conversation either way once tapped: the label
+                    // is never part of the thread itself, only of how this list describes it.
+                    const contextualLabel = selectedChildClassIds.map((id) => t.labelsByClassId?.[id]).find((l) => l) || t.label;
+                    return (
                     <button key={t.uid} onClick={() => openTeacherMessages(t.uid).then(refreshUnreadThreads)}
                       className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
                       <div>
                         <p className="font-semibold text-stone-900">{t.name}</p>
-                        {t.label && <p className="text-xs font-semibold text-[#5F9F9E]">{t.label}</p>}
+                        {contextualLabel && <p className="text-xs font-semibold text-[#5F9F9E]">{contextualLabel}</p>}
                         <p className="text-xs text-stone-400">Message goes only to {t.name}</p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0 ml-2">
@@ -7650,7 +7743,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                         <ChevronRight size={16} className="text-stone-300" />
                       </div>
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -7676,8 +7770,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             const blogIndex = selectedChildLink ? uniqueClasses.findIndex((c) => c.classId === selectedChildLink.classId) : -1;
             return (
               <ParentBlogTabContent uniqueClasses={uniqueClasses} selectedIndex={blogIndex >= 0 ? blogIndex : 0}
-                onSelectIndex={(i) => setSelectedStudentId(uniqueClasses[i]?.studentId)}
-                family={family} onMarkRead={markBlogRead} />
+                family={family} onMarkRead={markBlogRead} isRealActiveTab={isRealActiveTab} />
             );
           })()
         ) : parentTab === "homework" ? (
@@ -7689,7 +7782,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
             ) : (
               <ParentHomeworkTabContent links={elementaryLinks} selectedIndex={findChildIndex(elementaryLinks, selectedStudentId)}
-                onSelectIndex={(i) => setSelectedStudentId(elementaryLinks[i]?.studentId)}
                 onMarkRead={markHomeworkRead} />
             );
           })()
@@ -7723,10 +7815,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               </div>
             ) : (
               <>
-                {fullTimeStudentLinks.length > 1 && (
-                  <ChildSwitcher labels={fullTimeStudentLinks.map((l) => l.studentName)} selectedIndex={findChildIndex(fullTimeStudentLinks, selectedStudentId)}
-                    onSelect={(i) => setSelectedStudentId(fullTimeStudentLinks[i]?.studentId)} />
-                )}
                 {(() => {
                   const link = fullTimeStudentLinks[findChildIndex(fullTimeStudentLinks, selectedStudentId)] || fullTimeStudentLinks[0];
                   const isPreschoolChild = link.classType === "preschool";
@@ -7789,6 +7877,48 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         )
         );
       };
+  // The one child-switcher bar, computed here (against the real, committed parentTab — never
+  // tabToRender) so a single instance can live in the fixed header instead of inside each tab's
+  // own swipeable content, where it used to get rendered twice at once during an active swipe
+  // (once for the real tab, once for the live preview of wherever the drag was headed) and
+  // produce two overlapping bars instead of one settled one. Living here means it can't be
+  // duplicated that way, and it never moves during a swipe at all — it was never part of the
+  // swiped content to begin with. null whenever the current tab has nothing to switch between
+  // (only one child, data still loading, or a tab with no such concept at all, like Settings).
+  const activeSwitcherConfig = (() => {
+    if (parentTab === "home" || parentTab === "homework") {
+      if (!fullTimeStudentLinks) return null;
+      const links = parentTab === "homework" ? fullTimeStudentLinks.filter((l) => l.classType !== "preschool") : fullTimeStudentLinks;
+      if (links.length <= 1) return null;
+      return {
+        labels: links.map((l) => l.studentName),
+        selectedIndex: findChildIndex(links, selectedStudentId),
+        onSelect: (i) => setSelectedStudentId(links[i]?.studentId),
+      };
+    }
+    if (parentTab === "blog") {
+      if (!fullTimeStudentLinks) return null;
+      const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
+      if (uniqueClasses.length <= 1) return null;
+      const selectedChildLink = fullTimeStudentLinks.find((l) => l.studentId === selectedStudentId);
+      const blogIndex = selectedChildLink ? uniqueClasses.findIndex((c) => c.classId === selectedChildLink.classId) : -1;
+      return {
+        labels: uniqueClasses.map((l) => l.studentName),
+        selectedIndex: blogIndex >= 0 ? blogIndex : 0,
+        onSelect: (i) => setSelectedStudentId(uniqueClasses[i]?.studentId),
+      };
+    }
+    if (parentTab === "messages") {
+      const uniqueChildren = [...new Map((family?.studentLinks || []).map((l) => [l.studentId, l])).values()];
+      if (uniqueChildren.length <= 1) return null;
+      return {
+        labels: uniqueChildren.map((l) => l.studentName),
+        selectedIndex: findChildIndex(uniqueChildren, selectedStudentId),
+        onSelect: (i) => setSelectedStudentId(uniqueChildren[i]?.studentId),
+      };
+    }
+    return null;
+  })();
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
@@ -7841,6 +7971,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 unreadHomeworkCount={unreadHomeworkCount} showHomework={(fullTimeStudentLinks || []).some((l) => l.classType !== "preschool")} />
             </div>
           </TourHint>
+        )}
+        {activeSwitcherConfig && (
+          <div className="max-w-lg mx-auto px-3 pb-3">
+            <ChildSwitcher labels={activeSwitcherConfig.labels} selectedIndex={activeSwitcherConfig.selectedIndex} onSelect={activeSwitcherConfig.onSelect} />
+          </div>
         )}
       </div>
 
@@ -11125,7 +11260,10 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
         for (const sid of selectedStudentIds) {
           const match = allFamilies.find((f) => (f.studentLinks || []).some((l) => l.studentId === sid && l.classId === classId));
           if (!match) continue; // eslint-disable-line no-continue
-          await sendMessageToFamily(match.familyGroupId || match.uid, caption, attachments); // eslint-disable-line no-await-in-loop
+          // This specific guardian's own uid — not familyGroupId, which would silently misroute
+          // to whichever guardian happens to be that shared group's "primary" instead of the one
+          // actually matched here, the same class of bug the broadcast tool below this one had.
+          await sendMessageToFamily(match.uid, caption, attachments); // eslint-disable-line no-await-in-loop
         }
       }
       setSent(true);
@@ -18928,11 +19066,16 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
         }
       }
       const relevant = await fetchClassFamilies(classId);
-      const groupIds = new Set(relevant.map((f) => f.familyGroupId || f.uid));
-      for (const groupId of groupIds) {
-        await sendMessageToFamily(groupId, draft.trim(), attachmentUrl ? [{ url: attachmentUrl, type: attachType, name: attachType === "file" ? attachFile.name : null }] : []); // eslint-disable-line no-await-in-loop
+      // Every individual GUARDIAN's own uid — not familyGroupId, which was silently collapsing a
+      // two-guardian family down to just one recipient here: both guardians share the same group
+      // id, so deduplicating by it (rather than by each guardian's own uid) meant the second
+      // guardian's own private thread never received this broadcast at all, not merely a
+      // duplicate-avoidance step gone slightly too far.
+      const uids = new Set(relevant.map((f) => f.uid));
+      for (const familyUid of uids) {
+        await sendMessageToFamily(familyUid, draft.trim(), attachmentUrl ? [{ url: attachmentUrl, type: attachType, name: attachType === "file" ? attachFile.name : null }] : []); // eslint-disable-line no-await-in-loop
       }
-      setSentInAppTo(groupIds.size);
+      setSentInAppTo(uids.size);
     } catch (err) {
       setAttachError(describeUploadError(err));
     }

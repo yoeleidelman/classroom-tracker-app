@@ -131,6 +131,17 @@ export default async function handler(req, res) {
     const relevantClassIds = [...new Set([...eligibleViaClassIds, ...eligibleViaClassTypes])];
     if (relevantClassIds.length === 0) return;
     const label = relevantClassIds.map((id) => labelsByClassId[id]?.[t.uid]).find((l) => l && l.trim()) || "";
+    // Per-class, not collapsed to one value the way `label` above is — a teacher whose own admin-
+    // assigned role genuinely differs by classroom (Judaic Studies for one of this family's kids,
+    // General Studies for another) needs the app to show each child their own correct label, not
+    // whichever one happened to be found first across every class this person is reachable
+    // through. The conversation itself is unaffected either way — it's keyed by this teacher and
+    // this guardian alone, never by class or label, so a parent always lands in the exact same
+    // single thread with this person regardless of which child's label led them there; only what's
+    // shown on the outside, before that tap, is meant to vary.
+    const labelsByClassIdForTeacher = Object.fromEntries(
+      relevantClassIds.map((id) => [id, labelsByClassId[id]?.[t.uid] || ""]).filter(([, l]) => l)
+    );
     // One of the teacher's OWN assigned classes (not necessarily one shared with this family) —
     // needed only so a tapped notification can deep-link into that teacher's app at all, since
     // entering some class of theirs is a prerequisite their app has for showing any messages
@@ -152,6 +163,7 @@ export default async function handler(req, res) {
       uid: t.uid, name: t.name, label, deepLinkClassId: assigned[0] || null,
       classIds: eligibleViaClassIds,
       reachableClassTypes: messagingTypes.filter((type) => linkedClassTypes.includes(type)),
+      labelsByClassId: labelsByClassIdForTeacher,
     });
   });
 
