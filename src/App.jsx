@@ -7752,7 +7752,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 account this is (their own initials, always visible) and is the way into account
                 settings (same destination the gear used to open), freeing the whole center of the
                 header instead of needing its own dedicated space for a name that could run long. */}
-            <button onClick={() => navigateParentTab("settings")} aria-label="Account settings"
+            <button onClick={() => navigateParentTab(parentTab === "settings" ? "home" : "settings")} aria-label="Account settings"
               className="w-9 h-9 rounded-full bg-[#5F9F9E] text-white text-xs font-bold flex items-center justify-center hover:bg-[#508786] shrink-0">
               {getInitials(family?.name)}
             </button>
