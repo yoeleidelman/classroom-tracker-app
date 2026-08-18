@@ -752,6 +752,44 @@ function useVisualViewportHeight() {
   return height;
 }
 
+// "Sticks" to the bottom of a scrollable feed the way a real chat app does — not a one-time jump
+// on arrival, but staying pinned there through anything that changes the content's height
+// afterward (a web font finishing its swap-in, a reaction count settling in, an image's real
+// dimensions replacing its reserved aspect-ratio box by a pixel or two), for as long as the
+// person hasn't taken control by scrolling themselves. This is what a single scrollIntoView call
+// on mount can't cover: it lands correctly for the content that exists at that exact instant, but
+// anything that grows the content afterward silently leaves that old position short of the real
+// bottom — which is exactly what reads as "close, but a small jump happens when you touch it."
+// containerRef is the scrollable element itself (whose scrollTop this sets); contentRef is
+// whatever's actually growing inside it — needed separately because the scrollable element's OWN
+// box stays a fixed height (that's what makes it scrollable at all), so watching it directly would
+// never see the resize that watching its content does. resetKey re-arms "stuck" mode fresh
+// whenever it changes (switching to a different conversation or class, say), so a person who
+// scrolled up while reading an old thread doesn't stay "unstuck" once they've moved to a new one
+// that deserves to open at its own bottom again.
+function useStickToBottom(containerRef, contentRef, resetKey) {
+  const stuckRef = useRef(true);
+  useLayoutEffect(() => {
+    stuckRef.current = true;
+    const container = containerRef.current;
+    const content = contentRef.current;
+    if (!container || !content) return;
+    const jump = () => { if (stuckRef.current) container.scrollTop = container.scrollHeight; };
+    jump();
+    const observer = new ResizeObserver(jump);
+    observer.observe(content);
+    const onScroll = () => {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      stuckRef.current = distanceFromBottom < 40; // small tolerance for sub-pixel rounding
+    };
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      observer.disconnect();
+      container.removeEventListener("scroll", onScroll);
+    };
+  }, [resetKey]); // eslint-disable-line react-hooks/exhaustive-deps
+}
+
 // A program's roster is never stored on its own — it's always the current combined roster
 // of whichever classes are members, so adding or removing a student from a member class
 // automatically shows up here too, with no separate list to keep in sync.
@@ -5953,7 +5991,12 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   const [openActionsFor, setOpenActionsFor] = useState(null); // message id whose Edit/Delete menu is open
   const [editingId, setEditingId] = useState(null);
   const [editDraft, setEditDraft] = useState("");
-  const bottomRef = useRef(null);
+  // scrollContainerRef is the scrollable message list itself; contentRef is what's actually
+  // growing inside it (an image settling into its final size, a font swapping in) — see
+  // useStickToBottom for why both are needed to genuinely land at, and stay at, the true bottom
+  // rather than wherever it happened to be at the exact instant of the first message rendering.
+  const scrollContainerRef = useRef(null);
+  const contentRef = useRef(null);
   const composerRef = useRef(null);
   // iOS Safari in particular doesn't shrink the layout viewport when the keyboard opens — it
   // keeps the page the same overall size and just overlays the keyboard on top. A static 100vh
@@ -5974,14 +6017,11 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
     return () => { window.__activeContent = { ...(window.__activeContent || {}), threadKey: null }; };
   }, [threadKey]);
 
-  // Lands already at the newest message the instant this screen is visible — useLayoutEffect,
-  // not useEffect, is what makes that true: useEffect runs after the browser has already painted,
-  // so for one visible frame the page would show wherever it started (the top) before jumping,
-  // which reads as an awkward flash or slide even without a smooth animation attached to it.
-  // useLayoutEffect runs synchronously before that paint happens, so the very first frame the
-  // person actually sees already reflects the scrolled position — there's nothing to visibly
-  // adjust because the "before" state was never painted at all.
-  useLayoutEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [messages.length]);
+  // Lands already at the newest message the instant this screen is visible, and — unlike a single
+  // scrollIntoView on mount — stays there through anything that grows the list afterward (an
+  // image's real size replacing its reserved box, a font swapping in), not just a one-time jump
+  // that can drift stale the moment anything after it changes height.
+  useStickToBottom(scrollContainerRef, contentRef, threadKey);
 
   // Grows with what's actually being typed, the way most messaging apps handle this, instead of
   // staying pinned to one line and forcing a scroll inside a tiny box to see what you've written.
@@ -6128,7 +6168,8 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
         )}
       </div>
 
-      <div className="flex-1 space-y-2 overflow-y-auto mb-3">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto no-scrollbar mb-3">
+        <div ref={contentRef} className="space-y-2">
         {messages.length === 0 && (
           <p className="text-sm text-stone-400 text-center py-8">No messages yet — say hello.</p>
         )}
@@ -6260,7 +6301,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
             </Fragment>
           );
         })}
-        <div ref={bottomRef} />
+        </div>
       </div>
 
       {lightboxPhoto && <PhotoLightbox url={lightboxPhoto.url} onClose={() => setLightboxPhoto(null)} />}
@@ -6550,7 +6591,12 @@ function ParentBlogView({ link, family, onBack }) {
   const [posts, setPosts] = useState([]);
   const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [lightboxIndex, setLightboxIndex] = useState(null);
-  const bottomRef = useRef(null);
+  // scrollContainerRef is the scrollable region itself; contentRef is what's actually growing
+  // inside it (images settling into their final size, fonts swapping in) — see useStickToBottom
+  // for why both are needed to genuinely land at, and stay at, the true bottom rather than
+  // wherever it happened to be at the exact instant of the first scroll.
+  const scrollContainerRef = useRef(null);
+  const contentRef = useRef(null);
   // Bounds this view to exactly the visible height and makes its own post list independently
   // scrollable within that — see the matching reasoning just below, on why that's what actually
   // lets this land at the bottom with zero visible adjustment, during a swipe included, not just
@@ -6574,22 +6620,13 @@ function ParentBlogView({ link, family, onBack }) {
     return () => { cancelled = true; };
   }, [link.classId]);
 
-  // Lands on the newest post the instant this screen is actually visible — not scrolled down
-  // after arrival, but already there for the very first frame the person sees, during an
-  // in-progress swipe included, not just on a direct tap. That last part is exactly why this no
-  // longer guards on isRealActiveTab the way it used to: this view's own post list is now its own
-  // independently-scrollable region (see the bounded-height wrapper below), not something that
-  // moves the page itself — so a live preview pane sliding in during a swipe can safely land at
-  // its own bottom immediately too, without touching whatever the person is still actually looking
-  // at. useLayoutEffect, not useEffect, is what removes the jolt on real arrival — useEffect runs
-  // after the browser paints, so the top of the feed would flash for one frame before jumping;
-  // useLayoutEffect runs before that paint, so there's nothing "before" to see at all. No smooth
-  // animation either, for the same reason — an animated glide is still a visible adjustment
-  // happening in front of the person, exactly what this is meant to avoid, not a gentler version
-  // of it.
-  useLayoutEffect(() => {
-    if (!loading) bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [loading]);
+  // Lands on the newest post the instant this screen is actually visible, and — unlike a single
+  // scrollIntoView on mount — stays there through anything that grows the feed afterward (an
+  // image's real size replacing its reserved box, a font swapping in), during an in-progress swipe
+  // included, not just on a direct tap. Safe to run immediately even as a live swipe-preview pane,
+  // since this view's own post list is its own independently-scrollable region, not something that
+  // moves the page itself.
+  useStickToBottom(scrollContainerRef, contentRef, link.classId);
 
   const persist = (next) => { setPosts(next); saveJSON(`class:${link.classId}:blogPosts`, next, true); };
 
@@ -6661,23 +6698,24 @@ function ParentBlogView({ link, family, onBack }) {
           its own bottom never touches window scroll, so it's safe to do immediately, even while
           this is only rendering as a preview of wherever an in-progress swipe is headed and some
           other tab is still the one actually on screen. */}
-      <div className="flex-1 overflow-y-auto">
-        {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-        {!loading && sorted.length === 0 && (
-          <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
-        )}
-        {!loading && sorted.length > 0 && (
-          <>
-            <p className="text-center text-[11px] text-stone-400 mb-4">Beginning of the class blog</p>
-            <div className="space-y-4">
-              {sorted.map((post) => (
-                <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
-                  commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
-              ))}
-            </div>
-          </>
-        )}
-        <div ref={bottomRef} />
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto no-scrollbar">
+        <div ref={contentRef}>
+          {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+          {!loading && sorted.length === 0 && (
+            <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
+          )}
+          {!loading && sorted.length > 0 && (
+            <>
+              <p className="text-center text-[11px] text-stone-400 mb-4">Beginning of the class blog</p>
+              <div className="space-y-4">
+                {sorted.map((post) => (
+                  <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
+                    commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </div>
       {lightboxIndex !== null && allMedia[lightboxIndex] && (
         <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
