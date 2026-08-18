@@ -17328,6 +17328,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
   const [editStart, setEditStart] = useState("");
   const [editEnd, setEditEnd] = useState("");
   const [pendingCascade, setPendingCascade] = useState(null); // { delta, items: [{id,label,newStart,newEnd}] }
+  const [expandedSegId, setExpandedSegId] = useState(null); // which segment's imported lesson list is shown, if any
 
   // Every subject from Settings gets a row automatically — no separate "add it to Benchmarks"
   // step. A row is "virtual" (benchmarkSubjectId: null) until its first segment is added, at
@@ -17473,7 +17474,9 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
               // Per-subject color progression, tracked across this whole batch — otherwise every
               // brand-new subject discovered in the same document would start its very first
               // segment at the same color, and a subject that already has segments would ignore
-              // how many it's got and restart from the beginning of the color list too.
+              // how many it's got and restart from the beginning of the color list too. Only
+              // actually used as a fallback now — extracted color from the document itself always
+              // wins when the source had real color-coding to preserve.
               const usedCounts = {};
               items.filter((it) => it.subject && it.subject.trim()).forEach((it) => {
                 const subjKey = it.subject.trim().toLowerCase();
@@ -17481,7 +17484,11 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
                 const baseCount = existingSubj?.segments.length || 0;
                 const usedSoFar = usedCounts[subjKey] || 0;
                 usedCounts[subjKey] = usedSoFar + 1;
-                const newSeg = { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(baseCount + usedSoFar) % COLOR_CHOICES.length] };
+                const newSeg = {
+                  label: it.label, startDate: it.start, endDate: it.end,
+                  color: it.color || COLOR_CHOICES[(baseCount + usedSoFar) % COLOR_CHOICES.length],
+                  lessons: it.lessons || [],
+                };
                 addSegmentBySubjectLabel(it.subject.trim(), newSeg);
               });
             }}
@@ -17656,13 +17663,36 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
             <ul className="space-y-1.5 mb-4">
               {active.segments.length === 0 && <li className="text-xs text-stone-400">No segments yet — add your first benchmark period below.</li>}
               {active.segments.map((seg) => (
-                <li key={seg.id} className="flex items-center justify-between bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-xs">
-                  <button onClick={() => openEditSegment(seg)} className="flex items-center gap-2 text-left hover:opacity-70">
-                    <span className={`w-2.5 h-2.5 rounded-full bg-${seg.color}-400 shrink-0`} />
-                    <span className="font-medium text-stone-700">{seg.label}</span>
-                    <span className="text-stone-400">{seg.startDate} → {seg.endDate}</span>
-                  </button>
-                  <ConfirmDelete onConfirm={() => removeSegment(active.benchmarkSubjectId, seg.id)} size={13} />
+                <li key={seg.id} className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <button onClick={() => openEditSegment(seg)} className="flex items-center gap-2 text-left hover:opacity-70 min-w-0">
+                      <span className={`w-2.5 h-2.5 rounded-full bg-${seg.color}-400 shrink-0`} />
+                      <span className="font-medium text-stone-700 truncate">{seg.label}</span>
+                      <span className="text-stone-400 shrink-0">{seg.startDate} → {seg.endDate}</span>
+                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {seg.lessons && seg.lessons.length > 0 && (
+                        <button onClick={() => setExpandedSegId(expandedSegId === seg.id ? null : seg.id)} className="text-[11px] font-semibold text-teal-700 hover:underline">
+                          {seg.lessons.length} lesson{seg.lessons.length === 1 ? "" : "s"} {expandedSegId === seg.id ? "▲" : "▼"}
+                        </button>
+                      )}
+                      <ConfirmDelete onConfirm={() => removeSegment(active.benchmarkSubjectId, seg.id)} size={13} />
+                    </div>
+                  </div>
+                  {/* Read-only here — this is for seeing what got imported, not re-editing it after
+                      the fact. Adjusting a lesson title or date is what the review step during
+                      import is for, while the information is still fresh and easy to compare
+                      against the source document; this is just the record of what was confirmed. */}
+                  {expandedSegId === seg.id && seg.lessons && (
+                    <ul className="mt-2 pl-4 border-l-2 border-stone-200 space-y-0.5">
+                      {seg.lessons.map((l) => (
+                        <li key={l.id} className="flex items-baseline gap-2 text-[11px] text-stone-500">
+                          <span className="text-stone-400 shrink-0">{l.date}</span>
+                          <span className="truncate">{l.title}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ul>
@@ -17723,10 +17753,14 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
               </div>
             )}
             {showDocImport && (
-              <DocumentImportPanel mode="benchmark" destinationLabel={active.label}
+              <DocumentImportPanel mode="benchmark" destinationLabel={active.label} existingSegments={active.segments}
                 onApplyBenchmark={(items) => {
                   items.forEach((it, i) => {
-                    const newSeg = { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(active.segments.length + i) % COLOR_CHOICES.length] };
+                    const newSeg = {
+                      label: it.label, startDate: it.start, endDate: it.end,
+                      color: it.color || COLOR_CHOICES[(active.segments.length + i) % COLOR_CHOICES.length],
+                      lessons: it.lessons || [],
+                    };
                     if (active.benchmarkSubjectId) addSegment(active.benchmarkSubjectId, newSeg);
                     else addSegmentBySubjectLabel(active.label, newSeg);
                   });
@@ -17740,13 +17774,14 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
   );
 }
 
-function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCalendar, onApplyBenchmark, onClose }) {
+function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, existingSegments, onApplyCalendar, onApplyBenchmark, onClose }) {
   const [rawText, setRawText] = useState("");
   const [pdfBase64, setPdfBase64] = useState(null);
   const [fileName, setFileName] = useState("");
   const [extracting, setExtracting] = useState(false);
   const [items, setItems] = useState(null); // null = not extracted yet
   const [error, setError] = useState("");
+  const [expandedId, setExpandedId] = useState(null); // which item's lesson list is open, if any
 
   const handleFile = (file) => {
     if (!file) return;
@@ -17773,25 +17808,49 @@ function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCa
   const extract = async () => {
     setExtracting(true); setError(""); setItems(null);
     try {
+      // The exact 9 names the app's own color palette supports — anything else silently fails to
+      // render at all (a build-time Tailwind constraint, not a runtime choice), so the model is
+      // told the closed list directly rather than allowed to invent shades of its own.
+      const colorNames = COLOR_CHOICES.join(", ");
+      const lessonSchemaNote = `Read through the ENTIRE document, every page — do not stop partway through, even if it's long. Extract EVERY individual dated lesson or activity entry, not just a summary of the ranges. For each one, capture its own date and a short title. If the document uses color-coding (distinct background or text colors per entry — this only applies to an actual visual document like a PDF, never to plain text), map each color you see to the single closest name from this exact list: ${colorNames}. Entries that share a visual color must get the same mapped name; omit "color" entirely for any entry with no visible color-coding. Then GROUP the individual dated entries into logical segments — a segment is a unit, week, or pacing period that several consecutive, related entries belong to (contiguous dates, matching color, and/or a shared topic in their titles are all signals of the same segment). Every single dated entry in the document must end up inside some segment's "lessons" array — none should be dropped or summarized away.`;
       const instructions = mode === "calendar"
         ? `Extract every distinct date range and its school status from this document. Valid statuses are exactly: ${dayTypeOptions.map((t) => t.id).join(", ")}. Infer the closest matching status from context (a holiday or break = "no-school", an early dismissal = "half-day" if that option exists, a late start = "late-start" if that option exists, otherwise pick the closest available option). Output ONLY a JSON array, no other text, no markdown fences: [{"start":"YYYY-MM-DD","end":"YYYY-MM-DD","status":"...","label":"short description"}]. Use the same date for "start" and "end" if it's a single day.`
         : multiSubject
-          ? `This document covers pacing/benchmarks for MULTIPLE different subjects. Extract every distinct benchmark, unit, or pacing period, its date range, AND which subject it belongs to. Output ONLY a JSON array, no other text, no markdown fences: [{"subject":"short subject name, e.g. Math or Chumash","start":"YYYY-MM-DD","end":"YYYY-MM-DD","label":"short name of this unit/benchmark"}]`
-          : `Extract every distinct benchmark, unit, or pacing period and its date range from this document. Output ONLY a JSON array, no other text, no markdown fences: [{"start":"YYYY-MM-DD","end":"YYYY-MM-DD","label":"short name of this unit/benchmark"}]`;
+          ? `This document covers pacing/benchmarks for MULTIPLE different subjects. ${lessonSchemaNote} Also identify which subject each segment belongs to. Output ONLY a JSON array, no other text, no markdown fences, in exactly this shape: [{"subject":"short subject name, e.g. Math or Chumash","label":"short name of this unit/segment, e.g. Unit 3: Fractions","start":"YYYY-MM-DD","end":"YYYY-MM-DD","color":"one of the exact names above, or omit","lessons":[{"date":"YYYY-MM-DD","title":"short lesson title"}]}]`
+          : `${lessonSchemaNote} Output ONLY a JSON array, no other text, no markdown fences, in exactly this shape: [{"label":"short name of this unit/segment, e.g. Unit 3: Fractions","start":"YYYY-MM-DD","end":"YYYY-MM-DD","color":"one of the exact names above, or omit","lessons":[{"date":"YYYY-MM-DD","title":"short lesson title"}]}]`;
       const content = pdfBase64
         ? [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } }, { type: "text", text: instructions }]
         : `${instructions}\n\nDocument text:\n${rawText}`;
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: await authHeaders(),
-        body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 2000, messages: [{ role: "user", content }] }),
+        // A full school year of individual dated lessons, each nested inside its own segment, can
+        // run well past what the old 2000-token ceiling allowed — that ceiling cut the response off
+        // mid-document, which is exactly what read as "only extracting from the first page" (the
+        // model saw everything; its own answer just got truncated before it could list the rest).
+        // 16000 comfortably covers even a detailed full-year calendar, and there's no cost or
+        // rate-limit downside to leaving real headroom unused when a document is shorter.
+        body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 16000, messages: [{ role: "user", content }] }),
       });
       const data = await response.json();
       const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
       const cleaned = text.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+      // A response that was itself cut off mid-generation (hitting even the raised ceiling on a
+      // truly enormous document) fails JSON.parse below with a clear signal here, rather than
+      // silently keeping whatever partial array text happened to parse — better to tell the
+      // teacher honestly than to quietly hand back an incomplete import.
+      if (data.stop_reason === "max_tokens") {
+        setError("This document is larger than one pass can fully read — try splitting it into smaller files (e.g. one per term) and importing each separately.");
+        return;
+      }
       const parsed = JSON.parse(cleaned);
       if (!Array.isArray(parsed) || parsed.length === 0) { setError("Nothing recognizable was found in this document."); setItems(null); }
-      else setItems(parsed.map((p) => ({ ...p, id: uid() })));
+      else setItems(parsed.map((p) => ({
+        ...p,
+        id: uid(),
+        color: COLOR_CHOICES.includes(p.color) ? p.color : null, // null = not extracted, gets auto-assigned on apply
+        lessons: (p.lessons || []).map((l) => ({ ...l, id: uid() })),
+      })));
     } catch (e) {
       setError("Could not read this document — try pasting the text directly instead.");
     } finally {
@@ -17801,6 +17860,25 @@ function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCa
 
   const removeItem = (id) => setItems((prev) => prev.filter((i) => i.id !== id));
   const updateItem = (id, field, value) => setItems((prev) => prev.map((i) => (i.id === id ? { ...i, [field]: value } : i)));
+  const updateLesson = (itemId, lessonId, field, value) => setItems((prev) => prev.map((i) => (
+    i.id !== itemId ? i : { ...i, lessons: i.lessons.map((l) => (l.id === lessonId ? { ...l, [field]: value } : l)) }
+  )));
+  const removeLesson = (itemId, lessonId) => setItems((prev) => prev.map((i) => (
+    i.id !== itemId ? i : { ...i, lessons: i.lessons.filter((l) => l.id !== lessonId) }
+  )));
+  const addLesson = (itemId) => setItems((prev) => prev.map((i) => (
+    i.id !== itemId ? i : { ...i, lessons: [...i.lessons, { id: uid(), date: i.start || todayISO(), title: "" }] }
+  )));
+
+  // Two existing segments overlap this new one if either's start falls inside the other's range —
+  // the standard interval-overlap check. Flagged here, in the same editable review list the
+  // teacher's already using, rather than a separate merge screen: nudging a date by a day or two
+  // to resolve it is the same edit they'd already make for a typo, not a different kind of action
+  // that needs its own UI.
+  const overlappingExisting = (item) => {
+    if (!existingSegments || !item.start || !item.end) return null;
+    return existingSegments.find((s) => item.start <= s.endDate && item.end >= s.startDate) || null;
+  };
 
   const apply = () => {
     if (mode === "calendar") onApplyCalendar(items);
@@ -17843,9 +17921,12 @@ function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCa
           <p className="text-xs font-semibold text-stone-500 uppercase mb-2">
             Review before applying — {items.length} found{destinationLabel ? <> for <span className="normal-case font-semibold text-teal-700">{destinationLabel}</span></> : ""}
           </p>
-          <ul className="space-y-1.5 mb-3 max-h-72 overflow-y-auto">
-            {items.map((it) => (
-              <li key={it.id} className="bg-stone-50 rounded-lg p-2">
+          <ul className="space-y-1.5 mb-3 max-h-96 overflow-y-auto">
+            {items.map((it) => {
+              const conflict = overlappingExisting(it);
+              const isExpanded = expandedId === it.id;
+              return (
+              <li key={it.id} className={`bg-stone-50 rounded-lg p-2 ${conflict ? "border border-amber-300" : ""}`}>
                 {multiSubject && (
                   <input value={it.subject} onChange={(e) => updateItem(it.id, "subject", e.target.value)} placeholder="Subject"
                     className="w-full rounded border border-teal-200 bg-white px-2 py-1 text-xs font-semibold text-teal-700 mb-1.5" />
@@ -17862,8 +17943,47 @@ function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCa
                   )}
                   <button onClick={() => removeItem(it.id)} className="text-stone-300 hover:text-red-500 shrink-0"><Trash2 size={13} /></button>
                 </div>
+
+                {mode === "benchmark" && (
+                  <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                    {/* Color swatches — the exact 9 the app can actually render, so whatever the
+                        model picked (or the teacher picks by hand) is always a real, working
+                        choice, never an arbitrary shade that would silently fail to show up. */}
+                    <div className="flex items-center gap-1">
+                      {COLOR_CHOICES.map((c) => (
+                        <button key={c} onClick={() => updateItem(it.id, "color", c)} title={c}
+                          className={`w-4 h-4 rounded-full bg-${c}-500 ${it.color === c ? "ring-2 ring-offset-1 ring-stone-400" : "opacity-50 hover:opacity-100"}`} />
+                      ))}
+                    </div>
+                    {it.lessons && it.lessons.length > 0 && (
+                      <button onClick={() => setExpandedId(isExpanded ? null : it.id)} className="text-[11px] font-semibold text-teal-700 hover:underline">
+                        {isExpanded ? "Hide" : "Show"} {it.lessons.length} lesson{it.lessons.length === 1 ? "" : "s"} {isExpanded ? "▲" : "▼"}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {conflict && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-1 mt-1.5">
+                    Overlaps existing <strong>{conflict.label}</strong> ({conflict.startDate} → {conflict.endDate}) — adjust the dates above to resolve, or leave as-is to keep both.
+                  </p>
+                )}
+
+                {isExpanded && (
+                  <div className="mt-2 pl-2 border-l-2 border-stone-200 space-y-1">
+                    {it.lessons.map((l) => (
+                      <div key={l.id} className="flex items-center gap-1.5">
+                        <input type="date" value={l.date} onChange={(e) => updateLesson(it.id, l.id, "date", e.target.value)} className="rounded border border-stone-200 px-1.5 py-1 text-[11px]" />
+                        <input value={l.title} onChange={(e) => updateLesson(it.id, l.id, "title", e.target.value)} placeholder="Lesson title" className="flex-1 rounded border border-stone-200 px-2 py-1 text-[11px]" />
+                        <button onClick={() => removeLesson(it.id, l.id)} className="text-stone-300 hover:text-red-500 shrink-0"><Trash2 size={11} /></button>
+                      </div>
+                    ))}
+                    <button onClick={() => addLesson(it.id)} className="text-[11px] font-semibold text-teal-700 flex items-center gap-1 mt-1"><Plus size={11} /> Add lesson</button>
+                  </div>
+                )}
               </li>
-            ))}
+              );
+            })}
           </ul>
           <div className="flex gap-2">
             <button onClick={apply} disabled={items.length === 0} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
