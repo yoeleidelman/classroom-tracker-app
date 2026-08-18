@@ -6568,11 +6568,26 @@ function firstNameOnly(fullName) {
   return parts.length > 1 ? parts.slice(0, -1).join(" ") : (parts[0] || "");
 }
 
+// A family's own name is whatever was typed when the account was created — sometimes an actual
+// person's name ("Sarah Cohen"), sometimes a household-style name ("The Cohen Family"). "The" and
+// "Family" are filtered out either way, since neither is ever the part someone would actually
+// recognize as their own initials — from whatever's left, first-letter-of-first-word plus
+// first-letter-of-last-word (or just the one letter, for a single remaining word).
+function getInitials(fullName) {
+  const stopWords = new Set(["the", "family", "and"]);
+  const words = (fullName || "").trim().split(/\s+/)
+    .map((w) => w.replace(/[^a-zA-Z]/g, ""))
+    .filter((w) => w.length > 0 && !stopWords.has(w.toLowerCase()));
+  if (words.length === 0) return "?";
+  if (words.length === 1) return words[0][0].toUpperCase();
+  return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+}
+
 function ChildSwitcher({ labels, selectedIndex, onSelect }) {
   const containerRef = useRef(null);
   const BASE_PX = 14; // text-sm, the largest size a name is ever shown at
   const MIN_PX = 10; // never shrinks past this, however many children or however long a name
-  const MIN_MARGIN_PX = 10; // guaranteed clear space on either side of every name's own text — enforced twice, once as real CSS padding (so it's a hard floor no measurement error can violate) and once in the measurement below (so a name is never allowed to merely reach that padding's edge)
+  const MIN_MARGIN_PX = 12; // guaranteed clear space on either side of every name's own text — enforced twice, once as real CSS padding (so it's a hard floor no measurement error can violate) and once in the measurement below (so a name is never allowed to merely reach that padding's edge)
   const displayLabels = labels.map(firstNameOnly);
   const [fontPx, setFontPx] = useState(BASE_PX);
 
@@ -6612,6 +6627,17 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
 
   useLayoutEffect(() => { measureAndFit(); }, [measureAndFit]);
   useEffect(() => {
+    // This first pass can run before the real 'Inter' web font has actually finished loading —
+    // web fonts load asynchronously, and useLayoutEffect fires synchronously before paint, so
+    // there's a real window where the canvas measures against whatever fallback system font the
+    // browser has on hand instead. If that fallback happens to be narrower than the real Inter,
+    // the size this settles on reads as safe at that moment but is actually too large for the
+    // real font that then renders — exactly the "touching the edge" gap a fixed safety-margin
+    // number alone can't close, since the problem isn't the margin being too thin, it's the
+    // measurement itself being taken against the wrong font. document.fonts.ready is the browser's
+    // own signal for "every font actually being used on this page has now loaded" — re-measuring
+    // once it resolves catches and corrects for this even on the rare load where it happens.
+    document.fonts?.ready?.then(() => measureAndFit());
     const onResize = () => measureAndFit();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
@@ -6621,7 +6647,7 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
     <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
       {displayLabels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
-          className={`flex-1 py-2.5 px-2.5 font-semibold border-b-2 whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
+          className={`flex-1 py-2.5 px-3 font-semibold border-b-2 whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
           {label}
         </button>
       ))}
@@ -7442,6 +7468,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-[#1c3453] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#14283f] disabled:opacity-50 mb-3">
               {pwSaving ? "Updating..." : "Change password"}
             </button>
+            {canSwitchToTeacher && (
+              <button onClick={onSwitchToTeacher} className="w-full text-xs font-semibold text-[#5F9F9E] hover:text-[#447271] pt-3 pb-2 border-t border-stone-200">Switch to Teacher view</button>
+            )}
             <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
           </div>
           <NotificationToggle uid={family.uid} accentColor="#1c3453" />
@@ -7563,7 +7592,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                       className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
                       <div>
                         <p className="font-semibold text-stone-900">{t.name}</p>
-                        {t.label && <p className="text-xs font-semibold text-teal-700">{t.label}</p>}
+                        {t.label && <p className="text-xs font-semibold text-[#5F9F9E]">{t.label}</p>}
                         <p className="text-xs text-stone-400">Message goes only to {t.name}</p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0 ml-2">
@@ -7700,25 +7729,33 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       <GlobalAppStyles />
       <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
         <div className="max-w-lg mx-auto px-3 py-3 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 shrink-0">
-            <img src="/sja-icon-mark.png" alt="SJA" className="h-10 w-auto object-contain shrink-0" />
-            <div className="leading-none">
-              <p className="text-[11px] font-semibold text-[#1c3453] leading-tight">Parent</p>
-              <p className="text-[11px] font-semibold text-[#1c3453] leading-tight">Portal</p>
+          <div className="flex items-start gap-2 shrink-0">
+            <img src="/sja-icon-mark.png" alt="SJA" className="h-14 w-auto object-contain shrink-0" />
+            {/* Deliberately not vertically centered against the icon's full height — the icon's
+                own flame sits above its letters, so centering this against the whole icon would
+                visually align "Parent Portal" with the flame instead of the letters it's actually
+                meant to sit alongside. This offset (measured directly against the icon file: the
+                letters themselves start right around 35% of the way down) pushes the text down to
+                start where the letters do. */}
+            <div className="leading-none" style={{ marginTop: "20px" }}>
+              <p className="text-[13px] font-semibold text-[#5F9F9E] leading-tight">Parent</p>
+              <p className="text-[13px] font-semibold text-[#5F9F9E] leading-tight">Portal</p>
             </div>
           </div>
-          <div className="min-w-0 flex-1 text-center px-1">
-            <h1 className="text-sm font-semibold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
-            {canSwitchToTeacher && (
-              <button onClick={onSwitchToTeacher} className="text-[10px] text-[#1c3453]/60 hover:text-[#1c3453]">Switch to Teacher view</button>
-            )}
-          </div>
-          <div className="flex items-start gap-4 shrink-0">
+          <div className="flex items-center gap-4 shrink-0">
             <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#1c3453]/90 hover:text-[#1c3453]">
               <Phone size={20} strokeWidth={1.5} />
               <span className="text-[9px] font-bold leading-none whitespace-nowrap">Contact office</span>
             </button>
-            <button onClick={() => navigateParentTab("settings")} aria-label="Settings" className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={20} strokeWidth={1.5} /></button>
+            {/* Replaces the old separate "family name + settings gear" pairing — this one circle
+                does both jobs the header used to split across two things: it identifies whose
+                account this is (their own initials, always visible) and is the way into account
+                settings (same destination the gear used to open), freeing the whole center of the
+                header instead of needing its own dedicated space for a name that could run long. */}
+            <button onClick={() => navigateParentTab("settings")} aria-label="Account settings"
+              className="w-9 h-9 rounded-full bg-[#1c3453] text-white text-xs font-bold flex items-center justify-center hover:bg-[#14283f] shrink-0">
+              {getInitials(family?.name)}
+            </button>
           </div>
         </div>
         {contactPanelOpen && (
