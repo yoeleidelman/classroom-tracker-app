@@ -18,7 +18,7 @@ import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset } from "firebase/auth";
-import { useState, useEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
@@ -6005,6 +6005,15 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   // in rather than always using the teacher-side tone, which is exactly what produced a visible,
   // flat-beige mismatch against the parent portal's white-card, lighter-background look elsewhere.
   const threadBg = myRole === "family" ? "#f6f5f1" : undefined;
+  // A parent's own sent-message bubble picks up the school's turquoise instead of the app's
+  // default teal-700 — matching the highlight already used for the active tab. Scoped tightly to
+  // myRole === "family" specifically (not just "mine"), since this same component and this same
+  // "mine" bubble also renders a TEACHER's own sent messages when they're the one viewing the
+  // thread — the school-brand color is only meant for the parent side, not something a teacher
+  // opening their own inbox should suddenly see their own messages recolored with.
+  const mineBubble = myRole === "family"
+    ? { base: "bg-[#5F9F9E]", dark: "bg-[#508786]", darkHover: "hover:bg-[#447271]", lightText: "text-[#dbe9e9]", lighterText: "text-[#b7d3d3]", brandText: "text-[#5F9F9E]" }
+    : { base: "bg-teal-700", dark: "bg-teal-800", darkHover: "hover:bg-teal-900", lightText: "text-teal-100", lighterText: "text-teal-200", brandText: "text-teal-700" };
 
   return (
     <div className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh", ...(threadBg ? { background: threadBg } : {}) }}>
@@ -6047,12 +6056,12 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
 
           return (
             <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[80%] rounded-2xl overflow-hidden relative ${mine ? "bg-teal-700 text-white" : "bg-white border border-stone-200 text-stone-800"}`}>
+              <div className={`max-w-[80%] rounded-2xl overflow-hidden relative ${mine ? `${mineBubble.base} text-white` : "bg-white border border-stone-200 text-stone-800"}`}>
                 <div className="px-3.5 pt-2.5 flex items-start justify-between gap-2">
-                  <p className={`text-[10px] font-semibold mb-0.5 ${mine ? "text-teal-100" : "text-stone-400"}`}>{m.senderName}</p>
+                  <p className={`text-[10px] font-semibold mb-0.5 ${mine ? mineBubble.lightText : "text-stone-400"}`}>{m.senderName}</p>
                   {canModify && (
                     <button onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)}
-                      className={`shrink-0 -mt-1 -mr-1 p-1 rounded ${mine ? "text-teal-200 hover:text-white" : "text-stone-300 hover:text-stone-600"}`}>
+                      className={`shrink-0 -mt-1 -mr-1 p-1 rounded ${mine ? `${mineBubble.lighterText} hover:text-white` : "text-stone-300 hover:text-stone-600"}`}>
                       <MoreVertical size={14} />
                     </button>
                   )}
@@ -6060,7 +6069,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
 
                 {openActionsFor === m.id && (
                   <div className="anim-expand-down mx-3.5 mb-1.5 flex gap-1.5">
-                    <button onClick={() => startEdit(m)} className={`text-[11px] font-semibold px-2 py-1 rounded-md ${mine ? "bg-teal-800 text-white hover:bg-teal-900" : "bg-stone-100 text-stone-700 hover:bg-stone-200"}`}>Edit</button>
+                    <button onClick={() => startEdit(m)} className={`text-[11px] font-semibold px-2 py-1 rounded-md ${mine ? `${mineBubble.dark} text-white ${mineBubble.darkHover}` : "bg-stone-100 text-stone-700 hover:bg-stone-200"}`}>Edit</button>
                     <ConfirmDelete onConfirm={() => confirmDelete(m.id)} size={12} label="Delete" />
                   </div>
                 )}
@@ -6070,8 +6079,8 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                     <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={2} autoFocus
                       className={`w-full rounded-lg px-2 py-1.5 text-sm mb-1.5 ${mine ? "text-stone-900" : "border border-stone-300"}`} />
                     <div className="flex gap-1.5">
-                      <button onClick={() => saveEdit(m.id)} className={`text-[11px] font-semibold px-2.5 py-1 rounded-md ${mine ? "bg-white text-teal-700" : "bg-teal-700 text-white"}`}>Save</button>
-                      <button onClick={cancelEdit} className={`text-[11px] font-semibold px-2.5 py-1 rounded-md ${mine ? "bg-teal-800 text-teal-100" : "bg-stone-100 text-stone-500"}`}>Cancel</button>
+                      <button onClick={() => saveEdit(m.id)} className={`text-[11px] font-semibold px-2.5 py-1 rounded-md ${mine ? `bg-white ${mineBubble.brandText}` : `${mineBubble.base} text-white`}`}>Save</button>
+                      <button onClick={cancelEdit} className={`text-[11px] font-semibold px-2.5 py-1 rounded-md ${mine ? `${mineBubble.dark} ${mineBubble.lightText}` : "bg-stone-100 text-stone-500"}`}>Cancel</button>
                     </div>
                   </div>
                 ) : (
@@ -6560,12 +6569,60 @@ function firstNameOnly(fullName) {
 }
 
 function ChildSwitcher({ labels, selectedIndex, onSelect }) {
+  const containerRef = useRef(null);
+  const BASE_PX = 14; // text-sm, the largest size a name is ever shown at
+  const MIN_PX = 10; // never shrinks past this, however many children or however long a name
+  const MIN_MARGIN_PX = 10; // guaranteed clear space on either side of every name's own text — enforced twice, once as real CSS padding (so it's a hard floor no measurement error can violate) and once in the measurement below (so a name is never allowed to merely reach that padding's edge)
+  const displayLabels = labels.map(firstNameOnly);
+  const [fontPx, setFontPx] = useState(BASE_PX);
+
+  // Canvas text measurement instead of a render-measure-adjust-rerender loop — one pass, no
+  // flicker, and (this is the part a loop can't do) it finds the single scale factor every name
+  // shares. Shrinking is deliberately uniform: if only the longest name shrank to fit its own
+  // space, the row would look inconsistent and arbitrary — every button's text is the exact same
+  // size as every other's, always, so what makes one narrower is only ever the name itself being
+  // shorter, never a different font size doing the work.
+  const measureAndFit = useCallback(() => {
+    const container = containerRef.current;
+    if (!container || displayLabels.length === 0) return;
+    const containerWidth = container.getBoundingClientRect().width;
+    if (containerWidth === 0) return;
+    const dividerWidth = (displayLabels.length - 1) * 1; // one 1px border between each pair of adjacent buttons
+    const perButtonWidth = (containerWidth - dividerWidth) / displayLabels.length;
+    const availableTextWidth = perButtonWidth - MIN_MARGIN_PX * 2;
+
+    if (!measureAndFit.canvas) measureAndFit.canvas = document.createElement("canvas");
+    const ctx = measureAndFit.canvas.getContext("2d");
+    ctx.font = `600 ${BASE_PX}px Inter, sans-serif`;
+
+    let minScale = 1;
+    for (const label of displayLabels) {
+      // A small safety margin on top of the raw measurement — canvas font metrics can come out
+      // very slightly different from the browser's own text layout (most often because the real
+      // font hadn't finished loading yet the instant this ran), and this is what keeps that gap
+      // from ever actually costing a name its promised margin.
+      const textWidth = ctx.measureText(label).width * 1.06;
+      if (textWidth > availableTextWidth) {
+        const scale = availableTextWidth / textWidth;
+        if (scale < minScale) minScale = scale;
+      }
+    }
+    setFontPx(Math.max(MIN_PX, BASE_PX * minScale));
+  }, [displayLabels]);
+
+  useLayoutEffect(() => { measureAndFit(); }, [measureAndFit]);
+  useEffect(() => {
+    const onResize = () => measureAndFit();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [measureAndFit]);
+
   return (
-    <div className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
-      {labels.map((label, i) => (
-        <button key={i} onClick={() => onSelect(i)}
-          className={`flex-1 py-2.5 text-sm font-semibold border-b-2 whitespace-nowrap ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
-          {firstNameOnly(label)}
+    <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
+      {displayLabels.map((label, i) => (
+        <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
+          className={`flex-1 py-2.5 px-2.5 font-semibold border-b-2 whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
+          {label}
         </button>
       ))}
     </div>
@@ -6613,8 +6670,8 @@ function ParentHomeworkView({ link }) {
       ) : (
         <div className="space-y-3">
           {sorted.map((post) => (
-            <div key={post.id} className="bg-white border border-stone-200 rounded-xl p-4">
-              <p className="text-sm font-bold text-stone-900 mb-1.5">
+            <div key={post.id} className="bg-white border border-stone-200 border-l-4 border-l-[#5F9F9E] rounded-xl p-4">
+              <p className="text-sm font-bold text-[#4a8483] mb-1.5">
                 {post.cadence === "weekly" ? "This week's homework" : "Today's homework"}
                 <span className="ml-2 text-[10px] font-semibold text-stone-400">{new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
               </p>
@@ -7646,12 +7703,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           <div className="flex items-center gap-2 shrink-0">
             <img src="/sja-icon-mark.png" alt="SJA" className="h-10 w-auto object-contain shrink-0" />
             <div className="leading-none">
-              <p className="display-font text-[11px] font-bold text-[#1c3453] leading-tight">Parent</p>
-              <p className="display-font text-[11px] font-bold text-[#1c3453] leading-tight">Portal</p>
+              <p className="text-[11px] font-semibold text-[#1c3453] leading-tight">Parent</p>
+              <p className="text-[11px] font-semibold text-[#1c3453] leading-tight">Portal</p>
             </div>
           </div>
           <div className="min-w-0 flex-1 text-center px-1">
-            <h1 className="display-font text-sm font-bold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
+            <h1 className="text-sm font-semibold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
             {canSwitchToTeacher && (
               <button onClick={onSwitchToTeacher} className="text-[10px] text-[#1c3453]/60 hover:text-[#1c3453]">Switch to Teacher view</button>
             )}
