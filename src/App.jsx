@@ -7728,7 +7728,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
       <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
-        <div className="max-w-lg mx-auto px-3 py-3 flex items-center justify-between gap-2">
+        <div className="max-w-lg mx-auto px-3 py-3 flex items-start justify-between gap-2">
           <div className="flex items-start gap-2 shrink-0">
             <img src="/sja-icon-mark.png" alt="SJA" className="h-14 w-auto object-contain shrink-0" />
             {/* Deliberately not vertically centered against the icon's full height — the icon's
@@ -7742,7 +7742,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               <p className="text-[13px] font-semibold text-[#5F9F9E] leading-tight">Portal</p>
             </div>
           </div>
-          <div className="flex items-center gap-4 shrink-0">
+          {/* The whole outer row switched from items-center to items-start so every group's own
+              vertical position could be set independently instead of centered against whichever
+              group happens to be tallest (the icon, at 56px) — that centering was exactly what
+              made this side float noticeably higher than "Parent Portal" once that text was
+              deliberately pushed down to align with the icon's letters rather than its flame. This
+              marginTop brings it back down to that same line. */}
+          <div className="flex items-center gap-4 shrink-0" style={{ marginTop: "12px" }}>
             <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#5F9F9E] hover:text-[#447271]">
               <Phone size={20} strokeWidth={1.5} />
               <span className="text-[9px] font-bold leading-none whitespace-nowrap">Contact office</span>
