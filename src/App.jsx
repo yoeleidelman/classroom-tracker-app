@@ -18,7 +18,7 @@ import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset } from "firebase/auth";
-import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component, Fragment } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
@@ -1562,6 +1562,21 @@ function isThreadUnread(readState, threadKey, lastMessage, myRole) {
   if (snoozedUntil && new Date(snoozedUntil) > new Date()) return false;
   const lastRead = readState[threadKey];
   return !lastRead || new Date(lastMessage.timestamp) > new Date(lastRead);
+}
+
+// The actual number behind isThreadUnread's yes/no above — same three rules (from the other side,
+// newer than this viewer's own last-read mark, not currently snoozed), just counting every
+// message that matches instead of only checking the last one. Used both for a real unread count
+// next to each conversation in the list (instead of a bare presence dot) and, inside an open
+// conversation, for finding exactly where to draw the "unread starts here" divider — the same
+// question either way, just asked against a different scope of messages.
+function countUnreadInThread(readState, threadKey, messages, myRole) {
+  const snoozedUntil = readState.snoozed?.[threadKey];
+  if (snoozedUntil && new Date(snoozedUntil) > new Date()) return 0;
+  const lastRead = readState[threadKey];
+  return (messages || []).filter((m) =>
+    m.senderType !== myRole && (!lastRead || new Date(m.timestamp) > new Date(lastRead))
+  ).length;
 }
 
 const VAPID_KEY = "BEqoLhS_bXi-hjn4U3NcgCGIpFZZ-Dct-KPFj4D0MOOVyzS0Mvj7-6JTD3s2GUxNqqciXMVI6jBsWcUcptLPFgQ";
@@ -5924,7 +5939,7 @@ function AttachmentMenuButton({ onPickFile, onPickFiles }) {
   );
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false, lastReadBeforeOpen }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
@@ -6071,6 +6086,13 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   // in rather than always using the teacher-side tone, which is exactly what produced a visible,
   // flat-beige mismatch against the parent portal's white-card, lighter-background look elsewhere.
   const threadBg = myRole === "family" ? "#f6f5f1" : undefined;
+  // Which message (if any) is the first one to draw the "new messages" divider above — only
+  // meaningful against a genuine previous read point, since a thread being opened for the very
+  // first time ever has nothing to contrast "new" against (everything in it already is), the same
+  // reasoning WhatsApp itself follows for a brand new chat.
+  const firstUnreadId = lastReadBeforeOpen
+    ? messages.find((m) => m.senderType !== myRole && !m.deleted && new Date(m.timestamp) > new Date(lastReadBeforeOpen))?.id || null
+    : null;
   // A parent's own sent-message bubble picks up the school's turquoise instead of the app's
   // default teal-700 — matching the highlight already used for the active tab. Scoped tightly to
   // myRole === "family" specifically (not just "mine"), since this same component and this same
@@ -6109,19 +6131,31 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           // the accountability reasoning behind soft delete itself: the point is a school having
           // a stable, trustworthy record of what it told a family, not the reverse.
           const canModify = mine && myRole !== "family" && onEdit && onDelete && !m.deleted;
+          const divider = m.id === firstUnreadId && (
+            <div className="flex items-center gap-2 py-1">
+              <div className="flex-1 h-px bg-rose-200" />
+              <span className="text-[10px] font-bold uppercase tracking-wide text-rose-500">New</span>
+              <div className="flex-1 h-px bg-rose-200" />
+            </div>
+          );
 
           if (m.deleted) {
             return (
-              <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-                <div className={`max-w-[80%] rounded-2xl px-3.5 py-2.5 ${mine ? "bg-stone-200" : "bg-stone-100 border border-stone-200"}`}>
-                  <p className="text-xs italic text-stone-400">This message was deleted</p>
+              <Fragment key={m.id}>
+                {divider}
+                <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+                  <div className={`max-w-[80%] rounded-2xl px-3.5 py-2.5 ${mine ? "bg-stone-200" : "bg-stone-100 border border-stone-200"}`}>
+                    <p className="text-xs italic text-stone-400">This message was deleted</p>
+                  </div>
                 </div>
-              </div>
+              </Fragment>
             );
           }
 
           return (
-            <div key={m.id} className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+            <Fragment key={m.id}>
+              {divider}
+              <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[80%] rounded-2xl overflow-hidden relative ${mine ? `${mineBubble.base} text-white` : "bg-white border border-stone-200 text-stone-800"}`}>
                 <div className="px-3.5 pt-2.5 flex items-start justify-between gap-2">
                   <p className={`text-[10px] font-semibold mb-0.5 ${mine ? mineBubble.lightText : "text-stone-400"}`}>{m.senderName}</p>
@@ -6215,7 +6249,8 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                   </>
                 )}
               </div>
-            </div>
+              </div>
+            </Fragment>
           );
         })}
         <div ref={bottomRef} />
@@ -6742,7 +6777,7 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
     // is what produced two overlapping bars mid-drag instead of one settled one. A single instance
     // living in the header can't be duplicated that way, and never moves during a swipe at all,
     // since it was never part of the swiped content to begin with.
-    <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden">
+    <div ref={containerRef} className="flex bg-white border-t border-stone-200 overflow-hidden">
       {displayLabels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
           className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
@@ -7123,6 +7158,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const [messagingClassId, setMessagingClassId] = useState(null); // classId of the conversation currently open, or null
   const [messagingAdmin, setMessagingAdmin] = useState(false);
   const [messagingTeacherUid, setMessagingTeacherUid] = useState(null); // uid of the individual teacher thread currently open, or null
+  // Captured right before markThreadRead overwrites it — opening a thread marks it read
+  // immediately, so by the time ConversationThreadView actually renders, the stored read-state
+  // already says "now." Without holding onto this earlier value separately, there'd be no way to
+  // tell which messages were genuinely still unread at the moment the thread was opened, which is
+  // exactly what the "new messages start here" divider inside the conversation needs to know.
+  const [lastReadBeforeOpen, setLastReadBeforeOpen] = useState(null);
   const [eligibleTeachers, setEligibleTeachers] = useState(null); // null while loading; [] once loaded with none
   const [unreadThreads, setUnreadThreads] = useState([]); // [{ threadKey, kind, classId, title, preview, timestamp }]
   const [unreadBlogCount, setUnreadBlogCount] = useState(0); // total new posts across every linked class
@@ -7163,16 +7204,30 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       const thread = await loadJSON(`class:${l.classId}:messages:${family.uid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
       const last = thread?.messages?.[thread.messages.length - 1];
       if (isThreadUnread(readState, `class-${l.classId}`, last, "family")) {
-        results.push({ threadKey: `class-${l.classId}`, kind: "class", classId: l.classId, title: l.className, preview: last.text, senderName: last.senderName, timestamp: last.timestamp });
+        const unreadCount = countUnreadInThread(readState, `class-${l.classId}`, thread.messages, "family");
+        results.push({ threadKey: `class-${l.classId}`, kind: "class", classId: l.classId, title: l.className, preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
       }
     }
     const adminThreadData = await loadJSON(`admin-messages:${family.uid}`, { messages: [] }, true);
     const lastAdmin = adminThreadData?.messages?.[adminThreadData.messages.length - 1];
     if (isThreadUnread(readState, `admin-${family.uid}`, lastAdmin, "family")) {
-      results.push({ threadKey: `admin-${family.uid}`, kind: "admin", title: "School Office", preview: lastAdmin.text, senderName: lastAdmin.senderName, timestamp: lastAdmin.timestamp });
+      const unreadCount = countUnreadInThread(readState, `admin-${family.uid}`, adminThreadData.messages, "family");
+      results.push({ threadKey: `admin-${family.uid}`, kind: "admin", title: "School Office", preview: lastAdmin.text, senderName: lastAdmin.senderName, timestamp: lastAdmin.timestamp, unreadCount });
+    }
+    // Individual teacher threads were never actually included here at all before, despite the
+    // Messages list checking unreadThreads for a matching teacher-{uid} entry to decide whether to
+    // show a dot next to each one — that dot could never have lit up, since nothing ever populated
+    // the data it was looking for.
+    for (const t of eligibleTeachers || []) {
+      const thread = await loadJSON(`teacher-messages:${t.uid}:${family.uid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const last = thread?.messages?.[thread.messages.length - 1];
+      if (isThreadUnread(readState, `teacher-${t.uid}`, last, "family")) {
+        const unreadCount = countUnreadInThread(readState, `teacher-${t.uid}`, thread.messages, "family");
+        results.push({ threadKey: `teacher-${t.uid}`, kind: "teacher", title: t.name, preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
+      }
     }
     setUnreadThreads(results);
-  }, [family]);
+  }, [family, eligibleTeachers]);
 
   useEffect(() => { refreshUnreadThreads(); }, [refreshUnreadThreads]);
   useEffect(() => {
@@ -7269,6 +7324,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", `class:${classId}`);
     window.history.pushState({ thread: `class:${classId}` }, "", url);
+    const readState = await getReadState(family.uid);
+    setLastReadBeforeOpen(readState[`class-${classId}`] || null);
     await markThreadRead(family.uid, `class-${classId}`);
   };
 
@@ -7280,6 +7337,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", "admin");
     window.history.pushState({ thread: "admin" }, "", url);
+    const readState = await getReadState(family.uid);
+    setLastReadBeforeOpen(readState[`admin-${family.uid}`] || null);
     await markThreadRead(family.uid, `admin-${family.uid}`);
   };
 
@@ -7309,6 +7368,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", `teacher:${teacherUid}`);
     window.history.pushState({ thread: `teacher:${teacherUid}` }, "", url);
+    const readState = await getReadState(family.uid);
+    setLastReadBeforeOpen(readState[`teacher-${teacherUid}`] || null);
     await markThreadRead(family.uid, `teacher-${teacherUid}`);
   };
 
@@ -7514,6 +7575,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
         <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
+          lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => window.history.back()}
           onSend={async (text, attachments) => { await sendMessageToTeacher(messagingClassId, text, attachments); }} />
       </div>
@@ -7532,6 +7594,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             happened to be picked would read as contradicting whichever one the person actually
             tapped through from. */}
         <ConversationThreadView title={teacherName} subtitle="Direct message" messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
+          lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => window.history.back()}
           onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }} />
       </div>
@@ -7693,7 +7756,14 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                       <p className="text-xs text-stone-400">Message goes to every teacher in this class</p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0 ml-2">
-                      {unreadThreads.some((t) => t.threadKey === `class-${l.classId}`) && <span className="w-2 h-2 rounded-full bg-[#5F9F9E]" />}
+                      {(() => {
+                        const count = unreadThreads.find((t) => t.threadKey === `class-${l.classId}`)?.unreadCount;
+                        return count > 0 && (
+                          <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-[#5F9F9E] text-white text-[11px] font-bold leading-none">
+                            {count > 9 ? "9+" : count}
+                          </span>
+                        );
+                      })()}
                       <ChevronRight size={16} className="text-stone-300" />
                     </div>
                   </button>
@@ -7739,7 +7809,14 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                         <p className="text-xs text-stone-400">Message goes only to {t.name}</p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0 ml-2">
-                        {unreadThreads.some((th) => th.threadKey === `teacher-${t.uid}`) && <span className="w-2 h-2 rounded-full bg-teal-700" />}
+                        {(() => {
+                          const count = unreadThreads.find((th) => th.threadKey === `teacher-${t.uid}`)?.unreadCount;
+                          return count > 0 && (
+                            <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
+                              {count > 9 ? "9+" : count}
+                            </span>
+                          );
+                        })()}
                         <ChevronRight size={16} className="text-stone-300" />
                       </div>
                     </button>
@@ -7973,7 +8050,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           </TourHint>
         )}
         {activeSwitcherConfig && (
-          <div className="max-w-lg mx-auto px-3 pb-3">
+          <div className="max-w-lg mx-auto">
             <ChildSwitcher labels={activeSwitcherConfig.labels} selectedIndex={activeSwitcherConfig.selectedIndex} onSelect={activeSwitcherConfig.onSelect} />
           </div>
         )}
@@ -8064,6 +8141,10 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   const [families, setFamilies] = useState(null); // null = loading
   const [threads, setThreads] = useState({});
   const [openGroup, setOpenGroup] = useState(null);
+  // Same reasoning as the equivalent state in TeacherMessagesView — captured right before
+  // markThreadRead overwrites it, since opening a thread marks it read immediately.
+  const [lastReadBeforeOpen, setLastReadBeforeOpen] = useState(null);
+  const [listReadState, setListReadState] = useState({});
 
   const refresh = useCallback(async () => {
     const relevant = await fetchStaffReachableFamilies();
@@ -8078,9 +8159,17 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     setFamilies(groupList);
     const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
+    setListReadState(await getReadState(loggedInTeacher.uid));
   }, [loggedInTeacher.uid]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  const openThread = async (g) => {
+    const readState = await getReadState(loggedInTeacher.uid);
+    setLastReadBeforeOpen(readState[`teacher-direct-${g.groupId}`] || null);
+    setOpenGroup(g);
+    await markThreadRead(loggedInTeacher.uid, `teacher-direct-${g.groupId}`);
+  };
 
   // Opens straight into the right family's thread the moment the family list has actually
   // loaded — this page has no class-entry step to wait on first (unlike a classroom teacher's
@@ -8088,10 +8177,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   useEffect(() => {
     if (!deepLinkGroupId || !families) return;
     const match = families.find((g) => g.groupId === deepLinkGroupId);
-    if (match) {
-      setOpenGroup(match);
-      markThreadRead(loggedInTeacher.uid, `teacher-direct-${match.groupId}`);
-    }
+    if (match) openThread(match);
   }, [deepLinkGroupId, families]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Same shape as ClassApp's own sendDirectMessageToFamily — this person has no classroom thread
@@ -8118,6 +8204,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" teacher={loggedInTeacher} threadKey={`teacher-direct-${openGroup.groupId}`}
+          lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => { setOpenGroup(null); refresh(); }}
           onSend={async (text, attachments) => { await sendMessage(openGroup.groupId, text, attachments); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
@@ -8150,12 +8237,20 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
           const last = thread?.messages?.[thread.messages.length - 1];
           const childNames = (g.studentLinks || []).map((l) => l.studentName).join(", ");
           const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+          const unreadCount = countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher");
           return (
-            <button key={g.groupId} onClick={() => { setOpenGroup(g); markThreadRead(loggedInTeacher.uid, `teacher-direct-${g.groupId}`); }}
+            <button key={g.groupId} onClick={() => openThread(g)}
               className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
               <div className="flex items-center justify-between gap-2">
                 <p className="font-semibold text-stone-900">{guardianNames}</p>
-                {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {unreadCount > 0 && (
+                    <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
+                      {unreadCount > 9 ? "9+" : unreadCount}
+                    </span>
+                  )}
+                  {last && <p className="text-[10px] text-stone-400">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                </div>
               </div>
               <p className="text-xs text-stone-400 mb-1">{childNames}</p>
               <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
@@ -8614,7 +8709,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const last = thread?.messages?.[thread.messages.length - 1];
       const threadKey = `classroom-${g.groupId}`;
       if (isThreadUnread(readState, threadKey, last, "teacher")) {
-        results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: last.text, senderName: last.senderName, timestamp: last.timestamp });
+        const unreadCount = countUnreadInThread(readState, threadKey, thread.messages, "teacher");
+        results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
       }
     }
     setCommUnreadFamilies(results);
@@ -12528,7 +12624,7 @@ function ClassModeView({ roster, studentData, config, addPoints, openIncidentFor
       <div className="flex-1 flex flex-col gap-1.5 p-2 pb-16 overflow-hidden">
         {activeRoster.map((s) => (
           <div key={s.id} className="flex-1 min-h-0 bg-white rounded-xl border border-stone-200 flex items-center justify-between gap-3 px-4 overflow-hidden">
-            <p className={`font-bold text-stone-900 truncate flex-1 min-w-0 ${nameSize}`}>{s.name}</p>
+            <p className={`font-medium text-stone-900 truncate flex-1 min-w-0 ${nameSize}`}>{s.name}</p>
             {individualPointCats.length > 0 && (
               <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
                 {individualPointCats.map((cat) => {
@@ -14765,6 +14861,27 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   const [mode, setMode] = useState(deepLinkIsDirect ? "direct" : "inbox"); // "inbox" | "direct" | "compose"
   const [directGroups, setDirectGroups] = useState(null); // families this teacher can message individually, across every class they teach
   const [openDirectGroup, setOpenDirectGroup] = useState(null);
+  // Captured right before markThreadRead overwrites it — same reasoning as the parent side's own
+  // lastReadBeforeOpen: opening a thread marks it read immediately, so without holding onto the
+  // value from just before that happens, there'd be no way to know which messages were genuinely
+  // still unread at the moment the thread was opened, which the "new messages start here" divider
+  // needs.
+  const [lastReadBeforeOpen, setLastReadBeforeOpen] = useState(null);
+  const openClassroomGroup = async (g) => {
+    const readState = await getReadState(loggedInTeacher.uid);
+    setLastReadBeforeOpen(readState[`classroom-${g.groupId}`] || null);
+    navigateToGroup(g);
+    await markThreadRead(loggedInTeacher.uid, `classroom-${g.groupId}`);
+    onCommRead?.();
+  };
+  const openDirectGroupThread = async (g) => {
+    const readState = await getReadState(loggedInTeacher.uid);
+    setLastReadBeforeOpen(readState[`teacher-direct-${g.groupId}`] || null);
+    setOpenDirectGroup(g);
+    await markThreadRead(loggedInTeacher.uid, `teacher-direct-${g.groupId}`);
+    onCommRead?.();
+  };
+
 
   // Live-subscribed for whichever ONE conversation is actually open right now, AND (via
   // useLiveJSONMap below) for every family's preview in the inbox list at once — a message
@@ -14782,6 +14899,15 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
 
   const liveDirectThreadsByStorageKey = useLiveJSONMap((directGroups || []).map((g) => `teacher-messages:${loggedInTeacher.uid}:${g.groupId}`));
   const directThreads = Object.fromEntries((directGroups || []).map((g) => [g.groupId, liveDirectThreadsByStorageKey[`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`] || { messages: [] }]));
+
+  // For showing an actual unread count on each row in both inbox lists below, not just inside an
+  // open conversation — refreshed on the same events that already change what's actually unread
+  // (a thread being marked read, or the live thread data itself changing).
+  const [listReadState, setListReadState] = useState({});
+  useEffect(() => {
+    if (!loggedInTeacher) return;
+    getReadState(loggedInTeacher.uid).then(setListReadState);
+  }, [loggedInTeacher, threads, directThreads]);
 
   // Same reasoning as the class/tab history work — pushing a real entry here is what lets the
   // Android back button (and the in-app Back button, which now goes through the same mechanism
@@ -14855,10 +14981,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   useEffect(() => {
     if (!deepLinkGroupId || deepLinkIsDirect || !groups) return;
     const match = groups.find((g) => g.groupId === deepLinkGroupId);
-    if (match) {
-      navigateToGroup(match);
-      markThreadRead(loggedInTeacher.uid, `classroom-${match.groupId}`).then(() => onCommRead?.());
-    }
+    if (match) openClassroomGroup(match);
   }, [deepLinkGroupId, deepLinkIsDirect, groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The direct-message counterpart to the classroom resolver above — waits on directGroups
@@ -14868,10 +14991,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   useEffect(() => {
     if (!deepLinkGroupId || !deepLinkIsDirect || !directGroups) return;
     const match = directGroups.find((g) => g.groupId === deepLinkGroupId);
-    if (match) {
-      setOpenDirectGroup(match);
-      markThreadRead(loggedInTeacher.uid, `teacher-direct-${match.groupId}`).then(() => onCommRead?.());
-    }
+    if (match) openDirectGroupThread(match);
   }, [deepLinkGroupId, deepLinkIsDirect, directGroups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (openGroup) {
@@ -14883,6 +15003,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
+          lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => { window.history.back(); refresh(); }}
           onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
@@ -14900,6 +15021,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`teacher-direct-${openDirectGroup.groupId}`}
+          lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
           onSend={async (text, attachments) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
@@ -14940,11 +15062,19 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const last = thread?.messages?.[thread.messages.length - 1];
               const childNames = (g.studentLinks || []).filter((l) => assignedClassIds.includes(l.classId)).map((l) => l.studentName).join(", ");
               const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+              const unreadCount = countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher");
               return (
-                <button key={g.groupId} onClick={() => { setOpenDirectGroup(g); markThreadRead(loggedInTeacher.uid, `teacher-direct-${g.groupId}`).then(() => onCommRead?.()); }} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
+                <button key={g.groupId} onClick={() => openDirectGroupThread(g)} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold text-stone-900">{guardianNames}</p>
-                    {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {unreadCount > 0 && (
+                        <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
+                          {unreadCount > 9 ? "9+" : unreadCount}
+                        </span>
+                      )}
+                      {last && <p className="text-[10px] text-stone-400">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                    </div>
                   </div>
                   <p className="text-xs text-stone-400 mb-1">{childNames}</p>
                   <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
@@ -14964,11 +15094,19 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const last = thread?.messages?.[thread.messages.length - 1];
               const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
               const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
+              const unreadCount = countUnreadInThread(listReadState, `classroom-${g.groupId}`, thread?.messages, "teacher");
               return (
-                <button key={g.groupId} onClick={() => { navigateToGroup(g); markThreadRead(loggedInTeacher.uid, `classroom-${g.groupId}`).then(() => onCommRead?.()); }} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
+                <button key={g.groupId} onClick={() => openClassroomGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold text-stone-900">{guardianNames}</p>
-                    {last && <p className="text-[10px] text-stone-400 shrink-0">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {unreadCount > 0 && (
+                        <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
+                          {unreadCount > 9 ? "9+" : unreadCount}
+                        </span>
+                      )}
+                      {last && <p className="text-[10px] text-stone-400">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
+                    </div>
                   </div>
                   <p className="text-xs text-stone-400 mb-1">{childNames}</p>
                   <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
