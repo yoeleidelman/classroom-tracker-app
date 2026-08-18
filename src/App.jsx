@@ -255,6 +255,12 @@ const DEFAULT_CONFIG = {
 };
 
 const COLOR_CHOICES = ["emerald", "amber", "rose", "indigo", "sky", "violet", "stone", "teal", "fuchsia"];
+// Swipe-between-tabs on the teacher side (ClassApp) — paused for now, per direct request, since it
+// was getting in the way there. This is the ONLY place it's controlled from; flip to true to
+// restore it, nothing else needs to change. Doesn't touch the parent app's own swipe (a separate,
+// unrelated mechanism), and doesn't touch the horizontal scroll on the tab bar row itself, which
+// is a completely different thing (its own overflow-x-auto) from this full-page swipe gesture.
+const SWIPE_BETWEEN_TABS_ENABLED = false;
 // Quick-add suggestions for a class's Subjects list — tap one to add it instantly, or type
 // something else entirely. Not a fixed or required set, just a head start.
 const SUBJECT_LIBRARY = ["Davening", "Kriya", "Chumash", "Hebrew Grammar", "Ksiva", "Tanya Baal Peh", "Gemara", "Mishnayos", "Yiddish", "English", "Math"];
@@ -8664,6 +8670,16 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const swipeTrackWidth = useRef(390);
 
   const onTabAreaTouchStart = (e) => {
+    // Paused for now, per direct request — swiping between tabs was getting in the way on the
+    // teacher side specifically. Flip this one constant back to true to restore it; nothing else
+    // needs to change. The horizontal scroll on the tab bar ROW itself is a completely separate
+    // mechanism (its own overflow-x-auto) and is untouched by this — only the swipe-between-full-
+    // tabs gesture is disabled. Returning here before swipeStart.current is ever set means
+    // onTabAreaTouchMove's own `if (!swipeStart.current) return` never has anything to act on
+    // either, and the render below (which only transforms/shows a preview pane when
+    // dragOffsetPx/dragTargetTab actually change) naturally falls back to just the current tab
+    // with no other edits needed anywhere else.
+    if (!SWIPE_BETWEEN_TABS_ENABLED) return;
     if (!swipeOrder.includes(view) || dragAnimating) return; // not currently on a swipeable tab at all
     swipeStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, decided: false, horizontal: false };
     swipeTrackWidth.current = e.currentTarget.getBoundingClientRect().width || window.innerWidth;
@@ -9894,7 +9910,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
             <p className="font-semibold text-stone-800">Class Tools</p>
             <button onClick={() => setShowPlan(false)} className="text-stone-400 hover:text-stone-700 p-1"><ChevronRight size={20} /></button>
           </div>
-          <TodaysPlanPanel config={config} plannerDays={plannerDays} setPlannerDay={setPlannerDay} navigate={navigateView} />
+          <TodaysPlanPanel config={config} plannerDays={plannerDays} setPlannerDay={setPlannerDay} navigate={navigateView} benchmarkSubjects={benchmarkSubjects} />
           <TimerWidget />
           <RandomPickerWidget roster={roster} pickerData={randomPickerData} onPick={recordRandomPick} onReset={resetRandomPicker} />
           <ScratchpadWidget plannerDays={plannerDays} setPlannerDay={setPlannerDay} />
@@ -10521,7 +10537,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
   );
 }
 
-function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
+function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate, benchmarkSubjects }) {
   const today = todayISO();
   const entry = plannerDays?.[today] || {};
   const dayTypeMap = {};
@@ -10533,6 +10549,37 @@ function TodaysPlanPanel({ config, plannerDays, setPlannerDay, navigate }) {
   useEffect(() => { setSlotDrafts(plannerDays?.[today]?.slotContent || {}); }, [today, plannerDays]);
 
   const saveSlot = (slotId, text) => setPlannerDay(today, { slotContent: { ...(plannerDays?.[today]?.slotContent || {}), [slotId]: text } });
+
+  // Whatever a benchmark says is happening in a given subject today, brought straight into that
+  // subject's own note — matched by name (a schedule slot labeled "Math" against a benchmark
+  // subject also labeled "Math") since that's the only thing tying the two features together at
+  // all. Only ever fills a slot that's still genuinely empty — never overwrites a note the teacher
+  // already wrote themselves, since their own words about their own day always win.
+  const lessonTitleForSlot = (slotLabel) => {
+    const subject = (benchmarkSubjects || []).find((s) => s.label.trim().toLowerCase() === (slotLabel || "").trim().toLowerCase());
+    if (!subject) return null;
+    const seg = subject.segments.find((sg) => today >= sg.startDate && today <= sg.endDate);
+    return seg?.lessons?.find((l) => l.date === today)?.title || null;
+  };
+
+  // Runs once whenever there's actually something new to offer — a fresh day, or benchmark data
+  // that's only just loaded in. Writes straight to the saved plan, not just a visual placeholder,
+  // so it's genuinely there the moment Class Tools opens rather than only appearing once a slot
+  // happens to be clicked into. Computes every slot's fill in one pass and writes them together in
+  // a single call — calling saveSlot separately per slot would have each one spread from the same
+  // not-yet-updated plannerDays snapshot, silently losing all but the last write whenever more than
+  // one slot needs filling on the same day.
+  useEffect(() => {
+    if (!template || template.length === 0 || !benchmarkSubjects || benchmarkSubjects.length === 0) return;
+    const existing = plannerDays?.[today]?.slotContent || {};
+    const fills = {};
+    template.forEach((slot) => {
+      if (existing[slot.id]) return; // never override a note that's already there, teacher-written or otherwise
+      const lessonTitle = lessonTitleForSlot(slot.label);
+      if (lessonTitle) fills[slot.id] = lessonTitle;
+    });
+    if (Object.keys(fills).length > 0) setPlannerDay(today, { slotContent: { ...existing, ...fills } });
+  }, [today, template, benchmarkSubjects]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="bg-white border border-stone-200 rounded-xl p-4 lg:sticky lg:top-6">
@@ -17445,6 +17492,14 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
     if (!active) return null;
     return active.segments.find((seg) => dateStr >= seg.startDate && dateStr <= seg.endDate) || null;
   };
+  // The specific lesson entry (if any) for one exact date, drilling from segment down into its own
+  // lessons array — separate from segmentForDate above since a segment covers a whole date RANGE,
+  // while this needs to know what was actually said about this one particular day within it.
+  const lessonForDate = (dateStr) => {
+    const seg = segmentForDate(dateStr);
+    return seg?.lessons?.find((l) => l.date === dateStr) || null;
+  };
+  const [selectedCalDay, setSelectedCalDay] = useState(null);
 
   const calMonthIdx0 = yearStart.getMonth() + calMonthOffset;
   const calYear = yearStart.getFullYear() + Math.floor(calMonthIdx0 / 12);
@@ -17639,6 +17694,7 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
                   {calGrid.map((d, i) => {
                     if (!d) return <div key={i} />;
                     const seg = segmentForDate(d);
+                    const lesson = lessonForDate(d);
                     const kind = scheduleKindForDate(d, plannerDays, dayTypes);
                     const dayNum = Number(d.slice(-2));
                     const colorClass = !seg || kind === "none"
@@ -17646,16 +17702,37 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
                       : kind === "half"
                         ? `bg-${seg.color}-200 text-stone-700`
                         : `bg-${seg.color}-400 text-white`;
+                    // Tappable, not just a hover title — a hover-only tooltip is effectively
+                    // invisible on a phone, which is where this actually needs to work. The small
+                    // dot marks which days have an actual lesson entry worth tapping into, so it's
+                    // clear at a glance where there's more to see before tapping anything.
                     return (
-                      <div key={d} title={kind === "none" ? "No school" : seg ? `${seg.label}${kind === "half" ? " (half day)" : ""}` : ""}
-                        className={`relative aspect-square rounded-lg text-[10px] font-semibold flex items-center justify-center ${colorClass}`}>
+                      <button key={d} onClick={() => setSelectedCalDay(selectedCalDay === d ? null : d)}
+                        className={`relative aspect-square rounded-lg text-[10px] font-semibold flex items-center justify-center ${colorClass} ${selectedCalDay === d ? "ring-2 ring-offset-1 ring-stone-500" : ""}`}>
                         {dayNum}
                         {kind === "none" && <span className="absolute -top-0.5 -right-0.5 text-stone-300 text-[8px]">•</span>}
-                      </div>
+                        {lesson && <span className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full ${kind === "half" ? "bg-stone-600" : "bg-white"}`} />}
+                      </button>
                     );
                   })}
                 </div>
-                <p className="text-[10px] text-stone-400 mt-2">Solid = full school day in a benchmark, light = half day, blank = no school.</p>
+                <p className="text-[10px] text-stone-400 mt-2">Solid = full school day in a benchmark, light = half day, blank = no school. Tap a day for its lesson.</p>
+                {selectedCalDay && (() => {
+                  const seg = segmentForDate(selectedCalDay);
+                  const lesson = lessonForDate(selectedCalDay);
+                  return (
+                    <div className="mt-2 bg-white border border-stone-200 rounded-lg p-2.5">
+                      <p className="text-[10px] font-semibold text-stone-400">{selectedCalDay}</p>
+                      {lesson ? (
+                        <p className="text-xs text-stone-700 mt-0.5">{lesson.title}</p>
+                      ) : seg ? (
+                        <p className="text-xs text-stone-500 mt-0.5 italic">Part of {seg.label} — no specific lesson text for this day.</p>
+                      ) : (
+                        <p className="text-xs text-stone-400 mt-0.5 italic">No benchmark scheduled for this day.</p>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
