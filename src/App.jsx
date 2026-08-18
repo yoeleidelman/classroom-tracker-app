@@ -6778,22 +6778,12 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
     // living in the header can't be duplicated that way, and never moves during a swipe at all,
     // since it was never part of the swiped content to begin with.
     <div ref={containerRef} className="flex bg-white border-t border-stone-200 overflow-hidden">
-      {displayLabels.map((label, i) => {
-        // Anchored toward whichever edge this button is actually closest to (left-aligned for
-        // the first, right-aligned for the last, centered for anything in between) rather than
-        // centered within its own segment across the board — centering looked fine back when this
-        // whole bar was its own inset card, but now that the bar itself runs edge to edge like the
-        // tab row above it, a centered name floats toward the middle of its half instead of
-        // actually reaching the edge the way "Home" and "Homework" do up there, which is what
-        // "flush" was supposed to mean here in the first place.
-        const align = i === 0 ? "text-left" : i === displayLabels.length - 1 ? "text-right" : "text-center";
-        return (
-          <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
-            className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis ${align} ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
-            {label}
-          </button>
-        );
-      })}
+      {displayLabels.map((label, i) => (
+        <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
+          className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis text-center ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
+          {label}
+        </button>
+      ))}
     </div>
   );
 }
