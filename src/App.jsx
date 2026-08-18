@@ -30,7 +30,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -6808,11 +6808,38 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       }
     }
     if (!swipeStart.current.horizontal) return;
+    // Claims the gesture once it's decided to be horizontal — see the useEffect below that
+    // attaches this as a real, non-passive native listener for why a plain JSX onTouchMove prop
+    // can't actually make preventDefault() stick (confirmed directly: React marks touchmove as
+    // passive by default since React 17, so the synthetic event reports defaultPrevented=true
+    // while the real underlying browser event does not, and the browser's own console says so).
+    // Without it actually taking effect, the native scroll/bounce keeps running alongside this
+    // JS-driven transform, the two fighting over the same finger movement.
+    e.preventDefault();
     // Clamped so dragging past either end of the sequence (no adjacent tab to reveal) shows a
     // little resistance instead of an empty gap sliding into view.
     const clamped = dragTargetTab ? dx : dx * 0.25;
     setDragOffsetPx(clamped);
   };
+  // A callback ref, not a useRef+useEffect pair — see the matching, fuller comment on the teacher
+  // side's own version of this for why: React guarantees to call this exactly when the DOM node
+  // itself mounts or unmounts, which a useEffect tied to a dependency array isn't reliably able to
+  // promise.
+  const attachedSwipeNode = useRef(null);
+  const latestTouchMove = useRef(onTabAreaTouchMove);
+  latestTouchMove.current = onTabAreaTouchMove;
+  const swipeContainerRef = useCallback((node) => {
+    if (attachedSwipeNode.current) {
+      attachedSwipeNode.current.removeEventListener("touchmove", attachedSwipeNode.current._swipeListener);
+      attachedSwipeNode.current = null;
+    }
+    if (node) {
+      const listener = (e) => latestTouchMove.current(e);
+      node.addEventListener("touchmove", listener, { passive: false });
+      node._swipeListener = listener;
+      attachedSwipeNode.current = node;
+    }
+  }, []);
 
   const onTabAreaTouchEnd = () => {
     if (!swipeStart.current?.horizontal) { swipeStart.current = null; return; }
@@ -7638,7 +7665,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         )}
       </div>
 
-      <div className="max-w-lg mx-auto overflow-hidden relative" onTouchStart={onTabAreaTouchStart} onTouchMove={onTabAreaTouchMove} onTouchEnd={onTabAreaTouchEnd}>
+      <div ref={swipeContainerRef} className="max-w-lg mx-auto overflow-hidden relative" style={{ minHeight: "70vh" }} onTouchStart={onTabAreaTouchStart} onTouchEnd={onTabAreaTouchEnd}>
       <div className="px-4 py-5" style={{ transform: `translateX(${dragOffsetPx}px)`, transition: dragAnimating ? "transform 0.22s ease-out" : "none" }}>
 
       {renderTabContent(parentTab)}
@@ -8156,9 +8183,47 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       }
     }
     if (!swipeStart.current.horizontal) return;
+    // Claims the gesture once it's decided to be horizontal (never during the ambiguous phase
+    // above, so an ordinary vertical scroll is never touched) — see the useEffect below that
+    // attaches this as a real, non-passive native listener for why a plain JSX onTouchMove prop
+    // can't actually do this on its own.
+    e.preventDefault();
     const clamped = dragTargetTab ? dx : dx * 0.25;
     setDragOffsetPx(clamped);
   };
+  // React attaches touchmove listeners as passive by default (since React 17), which silently
+  // makes e.preventDefault() inside a plain JSX onTouchMove prop a no-op on the actual browser
+  // behavior — confirmed directly: the synthetic event reports defaultPrevented=true, but the
+  // real native event underneath does not, and the browser's own console says so
+  // ("Unable to preventDefault inside passive event listener invocation"). Without it actually
+  // taking effect, the browser's native scroll/bounce keeps running alongside this JS-driven
+  // transform, the two fighting over the same finger movement — invisible when testing with a
+  // mouse (which never fires touch events at all) but exactly the janky, half-scrolling feel this
+  // was built to prevent on a real phone. A real, manually-attached listener with
+  // { passive: false } is the only way to make preventDefault() actually stick.
+  // A callback ref, not a useRef+useEffect pair — React guarantees to call this exactly when the
+  // DOM node itself actually mounts or unmounts, regardless of render timing or what else this
+  // component's dependency arrays happen to look like at that moment. A useEffect keyed on `view`
+  // looked reasonable but wasn't reliable in practice: on the render where this container first
+  // becomes eligible to exist, the effect can still run before the ref has actually been attached
+  // to it, and since `view` doesn't necessarily change value again after that, the effect never
+  // gets a second chance to notice the node showing up later — silently leaving the swipeable area
+  // with no real listener attached at all, and preventDefault() with nothing to call.
+  const attachedSwipeNode = useRef(null);
+  const latestTouchMove = useRef(onTabAreaTouchMove);
+  latestTouchMove.current = onTabAreaTouchMove;
+  const swipeContainerRef = useCallback((node) => {
+    if (attachedSwipeNode.current) {
+      attachedSwipeNode.current.removeEventListener("touchmove", attachedSwipeNode.current._swipeListener);
+      attachedSwipeNode.current = null;
+    }
+    if (node) {
+      const listener = (e) => latestTouchMove.current(e);
+      node.addEventListener("touchmove", listener, { passive: false });
+      node._swipeListener = listener;
+      attachedSwipeNode.current = node;
+    }
+  }, []);
   const onTabAreaTouchEnd = () => {
     if (!swipeStart.current?.horizontal) { swipeStart.current = null; return; }
     swipeStart.current = null;
@@ -8576,15 +8641,25 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // separate "create the benchmark subject" step first. The first time a segment is added for a
   // subject that doesn't have a benchmarkSubjects entry yet, this creates it and adds the segment
   // in the same update, rather than requiring it to already exist.
+  // Uses the functional form of setBenchmarkSubjects, not the closure-captured benchmarkSubjects
+  // variable directly — this specifically has to survive being called several times in a tight,
+  // synchronous loop (the multi-subject document import calls this once per benchmark, often for
+  // several different subjects back to back). Reading the closure variable directly would have
+  // every one of those calls compute its "next" array from the exact same stale starting point,
+  // so only the last call's result would actually stick — silently losing every subject added by
+  // an earlier call in the same batch. The functional form guarantees each call sees the true
+  // latest state, including whatever the previous call in the same batch just added.
   const addBenchmarkSegmentBySubjectLabel = (label, segment) => {
     const trimmed = (label || "").trim();
     if (!trimmed) return;
-    const existing = benchmarkSubjects.find((s) => s.label.trim().toLowerCase() === trimmed.toLowerCase());
-    if (existing) {
-      persistBenchmarkSubjects(benchmarkSubjects.map((s) => s.id === existing.id ? { ...s, segments: [...s.segments, { id: uid(), ...segment }] } : s));
-    } else {
-      persistBenchmarkSubjects([...benchmarkSubjects, { id: uid(), label: trimmed, segments: [{ id: uid(), ...segment }] }]);
-    }
+    setBenchmarkSubjects((prev) => {
+      const existing = prev.find((s) => s.label.trim().toLowerCase() === trimmed.toLowerCase());
+      const next = existing
+        ? prev.map((s) => (s.id === existing.id ? { ...s, segments: [...s.segments, { id: uid(), ...segment }] } : s))
+        : [...prev, { id: uid(), label: trimmed, segments: [{ id: uid(), ...segment }] }];
+      saveC("benchmarkSubjects", next);
+      return next;
+    });
   };
   const addBenchmarkSegment = (subjectId, segment) => {
     persistBenchmarkSubjects(benchmarkSubjects.map((s) => s.id === subjectId ? { ...s, segments: [...s.segments, { id: uid(), ...segment }] } : s));
@@ -9262,7 +9337,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       <GlobalAppStyles />
 
       {swipeOrder.includes(view) && (
-        <div className="relative overflow-hidden" onTouchStart={onTabAreaTouchStart} onTouchMove={onTabAreaTouchMove} onTouchEnd={onTabAreaTouchEnd}>
+        // min-height fills out the rest of the screen even when a tab's own content is short —
+        // without it, this div's height just wraps to its content, and touching the empty space
+        // below that (which then belongs to something else entirely, with no touch handlers of
+        // its own) does nothing at all. Since most of a phone screen can easily be empty
+        // depending on what's posted that day, that made a swipe feel like it only worked from
+        // certain, hard-to-predict spots on the page.
+        <div ref={swipeContainerRef} className="relative overflow-hidden" style={{ minHeight: "70vh" }} onTouchStart={onTabAreaTouchStart} onTouchEnd={onTabAreaTouchEnd}>
           <div style={{ transform: `translateX(${dragOffsetPx}px)`, transition: dragAnimating ? "transform 0.22s ease-out" : "none" }}>
             {renderMainTabContent(view)}
           </div>
@@ -16681,6 +16762,10 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
   const [showAddSubject, setShowAddSubject] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const [showDocImport, setShowDocImport] = useState(false);
+  // Separate from showDocImport above (which is the per-subject one, opened from inside a
+  // specific subject's own detail view) — this is the top-level version, for a single document
+  // that covers several subjects at once and needs to say, per benchmark, which one it's for.
+  const [showTopLevelImport, setShowTopLevelImport] = useState(false);
   const [newSubjectName, setNewSubjectName] = useState("");
   const [showSegForm, setShowSegForm] = useState(false);
   const [segLabel, setSegLabel] = useState("");
@@ -16819,11 +16904,40 @@ function BenchmarksView({ subjects, addSubject, removeSubject, addSegment, addSe
     <div>
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <p className="text-sm font-semibold text-stone-800">{yearStart.getFullYear()}–{yearStart.getFullYear() + 1} school year</p>
-        <button onClick={() => setShowAddSubject(true)}
-          className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showAddSubject ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300"}`}>
-          <Plus size={12} /> Track something else
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => setShowTopLevelImport((v) => !v)}
+            className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showTopLevelImport ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300"}`}>
+            <Upload size={12} /> Import benchmarks from a file
+          </button>
+          <button onClick={() => setShowAddSubject(true)}
+            className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showAddSubject ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300"}`}>
+            <Plus size={12} /> Track something else
+          </button>
+        </div>
       </div>
+
+      {showTopLevelImport && (
+        <div className="mb-5 md:w-[28rem]">
+          <DocumentImportPanel mode="benchmark"
+            onApplyBenchmark={(items) => {
+              // Per-subject color progression, tracked across this whole batch — otherwise every
+              // brand-new subject discovered in the same document would start its very first
+              // segment at the same color, and a subject that already has segments would ignore
+              // how many it's got and restart from the beginning of the color list too.
+              const usedCounts = {};
+              items.filter((it) => it.subject && it.subject.trim()).forEach((it) => {
+                const subjKey = it.subject.trim().toLowerCase();
+                const existingSubj = subjects.find((s) => s.label.trim().toLowerCase() === subjKey);
+                const baseCount = existingSubj?.segments.length || 0;
+                const usedSoFar = usedCounts[subjKey] || 0;
+                usedCounts[subjKey] = usedSoFar + 1;
+                const newSeg = { label: it.label, startDate: it.start, endDate: it.end, color: COLOR_CHOICES[(baseCount + usedSoFar) % COLOR_CHOICES.length] };
+                addSegmentBySubjectLabel(it.subject.trim(), newSeg);
+              });
+            }}
+            onClose={() => setShowTopLevelImport(false)} />
+        </div>
+      )}
 
       {showAddSubject && (
         <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-96">
@@ -17099,12 +17213,21 @@ function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCa
     }
   };
 
+  // A subject-per-item field is only requested when destinationLabel isn't given — that's the
+  // "many subjects at once" case (the top-level import), where the document is expected to cover
+  // several subjects and each benchmark needs to say which one it belongs to. When destinationLabel
+  // IS given (the per-subject import, opened from inside one specific subject), everything found
+  // is already known to belong there, so asking the model to also guess a subject name would just
+  // be a chance to get it wrong for no benefit.
+  const multiSubject = mode === "benchmark" && !destinationLabel;
   const extract = async () => {
     setExtracting(true); setError(""); setItems(null);
     try {
       const instructions = mode === "calendar"
         ? `Extract every distinct date range and its school status from this document. Valid statuses are exactly: ${dayTypeOptions.map((t) => t.id).join(", ")}. Infer the closest matching status from context (a holiday or break = "no-school", an early dismissal = "half-day" if that option exists, a late start = "late-start" if that option exists, otherwise pick the closest available option). Output ONLY a JSON array, no other text, no markdown fences: [{"start":"YYYY-MM-DD","end":"YYYY-MM-DD","status":"...","label":"short description"}]. Use the same date for "start" and "end" if it's a single day.`
-        : `Extract every distinct benchmark, unit, or pacing period and its date range from this document. Output ONLY a JSON array, no other text, no markdown fences: [{"start":"YYYY-MM-DD","end":"YYYY-MM-DD","label":"short name of this unit/benchmark"}]`;
+        : multiSubject
+          ? `This document covers pacing/benchmarks for MULTIPLE different subjects. Extract every distinct benchmark, unit, or pacing period, its date range, AND which subject it belongs to. Output ONLY a JSON array, no other text, no markdown fences: [{"subject":"short subject name, e.g. Math or Chumash","start":"YYYY-MM-DD","end":"YYYY-MM-DD","label":"short name of this unit/benchmark"}]`
+          : `Extract every distinct benchmark, unit, or pacing period and its date range from this document. Output ONLY a JSON array, no other text, no markdown fences: [{"start":"YYYY-MM-DD","end":"YYYY-MM-DD","label":"short name of this unit/benchmark"}]`;
       const content = pdfBase64
         ? [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } }, { type: "text", text: instructions }]
         : `${instructions}\n\nDocument text:\n${rawText}`;
@@ -17172,23 +17295,33 @@ function DocumentImportPanel({ mode, dayTypeOptions, destinationLabel, onApplyCa
           </p>
           <ul className="space-y-1.5 mb-3 max-h-72 overflow-y-auto">
             {items.map((it) => (
-              <li key={it.id} className="flex items-center gap-1.5 bg-stone-50 rounded-lg p-2">
-                <input value={it.label} onChange={(e) => updateItem(it.id, "label", e.target.value)} className="flex-1 rounded border border-stone-200 px-2 py-1 text-xs" />
-                <input type="date" value={it.start} onChange={(e) => updateItem(it.id, "start", e.target.value)} className="rounded border border-stone-200 px-1.5 py-1 text-xs" />
-                <span className="text-stone-400 text-xs">→</span>
-                <input type="date" value={it.end} onChange={(e) => updateItem(it.id, "end", e.target.value)} className="rounded border border-stone-200 px-1.5 py-1 text-xs" />
-                {mode === "calendar" && (
-                  <select value={it.status} onChange={(e) => updateItem(it.id, "status", e.target.value)} className="rounded border border-stone-200 px-1 py-1 text-xs bg-white">
-                    {dayTypeOptions.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
-                  </select>
+              <li key={it.id} className="bg-stone-50 rounded-lg p-2">
+                {multiSubject && (
+                  <input value={it.subject} onChange={(e) => updateItem(it.id, "subject", e.target.value)} placeholder="Subject"
+                    className="w-full rounded border border-teal-200 bg-white px-2 py-1 text-xs font-semibold text-teal-700 mb-1.5" />
                 )}
-                <button onClick={() => removeItem(it.id)} className="text-stone-300 hover:text-red-500 shrink-0"><Trash2 size={13} /></button>
+                <div className="flex items-center gap-1.5">
+                  <input value={it.label} onChange={(e) => updateItem(it.id, "label", e.target.value)} className="flex-1 rounded border border-stone-200 px-2 py-1 text-xs" />
+                  <input type="date" value={it.start} onChange={(e) => updateItem(it.id, "start", e.target.value)} className="rounded border border-stone-200 px-1.5 py-1 text-xs" />
+                  <span className="text-stone-400 text-xs">→</span>
+                  <input type="date" value={it.end} onChange={(e) => updateItem(it.id, "end", e.target.value)} className="rounded border border-stone-200 px-1.5 py-1 text-xs" />
+                  {mode === "calendar" && (
+                    <select value={it.status} onChange={(e) => updateItem(it.id, "status", e.target.value)} className="rounded border border-stone-200 px-1 py-1 text-xs bg-white">
+                      {dayTypeOptions.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+                    </select>
+                  )}
+                  <button onClick={() => removeItem(it.id)} className="text-stone-300 hover:text-red-500 shrink-0"><Trash2 size={13} /></button>
+                </div>
               </li>
             ))}
           </ul>
           <div className="flex gap-2">
             <button onClick={apply} disabled={items.length === 0} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-              {destinationLabel ? `Add ${items.length} item${items.length === 1 ? "" : "s"} to ${destinationLabel}` : `Apply ${items.length} item${items.length === 1 ? "" : "s"}`}
+              {destinationLabel
+                ? `Add ${items.length} item${items.length === 1 ? "" : "s"} to ${destinationLabel}`
+                : multiSubject
+                  ? `Add ${items.length} benchmark${items.length === 1 ? "" : "s"} across ${new Set(items.map((i) => i.subject.trim().toLowerCase()).filter(Boolean)).size} subject${new Set(items.map((i) => i.subject.trim().toLowerCase()).filter(Boolean)).size === 1 ? "" : "s"}`
+                  : `Apply ${items.length} item${items.length === 1 ? "" : "s"}`}
             </button>
             <button onClick={() => setItems(null)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Start over</button>
           </div>
