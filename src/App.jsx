@@ -5780,7 +5780,7 @@ function ContactOfficeView({ adminThread, onBack }) {
             <MessageCircle size={22} className="text-[#5F9F9E]" />
             <span className="text-xs font-semibold text-stone-700">Text</span>
           </a>
-          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#1c3453]">
+          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#5F9F9E]">
             <MessageCircle size={22} className="text-emerald-600" />
             <span className="text-xs font-semibold text-stone-700">WhatsApp</span>
           </a>
@@ -6339,13 +6339,13 @@ function ChildDailyLogView({ link, onBack }) {
       {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>}
 
       <div className="inline-flex items-center gap-0.5 mb-5">
-        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-[#1c3453] p-3 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous day"><ChevronLeft size={16} /></button>
+        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-[#5F9F9E] p-3 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous day"><ChevronLeft size={16} /></button>
         <div className="relative py-3">
           <span className="text-sm font-semibold text-stone-800 px-1.5 select-none whitespace-nowrap">{friendlyDateLabel(date)}</span>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()}
             aria-label="Choose a date" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
         </div>
-        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-[#1c3453] p-3 -m-1 rounded-full hover:bg-stone-100 disabled:opacity-30" aria-label="Next day"><ChevronRight size={16} /></button>
+        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-[#5F9F9E] p-3 -m-1 rounded-full hover:bg-stone-100 disabled:opacity-30" aria-label="Next day"><ChevronRight size={16} /></button>
       </div>
 
       {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
@@ -6647,7 +6647,7 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
     <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
       {displayLabels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
-          className={`flex-1 py-2.5 px-3 font-semibold border-b-2 whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
+          className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
           {label}
         </button>
       ))}
@@ -6813,13 +6813,13 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
     ...(showHomework ? [{ id: "homework", label: "Homework", icon: FileText, count: unreadHomeworkCount }] : []),
   ];
   return (
-    <div className="flex overflow-x-auto no-scrollbar">
+    <div className="flex overflow-x-auto no-scrollbar gap-1 px-2 pb-2">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 shrink-0 flex items-center justify-center py-3 text-xs sm:text-sm font-semibold whitespace-nowrap border-b-2 px-1 ${isActive ? "text-[#F15A61] border-[#F15A61]" : "text-stone-400 border-transparent"}`}>
+            className={`flex-1 shrink-0 flex items-center justify-center py-2.5 text-xs sm:text-sm font-semibold whitespace-nowrap px-2 rounded-lg ${isActive ? "bg-[#F15A61] text-white" : "text-stone-400 hover:bg-stone-50"}`}>
             <span className="relative inline-flex items-center gap-1 sm:gap-1.5">
               <Icon size={14} /> {t.label}
               <TabBadge count={t.count} />
@@ -7455,7 +7455,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <label className="block text-xs font-medium text-stone-500 mb-1">Your name</label>
             <div className="flex gap-2 mb-4">
               <input value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-              <button onClick={saveName} className="bg-[#1c3453] text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-[#14283f]">Save</button>
+              <button onClick={saveName} className="bg-[#5F9F9E] text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-[#508786]">Save</button>
             </div>
             {nameSaved && <p className="text-xs text-emerald-600 -mt-3 mb-4">Saved.</p>}
 
@@ -7468,12 +7468,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
             {pwError && <p className="text-xs text-rose-600 mb-2">{pwError}</p>}
             {pwSuccess && <p className="text-xs text-emerald-600 mb-2">Password updated.</p>}
-            <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-[#1c3453] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#14283f] disabled:opacity-50 mb-3">
+            <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-[#5F9F9E] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#508786] disabled:opacity-50 mb-3">
               {pwSaving ? "Updating..." : "Change password"}
             </button>
             <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
           </div>
-          <NotificationToggle uid={family.uid} accentColor="#1c3453" />
+          <NotificationToggle uid={family.uid} accentColor="#5F9F9E" />
           </>
         ) : actionUnlocked ? (
           <>
@@ -7537,28 +7537,28 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         ) : parentTab === "messages" ? (
           <div className="space-y-5">
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-wide text-[#1c3453]/70 mb-2 px-1">Classes</p>
+              <p className="text-[10px] font-bold uppercase tracking-wide text-[#5F9F9E]/80 mb-2 px-1">Classes</p>
               <div className="space-y-3">
                 <button onClick={() => openAdminMessages().then(refreshUnreadThreads)}
-                  className="w-full text-left bg-white border-2 border-[#1c3453]/15 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
+                  className="w-full text-left bg-white border-2 border-[#5F9F9E]/20 rounded-xl p-4 flex items-center justify-between hover:border-[#5F9F9E]">
                   <div>
                     <p className="font-semibold text-stone-900">School Office</p>
                     <p className="text-xs text-stone-400">Message the office directly</p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0 ml-2">
-                    {unreadThreads.some((t) => t.kind === "admin") && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
+                    {unreadThreads.some((t) => t.kind === "admin") && <span className="w-2 h-2 rounded-full bg-[#5F9F9E]" />}
                     <ChevronRight size={16} className="text-stone-300" />
                   </div>
                 </button>
                 {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
                   <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
-                    className="w-full text-left bg-white border-2 border-[#1c3453]/15 rounded-xl p-4 flex items-center justify-between hover:border-[#1c3453]">
+                    className="w-full text-left bg-white border-2 border-[#5F9F9E]/20 rounded-xl p-4 flex items-center justify-between hover:border-[#5F9F9E]">
                     <div>
                       <p className="font-semibold text-stone-900">{l.className}</p>
                       <p className="text-xs text-stone-400">Message goes to every teacher in this class</p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0 ml-2">
-                      {unreadThreads.some((t) => t.threadKey === `class-${l.classId}`) && <span className="w-2 h-2 rounded-full bg-[#1c3453]" />}
+                      {unreadThreads.some((t) => t.threadKey === `class-${l.classId}`) && <span className="w-2 h-2 rounded-full bg-[#5F9F9E]" />}
                       <ChevronRight size={16} className="text-stone-300" />
                     </div>
                   </button>
@@ -7634,8 +7634,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             {unreadThreads.length > 0 && (
               <div className="space-y-2 mb-4">
                 {unreadThreads.map((item) => (
-                  <div key={item.threadKey} className="bg-[#1c34530d] border border-[#1c345366] rounded-xl p-3.5 flex items-start gap-2.5">
-                    <div className="bg-[#1c3453] text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
+                  <div key={item.threadKey} className="bg-[#5F9F9E0d] border border-[#5F9F9E66] rounded-xl p-3.5 flex items-start gap-2.5">
+                    <div className="bg-[#5F9F9E] text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
                     <button onClick={() => openUnread(item)} className="flex-1 text-left min-w-0">
                       <p className="text-sm font-bold text-stone-900">New message — {item.title}</p>
                       <p className="text-xs text-stone-600 truncate">{item.senderName}: {item.preview}</p>
@@ -7684,7 +7684,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                       <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
                         text="Scan the QR code posted at school to check your child in and out yourself."
                         onNext={advanceTour} onSkip={dismissTour}>
-                        <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #1c3453 0%, #2c4d73 100%)" }}>
+                        <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #5F9F9E 0%, #7bb0af 100%)" }}>
                           Scan QR code to check in or out
                         </button>
                       </TourHint>
