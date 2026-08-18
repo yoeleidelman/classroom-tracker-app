@@ -6442,7 +6442,6 @@ function ParentBlogView({ link, family, onBack }) {
   const [posts, setPosts] = useState([]);
   const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [lightboxIndex, setLightboxIndex] = useState(null);
-  const bottomRef = useRef(null);
   const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
   const authorName = family.name || "A family";
 
@@ -6460,8 +6459,6 @@ function ParentBlogView({ link, family, onBack }) {
     });
     return () => { cancelled = true; };
   }, [link.classId]);
-
-  useEffect(() => { if (!loading) bottomRef.current?.scrollIntoView({ block: "end" }); }, [loading]);
 
   const persist = (next) => { setPosts(next); saveJSON(`class:${link.classId}:blogPosts`, next, true); };
 
@@ -6542,7 +6539,6 @@ function ParentBlogView({ link, family, onBack }) {
           </div>
         </>
       )}
-      <div ref={bottomRef} />
       {lightboxIndex !== null && allMedia[lightboxIndex] && (
         <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
           mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
@@ -6566,6 +6562,21 @@ function ParentBlogView({ link, family, onBack }) {
 function firstNameOnly(fullName) {
   const parts = (fullName || "").trim().split(/\s+/).filter(Boolean);
   return parts.length > 1 ? parts.slice(0, -1).join(" ") : (parts[0] || "");
+}
+
+// Turns the one shared selectedStudentId back into "which index is that, in THIS tab's own
+// list" — a small, repeatable lookup rather than one big derived value computed once, since nothing
+// guarantees every place that needs it runs after a single shared computation would have been
+// defined, and each tab's own list (links, by studentId) is shaped differently enough (Home and
+// Homework keyed by studentId directly, Messages the same, Blog by classId instead) that a single
+// shared formula couldn't cover all of them anyway. Falls back to 0 — the first entry — whenever
+// selectedStudentId is still unset (nothing tapped yet) or doesn't appear in this particular list
+// at all (a child who isn't in this tab's own filtered set, like a part-time child on the
+// full-time-only Home tab).
+function findChildIndex(links, studentId) {
+  if (!studentId) return 0;
+  const idx = (links || []).findIndex((l) => l.studentId === studentId);
+  return idx >= 0 ? idx : 0;
 }
 
 // A family's own name is whatever was typed when the account was created — sometimes an actual
@@ -6985,16 +6996,21 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     // anything to attach to if the currently selected child isn't preschool, so this jumps
     // straight to done from step 1 in that case, the same way it already did when there were no
     // linked children at all to point at.
-    const selectedLink = (fullTimeStudentLinks || [])[selectedChildIndex] || (fullTimeStudentLinks || [])[0];
+    const selectedLink = (fullTimeStudentLinks || [])[findChildIndex(fullTimeStudentLinks, selectedStudentId)] || (fullTimeStudentLinks || [])[0];
     const noPreschoolChild = !selectedLink || selectedLink.classType !== "preschool";
     if (tourStep === 0 && noPreschoolChild) { dismissTour(); return; }
     if (tourStep >= TOUR_TOTAL_STEPS - 1) dismissTour();
     else setTourStep((s) => s + 1);
   };
-  const [selectedChildIndex, setSelectedChildIndex] = useState(0); // which child's daily log shows on Home, when there's more than one
-  const [selectedBlogClassIndex, setSelectedBlogClassIndex] = useState(0); // which class's blog shows, when linked to more than one
-  const [selectedHomeworkChildIndex, setSelectedHomeworkChildIndex] = useState(0);
-  const [selectedMessagesChildIndex, setSelectedMessagesChildIndex] = useState(0);
+  // One shared "which child am I looking at" instead of four separate, unrelated indexes — a
+  // parent who taps their third child on Home and then swipes to Messages, Homework, or Blog
+  // should land on that same child there too, not bounce back to whichever child happens to sit
+  // first in that tab's own list. Tracked by the child's own studentId, not a raw index, since
+  // each tab's own array can be ordered or filtered differently (Blog in particular switches by
+  // CLASS, not by child, so two siblings sharing a class collapse into a single entry there) — an
+  // index that meant "third child" on Home would point at a completely different child, or
+  // nothing at all, once carried over to a tab whose list doesn't line up the same way.
+  const [selectedStudentId, setSelectedStudentId] = useState(null);
 
   // Blog and homework both only ever come from a student's full-time class — a part-time or
   // specific-periods enrollment (combined with another room for a subject or two) doesn't carry
@@ -7550,6 +7566,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           // are actually theirs, since that's what a teacher or classroom card below gets checked
           // against once a specific child is selected.
           const uniqueChildren = [...new Map((family?.studentLinks || []).map((l) => [l.studentId, l])).values()];
+          const selectedMessagesChildIndex = findChildIndex(uniqueChildren, selectedStudentId);
           const selectedChild = uniqueChildren[selectedMessagesChildIndex] || uniqueChildren[0];
           const selectedChildClassIds = (family?.studentLinks || []).filter((l) => l.studentId === selectedChild?.studentId).map((l) => l.classId);
           const selectedChildClassTypes = [...new Set(selectedChildClassIds.map((id) => linkedClassTypeById[id]).filter(Boolean))];
@@ -7566,7 +7583,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           return (
           <div className="space-y-5">
             {uniqueChildren.length > 1 && (
-              <ChildSwitcher labels={uniqueChildren.map((l) => l.studentName)} selectedIndex={selectedMessagesChildIndex} onSelect={setSelectedMessagesChildIndex} />
+              <ChildSwitcher labels={uniqueChildren.map((l) => l.studentName)} selectedIndex={selectedMessagesChildIndex}
+                onSelect={(i) => setSelectedStudentId(uniqueChildren[i]?.studentId)} />
             )}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wide text-[#5F9F9E]/80 mb-2 px-1">Classes</p>
@@ -7646,8 +7664,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
           ) : (() => {
             const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
+            // Blog switches by CLASS, not directly by child — so getting from "the shared
+            // selectedStudentId" to "which of these class tabs is that" has to go through that
+            // child's own classId first (two siblings sharing a class collapse into the same
+            // single tab here either way). Picking a different class tab, in the other direction,
+            // sets selectedStudentId back to whichever child that class's own link entry belongs
+            // to — a reasonable stand-in for "this class" everywhere else selectedStudentId gets
+            // used, even on a shared class, since anyone in it is in the class that was just
+            // chosen.
+            const selectedChildLink = fullTimeStudentLinks.find((l) => l.studentId === selectedStudentId);
+            const blogIndex = selectedChildLink ? uniqueClasses.findIndex((c) => c.classId === selectedChildLink.classId) : -1;
             return (
-              <ParentBlogTabContent uniqueClasses={uniqueClasses} selectedIndex={selectedBlogClassIndex} onSelectIndex={setSelectedBlogClassIndex}
+              <ParentBlogTabContent uniqueClasses={uniqueClasses} selectedIndex={blogIndex >= 0 ? blogIndex : 0}
+                onSelectIndex={(i) => setSelectedStudentId(uniqueClasses[i]?.studentId)}
                 family={family} onMarkRead={markBlogRead} />
             );
           })()
@@ -7659,7 +7688,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             return elementaryLinks.length === 0 ? (
               <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
             ) : (
-              <ParentHomeworkTabContent links={elementaryLinks} selectedIndex={selectedHomeworkChildIndex} onSelectIndex={setSelectedHomeworkChildIndex}
+              <ParentHomeworkTabContent links={elementaryLinks} selectedIndex={findChildIndex(elementaryLinks, selectedStudentId)}
+                onSelectIndex={(i) => setSelectedStudentId(elementaryLinks[i]?.studentId)}
                 onMarkRead={markHomeworkRead} />
             );
           })()
@@ -7694,10 +7724,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             ) : (
               <>
                 {fullTimeStudentLinks.length > 1 && (
-                  <ChildSwitcher labels={fullTimeStudentLinks.map((l) => l.studentName)} selectedIndex={selectedChildIndex} onSelect={setSelectedChildIndex} />
+                  <ChildSwitcher labels={fullTimeStudentLinks.map((l) => l.studentName)} selectedIndex={findChildIndex(fullTimeStudentLinks, selectedStudentId)}
+                    onSelect={(i) => setSelectedStudentId(fullTimeStudentLinks[i]?.studentId)} />
                 )}
                 {(() => {
-                  const link = fullTimeStudentLinks[selectedChildIndex] || fullTimeStudentLinks[0];
+                  const link = fullTimeStudentLinks[findChildIndex(fullTimeStudentLinks, selectedStudentId)] || fullTimeStudentLinks[0];
                   const isPreschoolChild = link.classType === "preschool";
                   // The QR check-in system, and the mood/meals/naps/diapers daily log below it,
                   // are both specific to how preschool rooms actually run — there's no equivalent
