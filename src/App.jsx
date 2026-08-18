@@ -752,6 +752,27 @@ function useVisualViewportHeight() {
   return height;
 }
 
+// The FULL viewport height is the wrong number for a bounded-height view that renders below the
+// app's own sticky header (logo, tab bar, child-switcher) — using it anyway claims more vertical
+// space than actually exists below where this view starts, pushing its true bottom past the
+// visible screen edge. That's what read as "goes to the bottom, but not all the way — there's
+// still one more message I have to scroll to reach." This measures the element's own actual
+// starting position (via getBoundingClientRect, which already accounts for everything above it,
+// whatever that header's real height happens to be — notch, safe-area insets, switcher shown or
+// not — without needing to know or predict any of that directly) and returns only the space that
+// genuinely remains below it. Re-measures on mount and whenever the viewport itself changes
+// (keyboard open/close, orientation), which covers the case that actually matters here: this is
+// measured once when the view first mounts, and mount is exactly when the header above it has
+// already settled into its real height.
+function useRemainingViewportHeight(ref) {
+  const viewportHeight = useVisualViewportHeight();
+  const [top, setTop] = useState(0);
+  useLayoutEffect(() => {
+    if (ref.current) setTop(ref.current.getBoundingClientRect().top);
+  }, [viewportHeight]); // eslint-disable-line react-hooks/exhaustive-deps
+  return viewportHeight - top;
+}
+
 // "Sticks" to the bottom of a scrollable feed the way a real chat app does — not a one-time jump
 // on arrival, but staying pinned there through anything that changes the content's height
 // afterward (a web font finishing its swap-in, a reaction count settling in, an image's real
@@ -6597,11 +6618,15 @@ function ParentBlogView({ link, family, onBack }) {
   // wherever it happened to be at the exact instant of the first scroll.
   const scrollContainerRef = useRef(null);
   const contentRef = useRef(null);
+  // The outer wrapper itself — needed so useRemainingViewportHeight can measure exactly how much
+  // space genuinely remains below it (accounting for the app's own sticky header above this view),
+  // rather than assuming the full screen height is available, which isn't true here.
+  const outerRef = useRef(null);
   // Bounds this view to exactly the visible height and makes its own post list independently
   // scrollable within that — see the matching reasoning just below, on why that's what actually
   // lets this land at the bottom with zero visible adjustment, during a swipe included, not just
   // on a direct tap.
-  const viewportHeight = useVisualViewportHeight();
+  const viewportHeight = useRemainingViewportHeight(outerRef);
   const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
   const authorName = family.name || "A family";
 
@@ -6682,15 +6707,8 @@ function ParentBlogView({ link, family, onBack }) {
   };
 
   return (
-    <div className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh" }}>
+    <div ref={outerRef} className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh" }}>
       {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3 shrink-0"><ChevronLeft size={16} /> Back</button>}
-      <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5 shrink-0">
-        <img src="/parent-logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
-        <div className="min-w-0">
-          <h1 className="display-font text-base font-bold text-stone-900 truncate">{link.className}</h1>
-          <p className="text-[11px] text-stone-400">Class Blog</p>
-        </div>
-      </div>
 
       {/* This is the piece that actually makes "already at the bottom, no visible adjustment"
           possible during a live swipe preview, not just a direct tap — its own bounded,
@@ -6700,6 +6718,15 @@ function ParentBlogView({ link, family, onBack }) {
           other tab is still the one actually on screen. */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto no-scrollbar">
         <div ref={contentRef}>
+          {/* Scrolls away with the rest of the feed, same as it always did — this only needed to
+              move inside the scrollable region, not become fixed above it. */}
+          <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
+            <img src="/parent-logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
+            <div className="min-w-0">
+              <h1 className="display-font text-base font-bold text-stone-900 truncate">{link.className}</h1>
+              <p className="text-[11px] text-stone-400">Class Blog</p>
+            </div>
+          </div>
           {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
           {!loading && sorted.length === 0 && (
             <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
