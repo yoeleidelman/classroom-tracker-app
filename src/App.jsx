@@ -1661,8 +1661,13 @@ function isIOSDevice() {
 // against the signed-in account — one account can have several devices enabled at once (a
 // teacher's phone AND tablet, say), so this adds to a list rather than replacing a single value.
 async function enableNotificationsFor(uid) {
-  if (!("Notification" in window)) return { ok: false, error: "This browser doesn't support notifications." };
+  // Same ordering fix as NotificationToggle's own refresh() above, and for the identical reason —
+  // iOS Safari in tab mode never exposes window.Notification at all, so checking that generic case
+  // first meant tapping the toggle on an iOS tab always produced "this browser doesn't support
+  // notifications" instead of the specific, actionable install instructions this function is
+  // actually able to signal for via needsInstall.
   if (isIOSDevice() && !isRunningStandalone()) return { ok: false, needsInstall: true };
+  if (!("Notification" in window)) return { ok: false, error: "This browser doesn't support notifications." };
 
   const permission = await Notification.requestPermission();
   if (permission !== "granted") return { ok: false, error: "Notifications weren't allowed — you can turn this on again later from your device's notification settings." };
@@ -3973,8 +3978,15 @@ function NotificationToggle({ uid, accentColor = "#0f766e" }) {
 
   const refresh = useCallback(async () => {
     if (!uid) return;
-    if (!("Notification" in window)) { setStatus("unsupported"); return; }
+    // Order matters here: iOS Safari doesn't expose window.Notification at all UNLESS it's
+    // already running as an installed, standalone home-screen app — so for anyone on iOS still
+    // using it as a normal Safari tab, "Notification" in window is false regardless of whether
+    // they'd otherwise be able to use notifications once actually installed. Checking that
+    // generic case FIRST meant every iOS Safari tab user hit the vague "not supported" dead end
+    // and never saw the specific, actionable install instructions below — checking the iOS case
+    // first fixes that, without changing behavior for any other browser at all.
     if (isIOSDevice() && !isRunningStandalone()) { setStatus("needs-install"); return; }
+    if (!("Notification" in window)) { setStatus("unsupported"); return; }
     if (Notification.permission === "denied") { setStatus("denied"); return; }
     const enabled = await isThisDeviceEnabled(uid);
     setStatus(enabled ? "on" : "off");
