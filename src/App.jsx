@@ -6813,13 +6813,13 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
     ...(showHomework ? [{ id: "homework", label: "Homework", icon: FileText, count: unreadHomeworkCount }] : []),
   ];
   return (
-    <div className="flex overflow-x-auto no-scrollbar gap-1 px-2 pb-2">
+    <div className="flex overflow-x-auto no-scrollbar">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 shrink-0 flex items-center justify-center py-2.5 text-xs sm:text-sm font-semibold whitespace-nowrap px-2 rounded-lg ${isActive ? "bg-[#F15A61] text-white" : "text-stone-400 hover:bg-stone-50"}`}>
+            className={`flex-1 shrink-0 flex items-center justify-center py-3 text-xs sm:text-sm font-semibold whitespace-nowrap px-1 ${isActive ? "text-[#F15A61]" : "text-stone-400"}`}>
             <span className="relative inline-flex items-center gap-1 sm:gap-1.5">
               <Icon size={14} /> {t.label}
               <TabBadge count={t.count} />
