@@ -5732,11 +5732,11 @@ function ContactOfficePanel({ onViewUpdates }) {
     <div className="anim-expand-down bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3">
       <div className="grid grid-cols-3 gap-2 mb-2">
         <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <Phone size={18} className="text-[#1c3453]" />
+          <Phone size={18} className="text-[#5F9F9E]" />
           <span className="text-[11px] font-semibold text-stone-700">Call</span>
         </a>
         <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <MessageCircle size={18} className="text-[#1c3453]" />
+          <MessageCircle size={18} className="text-[#5F9F9E]" />
           <span className="text-[11px] font-semibold text-stone-700">Text</span>
         </a>
         <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
@@ -5744,7 +5744,7 @@ function ContactOfficePanel({ onViewUpdates }) {
           <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
         </a>
       </div>
-      <button onClick={onViewUpdates} className="text-xs font-semibold text-[#1c3453] hover:text-[#14283f]">See updates from the office →</button>
+      <button onClick={onViewUpdates} className="text-xs font-semibold text-[#5F9F9E] hover:text-[#447271]">See updates from the office →</button>
     </div>
   );
 }
@@ -5772,12 +5772,12 @@ function ContactOfficeView({ adminThread, onBack }) {
       )}
       {!loading && digits && (
         <div className="grid grid-cols-3 gap-2 mb-6">
-          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#1c3453]">
-            <Phone size={22} className="text-[#1c3453]" />
+          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#5F9F9E]">
+            <Phone size={22} className="text-[#5F9F9E]" />
             <span className="text-xs font-semibold text-stone-700">Call</span>
           </a>
-          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#1c3453]">
-            <MessageCircle size={22} className="text-[#1c3453]" />
+          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#5F9F9E]">
+            <MessageCircle size={22} className="text-[#5F9F9E]" />
             <span className="text-xs font-semibold text-stone-700">Text</span>
           </a>
           <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#1c3453]">
