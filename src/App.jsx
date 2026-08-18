@@ -5974,7 +5974,14 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
     return () => { window.__activeContent = { ...(window.__activeContent || {}), threadKey: null }; };
   }, [threadKey]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "auto" }); }, [messages.length]);
+  // Lands already at the newest message the instant this screen is visible — useLayoutEffect,
+  // not useEffect, is what makes that true: useEffect runs after the browser has already painted,
+  // so for one visible frame the page would show wherever it started (the top) before jumping,
+  // which reads as an awkward flash or slide even without a smooth animation attached to it.
+  // useLayoutEffect runs synchronously before that paint happens, so the very first frame the
+  // person actually sees already reflects the scrolled position — there's nothing to visibly
+  // adjust because the "before" state was never painted at all.
+  useLayoutEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [messages.length]);
 
   // Grows with what's actually being typed, the way most messaging apps handle this, instead of
   // staying pinned to one line and forcing a scroll inside a tiny box to see what you've written.
@@ -6538,12 +6545,17 @@ function ChildDailyLogView({ link, onBack }) {
 // Self-contained, like ChildDailyLogView — fetches directly by classId rather than depending on
 // ClassApp's own closures, since a parent isn't inside any one class's context and may have
 // children in several different classes at once.
-function ParentBlogView({ link, family, onBack, isRealActiveTab }) {
+function ParentBlogView({ link, family, onBack }) {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState([]);
   const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const bottomRef = useRef(null);
+  // Bounds this view to exactly the visible height and makes its own post list independently
+  // scrollable within that — see the matching reasoning just below, on why that's what actually
+  // lets this land at the bottom with zero visible adjustment, during a swipe included, not just
+  // on a direct tap.
+  const viewportHeight = useVisualViewportHeight();
   const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
   const authorName = family.name || "A family";
 
@@ -6562,16 +6574,22 @@ function ParentBlogView({ link, family, onBack, isRealActiveTab }) {
     return () => { cancelled = true; };
   }, [link.classId]);
 
-  // Lands on the newest post automatically, so a parent never has to scroll down to reach it —
-  // but only for the genuinely real, settled tab. isRealActiveTab is false while this is only
-  // rendering as a live preview of wherever an in-progress swipe is headed, which is exactly the
-  // case that used to cause a visible jump: that preview pane's own data load could finish and
-  // fire this scroll before the swipe had even committed to landing on Blog at all, and doing so
-  // moves the actual page itself, not some contained corner of it. Smooth rather than an instant
-  // jump, so arriving at the bottom reads as a deliberate landing rather than another jolt.
-  useEffect(() => {
-    if (!loading && isRealActiveTab) bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [loading, isRealActiveTab]);
+  // Lands on the newest post the instant this screen is actually visible — not scrolled down
+  // after arrival, but already there for the very first frame the person sees, during an
+  // in-progress swipe included, not just on a direct tap. That last part is exactly why this no
+  // longer guards on isRealActiveTab the way it used to: this view's own post list is now its own
+  // independently-scrollable region (see the bounded-height wrapper below), not something that
+  // moves the page itself — so a live preview pane sliding in during a swipe can safely land at
+  // its own bottom immediately too, without touching whatever the person is still actually looking
+  // at. useLayoutEffect, not useEffect, is what removes the jolt on real arrival — useEffect runs
+  // after the browser paints, so the top of the feed would flash for one frame before jumping;
+  // useLayoutEffect runs before that paint, so there's nothing "before" to see at all. No smooth
+  // animation either, for the same reason — an animated glide is still a visible adjustment
+  // happening in front of the person, exactly what this is meant to avoid, not a gentler version
+  // of it.
+  useLayoutEffect(() => {
+    if (!loading) bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [loading]);
 
   const persist = (next) => { setPosts(next); saveJSON(`class:${link.classId}:blogPosts`, next, true); };
 
@@ -6627,9 +6645,9 @@ function ParentBlogView({ link, family, onBack, isRealActiveTab }) {
   };
 
   return (
-    <div className="app-page">
-      {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>}
-      <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
+    <div className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh" }}>
+      {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3 shrink-0"><ChevronLeft size={16} /> Back</button>}
+      <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5 shrink-0">
         <img src="/parent-logo-transparent.png" alt="" className="w-9 h-9 object-contain shrink-0" />
         <div className="min-w-0">
           <h1 className="display-font text-base font-bold text-stone-900 truncate">{link.className}</h1>
@@ -6637,22 +6655,30 @@ function ParentBlogView({ link, family, onBack, isRealActiveTab }) {
         </div>
       </div>
 
-      {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-      {!loading && sorted.length === 0 && (
-        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
-      )}
-      {!loading && sorted.length > 0 && (
-        <>
-          <p className="text-center text-[11px] text-stone-400 mb-4">Beginning of the class blog</p>
-          <div className="space-y-4">
-            {sorted.map((post) => (
-              <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
-                commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
-            ))}
-          </div>
-        </>
-      )}
-      <div ref={bottomRef} />
+      {/* This is the piece that actually makes "already at the bottom, no visible adjustment"
+          possible during a live swipe preview, not just a direct tap — its own bounded,
+          independently-scrollable region, separate from the page itself. Scrolling THIS div to
+          its own bottom never touches window scroll, so it's safe to do immediately, even while
+          this is only rendering as a preview of wherever an in-progress swipe is headed and some
+          other tab is still the one actually on screen. */}
+      <div className="flex-1 overflow-y-auto">
+        {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+        {!loading && sorted.length === 0 && (
+          <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
+        )}
+        {!loading && sorted.length > 0 && (
+          <>
+            <p className="text-center text-[11px] text-stone-400 mb-4">Beginning of the class blog</p>
+            <div className="space-y-4">
+              {sorted.map((post) => (
+                <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
+                  commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
+              ))}
+            </div>
+          </>
+        )}
+        <div ref={bottomRef} />
+      </div>
       {lightboxIndex !== null && allMedia[lightboxIndex] && (
         <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
           mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
@@ -6791,13 +6817,13 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
 // Split out from an inline expression specifically so it can use its own effect — marking a
 // class's blog as read has to happen when THAT class is actually the one being looked at, and
 // needs to re-fire every time the switcher changes which one that is.
-function ParentBlogTabContent({ uniqueClasses, selectedIndex, family, onMarkRead, isRealActiveTab }) {
+function ParentBlogTabContent({ uniqueClasses, selectedIndex, family, onMarkRead }) {
   const selectedLink = uniqueClasses[selectedIndex] || uniqueClasses[0];
   useEffect(() => {
     if (selectedLink) onMarkRead(selectedLink.classId);
   }, [selectedLink?.classId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return <ParentBlogView link={selectedLink} family={family} isRealActiveTab={isRealActiveTab} />;
+  return <ParentBlogView link={selectedLink} family={family} />;
 }
 
 // Per-child, not per-class like the blog switcher above — a parent thinks "my daughter's
@@ -7618,19 +7644,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       // tabToRender` shadows the outer parentTab for everything inside this function only — every
       // existing `parentTab === "..."` check below this point keeps working unchanged, now reading
       // whichever tab was actually passed in rather than always the live one.
-      // Captured under its own name here, before renderTabContent's own internal `const parentTab
-      // = tabToRender` has a chance to shadow it — referencing the plain name `parentTab` from
-      // inside that function, even on the line right before its own local declaration, hits its
-      // temporal dead zone and throws, it does not fall through to this outer value the way a
-      // different-named capture like this one does.
-      const committedParentTab = parentTab;
       const renderTabContent = (tabToRender) => {
-        // True only for the genuinely current, settled screen — false for a live preview of
-        // wherever an in-progress swipe is headed. That distinction matters for anything that
-        // should only ever happen once, for the real thing, on arrival — like the blog jumping to
-        // its newest post, which used to fire from the preview pane too, before the swipe had even
-        // committed to anything.
-        const isRealActiveTab = tabToRender === committedParentTab;
         const parentTab = tabToRender;
         return (
         parentTab === "settings" ? (
@@ -7847,7 +7861,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             const blogIndex = selectedChildLink ? uniqueClasses.findIndex((c) => c.classId === selectedChildLink.classId) : -1;
             return (
               <ParentBlogTabContent uniqueClasses={uniqueClasses} selectedIndex={blogIndex >= 0 ? blogIndex : 0}
-                family={family} onMarkRead={markBlogRead} isRealActiveTab={isRealActiveTab} />
+                family={family} onMarkRead={markBlogRead} />
             );
           })()
         ) : parentTab === "homework" ? (
@@ -12175,7 +12189,11 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
   const bottomRef = useRef(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
-  useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, []); // eslint-disable-line
+  // Same reasoning as the parent side's own blog view fix — useLayoutEffect, not useEffect, is
+  // what makes this genuinely start at the bottom rather than flash the top of the feed for one
+  // frame before jumping there. useEffect runs after the browser paints; useLayoutEffect runs
+  // before it, so the very first frame shown already reflects the scrolled position.
+  useLayoutEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, []); // eslint-disable-line
 
   // Same reasoning as the parent side's blog view — one continuous, chronological list of every
   // photo and video across the whole feed, so swiping in the lightbox isn't limited to whichever
