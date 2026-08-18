@@ -7447,6 +7447,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         parentTab === "settings" ? (
           <>
             <button onClick={() => navigateParentTab("home")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+            {canSwitchToTeacher && (
+              <button onClick={onSwitchToTeacher} className="w-full bg-[#5F9F9E] text-white rounded-xl py-3 text-sm font-bold hover:bg-[#508786] mb-5">Switch to Teacher view</button>
+            )}
             <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5">
             <p className="font-semibold text-stone-800 text-sm mb-3">My account</p>
             <label className="block text-xs font-medium text-stone-500 mb-1">Your name</label>
@@ -7468,9 +7471,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <button onClick={submitPasswordChange} disabled={pwSaving} className="w-full bg-[#1c3453] text-white rounded-lg py-2 text-sm font-semibold hover:bg-[#14283f] disabled:opacity-50 mb-3">
               {pwSaving ? "Updating..." : "Change password"}
             </button>
-            {canSwitchToTeacher && (
-              <button onClick={onSwitchToTeacher} className="w-full text-xs font-semibold text-[#5F9F9E] hover:text-[#447271] pt-3 pb-2 border-t border-stone-200">Switch to Teacher view</button>
-            )}
             <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-500 hover:text-rose-600 pt-2 border-t border-stone-200">Sign out</button>
           </div>
           <NotificationToggle uid={family.uid} accentColor="#1c3453" />
@@ -7743,7 +7743,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             </div>
           </div>
           <div className="flex items-center gap-4 shrink-0">
-            <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#1c3453]/90 hover:text-[#1c3453]">
+            <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#5F9F9E] hover:text-[#447271]">
               <Phone size={20} strokeWidth={1.5} />
               <span className="text-[9px] font-bold leading-none whitespace-nowrap">Contact office</span>
             </button>
@@ -7753,7 +7753,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 settings (same destination the gear used to open), freeing the whole center of the
                 header instead of needing its own dedicated space for a name that could run long. */}
             <button onClick={() => navigateParentTab("settings")} aria-label="Account settings"
-              className="w-9 h-9 rounded-full bg-[#1c3453] text-white text-xs font-bold flex items-center justify-center hover:bg-[#14283f] shrink-0">
+              className="w-9 h-9 rounded-full bg-[#5F9F9E] text-white text-xs font-bold flex items-center justify-center hover:bg-[#508786] shrink-0">
               {getInitials(family?.name)}
             </button>
           </div>
