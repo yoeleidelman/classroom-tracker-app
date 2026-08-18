@@ -6644,7 +6644,14 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
   }, [measureAndFit]);
 
   return (
-    <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
+    // Sticky, not just sitting in the normal scroll flow — on a long blog feed or a homework list,
+    // switching to a different child previously meant scrolling all the way back up first just to
+    // reach this bar again. The top offset accounts for both the sticky header above it (measured
+    // directly: logo row + tab row together render at 122px) and env(safe-area-inset-top), which
+    // varies by device (a notch adds real height to that header above, so a fixed number alone
+    // would drift out of sync with it on exactly the phones most likely to need it).
+    <div ref={containerRef} className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4 sticky z-[15]"
+      style={{ top: "calc(env(safe-area-inset-top) + 122px)" }}>
       {displayLabels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
           className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
@@ -6987,6 +6994,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const [selectedChildIndex, setSelectedChildIndex] = useState(0); // which child's daily log shows on Home, when there's more than one
   const [selectedBlogClassIndex, setSelectedBlogClassIndex] = useState(0); // which class's blog shows, when linked to more than one
   const [selectedHomeworkChildIndex, setSelectedHomeworkChildIndex] = useState(0);
+  const [selectedMessagesChildIndex, setSelectedMessagesChildIndex] = useState(0);
 
   // Blog and homework both only ever come from a student's full-time class — a part-time or
   // specific-periods enrollment (combined with another room for a subject or two) doesn't carry
@@ -7179,6 +7187,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // have no direct read access to teacher records) and deliberately deduplicated by teacher there,
   // so a teacher covering two of this family's classes, or General Studies for a grade they don't
   // otherwise teach, still shows up exactly once, not once per class they share.
+  const [linkedClassTypeById, setLinkedClassTypeById] = useState({}); // this family's own classId -> classType, for matching a grade-level-reachable teacher against a specific child
   useEffect(() => {
     (async () => {
       try {
@@ -7186,6 +7195,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         const res = await fetch("/api/eligible-teachers", { headers });
         const data = await res.json();
         setEligibleTeachers(res.ok ? (data.teachers || []) : []);
+        setLinkedClassTypeById(res.ok ? (data.linkedClassTypeById || {}) : {});
       } catch {
         setEligibleTeachers([]);
       }
@@ -7534,8 +7544,30 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             </div>
             <button onClick={() => setActionUnlocked(false)} className="w-full bg-stone-200 text-stone-700 rounded-xl py-3 text-sm font-bold hover:bg-stone-300">Done</button>
           </>
-        ) : parentTab === "messages" ? (
+        ) : parentTab === "messages" ? (() => {
+          // One row per unique CHILD (a child with links to two classes — General + Judaic
+          // Studies, say — only gets one tab, not two), each with the full set of classIds that
+          // are actually theirs, since that's what a teacher or classroom card below gets checked
+          // against once a specific child is selected.
+          const uniqueChildren = [...new Map((family?.studentLinks || []).map((l) => [l.studentId, l])).values()];
+          const selectedChild = uniqueChildren[selectedMessagesChildIndex] || uniqueChildren[0];
+          const selectedChildClassIds = (family?.studentLinks || []).filter((l) => l.studentId === selectedChild?.studentId).map((l) => l.classId);
+          const selectedChildClassTypes = [...new Set(selectedChildClassIds.map((id) => linkedClassTypeById[id]).filter(Boolean))];
+          const filteredClasses = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].filter((l) => selectedChildClassIds.includes(l.classId));
+          // A teacher belongs to the selected child either because they're directly assigned to
+          // one of that child's own classes, or because they're reachable by grade level (a
+          // coordinator, say) and that child has a class in the grade level they cover — checked
+          // against classType specifically for that second case, since a grade-level match was
+          // never tied to one particular classId to begin with.
+          const filteredTeachers = (eligibleTeachers || []).filter((t) =>
+            (t.classIds || []).some((id) => selectedChildClassIds.includes(id)) ||
+            (t.reachableClassTypes || []).some((type) => selectedChildClassTypes.includes(type))
+          );
+          return (
           <div className="space-y-5">
+            {uniqueChildren.length > 1 && (
+              <ChildSwitcher labels={uniqueChildren.map((l) => l.studentName)} selectedIndex={selectedMessagesChildIndex} onSelect={setSelectedMessagesChildIndex} />
+            )}
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wide text-[#5F9F9E]/80 mb-2 px-1">Classes</p>
               <div className="space-y-3">
@@ -7550,7 +7582,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                     <ChevronRight size={16} className="text-stone-300" />
                   </div>
                 </button>
-                {[...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].map((l) => (
+                {filteredClasses.map((l) => (
                   <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
                     className="w-full text-left bg-white border-2 border-[#5F9F9E]/20 rounded-xl p-4 flex items-center justify-between hover:border-[#5F9F9E]">
                     <div>
@@ -7583,11 +7615,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                   ))}
                 </div>
               </div>
-            ) : eligibleTeachers.length > 0 && (
+            ) : filteredTeachers.length > 0 && (
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
                 <div className="space-y-3">
-                  {eligibleTeachers.map((t) => (
+                  {filteredTeachers.map((t) => (
                     <button key={t.uid} onClick={() => openTeacherMessages(t.uid).then(refreshUnreadThreads)}
                       className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
                       <div>
@@ -7605,7 +7637,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               </div>
             )}
           </div>
-        ) : parentTab === "blog" ? (
+          );
+        })()
+        : parentTab === "blog" ? (
           fullTimeStudentLinks === null ? (
             <p className="text-sm text-stone-400 text-center py-8">Loading…</p>
           ) : fullTimeStudentLinks.length === 0 ? (
@@ -7779,7 +7813,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         )}
       </div>
 
-      <div ref={swipeContainerRef} className="max-w-lg mx-auto overflow-hidden relative" style={{ minHeight: "70vh" }} onTouchStart={onTabAreaTouchStart} onTouchEnd={onTabAreaTouchEnd}>
+      {/* overflow only actually needs to clip anything while a swipe gesture is genuinely in
+          progress (dragging, or still animating into place) — the rest of the time, this is just
+          a normal, sitting-still page, and overflow-hidden here would do nothing useful except
+          break position: sticky for anything inside it (a CSS quirk that isn't optional: setting
+          overflow-x to anything other than visible forces the browser to compute overflow-y as
+          auto too, even when overflow-y is explicitly set to visible right alongside it — and
+          auto is enough on its own to make this the "nearest scrolling ancestor" a sticky
+          descendant sticks relative to, instead of the actual page, even though this element
+          itself never actually scrolls internally). Swapping it in only for the moment it's
+          needed keeps the swipe animation exactly as clipped as before, without permanently
+          costing every sticky element inside a tab its own ability to stick during ordinary
+          scrolling. */}
+      <div ref={swipeContainerRef} className={`max-w-lg mx-auto relative ${(dragOffsetPx !== 0 || dragAnimating || dragTargetTab) ? "overflow-hidden" : ""}`} style={{ minHeight: "70vh" }} onTouchStart={onTabAreaTouchStart} onTouchEnd={onTabAreaTouchEnd}>
       <div className="px-4 py-5" style={{ transform: `translateX(${dragOffsetPx}px)`, transition: dragAnimating ? "transform 0.22s ease-out" : "none" }}>
 
       {renderTabContent(parentTab)}

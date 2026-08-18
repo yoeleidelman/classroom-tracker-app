@@ -139,8 +139,27 @@ export default async function handler(req, res) {
     // none to offer here — the notification link falls back to opening the app normally instead
     // of deep-linking straight to the thread, which is an acceptable, graceful degradation for
     // that specific, narrower case rather than a broken link.
-    teachers.push({ uid: t.uid, name: t.name, label, deepLinkClassId: assigned[0] || null });
+    //
+    // classIds and reachableClassTypes are what the app's own "tap a child, see their teachers"
+    // filter runs against client-side — eligibleViaClassIds specifically (a teacher directly
+    // assigned to one of this child's own classes), separate from messagingTypes filtered down to
+    // only the grade levels this family is actually connected to (a teacher reachable by grade
+    // level, like a coordinator, without necessarily being assigned to this exact class at all).
+    // Both are needed since only classIds can be matched directly against a specific child's own
+    // classId, while a grade-level match has to be checked against that child's class's type
+    // instead.
+    teachers.push({
+      uid: t.uid, name: t.name, label, deepLinkClassId: assigned[0] || null,
+      classIds: eligibleViaClassIds,
+      reachableClassTypes: messagingTypes.filter((type) => linkedClassTypes.includes(type)),
+    });
   });
 
-  return res.status(200).json({ teachers });
+  // Just this family's own linked classes, not the full school registry — enough for the client
+  // to know which classType each of ITS OWN children's classes is, so it can check a grade-level-
+  // reachable teacher (reachableClassTypes above) against a specific child rather than only being
+  // able to match teachers directly assigned to that exact class.
+  const linkedClassTypeById = Object.fromEntries(linkedClassIds.map((id) => [id, classTypeById[id]]));
+
+  return res.status(200).json({ teachers, linkedClassTypeById });
 }
