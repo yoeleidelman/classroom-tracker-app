@@ -6549,13 +6549,23 @@ function ParentBlogView({ link, family, onBack }) {
 // A grounded, connected row rather than separate floating pills — same underline-tab feel as the
 // main navigation bar above it, so switching between children (or between classes) reads as part
 // of the app's structure rather than loose buttons sitting on the page.
+// The last word in a name is treated as the last name, whatever it is — a student's own record
+// never actually separates first and last name as distinct fields, so this is the one rule that
+// holds up across every name shape that shows up in practice: "Ezra" (one word, kept as-is, since
+// dropping it would leave nothing), "Ezra Cohen" (drop "Cohen"), "Miriam Rivka Goldstein" (drop
+// only "Goldstein", keeping the middle name intact).
+function firstNameOnly(fullName) {
+  const parts = (fullName || "").trim().split(/\s+/).filter(Boolean);
+  return parts.length > 1 ? parts.slice(0, -1).join(" ") : (parts[0] || "");
+}
+
 function ChildSwitcher({ labels, selectedIndex, onSelect }) {
   return (
     <div className="flex bg-white border border-stone-200 rounded-xl overflow-hidden mb-4">
       {labels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)}
-          className={`flex-1 py-2.5 text-sm font-semibold border-b-2 ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
-          {label}
+          className={`flex-1 py-2.5 text-sm font-semibold border-b-2 whitespace-nowrap ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-[#1c3453] border-b-[#1c3453] bg-[#1c34530d]" : "text-stone-500 border-b-transparent hover:bg-stone-50"}`}>
+          {firstNameOnly(label)}
         </button>
       ))}
     </div>
@@ -6726,7 +6736,7 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
         const isActive = active === t.id;
         return (
           <button key={t.id} onClick={() => navigate(t.id)}
-            className={`flex-1 shrink-0 flex items-center justify-center py-3 text-xs sm:text-sm font-semibold whitespace-nowrap border-b-2 px-1 ${isActive ? "text-[#1c3453] border-[#1c3453]" : "text-stone-400 border-transparent"}`}>
+            className={`flex-1 shrink-0 flex items-center justify-center py-3 text-xs sm:text-sm font-semibold whitespace-nowrap border-b-2 px-1 ${isActive ? "text-[#F15A61] border-[#F15A61]" : "text-stone-400 border-transparent"}`}>
             <span className="relative inline-flex items-center gap-1 sm:gap-1.5">
               <Icon size={14} /> {t.label}
               <TabBadge count={t.count} />
@@ -7632,22 +7642,26 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
       <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2 min-w-0">
-            <img src="/sja-parent-portal-mark.png" alt="SJA Parent Portal" className="h-11 w-auto object-contain shrink-0" />
-            <div className="min-w-0">
-              <h1 className="display-font text-sm font-bold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
-              {canSwitchToTeacher && (
-                <button onClick={onSwitchToTeacher} className="text-[10px] text-[#1c3453]/60 hover:text-[#1c3453]">Switch to Teacher view</button>
-              )}
+        <div className="max-w-lg mx-auto px-3 py-3 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 shrink-0">
+            <img src="/sja-icon-mark.png" alt="SJA" className="h-10 w-auto object-contain shrink-0" />
+            <div className="leading-none">
+              <p className="display-font text-[11px] font-bold text-[#1c3453] leading-tight">Parent</p>
+              <p className="display-font text-[11px] font-bold text-[#1c3453] leading-tight">Portal</p>
             </div>
           </div>
-          <div className="flex items-start gap-5 shrink-0 pl-2 pr-1">
+          <div className="min-w-0 flex-1 text-center px-1">
+            <h1 className="display-font text-sm font-bold text-[#1c3453] truncate leading-tight">{family?.name || "Your family"}</h1>
+            {canSwitchToTeacher && (
+              <button onClick={onSwitchToTeacher} className="text-[10px] text-[#1c3453]/60 hover:text-[#1c3453]">Switch to Teacher view</button>
+            )}
+          </div>
+          <div className="flex items-start gap-4 shrink-0">
             <button onClick={() => setContactPanelOpen((v) => !v)} className="flex flex-col items-center gap-0.5 text-[#1c3453]/90 hover:text-[#1c3453]">
-              <Phone size={22} />
-              <span className="text-[10px] font-bold leading-none whitespace-nowrap">Contact office</span>
+              <Phone size={20} strokeWidth={1.5} />
+              <span className="text-[9px] font-bold leading-none whitespace-nowrap">Contact office</span>
             </button>
-            <button onClick={() => navigateParentTab("settings")} aria-label="Settings" className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={22} /></button>
+            <button onClick={() => navigateParentTab("settings")} aria-label="Settings" className="text-[#1c3453]/80 hover:text-[#1c3453]"><SettingsIcon size={20} strokeWidth={1.5} /></button>
           </div>
         </div>
         {contactPanelOpen && (
