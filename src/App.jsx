@@ -1704,13 +1704,33 @@ async function disableNotificationsFor(uid) {
 }
 // Whether the CURRENT device already has a registered token — used to show "Enabled" vs "Enable"
 // without needing to re-request anything just to check.
+//
+// This is also where a real, reported bug lived: FCM tokens aren't permanent — Firebase can and
+// does rotate a device's token on its own (a storage/cache clear, a service worker update, and
+// several other ordinary circumstances can all trigger it), and this app had no mechanism
+// anywhere to notice that and re-save the new one. The saved push-tokens list would silently go
+// stale, this function would correctly find no match for the new token, and the toggle would show
+// "off" — which looks exactly like notifications quietly turned themselves off, even though
+// nothing was ever actually disabled. If the browser's own permission is still genuinely granted
+// (meaning the person never revoked anything at the OS/browser level — that's the real signal of
+// their actual intent, not what happens to be sitting in a token list), a mismatch here means the
+// token rotated, not that they opted out — so this now re-saves the current token automatically
+// and reports "on," instead of silently reporting "off" and leaving them to notice and re-enable
+// it themselves.
 async function isThisDeviceEnabled(uid) {
   const messaging = await messagingPromise;
   if (!messaging) return false;
   try {
     const token = await getToken(messaging, { vapidKey: VAPID_KEY });
+    if (!token) return false;
     const existing = (await loadJSON(`push-tokens:${uid}`, null, true)) || { tokens: [] };
-    return existing.tokens.some((t) => t.token === token);
+    if (existing.tokens.some((t) => t.token === token)) return true;
+    if (Notification.permission === "granted") {
+      existing.tokens.push({ token, addedAt: new Date().toISOString(), userAgent: navigator.userAgent });
+      await saveJSON(`push-tokens:${uid}`, existing, true);
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
