@@ -2199,7 +2199,14 @@ function AppInner() {
           const registration = await navigator.serviceWorker.ready;
           await registration.showNotification(title, {
             body: payload.data?.body || "",
-            icon: "/icons/icon-192.png",
+            // A real bug lived in this path: "/icons/icon-192.png" points at a folder that was
+            // never actually there — the app's own icons are at the root ("/icon-192.png"), not
+            // under an "/icons/" prefix (a mistake this session already found and fixed once, in
+            // manifest.json specifically — this was the same wrong path recurring in a second,
+            // separate place). A missing icon file doesn't stop a notification from showing, so
+            // this was invisible as a failure — it just quietly fell back to a generic default
+            // icon on every single foreground notification instead of the app's own.
+            icon: "/icon-192.png",
             badge: "/icons-badge/badge-96.png",
             data: { url: payload.data?.url || "/" },
           });
@@ -2207,7 +2214,7 @@ function AppInner() {
           // No service worker available in this browser (or it isn't ready yet) — falling back to
           // the direct constructor is still strictly better than showing nothing at all, even on
           // the platforms where it's the less reliable of the two options.
-          const n = new Notification(title, { body: payload.data?.body || "", icon: "/icons/icon-192.png", badge: "/icons-badge/badge-96.png" });
+          const n = new Notification(title, { body: payload.data?.body || "", icon: "/icon-192.png", badge: "/icons-badge/badge-96.png" });
           n.onclick = () => { window.focus(); if (payload.data?.url) window.location.href = payload.data.url; };
         }
       });
