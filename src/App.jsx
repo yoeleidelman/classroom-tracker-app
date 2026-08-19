@@ -17,7 +17,7 @@
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithRedirect, getRedirectResult, linkWithCredential } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithPopup, linkWithCredential } from "firebase/auth";
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component, Fragment } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
@@ -2258,15 +2258,27 @@ function AppInner() {
     return () => unsubscribe();
   }, [isParentPortal]);
 
-  // Google Sign-In uses a redirect, not a popup — popups are unreliable inside an installed PWA's
-  // own standalone window (there's no real parent tab for one to sensibly return to), which is
-  // where most people actually use this app, so a redirect is the safer default even though it
-  // means leaving the app and coming back rather than a same-page popup. This is what picks the
-  // result back up after that round trip.
+  // Google Sign-In uses a popup, not a redirect. Redirect was the original choice, reasoned as
+  // "safer inside an installed PWA's own standalone window" — but that turned out to be weighing
+  // the wrong risk. signInWithRedirect depends on a cross-origin iframe reaching back to
+  // Firebase's own authDomain to carry its result across the round trip, and that mechanism is
+  // now broken by default on Safari, Firefox, and Chrome (since mid-2024) unless the app's auth
+  // domain is specially reconfigured — which this app, hosted on Vercel rather than Firebase
+  // Hosting, isn't. The real, reported symptom this caused: the whole Google flow completing
+  // successfully, then landing back with nothing — no result, no error, just silence, because
+  // getRedirectResult simply resolves to null in that situation rather than failing loudly.
+  // signInWithPopup carries its result back directly, in the same call, with no cross-origin
+  // storage dependency, and is Firebase's own documented fix for exactly this case.
   const [pendingGoogleLink, setPendingGoogleLink] = useState(null); // { credential, email } | null
   const [googleSignInError, setGoogleSignInError] = useState("");
-  useEffect(() => {
-    getRedirectResult(auth).catch((err) => {
+
+  const signInWithGoogle = async () => {
+    setGoogleSignInError("");
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+      // Success updates auth state directly (the same onAuthStateChanged listener above picks
+      // it up), so there's nothing further to do here on the happy path.
+    } catch (err) {
       // Firebase's real, documented default behavior: signing in with Google does NOT silently
       // take over an existing email/password account that shares the same address — it throws
       // this specific error instead, with the Google credential attached to it so it isn't lost.
@@ -2278,37 +2290,16 @@ function AppInner() {
         setPendingGoogleLink({ credential, email: err.customData?.email || "" });
         return;
       }
-      // Same fix as signInWithGoogle's own catch below, applied here too — this used to assume
-      // any other error was something harmless like the person closing the Google screen, and
-      // swallowed it silently. That assumption was wrong, and it's exactly what caused a real,
-      // reported bug: going through the entire Google flow, completing it successfully on
-      // Google's own side, and landing back on a plain sign-in screen with zero indication
-      // anything had gone wrong at all. Surfacing it here — rather than guessing at which error
-      // codes are "probably safe" to swallow, which is the same mistake that caused this bug in
-      // the first place — is what actually reveals what's failing instead of leaving it a mystery.
-      setGoogleSignInError(err.code || "unknown-error");
-    });
-  }, []);
-
-  const signInWithGoogle = async () => {
-    setGoogleSignInError("");
-    try {
-      await signInWithRedirect(auth, new GoogleAuthProvider());
-      // No code after this ever actually runs on success — signInWithRedirect navigates the
-      // whole page away immediately. It's only here, in the catch below, that anything gets a
-      // chance to run — which is exactly what was missing before: a failure here (a misconfigured
-      // authorized domain is the most likely one, given the app's real deployed URL has to be
-      // added to Firebase's own authorized-domains list separately from just enabling the
-      // provider) was an unhandled promise rejection with zero visible feedback — the button
-      // would look like it simply did nothing at all, which is exactly the reported symptom.
-    } catch (err) {
+      // Every other failure is surfaced directly rather than guessed at and silently swallowed —
+      // that exact kind of guess (assuming some error codes are "probably harmless") is what hid
+      // two real bugs in a row here before this was rewritten to use a popup at all.
       setGoogleSignInError(err.code || "unknown-error");
     }
   };
 
   // Completes a pending Google link (see pendingGoogleLink above) — signs in with the password
   // for the EXISTING account first (proving it's genuinely them, not just someone who knows the
-  // email), then attaches the Google credential from the earlier redirect to that same account.
+  // email), then attaches the Google credential from the earlier attempt to that same account.
   // From this point on, either method signs into the same account going forward.
   const completeGoogleLink = async (password) => {
     if (!pendingGoogleLink) return { ok: false, error: "Nothing to link — try Google sign-in again." };
