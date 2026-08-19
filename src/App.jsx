@@ -3480,12 +3480,17 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
 
   const save = async () => {
     setError("");
-    if (!name.trim() || !email.trim() || tempPassword.length < 6) {
+    // Trimmed here, not just at the point of use below — length is checked against the value
+    // that will actually be sent, so a password that's only "6 characters" because of a stray
+    // leading or trailing space (easy to pick up from a copy-paste) doesn't pass this check only
+    // to end up shorter, and different, than what the admin thinks they set.
+    const cleanPassword = tempPassword.trim();
+    if (!name.trim() || !email.trim() || cleanPassword.length < 6) {
       setError("Name, email, and a temporary password of at least 6 characters are all required.");
       return;
     }
     setSaving(true);
-    const result = await onSave(name.trim(), email.trim(), tempPassword, role, selectedClassIds, isSubstitute, messagingClassTypes);
+    const result = await onSave(name.trim(), email.trim(), cleanPassword, role, selectedClassIds, isSubstitute, messagingClassTypes);
     setSaving(false);
     if (!result.ok) setError(result.error);
   };
@@ -3495,7 +3500,7 @@ function TeacherAccountForm({ classes, onSave, onCancel }) {
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Teacher's name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (this is their username)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       <input type="text" value={tempPassword} onChange={(e) => setTempPassword(e.target.value)} placeholder="Temporary password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-      <p className="text-[10px] text-stone-400 mb-2">Share this password with them directly — there's no reset-email flow yet, so for now they'll sign in with exactly what you set here.</p>
+      <p className="text-[10px] text-stone-400 mb-2">Share this password with them directly, or they can tap "Forgot password?" on the sign-in screen at any time to set their own instead.</p>
 
       <label className="block text-[10px] text-stone-400 mb-0.5">Role</label>
       <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-2">
@@ -3561,12 +3566,15 @@ function AddGuardianForm({ existingFamily, onSave, onCancel }) {
 
   const save = async () => {
     setError("");
-    if (!name.trim() || !email.trim() || tempPassword.length < 6) {
+    // Trimmed before the length check, same reasoning as the teacher form — a stray leading or
+    // trailing space from a copy-paste shouldn't be able to sneak into a saved password unnoticed.
+    const cleanPassword = tempPassword.trim();
+    if (!name.trim() || !email.trim() || cleanPassword.length < 6) {
       setError("Name, email, and a temporary password of at least 6 characters are all required.");
       return;
     }
     setSaving(true);
-    const result = await onSave(name.trim(), email.trim(), tempPassword);
+    const result = await onSave(name.trim(), email.trim(), cleanPassword);
     setSaving(false);
     if (!result.ok) setError(result.error);
   };
@@ -3636,11 +3644,16 @@ function FamilyAccountForm({ allStudents, activeClasses, onSave, onCreateStudent
 
   const save = async () => {
     setError("");
-    if (!name.trim() || !email.trim() || tempPassword.length < 6) {
+    // Trimmed before the length checks and before being sent — same reasoning as the teacher
+    // form, applied to both parents here since either one's password field could pick up a stray
+    // leading or trailing space the same way.
+    const cleanPassword = tempPassword.trim();
+    const cleanPassword2 = tempPassword2.trim();
+    if (!name.trim() || !email.trim() || cleanPassword.length < 6) {
       setError("A name, email, and a temporary password of at least 6 characters are all required.");
       return;
     }
-    if (addSecondParent && (!name2.trim() || !email2.trim() || tempPassword2.length < 6)) {
+    if (addSecondParent && (!name2.trim() || !email2.trim() || cleanPassword2.length < 6)) {
       setError("The second parent needs a name, email, and a temporary password of at least 6 characters too — or uncheck adding one.");
       return;
     }
@@ -3649,8 +3662,8 @@ function FamilyAccountForm({ allStudents, activeClasses, onSave, onCreateStudent
       return;
     }
     setSaving(true);
-    const result = await onSave(name.trim(), email.trim(), tempPassword, selected,
-      addSecondParent ? { name: name2.trim(), email: email2.trim(), tempPassword: tempPassword2 } : null);
+    const result = await onSave(name.trim(), email.trim(), cleanPassword, selected,
+      addSecondParent ? { name: name2.trim(), email: email2.trim(), tempPassword: cleanPassword2 } : null);
     setSaving(false);
     if (!result.ok) setError(result.error);
   };
@@ -3661,7 +3674,7 @@ function FamilyAccountForm({ allStudents, activeClasses, onSave, onCreateStudent
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Parent 1's name (e.g. David Cohen)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (this is their username)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
       <input type="text" value={tempPassword} onChange={(e) => setTempPassword(e.target.value)} placeholder="Temporary password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-      <p className="text-[10px] text-stone-400 mb-3">Share this password with them directly — there's no reset-email flow yet, so for now they'll sign in with exactly what you set here.</p>
+      <p className="text-[10px] text-stone-400 mb-3">Share this password with them directly, or they can tap "Forgot password?" on the sign-in screen at any time to set their own instead.</p>
 
       {!addSecondParent ? (
         <button onClick={() => setAddSecondParent(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
@@ -5621,7 +5634,11 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
     if (!email.trim() || !password) return;
     setError("");
     setSigningIn(true);
-    const result = await onSignIn(email.trim(), password);
+    // Trimmed to match the same cleanup now applied when an admin sets a temporary password —
+    // catches accidental whitespace from either end (an autofill, a copy-paste with a stray
+    // space) landing only on one side of the comparison and turning into a mismatch that looks
+    // exactly like "the password is wrong" even though the visible characters match.
+    const result = await onSignIn(email.trim(), password.trim());
     setSigningIn(false);
     if (!result.ok) setError(result.error);
   };
@@ -5715,7 +5732,9 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
     if (!email.trim() || !password) return;
     setError("");
     setSigningIn(true);
-    const result = await onSignIn(email.trim(), password);
+    // Same reasoning as the teacher sign-in screen — trimmed to catch accidental leading or
+    // trailing whitespace from either end of the comparison.
+    const result = await onSignIn(email.trim(), password.trim());
     setSigningIn(false);
     if (!result.ok) setError(result.error);
   };
