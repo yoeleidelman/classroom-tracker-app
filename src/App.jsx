@@ -1061,7 +1061,7 @@ function buildPreschoolSampleData() {
   const mkDay = (checkedIn, mood, lunchAmt, napTimes, diaper) => ({
     checkIns: checkedIn ? [{ id: uid(), date: checkedIn, checkInTime: "08:00", checkInBy: "Teacher", checkOutTime: checkedIn === today ? null : "15:30", checkOutBy: checkedIn === today ? null : "Teacher" }] : [],
     mood: mood ? [{ date: checkedIn, mood }] : [],
-    meals: checkedIn ? [{ date: checkedIn, mealType: "lunch", amount: lunchAmt }, { date: checkedIn, mealType: "snack", amount: "all" }] : [],
+    meals: checkedIn ? [{ date: checkedIn, mealType: "lunch", amount: lunchAmt }, { date: checkedIn, mealType: "snack-am", amount: "all" }] : [],
     naps: napTimes ? [{ date: checkedIn, start: napTimes[0], end: napTimes[1] }] : [],
     diapers: diaper ? [{ id: uid(), date: checkedIn, time: "10:15", type: diaper }] : [],
     bathroom: [],
@@ -6552,29 +6552,36 @@ function ChildDailyLogView({ link, onBack }) {
           {mood && (
             <Card color="orange" title="Mood" icon={Smile}>
               {PRESCHOOL_MOOD_OPTIONS.find((m) => m.id === mood.mood)?.emoji} {PRESCHOOL_MOOD_OPTIONS.find((m) => m.id === mood.mood)?.label || mood.mood}
+              {mood.note && <span className="block text-stone-500 mt-0.5">{mood.note}</span>}
             </Card>
           )}
-          {meals.map((m, i) => (
-            <Card key={i} color={m.mealType === "snack" ? "fuchsia" : "emerald"} title={m.mealType} icon={m.mealType === "snack" ? Apple : Sandwich}>
-              Ate: {MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount}
-            </Card>
-          ))}
+          {meals.map((m, i) => {
+            const isSnack = m.mealType === "snack-am" || m.mealType === "snack-pm";
+            const label = m.mealType === "snack-am" ? "Morning Snack" : m.mealType === "snack-pm" ? "Afternoon Snack" : "Lunch";
+            return (
+              <Card key={i} color={isSnack ? "fuchsia" : "emerald"} title={label} icon={isSnack ? Apple : Sandwich}>
+                Ate: {MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount}
+                {m.note && <span className="block text-stone-500 mt-0.5">{m.note}</span>}
+              </Card>
+            );
+          })}
           {naps.map((n, i) => (
             <Card key={i} color="indigo" title="Nap" icon={Moon}>
-              {n.skipped ? "Didn't nap today" : `${formatTime12h(n.start)} – ${formatTime12h(n.end)}`}
+              {n.skipped ? "Didn't nap today" : n.start && !n.end ? `Started ${formatTime12h(n.start)} — still sleeping` : `${formatTime12h(n.start)} – ${formatTime12h(n.end)}`}
+              {n.note && <span className="block text-stone-500 mt-0.5">{n.note}</span>}
             </Card>
           ))}
           {diapers.length > 0 && (
             <Card color="rose" title="Diapers" icon={Baby}>
               {diapers.map((d, i) => (
-                <p key={i}>{formatTime12h(d.time)} — {DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type}</p>
+                <p key={i}>{formatTime12h(d.time)} — {DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type}{d.note && <span className="block text-stone-500">{d.note}</span>}</p>
               ))}
             </Card>
           )}
           {bathroomTrips.length > 0 && (
             <Card color="teal" title="Bathroom" icon={Droplets}>
               {bathroomTrips.map((b, i) => (
-                <p key={i}>{formatTime12h(b.time)} — {BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type}</p>
+                <p key={i}>{formatTime12h(b.time)} — {BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type}{b.note && <span className="block text-stone-500">{b.note}</span>}</p>
               ))}
             </Card>
           )}
@@ -8572,7 +8579,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         return (
         <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} photos={photos} config={config}
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
-          setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk}
+          setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk} startNapBulk={startNapBulk} endNapBulk={endNapBulk}
           logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
           logBathroomBulk={logBathroomBulk} removeBathroomLog={removeBathroomLog}
           openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
@@ -9645,28 +9652,67 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // NOT defaulted to "everyone" — that's not something that happens to the whole room at once, and
   // assuming it would be actively wrong, not just unnecessary — so those stay tap-the-specific-kid,
   // append-only logs, same as mood and health notes.
-  const setMood = (studentId, date, mood) => {
+  const setMood = (studentId, date, mood, note) => {
     const data = studentData[studentId];
     const without = (data.mood || []).filter((m) => m.date !== date);
-    persistStudent(studentId, { ...data, mood: [...without, withLogger({ date, mood })] });
+    persistStudent(studentId, { ...data, mood: [...without, withLogger({ date, mood, ...(note ? { note } : {}) })] });
   };
 
   // studentAmounts: { studentId: amount } — applied to every included student in one action.
-  const setMealBulk = (date, mealType, studentAmounts) => {
+  // studentNotes: { studentId: note } — optional, sparse (only students who actually got one).
+  const setMealBulk = (date, mealType, studentAmounts, studentNotes = {}) => {
     Object.entries(studentAmounts).forEach(([studentId, amount]) => {
       const data = studentData[studentId];
       const without = (data.meals || []).filter((m) => !(m.date === date && m.mealType === mealType));
-      persistStudent(studentId, { ...data, meals: [...without, withLogger({ date, mealType, amount })] });
+      const note = studentNotes[studentId];
+      persistStudent(studentId, { ...data, meals: [...without, withLogger({ date, mealType, amount, ...(note ? { note } : {}) })] });
     });
   };
 
   // studentTimes: { studentId: {start, end} | null } — null means that student is excluded (didn't nap).
+  // Still used directly for a one-step "log a completed nap" entry when that's genuinely what's
+  // wanted; the normal in-room workflow now goes through startNapBulk/endNapBulk below instead.
   const setNapBulk = (date, studentTimes) => {
     Object.entries(studentTimes).forEach(([studentId, times]) => {
       const data = studentData[studentId];
       const without = (data.naps || []).filter((n) => n.date !== date);
       const entry = times ? withLogger({ date, start: times.start, end: times.end }) : withLogger({ date, skipped: true });
       persistStudent(studentId, { ...data, naps: [...without, entry] });
+    });
+  };
+
+  // Begins a nap for each included student — records just the start time, leaving `end` unset
+  // until a separate End Nap action completes it, so different children can be started and later
+  // woken at their own actual times rather than everyone sharing one forced start-to-finish window.
+  // studentTimes: { studentId: startTime | null } — null marks that student as "didn't nap today"
+  // (skipped) rather than starting one. studentNotes: { studentId: note } — optional, sparse.
+  const startNapBulk = (date, studentTimes, studentNotes = {}) => {
+    Object.entries(studentTimes).forEach(([studentId, startTime]) => {
+      const data = studentData[studentId];
+      const without = (data.naps || []).filter((n) => n.date !== date);
+      const note = studentNotes[studentId];
+      const entry = startTime
+        ? withLogger({ date, start: startTime, ...(note ? { note } : {}) })
+        : withLogger({ date, skipped: true, ...(note ? { note } : {}) });
+      persistStudent(studentId, { ...data, naps: [...without, entry] });
+    });
+  };
+
+  // Completes an already-started nap by filling in its end time — finds each student's own
+  // in-progress entry for the date (one with a start but no end yet) and adds the end time to
+  // THAT SAME entry, rather than creating a new one, so the original start time — and any note
+  // added while starting it — are preserved rather than overwritten. A student with nothing
+  // in progress is silently skipped rather than creating a stray end-only entry for them.
+  const endNapBulk = (date, studentTimes, studentNotes = {}) => {
+    Object.entries(studentTimes).forEach(([studentId, endTime]) => {
+      const data = studentData[studentId];
+      const naps = data.naps || [];
+      const idx = naps.findIndex((n) => n.date === date && n.start && !n.end);
+      if (idx === -1) return;
+      const newNote = studentNotes[studentId];
+      const combinedNote = newNote ? (naps[idx].note ? `${naps[idx].note} ${newNote}` : newNote) : naps[idx].note;
+      const updated = { ...naps[idx], end: endTime, ...(combinedNote ? { note: combinedNote } : {}) };
+      persistStudent(studentId, { ...data, naps: naps.map((n, i) => (i === idx ? updated : n)) });
     });
   };
 
@@ -9681,10 +9727,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // studentTypes: { studentId: type } — same shape as setMealBulk, since diaper time now works the
   // same way meals do: one shared time, everyone defaults to the same type, exceptions get their
   // own value, one action logs everyone at once.
-  const logDiaperBulkWithDefaults = (date, time, studentTypes) => {
+  // studentNotes: { studentId: note } — optional, sparse (only students who actually got one).
+  const logDiaperBulkWithDefaults = (date, time, studentTypes, studentNotes = {}) => {
     Object.entries(studentTypes).forEach(([studentId, type]) => {
       const data = studentData[studentId];
-      const entry = withLogger({ id: uid(), date, time, type });
+      const note = studentNotes[studentId];
+      const entry = withLogger({ id: uid(), date, time, type, ...(note ? { note } : {}) });
       persistStudent(studentId, { ...data, diapers: [...(data.diapers || []), entry] });
     });
   };
@@ -9693,10 +9741,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistStudent(studentId, { ...data, diapers: (data.diapers || []).filter((d) => d.id !== entryId) });
   };
 
-  const logBathroomBulk = (date, time, type, studentIds) => {
+  // studentNotes: { studentId: note } — optional, sparse. type itself is still one shared value
+  // applied to every selected student, same as before; only the note is ever per-student.
+  const logBathroomBulk = (date, time, type, studentIds, studentNotes = {}) => {
     studentIds.forEach((studentId) => {
       const data = studentData[studentId];
-      const entry = withLogger({ id: uid(), date, time, type });
+      const note = studentNotes[studentId];
+      const entry = withLogger({ id: uid(), date, time, type, ...(note ? { note } : {}) });
       persistStudent(studentId, { ...data, bathroom: [...(data.bathroom || []), entry] });
     });
   };
@@ -11052,6 +11103,45 @@ const TILE_STYLES = {
   },
 };
 
+// A small, collapsed-by-default note affordance for one student's row within an already-expanded
+// customization panel — deliberately not part of the main tap-to-set-a-value flow, so a teacher
+// who never needs it never even sees an empty text box. The "+ Note" link is this field's entire
+// footprint until someone actually taps it; from then on (or whenever a value already exists,
+// e.g. reopening a row that already has one) it shows the real input instead. Shared by every
+// preschool bulk-logging screen — meals, diapers, bathroom, nap, mood — so notes work the same
+// single, consistent way everywhere rather than each screen inventing its own version.
+// onChange updates local draft state on every keystroke (cheap, no network call) — the shape every
+// bulk screen wants, since they only ever persist once, in a batch, on their own final "Log"
+// button. onBlur is optional and only for a screen with no such batch step of its own (Mood, which
+// saves the moment a mood is tapped, with nothing else to wait for) — fires once when the field
+// loses focus, so a real save happens once per edit instead of once per keystroke.
+function InlineNoteField({ value, onChange, onBlur }) {
+  const [open, setOpen] = useState(Boolean(value));
+  if (!open) {
+    return <button onClick={() => setOpen(true)} className="text-[11px] font-semibold text-stone-400 hover:text-stone-600">+ Note</button>;
+  }
+  return (
+    <input value={value || ""} onChange={(e) => onChange(e.target.value)} onBlur={onBlur} placeholder="Optional note for this student…" autoFocus
+      className="w-full rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+  );
+}
+
+// "HH:MM" strings in, minutes between them out — naps never cross midnight, so simple subtraction
+// (with the usual few-lines-of-day-math) is all this needs, no date object required.
+function napDurationMinutes(start, end) {
+  const [sh, sm] = start.split(":").map(Number);
+  const [eh, em] = end.split(":").map(Number);
+  return (eh * 60 + em) - (sh * 60 + sm);
+}
+function formatDurationMinutes(mins) {
+  if (mins == null || mins < 0) return "";
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h === 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+
 // Every tile on the preschool dashboard — one shared config drives both the dashboard grid and
 // which sub-screen a tap opens, so adding a category later means adding one entry here, not
 // touching the dashboard layout itself. bulkDefault: "all" means every student starts selected
@@ -11060,7 +11150,8 @@ const TILE_STYLES = {
 const PRESCHOOL_TILES = [
   { id: "mood", label: "Mood", icon: Smile, color: "orange", bulkDefault: "none" },
   { id: "lunch", label: "Lunch", icon: Sandwich, color: "emerald", bulkDefault: "all", mealType: "lunch" },
-  { id: "snack", label: "Snack", icon: Apple, color: "fuchsia", bulkDefault: "all", mealType: "snack" },
+  { id: "snack-am", label: "Morning Snack", icon: Apple, color: "fuchsia", bulkDefault: "all", mealType: "snack-am" },
+  { id: "snack-pm", label: "Afternoon Snack", icon: Apple, color: "violet", bulkDefault: "all", mealType: "snack-pm" },
   { id: "nap", label: "Nap", icon: Moon, color: "indigo", bulkDefault: "all" },
   { id: "diapers", label: "Diapers", icon: Baby, color: "rose", bulkDefault: "all" },
   { id: "bathroom", label: "Bathroom", icon: Droplets, color: "teal", bulkDefault: "none" },
@@ -11632,7 +11723,7 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
   );
 }
 
-function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, classId, submitBlogPost, sendMessageToFamily, navigate }) {
+function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, startNapBulk, endNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, classId, submitBlogPost, sendMessageToFamily, navigate }) {
   const [screen, setScreenRaw] = useState(null); // null = dashboard grid
   // Pushes a real history entry for every preschool sub-screen — Diapers, Snack, a health
   // incident form, and so on. This was the actual gap behind "Back sometimes leaves the class
@@ -11720,7 +11811,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
     return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMealBulk={setMealBulk} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "nap") {
-    return <NapBulkScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setNapBulk={setNapBulk} onBack={() => navigateScreen(null)} />;
+    return <NapBulkScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} startNapBulk={startNapBulk} endNapBulk={endNapBulk} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "mood") {
     return <MoodScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMood={setMood} onBack={() => navigateScreen(null)} />;
@@ -11768,11 +11859,12 @@ function MealBulkScreen({ tile, date, roster, studentData, checkedInIds, setMeal
   const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
   const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
   const [amounts, setAmounts] = useState(() => Object.fromEntries(checkedInRoster.map((s) => [s.id, "all"])));
+  const [notes, setNotes] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
 
   const submit = () => {
-    setMealBulk(date, tile.mealType, amounts);
+    setMealBulk(date, tile.mealType, amounts, notes);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -11792,13 +11884,16 @@ function MealBulkScreen({ tile, date, roster, studentData, checkedInIds, setMeal
                 <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{current.label}</span>
               </button>
               {isOpen && (
-                <div className="flex flex-wrap gap-1.5 px-4 pb-3">
-                  {MEAL_AMOUNTS.map((a) => (
-                    <button key={a.id} onClick={() => { setAmounts((prev) => ({ ...prev, [s.id]: a.id })); setExpanded(null); }}
-                      className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${amounts[s.id] === a.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
-                      {a.label}
-                    </button>
-                  ))}
+                <div className="px-4 pb-3 space-y-2">
+                  <div className="flex flex-wrap gap-1.5">
+                    {MEAL_AMOUNTS.map((a) => (
+                      <button key={a.id} onClick={() => { setAmounts((prev) => ({ ...prev, [s.id]: a.id })); setExpanded(null); }}
+                        className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${amounts[s.id] === a.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+                        {a.label}
+                      </button>
+                    ))}
+                  </div>
+                  <InlineNoteField value={notes[s.id]} onChange={(v) => setNotes((prev) => ({ ...prev, [s.id]: v }))} />
                 </div>
               )}
             </div>
@@ -11827,11 +11922,12 @@ function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDi
   const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
   const [time, setTime] = useState(() => new Date().toTimeString().slice(0, 5));
   const [types, setTypes] = useState(() => Object.fromEntries(checkedInRoster.map((s) => [s.id, DIAPER_TYPES[0].id])));
+  const [notes, setNotes] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
 
   const submit = () => {
-    logDiaperBulkWithDefaults(date, time, types);
+    logDiaperBulkWithDefaults(date, time, types, notes);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -11853,13 +11949,16 @@ function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDi
                 <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{current.label}</span>
               </button>
               {isOpen && (
-                <div className="flex flex-wrap gap-1.5 px-4 pb-3">
-                  {DIAPER_TYPES.map((d) => (
-                    <button key={d.id} onClick={() => { setTypes((prev) => ({ ...prev, [s.id]: d.id })); setExpanded(null); }}
-                      className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${types[s.id] === d.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
-                      {d.label}
-                    </button>
-                  ))}
+                <div className="px-4 pb-3 space-y-2">
+                  <div className="flex flex-wrap gap-1.5">
+                    {DIAPER_TYPES.map((d) => (
+                      <button key={d.id} onClick={() => { setTypes((prev) => ({ ...prev, [s.id]: d.id })); setExpanded(null); }}
+                        className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${types[s.id] === d.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+                        {d.label}
+                      </button>
+                    ))}
+                  </div>
+                  <InlineNoteField value={notes[s.id]} onChange={(v) => setNotes((prev) => ({ ...prev, [s.id]: v }))} />
                 </div>
               )}
             </div>
@@ -11881,25 +11980,51 @@ function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDi
 
 // Nap — most rooms share one nap block, so that's the default for everyone; the teacher only
 // touches a student who didn't nap or napped on a different schedule.
-function NapBulkScreen({ date, roster, studentData, checkedInIds, setNapBulk, onBack }) {
+// Redesigned around two separate moments, not one — Start Nap records just when a child goes
+// down; End Nap, a genuinely separate action reachable any time later, fills in when they woke.
+// The underlying entry sits "in progress" (a start with no end yet) in between, which is what
+// makes different children able to sleep and wake at their own real times rather than the whole
+// room being forced through one shared start-to-finish window, while still keeping the same
+// one-tap-for-everyone efficiency this screen has always had for the common case.
+function NapBulkScreen({ date, roster, studentData, checkedInIds, startNapBulk, endNapBulk, onBack }) {
   const tile = PRESCHOOL_TILES.find((t) => t.id === "nap");
   const st = TILE_STYLES[tile.color];
   const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
   const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
-  const [sharedStart, setSharedStart] = useState("13:00");
-  const [sharedEnd, setSharedEnd] = useState("14:30");
-  const [excluded, setExcluded] = useState({}); // studentId -> true if skipped
-  const [customTimes, setCustomTimes] = useState({}); // studentId -> {start, end}
+
+  const napFor = (studentId) => (studentData[studentId]?.naps || []).find((n) => n.date === date && !n.skipped);
+  const statusFor = (studentId) => {
+    const nap = napFor(studentId);
+    if (!nap) return "not-started";
+    if (nap.start && !nap.end) return "in-progress";
+    return "done";
+  };
+
+  const [mode, setMode] = useState("start"); // "start" | "end"
+  const [sharedTime, setSharedTime] = useState(() => new Date().toTimeString().slice(0, 5));
+  const [excluded, setExcluded] = useState({});
+  const [customTimes, setCustomTimes] = useState({});
+  const [notes, setNotes] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
 
+  // Leftover exclusions, custom times, or notes from one mode have no business silently carrying
+  // into the other — switching tabs starts each one fresh.
+  useEffect(() => { setExcluded({}); setCustomTimes({}); setNotes({}); setExpanded(null); }, [mode]);
+
+  const notStarted = checkedInRoster.filter((s) => statusFor(s.id) === "not-started");
+  const inProgress = checkedInRoster.filter((s) => statusFor(s.id) === "in-progress");
+  const done = checkedInRoster.filter((s) => statusFor(s.id) === "done");
+  const eligible = mode === "start" ? notStarted : inProgress;
+
   const submit = () => {
     const studentTimes = {};
-    checkedInRoster.forEach((s) => {
-      if (excluded[s.id]) { studentTimes[s.id] = null; return; }
-      studentTimes[s.id] = customTimes[s.id] || { start: sharedStart, end: sharedEnd };
+    eligible.forEach((s) => {
+      if (excluded[s.id]) { if (mode === "start") studentTimes[s.id] = null; return; }
+      studentTimes[s.id] = customTimes[s.id] || sharedTime;
     });
-    setNapBulk(date, studentTimes);
+    if (mode === "start") startNapBulk(date, studentTimes, notes);
+    else endNapBulk(date, studentTimes, notes);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -11907,62 +12032,115 @@ function NapBulkScreen({ date, roster, studentData, checkedInIds, setNapBulk, on
   return (
     <div className="app-page">
       <PreschoolScreenHeader tile={tile} title="Nap" onBack={onBack} />
-      <p className="text-xs text-stone-400 mb-2">Shared nap time for the room — applies to everyone unless you change a student below.</p>
-      <div className="flex items-center gap-2 mb-5 bg-white border border-stone-200 rounded-xl p-3">
-        <input type="time" value={sharedStart} onChange={(e) => setSharedStart(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-        <span className="text-xs text-stone-400">to</span>
-        <input type="time" value={sharedEnd} onChange={(e) => setSharedEnd(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+
+      <div className="flex gap-1.5 mb-4 bg-stone-100 rounded-xl p-1">
+        <button onClick={() => setMode("start")} className={`flex-1 text-sm font-semibold py-2 rounded-lg ${mode === "start" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>
+          Start Nap{notStarted.length > 0 ? ` (${notStarted.length})` : ""}
+        </button>
+        <button onClick={() => setMode("end")} className={`flex-1 text-sm font-semibold py-2 rounded-lg ${mode === "end" ? "bg-white text-indigo-700 shadow-sm" : "text-stone-500"}`}>
+          End Nap{inProgress.length > 0 ? ` (${inProgress.length})` : ""}
+        </button>
       </div>
-      <div className="space-y-2 mb-5">
-        {checkedInRoster.map((s) => {
-          const isOpen = expanded === s.id;
-          const isExcluded = Boolean(excluded[s.id]);
-          const custom = customTimes[s.id];
-          return (
-            <div key={s.id} className={`rounded-xl border ${isExcluded ? "border-stone-200 bg-stone-50" : custom ? st.rowActive : "border-stone-200 bg-white"}`}>
-              <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
-                <span className={`font-semibold ${isExcluded ? "text-stone-400 line-through" : "text-stone-800"}`}>{s.name}</span>
-                <span className="text-xs text-stone-500">{isExcluded ? "Didn't nap" : custom ? `${custom.start}–${custom.end}` : "Shared time"}</span>
-              </button>
-              {isOpen && (
-                <div className="px-4 pb-3 flex flex-wrap items-center gap-2">
-                  <button onClick={() => { setExcluded((prev) => ({ ...prev, [s.id]: !prev[s.id] })); setCustomTimes((prev) => ({ ...prev, [s.id]: null })); }}
-                    className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${isExcluded ? "bg-stone-600 text-white border-stone-600" : "text-stone-600 border-stone-300"}`}>
-                    Didn't nap
+
+      {eligible.length === 0 ? (
+        <p className="text-sm text-stone-400 bg-stone-50 rounded-xl p-4 text-center mb-5">
+          {mode === "start" ? "Everyone checked in has already started or finished a nap today." : "No one is currently napping."}
+        </p>
+      ) : (
+        <>
+          <p className="text-xs text-stone-400 mb-2">Shared {mode === "start" ? "start" : "wake-up"} time — applies to everyone unless you change a student below.</p>
+          <div className="flex items-center gap-2 mb-5 bg-white border border-stone-200 rounded-xl p-3">
+            <input type="time" value={sharedTime} onChange={(e) => setSharedTime(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          </div>
+          <div className="space-y-2 mb-5">
+            {eligible.map((s) => {
+              const isOpen = expanded === s.id;
+              const isExcluded = Boolean(excluded[s.id]);
+              const custom = customTimes[s.id];
+              const nap = napFor(s.id);
+              return (
+                <div key={s.id} className={`rounded-xl border ${isExcluded ? "border-stone-200 bg-stone-50" : custom ? st.rowActive : "border-stone-200 bg-white"}`}>
+                  <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
+                    <span className={`font-semibold ${isExcluded ? "text-stone-400 line-through" : "text-stone-800"}`}>{s.name}</span>
+                    <span className="text-xs text-stone-500">
+                      {isExcluded ? (mode === "start" ? "Didn't nap" : "Still sleeping") : custom || sharedTime}
+                      {mode === "end" && nap?.start ? ` (started ${nap.start})` : ""}
+                    </span>
                   </button>
-                  {!isExcluded && (
-                    <>
-                      <input type="time" value={custom?.start || sharedStart} onChange={(e) => setCustomTimes((prev) => ({ ...prev, [s.id]: { start: e.target.value, end: custom?.end || sharedEnd } }))}
-                        className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
-                      <span className="text-xs text-stone-400">to</span>
-                      <input type="time" value={custom?.end || sharedEnd} onChange={(e) => setCustomTimes((prev) => ({ ...prev, [s.id]: { start: custom?.start || sharedStart, end: e.target.value } }))}
-                        className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
-                    </>
+                  {isOpen && (
+                    <div className="px-4 pb-3 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button onClick={() => { setExcluded((prev) => ({ ...prev, [s.id]: !prev[s.id] })); setCustomTimes((prev) => ({ ...prev, [s.id]: null })); }}
+                          className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${isExcluded ? "bg-stone-600 text-white border-stone-600" : "text-stone-600 border-stone-300"}`}>
+                          {mode === "start" ? "Didn't nap" : "Still sleeping"}
+                        </button>
+                        {!isExcluded && (
+                          <input type="time" value={custom || sharedTime} onChange={(e) => setCustomTimes((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                            className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                        )}
+                      </div>
+                      <InlineNoteField value={notes[s.id]} onChange={(v) => setNotes((prev) => ({ ...prev, [s.id]: v }))} />
+                    </div>
                   )}
                 </div>
-              )}
-            </div>
-          );
-        })}
-        {notInRoster.map((s) => (
-          <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between">
-            <span className="font-semibold text-stone-400">{s.name}</span>
-            <span className="text-xs text-stone-400">Not checked in today</span>
+              );
+            })}
           </div>
-        ))}
-      </div>
-      <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
-        {saved ? "Logged ✓" : `Log nap for ${checkedInRoster.length} students`}
-      </button>
+        </>
+      )}
+
+      {done.length > 0 && (
+        <div className="mb-5">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-stone-400 mb-1.5">Finished today</p>
+          <div className="space-y-1.5">
+            {done.map((s) => {
+              const nap = napFor(s.id);
+              const mins = nap?.start && nap?.end ? napDurationMinutes(nap.start, nap.end) : null;
+              return (
+                <div key={s.id} className="flex items-center justify-between px-4 py-2 rounded-xl bg-stone-50 text-xs">
+                  <span className="font-semibold text-stone-600">{s.name}</span>
+                  <span className="text-stone-400">{nap.start}–{nap.end}{mins != null ? ` · ${formatDurationMinutes(mins)}` : ""}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {notInRoster.map((s) => (
+        <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between mb-2">
+          <span className="font-semibold text-stone-400">{s.name}</span>
+          <span className="text-xs text-stone-400">Not checked in today</span>
+        </div>
+      ))}
+
+      {eligible.length > 0 && (() => {
+        // Start mode still writes a record for every excluded student too (a "didn't nap" entry
+        // is a real, intentional result, not a no-op) — but End mode's excluded students ("still
+        // sleeping") are left completely untouched, not written at all, so the count show here
+        // needs to actually subtract them or the button would overstate how many students this
+        // action is really about to affect.
+        const actingOn = mode === "start" ? eligible.length : eligible.filter((s) => !excluded[s.id]).length;
+        return (
+          <button onClick={submit} disabled={actingOn === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
+            {saved ? "Logged ✓" : mode === "start" ? `Start nap for ${actingOn} students` : `End nap for ${actingOn} students`}
+          </button>
+        );
+      })()}
     </div>
   );
 }
+
 
 // Mood — deliberately not defaulted. Assuming a mood is a guess, not a time-saver, so this stays a
 // plain tap-each-student-you-have-something-to-say-about screen.
 function MoodScreen({ date, roster, studentData, checkedInIds, setMood, onBack }) {
   const tile = PRESCHOOL_TILES.find((t) => t.id === "mood");
   const st = TILE_STYLES[tile.color];
+  // Local note drafts, keyed by student — kept independent of the saved mood value itself so
+  // either one (tapping a mood pill, or typing a note) can be set first without the other getting
+  // lost; each action re-saves using whatever's currently known for both.
+  const [noteDrafts, setNoteDrafts] = useState({});
   return (
     <div className="app-page">
       <PreschoolScreenHeader tile={tile} title="Mood" onBack={onBack} />
@@ -11978,17 +12156,20 @@ function MoodScreen({ date, roster, studentData, checkedInIds, setMood, onBack }
               </div>
             );
           }
+          const currentNote = noteDrafts[s.id] ?? today?.note ?? "";
           return (
             <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
               <p className="font-semibold text-stone-800 mb-2">{s.name}</p>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-1.5 mb-2">
                 {PRESCHOOL_MOOD_OPTIONS.map((m) => (
-                  <button key={m.id} onClick={() => setMood(s.id, date, m.id)}
+                  <button key={m.id} onClick={() => setMood(s.id, date, m.id, currentNote)}
                     className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${today?.mood === m.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
                     {m.emoji} {m.label}
                   </button>
                 ))}
               </div>
+              <InlineNoteField value={currentNote} onChange={(v) => setNoteDrafts((prev) => ({ ...prev, [s.id]: v }))}
+                onBlur={() => { if (currentNote !== (today?.note || "")) setMood(s.id, date, today?.mood, currentNote); }} />
             </div>
           );
         })}
@@ -12682,14 +12863,16 @@ function TapLogScreen({ tile, date, roster, studentData, checkedInIds, dataKey, 
   const [time, setTime] = useState(() => new Date().toTimeString().slice(0, 5));
   const [type, setType] = useState(typeOptions[0].id);
   const [selected, setSelected] = useState([]);
+  const [notes, setNotes] = useState({});
   const [saved, setSaved] = useState(false);
 
   const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const submit = () => {
     if (selected.length === 0) return;
-    logBulk(date, time, type, selected);
+    logBulk(date, time, type, selected, notes);
     setSelected([]);
+    setNotes({});
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -12725,6 +12908,25 @@ function TapLogScreen({ tile, date, roster, studentData, checkedInIds, dataKey, 
           </span>
         ))}
       </div>
+
+      {/* One at a time is genuinely rare here — a note is the exception, not something worth
+          slowing the fast multi-select-and-log flow down for. Only ever appears once someone's
+          actually selected, and stays out of the way of the group-select pills entirely. */}
+      {selected.length > 0 && (
+        <div className="space-y-1.5 mb-4">
+          {selected.map((id) => {
+            const s = checkedInRoster.find((r) => r.id === id);
+            if (!s) return null;
+            return (
+              <div key={id} className="flex items-center justify-between gap-2 bg-white border border-stone-200 rounded-lg px-3 py-1.5">
+                <span className="text-xs font-semibold text-stone-600 shrink-0">{s.name}</span>
+                <div className="flex-1 min-w-0"><InlineNoteField value={notes[id]} onChange={(v) => setNotes((prev) => ({ ...prev, [id]: v }))} /></div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <button onClick={submit} disabled={selected.length === 0}
         className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 mb-5 ${st.solid} ${st.solidHover}`}>
         {saved ? "Logged ✓" : selected.length > 0 ? `Log for ${selected.length} selected` : "Select students above"}
@@ -12736,8 +12938,11 @@ function TapLogScreen({ tile, date, roster, studentData, checkedInIds, dataKey, 
           <ul className="space-y-1.5">
             {todaysEntries.map((e) => (
               <li key={e.id} className="flex items-center justify-between text-sm bg-white border border-stone-200 rounded-lg px-3 py-2">
-                <span className="text-stone-700">{formatTime12h(e.time)} — {e.studentName} — {typeOptions.find((t) => t.id === e.type)?.label || e.type}</span>
-                <button onClick={() => removeLog(e.studentId, e.id)} className="text-stone-400 hover:text-rose-600"><X size={14} /></button>
+                <span className="text-stone-700">
+                  {formatTime12h(e.time)} — {e.studentName} — {typeOptions.find((t) => t.id === e.type)?.label || e.type}
+                  {e.note && <span className="block text-xs text-stone-400 mt-0.5">{e.note}</span>}
+                </span>
+                <button onClick={() => removeLog(e.studentId, e.id)} className="text-stone-400 hover:text-rose-600 shrink-0"><X size={14} /></button>
               </li>
             ))}
           </ul>
