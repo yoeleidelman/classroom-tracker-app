@@ -17,7 +17,7 @@
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithRedirect, getRedirectResult, linkWithCredential } from "firebase/auth";
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component, Fragment } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
@@ -2258,6 +2258,48 @@ function AppInner() {
     return () => unsubscribe();
   }, [isParentPortal]);
 
+  // Google Sign-In uses a redirect, not a popup — popups are unreliable inside an installed PWA's
+  // own standalone window (there's no real parent tab for one to sensibly return to), which is
+  // where most people actually use this app, so a redirect is the safer default even though it
+  // means leaving the app and coming back rather than a same-page popup. This is what picks the
+  // result back up after that round trip.
+  const [pendingGoogleLink, setPendingGoogleLink] = useState(null); // { credential, email } | null
+  useEffect(() => {
+    getRedirectResult(auth).catch((err) => {
+      // Firebase's real, documented default behavior: signing in with Google does NOT silently
+      // take over an existing email/password account that shares the same address — it throws
+      // this specific error instead, with the Google credential attached to it so it isn't lost.
+      // The right response isn't to treat this as a failure, but to ask the person to confirm
+      // their existing password once, then link the two together — see completeGoogleLink below,
+      // which is what the sign-in screens call once someone does that.
+      if (err.code === "auth/account-exists-with-different-credential") {
+        const credential = GoogleAuthProvider.credentialFromError(err);
+        setPendingGoogleLink({ credential, email: err.customData?.email || "" });
+      }
+      // Any other error here (the person simply closed the Google screen, e.g.) is silently
+      // ignored — there's nothing pending to recover, and the sign-in screen itself already
+      // shows its own normal, empty state to try again from.
+    });
+  }, []);
+
+  const signInWithGoogle = () => signInWithRedirect(auth, new GoogleAuthProvider());
+
+  // Completes a pending Google link (see pendingGoogleLink above) — signs in with the password
+  // for the EXISTING account first (proving it's genuinely them, not just someone who knows the
+  // email), then attaches the Google credential from the earlier redirect to that same account.
+  // From this point on, either method signs into the same account going forward.
+  const completeGoogleLink = async (password) => {
+    if (!pendingGoogleLink) return { ok: false, error: "Nothing to link — try Google sign-in again." };
+    try {
+      const result = await signInWithEmailAndPassword(auth, pendingGoogleLink.email, password.trim());
+      await linkWithCredential(result.user, pendingGoogleLink.credential);
+      setPendingGoogleLink(null);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.code === "auth/invalid-credential" ? "Incorrect password." : "Couldn't link the accounts — try again." };
+    }
+  };
+
   // Teachers are stored one document per teacher (data/teacher:{uid}), not as a single array
   // covering everyone — this is deliberate: Firestore security rules can't reliably search
   // inside an array of objects to find "the one that's mine," but they CAN check "does this
@@ -3231,7 +3273,8 @@ function AppInner() {
   // genuinely holds both records.
   if (activeMode === "parent") {
     if (!authUser || !currentFamily) {
-      return <ParentSignInScreen onSignIn={signInTeacher} isSignedInAsSomethingElse={Boolean(authUser && !currentFamily)} />;
+      return <ParentSignInScreen onSignIn={signInTeacher} isSignedInAsSomethingElse={Boolean(authUser && !currentFamily)}
+        onSignInWithGoogle={signInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={completeGoogleLink} />;
     }
     return <ParentPortalApp family={currentFamily} onSignOut={async () => { if (authUser) { try { await disableNotificationsFor(authUser.uid); } catch { /* best-effort */ } } return signOut(auth); }} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword}
       canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} />;
@@ -3319,7 +3362,8 @@ function AppInner() {
   // original class-password flow available as an explicit fallback (useful until every
   // teacher has a real account set up, so nobody gets locked out mid-transition).
   if (!useLegacyFlow) {
-    return <TeacherSignInScreen onSignIn={signInTeacher} onUseLegacyFlow={() => setUseLegacyFlow(true)} onEnterSubstitute={enterSubstituteSession} />;
+    return <TeacherSignInScreen onSignIn={signInTeacher} onUseLegacyFlow={() => setUseLegacyFlow(true)} onEnterSubstitute={enterSubstituteSession}
+      onSignInWithGoogle={signInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={completeGoogleLink} />;
   }
   if (!classId) {
     if (isAdminSession) {
@@ -5496,6 +5540,48 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 // confirmation message whether or not the email actually has an account: revealing that
 // difference would let someone probe, one email at a time, for which addresses are registered —
 // a real privacy leak the standard "if an account exists, we've sent a link" phrasing avoids.
+// Shown on both sign-in screens (teacher and parent) — either a plain "Continue with Google"
+// button, or, once pendingGoogleLink is set, a small form asking for the existing account's
+// password instead. That second state is Firebase's real, documented default behavior: signing
+// in with Google does NOT silently take over an existing email/password account sharing the same
+// address, it requires proving it's genuinely the same person first. Confirming the password here
+// links the two together — from that point on, either one signs into the same account.
+function GoogleSignInSection({ onSignInWithGoogle, pendingGoogleLink, onCompleteGoogleLink }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [linking, setLinking] = useState(false);
+
+  if (pendingGoogleLink) {
+    const submit = async () => {
+      if (!password) return;
+      setError("");
+      setLinking(true);
+      const result = await onCompleteGoogleLink(password);
+      setLinking(false);
+      if (!result.ok) setError(result.error);
+    };
+    return (
+      <div className="bg-white border border-stone-200 rounded-2xl p-4 mb-4 shadow-sm">
+        <p className="text-sm font-semibold text-stone-800 mb-1">Connect your Google account</p>
+        <p className="text-xs text-stone-500 mb-3">You already have an account for {pendingGoogleLink.email} — enter its password once to connect Google. After that, either one signs you in.</p>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="Password" autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none" />
+        {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
+        <button onClick={submit} disabled={linking || !password} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {linking ? "Connecting..." : "Connect account"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button onClick={onSignInWithGoogle} className="w-full flex items-center justify-center gap-2 bg-white border border-stone-300 rounded-lg py-2.5 text-sm font-semibold text-stone-700 hover:bg-stone-50 mb-4">
+      <svg width="16" height="16" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.5 5.1 29.5 3 24 3 12.4 3 3 12.4 3 24s9.4 21 21 21 21-9.4 21-21c0-1.4-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.1 8 3l6-6C34.5 5.1 29.5 3 24 3c-7.7 0-14.4 4.4-17.7 10.7z"/><path fill="#4CAF50" d="M24 45c5.4 0 10.3-2.1 14-5.5l-6.5-5.5C29.4 35.9 26.8 37 24 37c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 40.5 16.2 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.2 5.7l6.5 5.5C39.5 37 44 31 44 24c0-1.4-.1-2.7-.4-3.5z"/></svg>
+      Continue with Google
+    </button>
+  );
+}
+
 function ForgotPasswordModal({ onClose }) {
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
@@ -5620,7 +5706,7 @@ function ResetPasswordScreen({ oobCode, onDone }) {
   );
 }
 
-function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
+function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute, onSignInWithGoogle, pendingGoogleLink, onCompleteGoogleLink }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -5657,6 +5743,13 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute }) {
         <img src="/logo-transparent.png" alt="Classroom Tracker" className="w-48 mx-auto mb-5" />
         <h1 className="display-font text-2xl font-bold text-stone-900 text-center mb-1">Welcome back</h1>
         <p className="text-stone-500 text-sm text-center mb-7">Sign in with your teacher account</p>
+
+        <GoogleSignInSection onSignInWithGoogle={onSignInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={onCompleteGoogleLink} />
+        {!pendingGoogleLink && (
+          <div className="flex items-center gap-2 mb-4">
+            <div className="flex-1 h-px bg-stone-200" /><span className="text-[10px] text-stone-400">OR</span><div className="flex-1 h-px bg-stone-200" />
+          </div>
+        )}
 
         <div className="bg-white border border-stone-200 rounded-2xl p-5 mb-4 shadow-sm">
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
@@ -5721,7 +5814,7 @@ function RoleChooserScreen({ teacherName, familyName, onChoose, onSignOut }) {
   );
 }
 
-function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
+function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse, onSignInWithGoogle, pendingGoogleLink, onCompleteGoogleLink }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -5751,6 +5844,13 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse }) {
         {isSignedInAsSomethingElse && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
             <p className="text-xs text-amber-800">This device is currently signed in with a staff account. Signing in below with a family account will switch to that instead.</p>
+          </div>
+        )}
+
+        <GoogleSignInSection onSignInWithGoogle={onSignInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={onCompleteGoogleLink} />
+        {!pendingGoogleLink && (
+          <div className="flex items-center gap-2 mb-4">
+            <div className="flex-1 h-px bg-stone-200" /><span className="text-[10px] text-stone-400">OR</span><div className="flex-1 h-px bg-stone-200" />
           </div>
         )}
 
