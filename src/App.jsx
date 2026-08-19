@@ -19649,7 +19649,7 @@ function buildParentLoginEmail(parentName, childNames, studentTypes, parentEmail
   const subject = `Your SJA School App Login Information`;
   const body = `Hi ${parentName || "there"},
 
-I'm reaching out regarding the new SJA School App that we will be using for communication between families, teachers, and the school. The app will keep you connected with messages, school and classroom updates, pictures, and other important information.
+I'm reaching out regarding the new SJA School App that we will be using for communication between parents, teachers, and the school. The app will keep you connected with messages, school and classroom updates, pictures, and other important information.
 
 Your login information is:
 Login: ${parentEmail}
