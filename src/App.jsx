@@ -19642,55 +19642,49 @@ function nextHebrewOccurrence(monthId, day, fromDate) {
   return null;
 }
 
-// Fixed content, not AI-generated — login credentials need to be exact, not paraphrased, and the
-// feature list is the same for every family of a given makeup, so there's nothing here that
-// benefits from being written fresh each time. Takes every linked child at once (not one student
-// at a time), since a family with kids in different rooms should get one email covering all of
-// them, not a separate one per child. studentTypes is a parallel array (same order/length as
-// childNames) so preschool-specific features (check-in, daily log) only get promised to a family
-// that actually has a preschool-enrolled child, and homework only to one with an elementary child.
+// Fixed content, not AI-generated — login credentials need to be exact, not paraphrased.
 function buildParentLoginEmail(parentName, childNames, studentTypes, parentEmail, defaultPassword) {
   const portalUrl = `${window.location.origin}${window.location.pathname}?portal=parent`;
-  const hasPreschool = studentTypes.includes("preschool");
-  const hasElementary = studentTypes.some((t) => t !== "preschool");
-  const namesList = childNames.join(", ");
 
-  const featureLines = [];
-  if (hasPreschool) {
-    featureLines.push("- Check your child in and out yourself by scanning the QR code posted at school");
-    featureLines.push("- See a daily log of your child's day — mood, meals, naps, diapers, and photos");
-  }
-  featureLines.push("- See new photos and updates from the classroom on the Class Blog");
-  if (hasElementary) {
-    featureLines.push("- See homework the moment a teacher posts it, organized by child");
-  }
-  featureLines.push("- Message your child's classroom, or the school office, directly from your phone");
-
-  const subject = `Your family's account for ${namesList}`;
+  const subject = `Your SJA School App Login Information`;
   const body = `Hi ${parentName || "there"},
 
-You now have a parent account for ${namesList} on our school's app. Here's everything you need to get started.
+I'm reaching out regarding the new SJA School App that we will be using for communication between families, teachers, and the school. The app will keep you connected with messages, school and classroom updates, pictures, and other important information.
 
-GETTING STARTED
-Open this link on your phone: ${portalUrl}
+Your login information is:
+Login: ${parentEmail}
+Temporary password: ${defaultPassword}
 
-On iPhone: open it in Safari, tap the Share button, then "Add to Home Screen." This lets it work like a regular app, including notifications.
-On Android: open it in Chrome, tap the menu (⋮), then "Add to Home Screen" or "Install app."
+Access the SJA School App here:
+${portalUrl}
 
-TURN ON NOTIFICATIONS — DON'T SKIP THIS STEP
-Once it's on your home screen, open it from that icon (not from Safari or Chrome directly), then tap the settings icon and turn notifications on. This is the only way you'll be alerted the moment there's a new message, a new blog post, or new homework — without it, you'd have to remember to check the app yourself.
+Once you have logged in, you can change the temporary password by opening the app's Settings and selecting the option to change your password.
 
-YOUR LOGIN
-Email: ${parentEmail}
-Password: ${defaultPassword}
-You can change this password anytime after signing in, under the settings icon.
+INSTALLING THE APP
 
-WHAT YOU CAN DO
-${featureLines.join("\n")}
+ANDROID
+1. Open the link above using Google Chrome.
+2. Tap the three-dot menu beside the address bar.
+3. Select "Install app" or "Add to Home screen," depending on the option shown on your device.
+4. Follow the prompts to complete the installation.
+5. Open the SJA app from the icon on your Home screen.
+6. Open Settings within the app and turn on notifications. When your device asks for permission, tap "Allow."
 
-This app is how we share what's happening in the classroom day to day — the more of it you use, the more connected you'll be to your child's day at school.
+iPHONE OR iPAD
+1. Open the link above using Safari.
+2. Tap the Share button.
+3. Scroll down and select "Add to Home Screen."
+4. Make sure "Open as Web App" is enabled if that option appears, and then tap "Add."
+5. Open the SJA app using the new icon on your Home Screen.
+6. Open Settings within the app and enable notifications. When your device asks for permission, tap "Allow."
 
-If anything doesn't work or you have questions, just reach out to the school office.`;
+Enabling notifications is important so that you receive messages, announcements, and classroom updates promptly.
+
+If you have any questions or experience difficulty with any part of the setup process, please reply to this email. I will be happy to guide you and make sure that you are fully set up with the app.
+
+Warmly,
+Rabbi Eidelman
+SJA`;
 
   return { subject, body };
 }
