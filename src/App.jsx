@@ -2276,10 +2276,17 @@ function AppInner() {
       if (err.code === "auth/account-exists-with-different-credential") {
         const credential = GoogleAuthProvider.credentialFromError(err);
         setPendingGoogleLink({ credential, email: err.customData?.email || "" });
+        return;
       }
-      // Any other error here (the person simply closed the Google screen, e.g.) is silently
-      // ignored — there's nothing pending to recover, and the sign-in screen itself already
-      // shows its own normal, empty state to try again from.
+      // Same fix as signInWithGoogle's own catch below, applied here too — this used to assume
+      // any other error was something harmless like the person closing the Google screen, and
+      // swallowed it silently. That assumption was wrong, and it's exactly what caused a real,
+      // reported bug: going through the entire Google flow, completing it successfully on
+      // Google's own side, and landing back on a plain sign-in screen with zero indication
+      // anything had gone wrong at all. Surfacing it here — rather than guessing at which error
+      // codes are "probably safe" to swallow, which is the same mistake that caused this bug in
+      // the first place — is what actually reveals what's failing instead of leaving it a mystery.
+      setGoogleSignInError(err.code || "unknown-error");
     });
   }, []);
 
