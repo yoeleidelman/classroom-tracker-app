@@ -66,7 +66,7 @@ messaging.onBackgroundMessage((payload) => {
     // nothing to fall back on except a generated default (the meaningless "C"). "badge" is the
     // small, monochrome-masked status-bar treatment, but platform support for it varies far more
     // by device — it was never a safe standalone replacement for icon, only a complement to it.
-    icon: "/icons/icon-192.png",
+    icon: "/icon-192.png",
     badge: "/icons-badge/badge-96.png",
     data: payload.data || {},
   });
