@@ -1377,6 +1377,29 @@ function useLiveJSONMap(keys) {
   return values;
 }
 
+// The live-query counterpart to loadAllWithPrefix — for a list like "every teacher" that an admin
+// screen needs to reflect real, current server state continuously, not a one-time snapshot taken
+// whenever that screen happened to first load. This is what a real, first-day-of-school
+// reliability incident traced back to: the admin's own teacher list only ever loaded once, so it
+// could silently drift out of sync with reality the longer the screen stayed open — and every
+// class-assignment change made during that time was then computed from that same increasingly
+// stale list, with no visible sign anything was wrong. A live query removes the staleness at its
+// source instead of requiring every write path that touches this data to individually defend
+// against it.
+function useLiveJSONPrefix(prefix) {
+  const [values, setValues] = useState([]);
+  useEffect(() => {
+    if (!prefix) { setValues([]); return; }
+    const col = collection(db, "data");
+    const q = query(col, where(documentId(), ">=", prefix), where(documentId(), "<", `${prefix}\uf8ff`));
+    const unsubscribe = onSnapshot(q,
+      (snap) => setValues(snap.docs.map((d) => d.data().value)),
+      (err) => console.error("Live prefix subscription failed", prefix, err));
+    return () => unsubscribe();
+  }, [prefix]);
+  return values;
+}
+
 // Every backend API route this calls (generate, send-push, create-teacher, create-family) now
 // requires a valid Firebase ID token in the Authorization header — a route handler running on
 // the server has no other way to tell a real signed-in user apart from anyone on the internet
@@ -2057,7 +2080,10 @@ function AppInner() {
   const [globalStudents, setGlobalStudents] = useState([]);
   const [schoolEvents, setSchoolEvents] = useState([]);
   const [schoolTools, setSchoolTools] = useState([]);
-  const [teachers, setTeachers] = useState([]);
+  // Live-subscribed, not a one-time load — see useLiveJSONPrefix for why this specific list needed
+  // to stop being a one-time snapshot. Always reflects the real, current server state, for as long
+  // as this screen stays open, with no manual refresh call needed anywhere.
+  const teachers = useLiveJSONPrefix("teacher:");
   const [programs, setPrograms] = useState([]);
   const [currentTeacher, setCurrentTeacher] = useState(null); // the signed-in teacher's own record, once real login exists
   const [authResolvedFamily, setAuthResolvedFamily] = useState(null); // set once, at sign-in (including the one-time backfill below) — currentFamily itself is derived further down, live, once authUser is known
@@ -2285,6 +2311,26 @@ function AppInner() {
     return () => unsubscribe();
   }, [isParentPortal]);
 
+  // Live-subscribes to the signed-in teacher's own record, on top of the one-time load above —
+  // this is the other half of the same first-day-of-school reliability incident. The one-time
+  // load is still what's used for the initial "which mode does this account open into" decision
+  // at the moment of sign-in, which only needs to happen once — but currentTeacher itself used to
+  // stay frozen at whatever it was at that moment for the rest of the session. If an admin fixed a
+  // class assignment while the affected teacher was already signed in — the exact situation right
+  // after repairing corrupted data — that teacher had no way to see the fix except manually
+  // signing all the way out and back in, which is precisely the "why do I have to keep redoing
+  // sign-in" complaint this exists to eliminate. Scoped to authUser.uid specifically, not
+  // currentTeacher — subscribing based on a value this same effect also sets would immediately
+  // re-trigger itself in a loop.
+  useEffect(() => {
+    if (!authUser?.uid) return;
+    const ref = doc(db, "data", `teacher:${authUser.uid}`);
+    const unsubscribe = onSnapshot(ref,
+      (snap) => setCurrentTeacher(snap.exists() ? snap.data().value : null),
+      (err) => console.error("Live teacher subscription failed", err));
+    return () => unsubscribe();
+  }, [authUser?.uid]);
+
   // Google Sign-In uses a popup, not a redirect. Redirect was the original choice, reasoned as
   // "safer inside an installed PWA's own standalone window" — but that turned out to be weighing
   // the wrong risk. signInWithRedirect depends on a cross-origin iframe reaching back to
@@ -2344,38 +2390,40 @@ function AppInner() {
   // covering everyone — this is deliberate: Firestore security rules can't reliably search
   // inside an array of objects to find "the one that's mine," but they CAN check "does this
   // exact document's ID match my own uid" precisely and efficiently.
-  const refreshTeachers = async () => {
-    const list = await loadAllWithPrefix("teacher:");
-    setTeachers(list);
-  };
+  //
+  // teachers itself is now a live subscription (see useLiveJSONPrefix above), not a one-time
+  // load — this function is kept only because onRefreshTeachers is still wired up as a prop in a
+  // couple of places; the list is already always current, so there's nothing left for it to do.
+  const refreshTeachers = async () => {};
 
   const updateTeacherRecord = async (uid, fields) => {
     const existing = await loadJSON(`teacher:${uid}`, {}, true);
     const next = { ...existing, ...fields };
     await saveJSON(`teacher:${uid}`, next, true);
-    setTeachers((prev) => prev.map((t) => (t.uid === uid ? next : t)));
+    // No local setTeachers call needed — the live subscription picks this up the moment the
+    // write lands, the same way it would for a change made from any other admin session too.
   };
 
   // Specifically for toggling ONE class on or off a teacher's own assignedClassIds — this is what
-  // was actually behind a real, reported bug: the admin screen's own `teachers` list is only ever
-  // refreshed once, when that screen first mounts (see the effect that calls onRefreshTeachers on
-  // load), and every toggle after that was computing the ENTIRE new array from that same
-  // possibly-stale local copy before calling updateTeacherRecord above — which does read the
-  // teacher's current record fresh, but that safety only protects fields it's not itself
-  // overwriting; assignedClassIds passed in as a full replacement array replaces whatever was
-  // actually there regardless. If the admin's local list had drifted out of sync with the real
-  // server state for any reason (this screen open a while, a change made from elsewhere), every
-  // subsequent toggle kept computing from that same stale base — including two toggles in a row,
-  // which is exactly what "unclick and click again, still doesn't work" looks like. This instead
-  // fetches the teacher's OWN true, current assignedClassIds fresh, right before toggling — so the
-  // add/remove is always correct relative to reality, never a locally-cached guess at it.
+  // was actually behind a real, reported bug: the admin screen's own `teachers` list used to be
+  // refreshed only once, when that screen first mounted, and every toggle after that was computing
+  // the ENTIRE new array from that same possibly-stale local copy before calling
+  // updateTeacherRecord above — which does read the teacher's current record fresh, but that
+  // safety only protects fields it's not itself overwriting; assignedClassIds passed in as a full
+  // replacement array replaces whatever was actually there regardless. If the admin's local list
+  // had drifted out of sync with the real server state for any reason (this screen open a while, a
+  // change made from elsewhere), every subsequent toggle kept computing from that same stale base
+  // — including two toggles in a row, which is exactly what "unclick and click again, still
+  // doesn't work" looks like. This still fetches the teacher's own true, current assignedClassIds
+  // fresh right before toggling, on top of teachers now being a live subscription rather than a
+  // one-time load — belt and suspenders against the same class of staleness at two different
+  // layers, since a first-day-of-school incident traced directly back to it.
   const toggleTeacherClassAssignment = async (uid, classId) => {
     const existing = await loadJSON(`teacher:${uid}`, {}, true);
     const current = existing.assignedClassIds || [];
     const next = current.includes(classId) ? current.filter((id) => id !== classId) : [...current, classId];
     const updated = { ...existing, assignedClassIds: next };
     await saveJSON(`teacher:${uid}`, updated, true);
-    setTeachers((prev) => prev.map((t) => (t.uid === uid ? updated : t)));
   };
 
   const deactivateTeacherRecord = async (uid) => {
@@ -2388,7 +2436,8 @@ function AppInner() {
   // kind of server-side admin function used to create accounts in the first place.
   const deleteTeacherPermanently = async (uid) => {
     await deleteJSON(`teacher:${uid}`);
-    setTeachers((prev) => prev.filter((t) => t.uid !== uid));
+    // No local setTeachers call needed — the live query drops the deleted document from its
+    // results automatically.
   };
 
   // Families mirror the teacher-account pattern exactly — one document per family (family:{uid}),
