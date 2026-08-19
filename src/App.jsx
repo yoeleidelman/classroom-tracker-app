@@ -19695,9 +19695,14 @@ function StudentContactFields({ student, onUpdateField }) {
 
   const emailParent = (parentName, parentEmail) => {
     const { subject, body } = buildParentLoginEmail(parentName, [student.name], [student.studentType], parentEmail, defaultPassword);
-    const link = document.createElement("a");
-    link.href = `mailto:${encodeURIComponent(parentEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    link.click();
+    // window.location.href, not a synthetic click on a detached <a> — Chrome's handoff of a
+    // mailto: link to the OS's registered mail app is measurably less reliable for a
+    // programmatic click on an element that was never actually attached to the page than for a
+    // real navigation, and this became visible specifically once the email body grew past what
+    // it used to be (the longer install instructions push the encoded URL close to a length
+    // that's historically been fragile for that OS-level handoff). This is the standard, more
+    // dependable way to trigger a mailto: link from JS.
+    window.location.href = `mailto:${encodeURIComponent(parentEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   };
 
   return (
@@ -21202,9 +21207,10 @@ function AdminFamilyDetailView({ group, allStudentsForLinking, globalStudents, o
     const studentTypes = uniqueChildren.map((l) => globalStudents.find((gs) => gs.id === l.studentId)?.studentType || "elementary");
     const defaultPassword = await loadJSON("defaultParentPassword", "Welcome123", true);
     const { subject, body } = buildParentLoginEmail(guardian.name, childNames, studentTypes, guardian.email, defaultPassword);
-    const link = document.createElement("a");
-    link.href = `mailto:${encodeURIComponent(guardian.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-    link.click();
+    // Same fix as StudentContactFields' own emailParent — window.location.href, not a synthetic
+    // click on a detached <a>, which is measurably less reliable for handing a mailto: link off
+    // to the OS's registered mail app.
+    window.location.href = `mailto:${encodeURIComponent(guardian.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     setEmailSentFor(guardian.uid);
     setTimeout(() => setEmailSentFor(null), 3000);
   };
