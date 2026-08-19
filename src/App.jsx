@@ -2685,6 +2685,28 @@ function AppInner() {
     }
   };
 
+  // Directly sets a NEW password for an existing teacher, admin-side, with no email round-trip at
+  // all — the fastest possible way to unblock someone. "Forgot password" is normally the right
+  // tool (it doesn't require the admin to know or relay a password at all), but it depends on the
+  // affected person actually being free to go check an inbox right now, which — on a chaotic first
+  // day, mid-classroom — often just isn't true. Requires its own server endpoint for the same
+  // reason account creation does: setting somebody else's password needs elevated admin
+  // credentials the browser can never hold.
+  const resetTeacherPassword = async (uid, newPassword) => {
+    try {
+      const response = await fetch("/api/reset-teacher-password", {
+        method: "POST",
+        headers: await authHeaders(),
+        body: JSON.stringify({ uid, newPassword }),
+      });
+      const data = await response.json();
+      if (!response.ok) return { ok: false, error: data.error || "Couldn't reset the password." };
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "Couldn't reach the server — try again." };
+    }
+  };
+
   // The admin "big picture" view: everything logged anywhere, for one date, all in one place —
   // not admin clicking into each class one at a time, but every class's events and incidents
   // for that date pulled together and clearly labeled with which class they came from.
@@ -3406,7 +3428,7 @@ function AppInner() {
           globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
-          teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+          teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
           families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin}
@@ -3460,7 +3482,7 @@ function AppInner() {
         globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
-        teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+        teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
         families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
         programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
@@ -4638,7 +4660,52 @@ function AdminMainTabs({ active, navigate }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+// Directly sets a new password for one teacher, admin-side — no email round-trip at all, so it
+// works even for someone who has no practical way to go check their inbox right this moment. Kept
+// collapsed to a single small link by default (mirroring InlineNoteField's own reasoning
+// elsewhere) so it doesn't clutter this row for the far more common case of a teacher whose
+// account is working fine.
+function TeacherPasswordResetForm({ uid, onReset }) {
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState(null); // { ok: true } | { ok: false, error }
+
+  if (!open) {
+    return <button onClick={() => setOpen(true)} className="text-xs font-semibold text-stone-500 hover:text-teal-700">Reset this teacher's password</button>;
+  }
+
+  const submit = async () => {
+    const clean = password.trim();
+    if (clean.length < 6) { setResult({ ok: false, error: "Needs to be at least 6 characters." }); return; }
+    setSaving(true);
+    const r = await onReset(uid, clean);
+    setSaving(false);
+    setResult(r);
+    if (r.ok) setPassword("");
+  };
+
+  return (
+    <div>
+      <p className="text-xs font-semibold text-stone-700 mb-1">Set a new password directly</p>
+      <div className="flex items-center gap-1.5">
+        <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="New password (6+ characters)" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+        <button onClick={submit} disabled={saving} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 disabled:opacity-40 shrink-0">
+          {saving ? "Saving..." : "Set"}
+        </button>
+        <button onClick={() => { setOpen(false); setResult(null); setPassword(""); }} className="text-xs text-stone-400 shrink-0">Cancel</button>
+      </div>
+      {result && (
+        result.ok
+          ? <p className="text-xs text-teal-700 mt-1">Password set — share it with them directly, or they can still use "Forgot password?" any time to change it themselves.</p>
+          : <p className="text-xs text-rose-600 mt-1">{result.error}</p>
+      )}
+    </div>
+  );
+}
+
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -5352,6 +5419,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                           </div>
                         </>
                       )}
+                      <div className="mt-2.5 pt-2.5 border-t border-stone-100">
+                        <TeacherPasswordResetForm uid={t.uid} onReset={onResetTeacherPassword} />
+                      </div>
                     </div>
                   )}
                 </li>
