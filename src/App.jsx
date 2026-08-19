@@ -6715,9 +6715,18 @@ function ChildDailyLogView({ link, onBack }) {
           {meals.map((m, i) => {
             const isSnack = m.mealType === "snack-am" || m.mealType === "snack-pm";
             const label = m.mealType === "snack-am" ? "Morning Snack" : m.mealType === "snack-pm" ? "Afternoon Snack" : "Lunch";
+            const perItem = m.items && typeof m.items === "object" ? Object.entries(m.items) : null;
             return (
               <Card key={i} color={isSnack ? "fuchsia" : "emerald"} title={label} icon={isSnack ? Apple : Sandwich}>
-                Ate: {MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount}
+                {perItem ? (
+                  <div className="space-y-0.5">
+                    {perItem.map(([item, amountId]) => (
+                      <p key={item}>{item}: {MEAL_AMOUNTS.find((a) => a.id === amountId)?.label || amountId}</p>
+                    ))}
+                  </div>
+                ) : (
+                  <>Ate: {MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount}</>
+                )}
                 {m.note && <span className="block text-stone-500 mt-0.5">{m.note}</span>}
               </Card>
             );
@@ -8734,7 +8743,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         );
       case "daily-log":
         return (
-        <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} photos={photos} config={config}
+        <PreschoolDashboardView roster={roster} studentData={studentData} incidents={incidents} photos={photos} config={config} persistConfig={persistConfig}
           plannerDays={plannerDays} plannerEvents={effectivePlannerEvents}
           setMood={setMood} setMealBulk={setMealBulk} setNapBulk={setNapBulk} startNapBulk={startNapBulk} endNapBulk={endNapBulk}
           logDiaperBulk={logDiaperBulk} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog}
@@ -9817,12 +9826,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
   // studentAmounts: { studentId: amount } — applied to every included student in one action.
   // studentNotes: { studentId: note } — optional, sparse (only students who actually got one).
-  const setMealBulk = (date, mealType, studentAmounts, studentNotes = {}) => {
+  // studentItems: { studentId: [itemNames eaten] } — optional, only present when today's meal
+  // has a specific configured menu (see mealMenuItemsFor); amount is still always derived and
+  // saved alongside it (all items selected → "all", none → "none", some → "some") so anything
+  // already reading the plain amount field — the parent-facing daily log, for one — keeps working
+  // exactly as before without needing to know about specific items at all.
+  const setMealBulk = (date, mealType, studentAmounts, studentNotes = {}, studentItems = {}) => {
     Object.entries(studentAmounts).forEach(([studentId, amount]) => {
       const data = studentData[studentId];
       const without = (data.meals || []).filter((m) => !(m.date === date && m.mealType === mealType));
       const note = studentNotes[studentId];
-      persistStudent(studentId, { ...data, meals: [...without, withLogger({ date, mealType, amount, ...(note ? { note } : {}) })] });
+      const items = studentItems[studentId];
+      persistStudent(studentId, { ...data, meals: [...without, withLogger({ date, mealType, amount, ...(note ? { note } : {}), ...(items ? { items } : {}) })] });
     });
   };
 
@@ -11299,6 +11314,28 @@ function formatDurationMinutes(mins) {
   return `${h}h ${m}m`;
 }
 
+// Weekday-keyed meal menus — one recurring weekly list of items per meal type (lunch, morning
+// snack, afternoon snack), configured once in Settings and then reused every week, rather than
+// re-entering the same menu every single day. Keyed by weekday name, not a specific date, since
+// the actual menu repeats week to week; a weekday with no items configured yet (Friday, until
+// it's set up) just means that meal falls back to the older, generic amount scale instead.
+const MEAL_MENU_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"];
+const MEAL_MENU_WEEKDAY_LABELS = { monday: "Monday", tuesday: "Tuesday", wednesday: "Wednesday", thursday: "Thursday", friday: "Friday" };
+function weekdayKeyForDate(dateStr) {
+  // dateStr is "YYYY-MM-DD"; JS Date's getDay() is 0=Sunday..6=Saturday, so this only ever
+  // returns one of the five keys above for an actual school day — Saturday/Sunday simply won't
+  // match any configured menu, which is the correct behavior (no school, no menu to show).
+  const idx = new Date(dateStr + "T00:00:00").getDay();
+  return ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][idx];
+}
+// Reads today's configured menu items for a given meal type — [] if that weekday has nothing
+// configured yet for this meal type, which the logging screen treats as "fall back to the
+// generic amount scale" rather than showing an empty, useless item list.
+function mealMenuItemsFor(config, mealType, dateStr) {
+  const weekday = weekdayKeyForDate(dateStr);
+  return config.preschool?.mealMenus?.[mealType]?.[weekday] || [];
+}
+
 // Every tile on the preschool dashboard — one shared config drives both the dashboard grid and
 // which sub-screen a tap opens, so adding a category later means adding one entry here, not
 // touching the dashboard layout itself. bulkDefault: "all" means every student starts selected
@@ -11880,7 +11917,7 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
   );
 }
 
-function PreschoolDashboardView({ roster, studentData, incidents, photos, config, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, startNapBulk, endNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, classId, submitBlogPost, sendMessageToFamily, navigate }) {
+function PreschoolDashboardView({ roster, studentData, incidents, photos, config, persistConfig, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, startNapBulk, endNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, classId, submitBlogPost, sendMessageToFamily, navigate }) {
   const [screen, setScreenRaw] = useState(null); // null = dashboard grid
   // Pushes a real history entry for every preschool sub-screen — Diapers, Snack, a health
   // incident form, and so on. This was the actual gap behind "Back sometimes leaves the class
@@ -11965,7 +12002,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
   const tile = PRESCHOOL_TILES.find((t) => t.id === screen);
 
   if (tile?.mealType) {
-    return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMealBulk={setMealBulk} onBack={() => navigateScreen(null)} />;
+    return <MealBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMealBulk={setMealBulk} config={config} persistConfig={persistConfig} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "nap") {
     return <NapBulkScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} startNapBulk={startNapBulk} endNapBulk={endNapBulk} onBack={() => navigateScreen(null)} />;
@@ -12011,17 +12048,78 @@ function PreschoolScreenHeader({ tile, title, onBack }) {
 // Meals — the one category where "everyone did the same thing" is a safe default. Every student
 // starts on "All"; tapping a row reveals the other options right there so an exception takes one
 // tap, not a trip to a separate screen.
-function MealBulkScreen({ tile, date, roster, studentData, checkedInIds, setMealBulk, onBack }) {
+function MealBulkScreen({ tile, date, roster, studentData, checkedInIds, setMealBulk, config, persistConfig, onBack }) {
   const st = TILE_STYLES[tile.color];
   const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
   const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
+
+  const weekday = weekdayKeyForDate(date);
+  const weekdayLabel = MEAL_MENU_WEEKDAY_LABELS[weekday] || "today";
+  const menuItems = mealMenuItemsFor(config, tile.mealType, date);
+  const hasMenu = menuItems.length > 0;
+
+  // studentId -> { itemName: amountId }. Each item gets its own full amount scale (some
+  // schnitzel, all the rice, none of the broccoli) rather than a plain yes/no per item — every
+  // item defaults to "all", matching the same "everyone starts having eaten everything" default
+  // used everywhere else. Re-initializes whenever the configured item list itself changes — most
+  // simply, right after an on-the-spot menu edit — so a newly added item defaults correctly
+  // rather than silently missing from students already expanded before the edit.
+  const [itemSelections, setItemSelections] = useState(() =>
+    Object.fromEntries(checkedInRoster.map((s) => [s.id, Object.fromEntries(menuItems.map((item) => [item, "all"]))]))
+  );
+  useEffect(() => {
+    setItemSelections(Object.fromEntries(checkedInRoster.map((s) => [s.id, Object.fromEntries(menuItems.map((item) => [item, "all"]))])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(menuItems)]);
+
+  // Fallback amount-scale state, used only when hasMenu is false.
   const [amounts, setAmounts] = useState(() => Object.fromEntries(checkedInRoster.map((s) => [s.id, "all"])));
   const [notes, setNotes] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
 
+  const [editingMenu, setEditingMenu] = useState(false);
+  const [menuDraft, setMenuDraft] = useState([]);
+  const openMenuEditor = () => { setMenuDraft(menuItems.length ? [...menuItems] : [""]); setEditingMenu(true); };
+  const saveMenu = () => {
+    const cleaned = menuDraft.map((i) => i.trim()).filter(Boolean);
+    const nextMealMenus = {
+      ...(config.preschool?.mealMenus || {}),
+      [tile.mealType]: { ...(config.preschool?.mealMenus?.[tile.mealType] || {}), [weekday]: cleaned },
+    };
+    persistConfig({ ...config, preschool: { ...config.preschool, mealMenus: nextMealMenus } });
+    setEditingMenu(false);
+  };
+
+  const setItemAmount = (studentId, item, amountId) => {
+    setItemSelections((prev) => ({ ...prev, [studentId]: { ...prev[studentId], [item]: amountId } }));
+  };
+
+  // A simple overall summary derived from the per-item amounts, saved alongside the specific
+  // items so anything already reading the plain amount field — the parent-facing daily log, for
+  // one — keeps working exactly as before without needing to know about specific items at all.
+  // All items matching → that shared amount; anything mixed → "some", as a reasonable middle
+  // ground between "ate everything" and "ate nothing."
+  const deriveAmount = (perItem) => {
+    const values = Object.values(perItem);
+    if (values.length === 0) return "all";
+    const allSame = values.every((v) => v === values[0]);
+    return allSame ? values[0] : "some";
+  };
+
   const submit = () => {
-    setMealBulk(date, tile.mealType, amounts, notes);
+    if (hasMenu) {
+      const submittedAmounts = {};
+      const submittedItems = {};
+      checkedInRoster.forEach((s) => {
+        const perItem = itemSelections[s.id] || {};
+        submittedAmounts[s.id] = deriveAmount(perItem);
+        submittedItems[s.id] = perItem;
+      });
+      setMealBulk(date, tile.mealType, submittedAmounts, notes, submittedItems);
+    } else {
+      setMealBulk(date, tile.mealType, amounts, notes);
+    }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -12029,50 +12127,122 @@ function MealBulkScreen({ tile, date, roster, studentData, checkedInIds, setMeal
   return (
     <div className="app-page">
       <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
-      <p className="text-xs text-stone-400 mb-4">Everyone starts on "All" — tap a name to change just that student.</p>
-      <div className="space-y-2 mb-5">
-        {checkedInRoster.map((s) => {
-          const isOpen = expanded === s.id;
-          const current = MEAL_AMOUNTS.find((a) => a.id === amounts[s.id]) || MEAL_AMOUNTS[0];
-          return (
-            <div key={s.id} className={`rounded-xl border ${amounts[s.id] === "all" ? "border-stone-200 bg-white" : st.rowActive}`}>
-              <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
-                <span className="font-semibold text-stone-800">{s.name}</span>
-                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{current.label}</span>
-              </button>
-              {isOpen && (
-                <div className="px-4 pb-3 space-y-2">
-                  <div className="flex flex-wrap gap-1.5">
-                    {MEAL_AMOUNTS.map((a) => (
-                      <button key={a.id} onClick={() => { setAmounts((prev) => ({ ...prev, [s.id]: a.id })); setExpanded(null); }}
-                        className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${amounts[s.id] === a.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
-                        {a.label}
-                      </button>
-                    ))}
-                  </div>
-                  <InlineNoteField value={notes[s.id]} onChange={(v) => setNotes((prev) => ({ ...prev, [s.id]: v }))} />
-                </div>
-              )}
+
+      <div className="bg-white border border-stone-200 rounded-xl p-3 mb-4">
+        {!editingMenu ? (
+          <>
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-xs font-bold uppercase tracking-wide text-stone-400">{weekdayLabel}'s menu</p>
+              <button onClick={openMenuEditor} className="text-xs font-semibold text-teal-700">{hasMenu ? "Edit" : "Set up"}</button>
             </div>
-          );
-        })}
-        {notInRoster.map((s) => (
-          <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between">
-            <span className="font-semibold text-stone-400">{s.name}</span>
-            <span className="text-xs text-stone-400">Not checked in today</span>
+            {hasMenu ? (
+              <p className="text-sm text-stone-700">{menuItems.join(", ")}</p>
+            ) : (
+              <p className="text-xs text-stone-400">No menu set for {weekdayLabel} yet — using the general amount scale below instead.</p>
+            )}
+          </>
+        ) : (
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">Edit {weekdayLabel}'s menu</p>
+            <p className="text-[10px] text-stone-400 mb-2">Changes apply to every {weekdayLabel} going forward — handy for a one-off substitution today too, just remember to change it back.</p>
+            <div className="space-y-1.5 mb-2">
+              {menuDraft.map((item, i) => (
+                <div key={i} className="flex items-center gap-1.5">
+                  <input value={item} onChange={(e) => setMenuDraft((prev) => prev.map((x, xi) => (xi === i ? e.target.value : x)))}
+                    placeholder="Item name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  <button onClick={() => setMenuDraft((prev) => prev.filter((_, xi) => xi !== i))} className="text-stone-400 hover:text-rose-600"><X size={16} /></button>
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setMenuDraft((prev) => [...prev, ""])} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3"><Plus size={12} /> Add item</button>
+            <div className="flex gap-2">
+              <button onClick={() => setEditingMenu(false)} className="flex-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg py-2">Cancel</button>
+              <button onClick={saveMenu} className="flex-1 text-xs font-semibold text-white bg-teal-700 rounded-lg py-2">Save menu</button>
+            </div>
           </div>
-        ))}
+        )}
       </div>
-      <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
-        {saved ? "Logged ✓" : `Log ${tile.label} for ${checkedInRoster.length} students`}
-      </button>
+
+      {!editingMenu && (
+        <>
+          <p className="text-xs text-stone-400 mb-4">
+            {hasMenu ? "Everyone starts marked as having eaten everything — tap a name to change just that student." : "Everyone starts on \"All\" — tap a name to change just that student."}
+          </p>
+          <div className="space-y-2 mb-5">
+            {checkedInRoster.map((s) => {
+              const isOpen = expanded === s.id;
+              if (hasMenu) {
+                const perItem = itemSelections[s.id] || {};
+                const values = Object.values(perItem);
+                const allAll = values.length > 0 && values.every((v) => v === "all");
+                const summaryLabel = allAll ? "All" : (MEAL_AMOUNTS.find((a) => a.id === deriveAmount(perItem))?.label || "Mixed");
+                return (
+                  <div key={s.id} className={`rounded-xl border ${allAll ? "border-stone-200 bg-white" : st.rowActive}`}>
+                    <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
+                      <span className="font-semibold text-stone-800">{s.name}</span>
+                      <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{summaryLabel}</span>
+                    </button>
+                    {isOpen && (
+                      <div className="px-4 pb-3 space-y-2.5">
+                        {menuItems.map((item) => (
+                          <div key={item}>
+                            <p className="text-xs font-semibold text-stone-600 mb-1">{item}</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {MEAL_AMOUNTS.map((a) => (
+                                <button key={a.id} onClick={() => setItemAmount(s.id, item, a.id)}
+                                  className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${perItem[item] === a.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+                                  {a.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                        <InlineNoteField value={notes[s.id]} onChange={(v) => setNotes((prev) => ({ ...prev, [s.id]: v }))} />
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+              const current = MEAL_AMOUNTS.find((a) => a.id === amounts[s.id]) || MEAL_AMOUNTS[0];
+              return (
+                <div key={s.id} className={`rounded-xl border ${amounts[s.id] === "all" ? "border-stone-200 bg-white" : st.rowActive}`}>
+                  <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
+                    <span className="font-semibold text-stone-800">{s.name}</span>
+                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{current.label}</span>
+                  </button>
+                  {isOpen && (
+                    <div className="px-4 pb-3 space-y-2">
+                      <div className="flex flex-wrap gap-1.5">
+                        {MEAL_AMOUNTS.map((a) => (
+                          <button key={a.id} onClick={() => { setAmounts((prev) => ({ ...prev, [s.id]: a.id })); setExpanded(null); }}
+                            className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${amounts[s.id] === a.id ? `text-white ${st.solid} ${st.solidBorder}` : "text-stone-600 border-stone-300"}`}>
+                            {a.label}
+                          </button>
+                        ))}
+                      </div>
+                      <InlineNoteField value={notes[s.id]} onChange={(v) => setNotes((prev) => ({ ...prev, [s.id]: v }))} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {notInRoster.map((s) => (
+              <div key={s.id} className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center justify-between">
+                <span className="font-semibold text-stone-400">{s.name}</span>
+                <span className="text-xs text-stone-400">Not checked in today</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
+            {saved ? "Logged ✓" : `Log ${tile.label} for ${checkedInRoster.length} students`}
+          </button>
+        </>
+      )}
     </div>
   );
 }
 
-// Diapers — unlike bathroom trips, this genuinely does happen for the whole room in one sitting,
-// so it gets the same default-everyone treatment as meals, just with a shared time up top since a
-// diaper change is a specific moment, not an all-day category.
+
 function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDiaperBulkWithDefaults, onBack }) {
   const st = TILE_STYLES[tile.color];
   const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
@@ -20759,6 +20929,81 @@ function SchoolwideQRCode() {
   );
 }
 
+// Lets admin set up all five weekdays at once for any of the three preschool meal types, rather
+// than only being able to edit "today's" menu from the logging screen itself (which works fine
+// for a quick on-the-spot fix, but is the wrong tool for entering a whole week's worth of menus
+// in one sitting).
+function WeeklyMealMenuEditor({ config, persistConfig }) {
+  const [activeMealType, setActiveMealType] = useState("lunch");
+  const mealTypeTabs = [
+    { id: "lunch", label: "Lunch" },
+    { id: "snack-am", label: "Morning Snack" },
+    { id: "snack-pm", label: "Afternoon Snack" },
+  ];
+  const menuForType = config.preschool?.mealMenus?.[activeMealType] || {};
+
+  const updateDay = (weekday, items) => {
+    const nextMealMenus = {
+      ...(config.preschool?.mealMenus || {}),
+      [activeMealType]: { ...(config.preschool?.mealMenus?.[activeMealType] || {}), [weekday]: items },
+    };
+    persistConfig({ ...config, preschool: { ...config.preschool, mealMenus: nextMealMenus } });
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {mealTypeTabs.map((t) => (
+          <button key={t.id} onClick={() => setActiveMealType(t.id)}
+            className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${activeMealType === t.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div className="space-y-2">
+        {MEAL_MENU_WEEKDAYS.map((weekday) => (
+          <WeeklyMealMenuDayRow key={weekday} weekday={weekday} items={menuForType[weekday] || []} onSave={(items) => updateDay(weekday, items)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WeeklyMealMenuDayRow({ weekday, items, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState([]);
+  const open = () => { setDraft(items.length ? [...items] : [""]); setEditing(true); };
+  const save = () => { onSave(draft.map((i) => i.trim()).filter(Boolean)); setEditing(false); };
+  return (
+    <div className="bg-white border border-stone-200 rounded-lg p-3">
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-xs font-bold text-stone-700">{MEAL_MENU_WEEKDAY_LABELS[weekday]}</p>
+        {!editing && <button onClick={open} className="text-xs font-semibold text-teal-700">{items.length ? "Edit" : "Set up"}</button>}
+      </div>
+      {!editing ? (
+        <p className="text-xs text-stone-500">{items.length ? items.join(", ") : "No items set yet"}</p>
+      ) : (
+        <div>
+          <div className="space-y-1.5 mb-2">
+            {draft.map((item, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <input value={item} onChange={(e) => setDraft((prev) => prev.map((x, xi) => (xi === i ? e.target.value : x)))}
+                  placeholder="Item name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+                <button onClick={() => setDraft((prev) => prev.filter((_, xi) => xi !== i))} className="text-stone-400 hover:text-rose-600"><X size={14} /></button>
+              </div>
+            ))}
+          </div>
+          <button onClick={() => setDraft((prev) => [...prev, ""])} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-2"><Plus size={11} /> Add item</button>
+          <div className="flex gap-2">
+            <button onClick={() => setEditing(false)} className="flex-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg py-1.5">Cancel</button>
+            <button onClick={save} className="flex-1 text-xs font-semibold text-white bg-teal-700 rounded-lg py-1.5">Save</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, classId, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding, createFamilyAccount }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
@@ -21052,6 +21297,15 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             <WeeklyScheduleEditor config={config} persistConfig={setConfig} classType={classType} />
           </Section>
         </div>
+
+        {isPreschool && (
+        <div className="md:col-span-2">
+          <Section title="Meal menus">
+            <p className="text-xs text-stone-400 mb-3">Set what's served each weekday for lunch and each snack — teachers then pick which specific items a child ate, instead of a general amount. A day left blank just falls back to the general amount scale.</p>
+            <WeeklyMealMenuEditor config={config} persistConfig={setConfig} />
+          </Section>
+        </div>
+        )}
 
         {!isPreschool && (
         <Section title="Class Log — mark types">
