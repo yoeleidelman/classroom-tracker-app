@@ -1679,6 +1679,17 @@ function isRunningStandalone() {
 function isIOSDevice() {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 }
+// Google's own sign-in system deliberately refuses to work inside a WebView, which is exactly
+// what an installed, standalone iOS PWA runs as — not a bug in this app, and not something either
+// a popup or a redirect can work around (confirmed independently across Firebase's own issue
+// tracker, Google's own engineers, and Apple's developer forums). The failure mode if attempted
+// anyway is worse than a normal error: the sign-in call simply never resolves, an indefinite
+// silent hang with no way out. Rather than showing the option and then explaining why it failed
+// after someone taps it, this hides it entirely in that specific environment — regular Safari on
+// iOS (not installed) is unaffected and still shows it normally.
+function shouldHideGoogleSignIn() {
+  return isIOSDevice() && isRunningStandalone();
+}
 
 // Requests permission, registers this specific device/browser for push, and remembers its token
 // against the signed-in account — one account can have several devices enabled at once (a
@@ -2347,6 +2358,14 @@ function AppInner() {
 
   const signInWithGoogle = async () => {
     setGoogleSignInError("");
+    // Defense in depth alongside shouldHideGoogleSignIn hiding the button entirely in this same
+    // environment — kept here too in case some device/browser combination the hiding check
+    // doesn't catch still reaches this call; see shouldHideGoogleSignIn's own comment for why
+    // this specific environment can't work at all, not just unreliably.
+    if (isIOSDevice() && isRunningStandalone()) {
+      setGoogleSignInError("unavailable-in-installed-ios-app");
+      return;
+    }
     try {
       await signInWithPopup(auth, new GoogleAuthProvider());
       // Success updates auth state directly (the same onAuthStateChanged listener above picks
@@ -5733,6 +5752,12 @@ function GoogleSignInSection({ onSignInWithGoogle, pendingGoogleLink, onComplete
     );
   }
 
+  // Hidden entirely on an installed, standalone iOS PWA — see shouldHideGoogleSignIn for why
+  // showing it and explaining the failure after a tap isn't the right call here. The caller
+  // (TeacherSignInScreen / ParentSignInScreen) checks this same function to also skip the "OR"
+  // divider that would otherwise sit above nothing.
+  if (shouldHideGoogleSignIn()) return null;
+
   return (
     <div className="mb-4">
       <button onClick={onSignInWithGoogle} className="w-full flex items-center justify-center gap-2 bg-white border border-stone-300 rounded-lg py-2.5 text-sm font-semibold text-stone-700 hover:bg-stone-50">
@@ -5911,7 +5936,7 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute, onS
         <p className="text-stone-500 text-sm text-center mb-7">Sign in with your teacher account</p>
 
         <GoogleSignInSection onSignInWithGoogle={onSignInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={onCompleteGoogleLink} googleSignInError={googleSignInError} />
-        {!pendingGoogleLink && (
+        {!pendingGoogleLink && !shouldHideGoogleSignIn() && (
           <div className="flex items-center gap-2 mb-4">
             <div className="flex-1 h-px bg-stone-200" /><span className="text-[10px] text-stone-400">OR</span><div className="flex-1 h-px bg-stone-200" />
           </div>
@@ -6014,7 +6039,7 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse, onSignInWithG
         )}
 
         <GoogleSignInSection onSignInWithGoogle={onSignInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={onCompleteGoogleLink} googleSignInError={googleSignInError} />
-        {!pendingGoogleLink && (
+        {!pendingGoogleLink && !shouldHideGoogleSignIn() && (
           <div className="flex items-center gap-2 mb-4">
             <div className="flex-1 h-px bg-stone-200" /><span className="text-[10px] text-stone-400">OR</span><div className="flex-1 h-px bg-stone-200" />
           </div>
@@ -10074,11 +10099,21 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     persistStudent(studentId, { ...data, bathroom: (data.bathroom || []).filter((b) => b.id !== entryId) });
   };
 
-  // Teacher-side toggle for QR check-in — same shared logic as the parent-side scan, just working
-  // against already-loaded React state instead of a fresh Firestore read, and attributed to the
-  // signed-in teacher instead of a family.
-  const toggleCheckInByTeacher = (studentId) => {
-    const data = studentData[studentId] || emptyStudentData();
+  // Teacher-side toggle for QR check-in — was previously working against already-loaded React
+  // state instead of a fresh Firestore read, unlike the parent-side scan's own version of this
+  // same logic (toggleCheckInForStudent below, which always reads fresh). That's a real, live risk
+  // here specifically: this screen commonly stays open for the whole day, and two devices open to
+  // it at once — two co-teachers, or the same teacher on a phone and a tablet — is an entirely
+  // normal way a preschool room actually runs. If one device checks a student in, the other's
+  // local copy has no way to know, and the next tap on that same student computes the toggle from
+  // its own stale view — creating a duplicate entry, or reading a genuine check-in as a check-out
+  // because that device never saw it happen. That's exactly what a toggle "flipping itself" would
+  // look like to the person tapping it, even though nothing was actually random. Now reads the
+  // student's own true, current check-in record fresh, right before deciding what the tap should
+  // do — the same fix already applied to the class-assignment toggle for the same underlying
+  // reason.
+  const toggleCheckInByTeacher = async (studentId) => {
+    const data = (await loadC(`kriya:${studentId}`, null)) || studentData[studentId] || emptyStudentData();
     const byLabel = loggedByName ? `Teacher: ${loggedByName}` : "Teacher";
     const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel);
     persistStudent(studentId, { ...data, checkIns: result.checkIns });
