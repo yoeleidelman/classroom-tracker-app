@@ -17,7 +17,7 @@
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithPopup, linkWithCredential } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, browserSessionPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithPopup, linkWithCredential } from "firebase/auth";
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component, Fragment } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
@@ -2334,7 +2334,27 @@ function AppInner() {
   // teacher stays signed in across closing and reopening the app, not just within one tab.
   useEffect(() => {
     let unsubscribe = () => {};
-    setPersistence(auth, browserLocalPersistence).finally(() => {
+    // A real, reported symptom traced back to exactly this: a sign-in that visibly succeeds —
+    // the class-selection screen shows — for a fraction of a second, then reverts straight back
+    // to signed-out. That matches a session that existed briefly in memory but couldn't actually
+    // be written to durable storage. browserLocalPersistence depends on IndexedDB, which some
+    // devices/browser configurations block or restrict — a managed or storage-constrained iPad
+    // being a real, plausible case — and the .finally() this used to end on meant that failure
+    // was silently swallowed: if setPersistence itself rejected, the code proceeded to attach the
+    // auth listener anyway, on whatever broken persistence state that left behind, with nothing
+    // to explain why a session that seemed to work for a moment then didn't. Now falls back
+    // explicitly to session-only persistence (sessionStorage-backed, not IndexedDB) if the
+    // durable option genuinely can't be established — not as good as surviving a full app
+    // restart, but real enough to keep someone signed in for as long as the tab/app itself stays
+    // open, rather than losing the session again within the same few seconds.
+    setPersistence(auth, browserLocalPersistence)
+      .catch((err) => {
+        console.error("browserLocalPersistence failed, falling back to session-only persistence", err);
+        return setPersistence(auth, browserSessionPersistence).catch((err2) => {
+          console.error("browserSessionPersistence also failed — signing in may not stay signed in at all on this device", err2);
+        });
+      })
+      .finally(() => {
       unsubscribe = onAuthStateChanged(auth, async (user) => {
         setAuthUser(user);
         if (user) {
