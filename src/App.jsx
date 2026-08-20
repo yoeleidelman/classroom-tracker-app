@@ -9854,6 +9854,31 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         finalConfig = { ...finalConfig, classType };
         saveC("config", finalConfig);
       }
+      // Fifth migration: a one-time auto-fill for the exact lunch schedule given directly in
+      // conversation rather than typed into the app — asked for explicitly, more than once,
+      // rather than being walked through entering it by hand. Only fires if lunch is completely
+      // empty (no days set at all yet), so it can never overwrite anything already there, whether
+      // from this same seed having already run or from someone editing it afterward — the normal
+      // Weekly Meal Menu Editor in Settings still works exactly as before for that, since this is
+      // only ever a one-time starting point, not a standing override.
+      if (classType === "preschool" && Object.keys(finalConfig.preschool?.mealMenus?.lunch || {}).length === 0) {
+        finalConfig = {
+          ...finalConfig,
+          preschool: {
+            ...finalConfig.preschool,
+            mealMenus: {
+              ...finalConfig.preschool?.mealMenus,
+              lunch: {
+                monday: ["Meatballs", "Rice", "Broccoli"],
+                tuesday: ["Fish sticks", "Couscous", "Veggies"],
+                wednesday: ["Schnitzel", "Pasta", "Veggies"],
+                thursday: ["Pizza", "Olives"],
+              },
+            },
+          },
+        };
+        saveC("config", finalConfig);
+      }
       setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: mergedPlanner });
       setIncidents(finalIncidents);
       setPhotos(ph);
