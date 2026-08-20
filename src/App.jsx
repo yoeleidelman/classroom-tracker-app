@@ -23167,7 +23167,66 @@ class ErrorBoundary extends Component {
 export default function App() {
   return (
     <ErrorBoundary>
+      <UpdateAvailableBanner />
       <AppInner />
     </ErrorBoundary>
+  );
+}
+
+// Detects when a newer version has been deployed while this exact session stayed open, and
+// prompts a refresh — the likely real explanation behind "it works on my phone but not on this
+// iPad" for something that's already fixed in the code: a classroom tablet that's rarely, if
+// ever, fully closed can keep running the exact JS bundle it loaded weeks ago indefinitely, with
+// nothing to ever prompt it to check for a newer one on its own, while a phone that gets closed
+// and reopened more often naturally picks up the current version without anyone noticing there
+// was ever a difference. Compares the actual script bundle THIS page loaded against what a fresh
+// fetch of the page right now would load — the real, current truth each time, not a version
+// number that has to be remembered and kept in sync by hand.
+function UpdateAvailableBanner() {
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const currentScriptSrc = useRef(null);
+
+  useEffect(() => {
+    currentScriptSrc.current = document.querySelector('script[type="module"][src]')?.getAttribute("src") || null;
+    if (!currentScriptSrc.current) return; // nothing to compare against — dev mode, or unexpected markup
+
+    const checkForUpdate = async () => {
+      try {
+        const res = await fetch(`${window.location.origin}/?_check=${Date.now()}`, { cache: "no-store" });
+        const html = await res.text();
+        const latestScriptSrc = new DOMParser().parseFromString(html, "text/html")
+          .querySelector('script[type="module"][src]')?.getAttribute("src");
+        if (latestScriptSrc && latestScriptSrc !== currentScriptSrc.current) setUpdateAvailable(true);
+      } catch {
+        // A failed check (offline, a network hiccup) just means try again next time — never
+        // treated as "an update is available," since that would be a false alarm from bad
+        // information rather than an actual, confirmed difference.
+      }
+    };
+
+    // Checks whenever the app becomes visible again after being backgrounded — the natural moment
+    // someone actually picks the device back up, and a far more meaningful trigger for a
+    // classroom tablet than any fixed timer alone, since it lines up with when a stale session
+    // would actually matter to the person holding it.
+    const onVisible = () => { if (document.visibilityState === "visible") checkForUpdate(); };
+    document.addEventListener("visibilitychange", onVisible);
+    checkForUpdate(); // also check once immediately, in case this session was already stale before this code even ran
+    const interval = setInterval(checkForUpdate, 20 * 60 * 1000); // and periodically regardless, for a tab simply left open and visible for hours at a stretch
+    return () => { document.removeEventListener("visibilitychange", onVisible); clearInterval(interval); };
+  }, []);
+
+  if (!updateAvailable || dismissed) return null;
+  return (
+    <div className="fixed bottom-0 inset-x-0 z-50 bg-teal-800 text-white px-4 py-3 flex items-center justify-between gap-3 shadow-lg"
+      style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
+      <p className="text-sm font-semibold">A newer version is ready.</p>
+      <div className="flex items-center gap-2 shrink-0">
+        <button onClick={() => setDismissed(true)} className="text-xs font-semibold text-teal-100 hover:text-white px-2">Later</button>
+        <button onClick={() => window.location.reload()} className="text-sm font-bold bg-white text-teal-800 rounded-lg px-3 py-1.5">
+          Refresh
+        </button>
+      </div>
+    </div>
   );
 }
