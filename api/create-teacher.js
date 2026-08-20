@@ -53,12 +53,20 @@ export default async function handler(req, res) {
   }
 
   const { name, email, password, role, assignedClassIds, isSubstitute, messagingClassTypes } = req.body || {};
-  if (!name || !email || !password || password.length < 6) {
+  const trimmedEmail = (email || "").trim();
+  const trimmedPassword = (password || "").trim();
+  if (!name || !trimmedEmail || !trimmedPassword || trimmedPassword.length < 6) {
     return res.status(400).json({ error: "Name, email, and a password of at least 6 characters are required." });
   }
 
   try {
     const auth = getAuth();
+    // Trimmed here, not just on the sign-in side — a stray leading or trailing space (an easy
+    // mistake copy-pasting a temp password, or autocorrect) would otherwise get permanently baked
+    // into the account itself at creation. No amount of correct, careful typing at sign-in
+    // afterward could ever match a password that was wrong from the very first moment the account
+    // existed — this is what a real, reported "auth/invalid-credential" failure on a brand new
+    // account, on its very first sign-in attempt, actually traced back to.
     // Mirrors create-family.js's own handling of this same situation in the opposite direction:
     // Firebase Auth allows exactly one account per email, and a person who's already a parent
     // here (most commonly) shouldn't be blocked from also getting a teacher login, or forced into
@@ -70,10 +78,10 @@ export default async function handler(req, res) {
     let userRecord;
     let linkedExisting = false;
     try {
-      userRecord = await auth.createUser({ email, password, displayName: name });
+      userRecord = await auth.createUser({ email: trimmedEmail, password: trimmedPassword, displayName: name });
     } catch (err) {
       if (err.code !== "auth/email-already-exists") throw err;
-      userRecord = await auth.getUserByEmail(email);
+      userRecord = await auth.getUserByEmail(trimmedEmail);
       linkedExisting = true;
     }
 
@@ -81,7 +89,7 @@ export default async function handler(req, res) {
     const ref = db.collection("data").doc(`teacher:${userRecord.uid}`);
     await ref.set({
       value: {
-        uid: userRecord.uid, name, email, role: role || "teacher",
+        uid: userRecord.uid, name, email: trimmedEmail, role: role || "teacher",
         assignedClassIds: assignedClassIds || [], isSubstitute: !!isSubstitute,
         // Reaches every parent with a child in one of these grade levels, independent of any
         // specific class assignment — how someone like a curriculum coordinator becomes

@@ -67,7 +67,9 @@ export default async function handler(req, res) {
   }
 
   const { name, email, password, studentLinks, familyGroupId } = req.body || {};
-  if (!name || !email || !password || password.length < 6) {
+  const trimmedEmail = (email || "").trim();
+  const trimmedPassword = (password || "").trim();
+  if (!name || !trimmedEmail || !trimmedPassword || trimmedPassword.length < 6) {
     return res.status(400).json({ error: "Family name, email, and a password of at least 6 characters are required." });
   }
 
@@ -89,11 +91,11 @@ export default async function handler(req, res) {
     let linkedExisting = false;
 
     try {
-      userRecord = await auth.createUser({ email, password, displayName: name });
+      userRecord = await auth.createUser({ email: trimmedEmail, password: trimmedPassword, displayName: name });
     } catch (err) {
       if (err.code !== "auth/email-already-exists") throw err;
       // Already has a login (e.g. this person is also a teacher) — reuse it rather than fail.
-      userRecord = await auth.getUserByEmail(email);
+      userRecord = await auth.getUserByEmail(trimmedEmail);
       linkedExisting = true;
     }
 
@@ -115,7 +117,7 @@ export default async function handler(req, res) {
     }
     await ref.set({
       value: {
-        uid: userRecord.uid, name, email,
+        uid: userRecord.uid, name, email: trimmedEmail,
         studentLinks: links, linkedClassIds, linkedClassTypes, familyGroupId: resolvedGroupId, active: true,
       },
     });
