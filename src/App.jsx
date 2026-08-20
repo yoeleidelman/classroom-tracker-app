@@ -12467,19 +12467,27 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     streamRef.current = null;
   };
 
-  // Requesting an explicit high resolution here is what actually fixes photo/video quality —
-  // without it, a bare { video: true } request lets the browser default to whatever it considers
+  // Requesting an explicit resolution here is what actually fixes photo/video quality — without
+  // it, a bare { video: true } request lets the browser default to whatever it considers
   // reasonable for its most common use case, which is video calling, not photography. That
   // default is often far below what the camera hardware can actually do. "ideal" (not "exact") is
-  // what makes this safe to request everywhere: it asks for 4K and lets the browser negotiate down
-  // to the closest resolution the actual camera and browser support, rather than failing outright
-  // on a device or browser that can't hit 4K exactly.
+  // what makes this safe to request everywhere: it asks for the target and lets the browser
+  // negotiate down to the closest resolution the actual camera and browser support, rather than
+  // failing outright on a device that can't hit it exactly.
+  // 1080p, not 4K: a real, reported pattern — the live preview struggling, this same recording
+  // timer stuttering/falling behind, and general sluggishness elsewhere in the app — traced back
+  // to exactly this. Decoding and rendering a continuous 4K stream in real time, then separately
+  // re-encoding it during recording, is a genuinely heavy, sustained load that a classroom iPad
+  // (older or mid-range hardware, not a flagship phone) can struggle to sustain, and a busy main
+  // thread is exactly what makes a setInterval-driven timer like this one drift and stutter. 1080p
+  // is still excellent quality for a classroom photo or video and asks a small fraction of the
+  // decoding/encoding work of 4K.
   const startStream = async () => {
     stopStream();
     setCameraError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode, width: { ideal: 3840 }, height: { ideal: 2160 } },
+        video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: true,
       });
       streamRef.current = stream;
@@ -12552,7 +12560,7 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
     // footage an actual recorded clip benefits from. 8 Mbps is comfortably enough for a genuinely
     // sharp 1080p-to-4K clip at the 30-second cap already in place, without producing an
     // unreasonably large file for that short a recording.
-    const recorder = new MediaRecorder(streamRef.current, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 8_000_000 });
+    const recorder = new MediaRecorder(streamRef.current, { ...(mimeType ? { mimeType } : {}), videoBitsPerSecond: 5_000_000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "video/webm" });
