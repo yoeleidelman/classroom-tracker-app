@@ -976,6 +976,34 @@ function computeSessionTimeline(data, category, config) {
 
 function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], checkIns: [] }; }
 
+// Silently collapses any duplicate meal (same date + mealType) or nap (same date) entries down to
+// just one — keeping whichever has the later loggedAt, since that's the one an actual correction
+// would produce. This exists because a manual, admin-triggered check-and-fix tool isn't a real
+// answer to a duplicate that can happen on its own: nobody is going to remember to regularly go
+// look for these, so healing has to happen automatically, on its own, the moment the data is
+// touched by anyone — not wait on a person to go find it. Called from every place this app loads
+// a student's daily-log data for display (both the teacher's own class view and the parent's own
+// view), so whichever one happens to load the data first silently repairs it for everyone,
+// immediately, with no admin action involved at all. An entry with no loggedAt at all (only
+// possible from before this field existed) is treated as older than any timestamped one, since a
+// real timestamp is strictly better information than none.
+function dedupeDailyLogData(data) {
+  const dedupeByKey = (list, keyFn) => {
+    const seen = {};
+    (list || []).forEach((entry) => {
+      const key = keyFn(entry);
+      const existing = seen[key];
+      if (!existing || (entry.loggedAt || "") > (existing.loggedAt || "")) seen[key] = entry;
+    });
+    return Object.values(seen);
+  };
+  const meals = dedupeByKey(data.meals, (m) => `${m.date}:${m.mealType}`);
+  const naps = dedupeByKey(data.naps, (n) => n.date);
+  const changed = meals.length !== (data.meals || []).length || naps.length !== (data.naps || []).length;
+  if (!changed) return { data, changed: false };
+  return { data: { ...data, meals, naps }, changed: true };
+}
+
 // QR check-in — one shared, pure function so the teacher-side toggle and the parent-side scan
 // (which reads and writes Firestore directly, with no React state involved) both produce exactly
 // the same result. Supports more than one in/out cycle per day on purpose — a child picked up
@@ -7089,7 +7117,13 @@ function ChildDailyLogView({ link, onBack }) {
       loadJSON(`class:${link.classId}:photos`, [], true),
     ]).then(([studentData, classIncidents, classPhotos]) => {
       if (cancelled) return;
-      setData(studentData || {});
+      const rawData = studentData || {};
+      const { data: cleaned, changed } = dedupeDailyLogData(rawData);
+      // Silent, fire-and-forget, same as the teacher-side load — a parent opening their own
+      // child's daily log is just as valid a moment to heal a leftover duplicate as a teacher
+      // opening their class, and often happens first.
+      if (changed) saveJSON(`class:${link.classId}:kriya:${link.studentId}`, cleaned, true);
+      setData(cleaned);
       setIncidents((classIncidents || []).filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId)));
       setPhotos((classPhotos || []).filter((p) => p.date === date && (p.studentIds || []).includes(link.studentId)));
       setLoading(false);
@@ -9603,7 +9637,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const dataMap = {};
       for (const s of finalRoster) {
         if (sampleStudentData && sampleStudentData[s.id]) { dataMap[s.id] = sampleStudentData[s.id]; continue; }
-        const d = await loadC(`kriya:${s.id}`, emptyStudentData());
+        const raw = await loadC(`kriya:${s.id}`, emptyStudentData());
+        const { data: d, changed } = dedupeDailyLogData(raw);
+        // Silent, fire-and-forget — a leftover duplicate found on load gets healed in the
+        // background without making anyone wait on it; the already-cleaned data is used for
+        // display immediately either way.
+        if (changed) saveC(`kriya:${s.id}`, d);
         dataMap[s.id] = { ...emptyStudentData(), ...d };
       }
       setStudentData(dataMap);
