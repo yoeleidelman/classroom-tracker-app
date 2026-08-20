@@ -6251,9 +6251,11 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute, onS
 
         <div className="bg-white border border-stone-200 rounded-2xl p-5 mb-4 shadow-sm">
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
-            placeholder="Email" autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
+            placeholder="Email" autoFocus autoCapitalize="none" autoCorrect="off" spellCheck={false}
+            className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
-            placeholder="Password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
+            placeholder="Password" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+            className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500" />
           <button onClick={() => setShowForgotPassword(true)} className="text-xs font-semibold text-stone-400 hover:text-teal-700 mb-3">Forgot password?</button>
           {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
           <button onClick={trySignIn} disabled={signingIn} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
@@ -6354,9 +6356,11 @@ function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse, onSignInWithG
 
         <div className="bg-white border border-stone-200 rounded-2xl p-5 mb-4 shadow-sm">
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
-            placeholder="Email" autoComplete="username" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none" />
+            placeholder="Email" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+            className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2.5 focus:border-teal-500 focus:outline-none" />
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && trySignIn()}
-            placeholder="Password" autoComplete="current-password" className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none" />
+            placeholder="Password" autoComplete="current-password" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+            className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none" />
           <button onClick={() => setShowForgotPassword(true)} className="text-xs font-semibold text-stone-400 hover:text-teal-700 mb-3">Forgot password?</button>
           {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
           <button onClick={trySignIn} disabled={signingIn} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
