@@ -2479,6 +2479,12 @@ function AppInner() {
       setPendingGoogleLink(null);
       return { ok: true };
     } catch (err) {
+      // Same reasoning as signInTeacher's own too-many-requests handling — a genuine, temporary,
+      // server-side lockout looks identical to a wrong password without this, inviting exactly
+      // the repeated-retry response that keeps it open longer.
+      if (err.code === "auth/too-many-requests") {
+        return { ok: false, error: "Too many attempts too quickly — this is temporary. Wait a few minutes before trying again." };
+      }
       return { ok: false, error: err.code === "auth/invalid-credential" ? "Incorrect password." : "Couldn't link the accounts — try again." };
     }
   };
@@ -2632,6 +2638,18 @@ function AppInner() {
       await signInWithEmailAndPassword(auth, email, password);
       return { ok: true };
     } catch (e) {
+      // A real, reported case traced back to exactly this: an account that had a genuine string
+      // of failed attempts (a mistyped password, autocapitalize altering what got submitted
+      // before that was fixed, anything) can trip Firebase's own server-side rate limit — tracked
+      // against the account/device on Firebase's end, not anything stored locally, so it persists
+      // through a fresh reload, a fully closed and reopened app, even a full uninstall and
+      // reinstall. Collapsing this into the same generic "couldn't sign in, try again" message as
+      // every other failure actively made it worse: it looks identical to a wrong password, so
+      // the natural response is to keep retrying immediately, which only holds the lockout open
+      // longer rather than letting it clear.
+      if (e.code === "auth/too-many-requests") {
+        return { ok: false, error: "Too many attempts too quickly — this is temporary. Wait a few minutes before trying again, rather than retrying right away." };
+      }
       return { ok: false, error: e.code === "auth/invalid-credential" ? "Incorrect email or password." : "Couldn't sign in — try again." };
     }
   };
@@ -2660,6 +2678,9 @@ function AppInner() {
       await updatePassword(user, newPassword);
       return { ok: true };
     } catch (e) {
+      if (e.code === "auth/too-many-requests") {
+        return { ok: false, error: "Too many attempts too quickly — this is temporary. Wait a few minutes before trying again." };
+      }
       if (e.code === "auth/invalid-credential" || e.code === "auth/wrong-password") return { ok: false, error: "That current password isn't right." };
       if (e.code === "auth/weak-password") return { ok: false, error: "New password needs to be at least 6 characters." };
       return { ok: false, error: "Couldn't change the password — try again." };
