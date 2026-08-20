@@ -1011,6 +1011,46 @@ async function toggleCheckInForStudent(classId, studentId, byLabel) {
   await saveJSON(`class:${classId}:kriya:${studentId}`, { ...data, checkIns: result.checkIns }, true);
   return result;
 }
+// A student legitimately enrolled in more than one class (part-time, or specific periods only —
+// both real, supported enrollment types) can still only actually be in one physical place at a
+// time. But check-in data is stored separately per class, and every check-in screen used to look
+// at only ONE of those classes' own records to decide whether a student was "in" — completely
+// blind to a second, independent open check-in sitting in a different class's own document. A
+// real, reported incident showed exactly what that allows: a child got checked in a second time,
+// under a class they didn't actually belong in that day, without any warning that they were
+// already checked in elsewhere — and when a parent later checked them out, it only closed the one
+// record they happened to interact with, leaving the other genuinely open with no way to notice.
+// This is what closes that gap: given every class a student could possibly be checked into, it
+// looks at ALL of their check-in records together and returns the one true, unified answer —
+// which class (if any) is actually open right now — so a check-out, wherever it's triggered from,
+// always finds and closes the right one.
+async function getUnifiedCheckInStatus(studentId, classLinks) {
+  const date = todayISO();
+  const perClass = await Promise.all((classLinks || []).map(async (link) => {
+    const data = await loadJSON(`class:${link.classId}:kriya:${studentId}`, null, true);
+    const todaysEntries = (data?.checkIns || []).filter((c) => c.date === date);
+    return { classId: link.classId, className: link.className, checkIns: data?.checkIns || [], todaysEntries };
+  }));
+  const allTodaysEntries = perClass
+    .flatMap((c) => c.todaysEntries.map((e) => ({ ...e, classId: c.classId, className: c.className })))
+    .sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
+  const openEntry = allTodaysEntries.find((e) => e.checkInTime && !e.checkOutTime);
+  return { isIn: Boolean(openEntry), openEntry, allTodaysEntries, perClass };
+}
+// Toggles a student's TRUE, unified check-in status. Checking out always closes whichever class's
+// record is actually open, regardless of which class or screen the action came from — a parent or
+// teacher tapping "check out" means "this child is leaving," not "close this specific class's own
+// entry." Checking in (when nothing is open anywhere) writes the new entry to defaultClassId, the
+// class this particular action is being taken for.
+async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLabel) {
+  const status = await getUnifiedCheckInStatus(studentId, classLinks);
+  const targetClassId = status.openEntry ? status.openEntry.classId : defaultClassId;
+  const existing = status.perClass.find((c) => c.classId === targetClassId);
+  const currentCheckIns = existing ? existing.checkIns : [];
+  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel);
+  await saveJSON(`class:${targetClassId}:kriya:${studentId}`, { ...(existing ? { checkIns: currentCheckIns } : emptyStudentData()), checkIns: result.checkIns }, true);
+  return { ...result, classId: targetClassId };
+}
 // Reuses the exact same day-type resolution Planner already uses to decide whether to hide
 // attendance on a given date — rather than a separate "school days" calendar, a day is a school
 // day unless it's explicitly marked as a type that hides attendance (e.g. "No School"). This
@@ -7911,39 +7951,52 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     setPendingHomeworkDeepLinkClassId(null);
   }, [pendingHomeworkDeepLinkClassId, fullTimeStudentLinks]);
 
+  // Was previously overwriting next[studentId] once per class link — for a student genuinely
+  // enrolled in more than one class, whichever link happened to be processed last silently
+  // discarded the other class's real status. A real, reported incident showed exactly what that
+  // allows: a child truly checked in under one class displayed as "not checked in" here, because
+  // the other (empty) class's link overwrote it — leading a parent to tap "Check in" on a child
+  // who was already in, creating a second, independent open check-in with no warning at all. Now
+  // groups every link by student FIRST, then asks getUnifiedCheckInStatus for the one true answer
+  // across all of that student's classes together, so nothing gets silently dropped.
   const refreshCheckInStatus = useCallback(async () => {
     const today = todayISO();
     const next = {};
     const classSchoolDayCache = {}; // classId -> boolean, deduped so shared classes aren't fetched twice
-    for (const link of family?.studentLinks || []) {
-      const data = await loadJSON(`class:${link.classId}:kriya:${link.studentId}`, null, true);
-      const checkIns = data?.checkIns || [];
-      const todaysEntries = checkIns.filter((c) => c.date === today).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
-      const open = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
-      if (!(link.classId in classSchoolDayCache)) {
-        const [classConfig, classPlannerDays] = await Promise.all([
-          loadJSON(`class:${link.classId}:config`, null, true),
-          loadJSON(`class:${link.classId}:plannerDays`, {}, true),
-        ]);
-        classSchoolDayCache[link.classId] = isSchoolDay(today, classConfig, classPlannerDays);
+    const linksByStudent = {};
+    (family?.studentLinks || []).forEach((link) => {
+      if (!linksByStudent[link.studentId]) linksByStudent[link.studentId] = [];
+      linksByStudent[link.studentId].push(link);
+    });
+    for (const [studentId, links] of Object.entries(linksByStudent)) {
+      const status = await getUnifiedCheckInStatus(studentId, links);
+      for (const link of links) {
+        if (!(link.classId in classSchoolDayCache)) {
+          const [classConfig, classPlannerDays] = await Promise.all([
+            loadJSON(`class:${link.classId}:config`, null, true),
+            loadJSON(`class:${link.classId}:plannerDays`, {}, true),
+          ]);
+          classSchoolDayCache[link.classId] = isSchoolDay(today, classConfig, classPlannerDays);
+        }
       }
-      next[link.studentId] = { isIn: Boolean(open), entries: todaysEntries, schoolDayToday: classSchoolDayCache[link.classId] };
+      // "Today's a school day" only matters for the class the check-in would actually land on —
+      // the open one if there is one, otherwise the first linked class — not every linked class.
+      const relevantClassId = status.openEntry ? status.openEntry.classId : links[0]?.classId;
+      next[studentId] = { isIn: status.isIn, entries: status.allTodaysEntries, schoolDayToday: classSchoolDayCache[relevantClassId], links };
     }
     setCheckInStatus(next);
   }, [family]);
 
   useEffect(() => { refreshCheckInStatus(); }, [refreshCheckInStatus]);
 
-  // Same shared logic the teacher-side toggle uses — reads the live document directly rather than
-  // relying on any cached state, since the parent portal doesn't keep a running copy of it. Only
-  // ever called from the unlocked action screen now, one child at a time, by deliberate tap — never
-  // automatically, and never reachable at all before a genuine scan.
+  // Toggles this child's ONE true check-in status — closing whichever class's record is actually
+  // open (which might not even be the class this specific link belongs to), or opening a new one
+  // under this link's class if nothing is open anywhere yet. See getUnifiedCheckInStatus/
+  // toggleUnifiedCheckIn for the full reasoning on why this can't just look at one class alone.
   const toggleCheckInByFamily = async (link) => {
-    const key = `class:${link.classId}:kriya:${link.studentId}`;
-    const data = (await loadJSON(key, null, true)) || emptyStudentData();
+    const allLinksForChild = (family?.studentLinks || []).filter((l) => l.studentId === link.studentId);
     const byLabel = `Parent: ${family?.name || "Family"}`;
-    const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel);
-    await saveJSON(key, { ...data, checkIns: result.checkIns }, true);
+    const result = await toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel);
     await refreshCheckInStatus();
     return result;
   };
@@ -8112,18 +8165,25 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               <p className="text-xs text-emerald-700 mt-0.5">Tap each child you're checking in or out right now.</p>
             </div>
             <div className="space-y-2 mb-4">
-              {family.studentLinks.map((link, i) => {
+              {/* One card per unique CHILD, not per class link — a student in two classes used to
+                  render two separate, identical-looking cards here, each capable of independently
+                  checking them in under a different class with no idea the other existed. Now
+                  shows every linked class together on one card, and passes ALL of a child's links
+                  through so toggleCheckInByFamily can always find and close whichever one is
+                  actually open. */}
+              {[...new Map(family.studentLinks.map((l) => [l.studentId, l])).values()].map((link) => {
                 const status = checkInStatus[link.studentId];
                 const isIn = status?.isIn;
                 const entries = status?.entries || [];
                 const schoolDayToday = status?.schoolDayToday !== false; // default to allowed until status has loaded
                 const confirming = confirmingRepeatChild === link.studentId;
+                const allClassNames = (status?.links || [link]).map((l) => l.className).join(", ");
                 return (
-                  <div key={i} className={`rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
+                  <div key={link.studentId} className={`rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <p className="font-semibold text-stone-900">{link.studentName}</p>
-                        <p className="text-xs text-stone-400">{link.className}</p>
+                        <p className="text-xs text-stone-400">{allClassNames}</p>
                         {!schoolDayToday ? (
                           <p className="text-xs font-semibold text-amber-700 mt-0.5">Not marked as a school day today</p>
                         ) : entries.length === 0 ? (
@@ -11379,9 +11439,11 @@ const DIAPER_TYPES = [
   { id: "dry", label: "Dry check" },
 ];
 const BATHROOM_TRIP_TYPES = [
-  { id: "success", label: "Success" },
-  { id: "accident", label: "Accident" },
+  { id: "wet", label: "Wet" },
+  { id: "bm", label: "BM" },
+  { id: "both", label: "Both" },
   { id: "no-result", label: "No result" },
+  { id: "accident", label: "Accident" },
 ];
 
 // Tailwind's compiler needs every class name to appear as a literal string somewhere in the
@@ -11624,28 +11686,43 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
 // there's no hard family ID on a student record, so this is a heuristic, not a guarantee.
 function AllPreschoolAttendanceView({ loggedByName, navigate }) {
   const [loading, setLoading] = useState(true);
-  const [families, setFamilies] = useState([]); // [{ key, students: [{ id, name, classId, className, checkIns }] }]
+  const [families, setFamilies] = useState([]); // [{ key, students: [{ id, name, classId, className, links, checkIns }] }]
   const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
   const date = todayISO();
 
+  // Was previously one entry PER CLASS a student was enrolled in — a student genuinely enrolled
+  // in two classes (part-time, or specific periods only) showed up here as two separate,
+  // independent rows, each with its own check-in button unaware the other existed. A real,
+  // reported incident showed exactly what that allows: a child checked in under one class while
+  // already checked in under another, with no warning either time — and no way for whichever
+  // class's teacher couldn't find them on their own roster to know where they actually were. Now
+  // groups by unique student FIRST, gathering every class link a student has, then asks
+  // getUnifiedCheckInStatus for the one true status across all of them together.
   const refresh = useCallback(async () => {
     setLoading(true);
     const allClasses = await loadJSON("schoolClasses", [], true);
     const preschoolClasses = (allClasses || []).filter((c) => c.classType === "preschool" && !c.archived);
-    const perClass = await Promise.all(preschoolClasses.map(async (c) => {
-      const roster = await loadJSON(`class:${c.id}:roster`, [], true);
-      const withData = await Promise.all(roster.map(async (s) => {
-        const data = await loadJSON(`class:${c.id}:kriya:${s.id}`, null, true);
-        return { id: s.id, name: s.name, classId: c.id, className: c.name, parentEmail: s.parentEmail, parentPhone: s.parentPhone, checkIns: data?.checkIns || [] };
-      }));
-      return withData;
+    const perClassRosters = await Promise.all(preschoolClasses.map(async (c) => ({
+      classId: c.id, className: c.name, roster: await loadJSON(`class:${c.id}:roster`, [], true),
+    })));
+
+    const byStudentId = {};
+    perClassRosters.forEach(({ classId, className, roster }) => {
+      roster.forEach((s) => {
+        if (!byStudentId[s.id]) byStudentId[s.id] = { id: s.id, name: s.name, parentEmail: s.parentEmail, parentPhone: s.parentPhone, links: [] };
+        byStudentId[s.id].links.push({ classId, className });
+      });
+    });
+
+    const uniqueStudents = await Promise.all(Object.values(byStudentId).map(async (s) => {
+      const status = await getUnifiedCheckInStatus(s.id, s.links);
+      return { ...s, classId: status.openEntry ? status.openEntry.classId : s.links[0].classId, className: s.links.map((l) => l.className).join(", "), checkIns: status.perClass.flatMap((c) => c.checkIns) };
     }));
-    const allStudents = perClass.flat();
 
     // Groups by shared parent email first, then phone, for students without an email on file —
     // anyone matching neither becomes their own single-student group.
     const groups = {};
-    allStudents.forEach((s) => {
+    uniqueStudents.forEach((s) => {
       const key = s.parentEmail ? `e:${s.parentEmail.toLowerCase()}` : s.parentPhone ? `p:${s.parentPhone}` : `solo:${s.id}`;
       if (!groups[key]) groups[key] = [];
       groups[key].push(s);
@@ -11659,13 +11736,15 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
   useEffect(() => { refresh(); }, [refresh]);
 
   const handleTap = async (student, isIn) => {
-    const todaysEntries = student.checkIns.filter((c) => c.date === date);
     if (!isIn && wouldBeRepeatCheckIn(student.checkIns, date)) {
       setConfirmingRepeatFor(student.id);
       return;
     }
     const byLabel = loggedByName ? `Teacher: ${loggedByName}` : "Teacher";
-    await toggleCheckInForStudent(student.classId, student.id, byLabel);
+    // student.classId here is already "whichever class is actually open, or the first one if
+    // none is" — toggleUnifiedCheckIn re-derives the true open class itself regardless, this
+    // is just the fallback for a brand new check-in.
+    await toggleUnifiedCheckIn(student.id, student.links, student.classId, byLabel);
     await refresh();
     setConfirmingRepeatFor(null);
   };
