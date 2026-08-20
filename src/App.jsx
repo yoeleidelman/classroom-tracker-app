@@ -7426,36 +7426,62 @@ function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, curre
     </div>
   );
 }
+// A real, direct requirement — a teacher's update should reach a parent automatically, the
+// moment it happens, with no refresh or re-navigation needed — that this screen was NOT actually
+// meeting: its data used to load once, with a plain one-time read, when this screen first opened.
+// A teacher logging something afterward, while a parent already had this exact screen open,
+// produced no visible change at all until the parent happened to leave and come back. This is
+// what actually makes it live: a genuine Firestore subscription per source (the child's own daily
+// log, the class's incidents, the class's photos), each independently reconnecting itself if its
+// connection ever drops (see useLiveJSON's own comment for why that matters), so a change on the
+// teacher's side is reflected here within moments, automatically, exactly matching what "mirror
+// image" was always supposed to mean.
+function useLiveChildDailyLog(classId, studentId) {
+  const [rawData, setRawData] = useState(null);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  useEffect(() => {
+    if (!classId || !studentId) return;
+    let unsubscribe = () => {};
+    let reconnectTimer = null;
+    let cancelled = false;
+    setHasLoadedOnce(false);
+
+    const subscribe = () => {
+      const ref = doc(db, "data", `class:${classId}:kriya:${studentId}`);
+      unsubscribe = onSnapshot(ref,
+        (snap) => { setRawData(snap.exists() ? snap.data().value : {}); setHasLoadedOnce(true); },
+        (err) => {
+          console.error("Live child daily-log subscription failed, reconnecting", err);
+          if (cancelled) return;
+          reconnectTimer = setTimeout(subscribe, 1500);
+        });
+    };
+    subscribe();
+
+    return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
+  }, [classId, studentId]);
+  return { rawData, hasLoadedOnce };
+}
+
 function ChildDailyLogView({ link, onBack }) {
   const [date, setDate] = useState(todayISO());
-  const [loading, setLoading] = useState(true);
-  const [data, setData] = useState(null);
-  const [incidents, setIncidents] = useState([]);
-  const [photos, setPhotos] = useState([]);
   const [viewingPhoto, setViewingPhoto] = useState(null);
 
+  const { rawData, hasLoadedOnce } = useLiveChildDailyLog(link.classId, link.studentId);
+  const classIncidents = useLiveJSON(`class:${link.classId}:incidents`, []);
+  const classPhotos = useLiveJSON(`class:${link.classId}:photos`, []);
+  const loading = !hasLoadedOnce;
+
+  const { data, changed } = useMemo(() => dedupeDailyLogData(rawData || {}), [rawData]);
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    Promise.all([
-      loadJSON(`class:${link.classId}:kriya:${link.studentId}`, null, true),
-      loadJSON(`class:${link.classId}:incidents`, [], true),
-      loadJSON(`class:${link.classId}:photos`, [], true),
-    ]).then(([studentData, classIncidents, classPhotos]) => {
-      if (cancelled) return;
-      const rawData = studentData || {};
-      const { data: cleaned, changed } = dedupeDailyLogData(rawData);
-      // Silent, fire-and-forget, same as the teacher-side load — a parent opening their own
-      // child's daily log is just as valid a moment to heal a leftover duplicate as a teacher
-      // opening their class, and often happens first.
-      if (changed) saveJSON(`class:${link.classId}:kriya:${link.studentId}`, cleaned, true);
-      setData(cleaned);
-      setIncidents((classIncidents || []).filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId)));
-      setPhotos((classPhotos || []).filter((p) => p.date === date && (p.studentIds || []).includes(link.studentId)));
-      setLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, [link.classId, link.studentId, date]);
+    // Silent, fire-and-forget, same as the teacher-side load — a parent opening their own child's
+    // daily log is just as valid a moment to heal a leftover duplicate as a teacher opening their
+    // class, and often happens first.
+    if (changed) saveJSON(`class:${link.classId}:kriya:${link.studentId}`, data, true);
+  }, [changed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const incidents = (classIncidents || []).filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId));
+  const photos = (classPhotos || []).filter((p) => p.date === date && (p.studentIds || []).includes(link.studentId));
 
   const shiftDate = (deltaDays) => {
     const d = new Date(`${date}T00:00:00`);
