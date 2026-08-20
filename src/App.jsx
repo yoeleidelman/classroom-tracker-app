@@ -3208,6 +3208,76 @@ function AppInner() {
     setGlobalStudents(gs);
   };
 
+  const findDuplicateEnrollments = async () => {
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const activeClasses = (allClasses || []).filter((c) => !c.archived);
+    const rosters = await Promise.all(activeClasses.map(async (c) => ({
+      classId: c.id, className: c.name, roster: await loadJSON(`class:${c.id}:roster`, [], true),
+    })));
+    const byStudentId = {};
+    rosters.forEach(({ classId, className, roster }) => {
+      roster.forEach((s) => {
+        if (!byStudentId[s.id]) byStudentId[s.id] = { name: s.name, classes: [] };
+        byStudentId[s.id].classes.push({ classId, className });
+      });
+    });
+    return Object.entries(byStudentId)
+      .filter(([, v]) => v.classes.length > 1)
+      .map(([studentId, v]) => ({ studentId, name: v.name, classes: v.classes }));
+  };
+
+  // Finds any preschool student with more than one meal entry for the same day and meal type, or
+  // more than one nap entry for the same day — exactly the duplicate a real, reported bug allowed
+  // to happen before the underlying race condition was fixed (see freshStudentData). That fix
+  // stops it from happening again going forward, but can't reach back and clean up whatever
+  // duplicates already exist from before it went live — this is what actually finds those, across
+  // every preschool class at once, so they can be reviewed and cleaned up by hand rather than
+  // waiting for a parent to notice each one individually.
+  const findDuplicateDailyLogs = async () => {
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const preschoolClasses = (allClasses || []).filter((c) => c.classType === "preschool" && !c.archived);
+    const results = [];
+    for (const cls of preschoolClasses) {
+      const roster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      for (const student of roster) {
+        const data = await loadJSON(`class:${cls.id}:kriya:${student.id}`, null, true);
+        if (!data) continue;
+        const mealGroups = {};
+        (data.meals || []).forEach((m) => {
+          const key = `${m.date}:${m.mealType}`;
+          (mealGroups[key] = mealGroups[key] || []).push(m);
+        });
+        Object.entries(mealGroups).forEach(([key, entries]) => {
+          if (entries.length <= 1) return;
+          const [date, mealType] = key.split(":");
+          const label = mealType === "snack-am" ? "Morning Snack" : mealType === "snack-pm" ? "Afternoon Snack" : "Lunch";
+          results.push({ classId: cls.id, className: cls.name, studentId: student.id, studentName: student.name, category: "meals", label, date, entries });
+        });
+        const napGroups = {};
+        (data.naps || []).forEach((n) => { (napGroups[n.date] = napGroups[n.date] || []).push(n); });
+        Object.entries(napGroups).forEach(([date, entries]) => {
+          if (entries.length <= 1) return;
+          results.push({ classId: cls.id, className: cls.name, studentId: student.id, studentName: student.name, category: "naps", label: "Nap", date, entries });
+        });
+      }
+    }
+    return results;
+  };
+
+  // Removes exactly one duplicate entry by matching its full content against a freshly re-fetched
+  // copy of the record, rather than trusting a remembered array index that could have drifted if
+  // anything else touched this student's data in the meantime — meals/naps entries have no stable
+  // id of their own the way diapers/bathroom entries do, so content match is what's actually safe.
+  const removeDailyLogDuplicate = async (classId, studentId, category, entryToRemove) => {
+    const data = await loadJSON(`class:${classId}:kriya:${studentId}`, null, true);
+    if (!data) return;
+    const list = data[category] || [];
+    const idx = list.findIndex((e) => JSON.stringify(e) === JSON.stringify(entryToRemove));
+    if (idx === -1) return; // already gone — someone else removed it, or it changed since this was shown
+    const updated = { ...data, [category]: list.filter((_, i) => i !== idx) };
+    await saveJSON(`class:${classId}:kriya:${studentId}`, updated, true);
+  };
+
   const addGlobalStudent = async (fields) => {
     const gs = await loadJSON("globalStudents", [], true);
     const student = {
@@ -3484,7 +3554,7 @@ function AppInner() {
       if (!classId) {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
           currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
-          globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
+          globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
@@ -3538,7 +3608,7 @@ function AppInner() {
   if (!classId) {
     if (isAdminSession) {
       return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
-        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents}
+        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
@@ -4764,7 +4834,173 @@ function TeacherPasswordResetForm({ uid, onReset }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+function DuplicateEnrollmentChecker({ onCheck }) {
+  const [status, setStatus] = useState("idle"); // idle | checking | done
+  const [results, setResults] = useState([]);
+
+  const runCheck = async () => {
+    setStatus("checking");
+    const found = await onCheck();
+    setResults(found);
+    setStatus("done");
+  };
+
+  return (
+    <div className="mb-3">
+      {status !== "done" && (
+        <button onClick={runCheck} disabled={status === "checking"}
+          className="text-xs font-semibold text-teal-700 border border-teal-200 bg-teal-50 rounded-lg px-3 py-2 disabled:opacity-50">
+          {status === "checking" ? "Checking every class…" : "Check for students enrolled in more than one class"}
+        </button>
+      )}
+      {status === "done" && results.length === 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 flex items-center justify-between">
+          <p className="text-xs font-semibold text-emerald-800">No duplicate enrollments found — every student is in exactly one class.</p>
+          <button onClick={runCheck} className="text-xs font-semibold text-emerald-700 shrink-0 ml-2">Recheck</button>
+        </div>
+      )}
+      {status === "done" && results.length > 0 && (
+        <div className="bg-rose-50 border-2 border-rose-300 rounded-lg p-3">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-bold text-rose-800">{results.length} student{results.length === 1 ? "" : "s"} enrolled in more than one class</p>
+            <button onClick={runCheck} className="text-xs font-semibold text-rose-700 shrink-0 ml-2">Recheck</button>
+          </div>
+          <p className="text-xs text-rose-700 mb-2">Each one needs to be removed from every class except their real one — from that class's own Settings → Students.</p>
+          <div className="space-y-1.5">
+            {results.map((r) => (
+              <div key={r.studentId} className="bg-white border border-rose-200 rounded-lg px-2.5 py-1.5">
+                <p className="text-sm font-semibold text-stone-800">{r.name}</p>
+                <p className="text-xs text-rose-600">{r.classes.map((c) => c.className).join(" · ")}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Same purpose as DuplicateEnrollmentChecker just above, for a different real, reported gap: a
+// child with two meal entries for the same day (or two nap entries), left over from before the
+// underlying race condition was fixed — that fix stops new ones from being created, but can't
+// reach back and repair what's already there. Unlike the enrollment case, there's no reliable way
+// to tell which of two entries is the "right" one automatically (no timestamp is stored on these,
+// only who logged them) — so this surfaces every duplicate found and lets an admin remove
+// whichever one is wrong by hand, rather than guessing on their behalf.
+function DuplicateDailyLogChecker({ onCheck, onRemove }) {
+  const [status, setStatus] = useState("idle"); // idle | checking | done
+  const [results, setResults] = useState([]);
+  const [removing, setRemoving] = useState(null); // a stable key for whichever entry (or "group:<key>" for a bulk action) is mid-removal
+
+  const runCheck = async () => {
+    setStatus("checking");
+    const found = await onCheck();
+    // Newest first within each group — now that every entry carries a real loggedAt, the one most
+    // likely to be the actual correction is easy to put first rather than left in whatever order
+    // the underlying array happened to be in.
+    const sorted = found.map((g) => ({ ...g, entries: [...g.entries].sort((a, b) => (b.loggedAt || "").localeCompare(a.loggedAt || "")) }));
+    setResults(sorted);
+    setStatus("done");
+  };
+
+  const handleRemove = async (group, entry, entryKey) => {
+    setRemoving(entryKey);
+    await onRemove(group.classId, group.studentId, group.category, entry);
+    // Re-checks from scratch rather than just splicing the removed entry out of local state —
+    // simpler, and correctly reflects reality if the underlying data changed in any other way
+    // between when this list was shown and now.
+    await runCheck();
+    setRemoving(null);
+  };
+
+  // Keeps only the newest entry in a group, removing every older one — a real shortcut now that
+  // there's a genuine timestamp to act on, not a guess. Still one tap per group, not automatic or
+  // silent: the group stays visible with each entry's own time shown until this is actually
+  // pressed, so it's always a deliberate choice, never something that happens on the admin's
+  // behalf just because they opened this screen.
+  const handleKeepNewest = async (group, groupKey) => {
+    setRemoving(`group:${groupKey}`);
+    for (const entry of group.entries.slice(1)) {
+      await onRemove(group.classId, group.studentId, group.category, entry);
+    }
+    await runCheck();
+    setRemoving(null);
+  };
+
+  const formatLoggedAt = (iso) => {
+    if (!iso) return null;
+    try { return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
+    catch { return null; }
+  };
+
+  return (
+    <div className="mb-3">
+      {status !== "done" && (
+        <button onClick={runCheck} disabled={status === "checking"}
+          className="text-xs font-semibold text-teal-700 border border-teal-200 bg-teal-50 rounded-lg px-3 py-2 disabled:opacity-50">
+          {status === "checking" ? "Checking every preschool class…" : "Check for duplicate meal/nap entries"}
+        </button>
+      )}
+      {status === "done" && results.length === 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 flex items-center justify-between">
+          <p className="text-xs font-semibold text-emerald-800">No duplicate meal or nap entries found.</p>
+          <button onClick={runCheck} className="text-xs font-semibold text-emerald-700 shrink-0 ml-2">Recheck</button>
+        </div>
+      )}
+      {status === "done" && results.length > 0 && (
+        <div className="bg-rose-50 border-2 border-rose-300 rounded-lg p-3">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-bold text-rose-800">{results.length} duplicate log{results.length === 1 ? "" : "s"} found</p>
+            <button onClick={runCheck} className="text-xs font-semibold text-rose-700 shrink-0 ml-2">Recheck</button>
+          </div>
+          <p className="text-xs text-rose-700 mb-2">Newest is listed first and marked — usually the actual correction, but check before trusting it.</p>
+          <div className="space-y-2">
+            {results.map((group) => {
+              const groupKey = `${group.studentId}-${group.category}-${group.date}-${group.label}`;
+              const hasTimestamps = group.entries.every((e) => e.loggedAt);
+              return (
+                <div key={groupKey} className="bg-white border border-rose-200 rounded-lg px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-stone-800">{group.studentName} <span className="text-stone-400 font-normal">· {group.className} · {group.label} · {group.date}</span></p>
+                    {hasTimestamps && (
+                      <button onClick={() => handleKeepNewest(group, groupKey)} disabled={removing === `group:${groupKey}`}
+                        className="text-xs font-semibold text-teal-700 hover:text-teal-900 shrink-0 disabled:opacity-40">
+                        {removing === `group:${groupKey}` ? "Working…" : "Keep newest, remove rest"}
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-1.5 space-y-1">
+                    {group.entries.map((entry, i) => {
+                      const entryKey = `${group.studentId}-${group.category}-${group.date}-${i}`;
+                      const summary = group.category === "meals"
+                        ? `Ate: ${MEAL_AMOUNTS.find((a) => a.id === entry.amount)?.label || entry.amount}${entry.note ? ` — "${entry.note}"` : ""}`
+                        : entry.skipped ? "Didn't nap" : `${formatTime12h(entry.start)}${entry.end ? ` – ${formatTime12h(entry.end)}` : " (still sleeping)"}`;
+                      const when = formatLoggedAt(entry.loggedAt);
+                      return (
+                        <div key={i} className={`flex items-center justify-between gap-2 rounded-md px-2 py-1.5 ${i === 0 && hasTimestamps ? "bg-teal-50 border border-teal-200" : "bg-stone-50"}`}>
+                          <p className="text-xs text-stone-600">
+                            {i === 0 && hasTimestamps && <span className="text-teal-700 font-bold mr-1">Newest —</span>}
+                            {summary}{entry.loggedBy ? ` — logged by ${entry.loggedBy}` : ""}{when ? ` at ${when}` : ""}
+                          </p>
+                          <button onClick={() => handleRemove(group, entry, entryKey)} disabled={removing === entryKey}
+                            className="text-xs font-semibold text-rose-600 hover:text-rose-800 shrink-0 disabled:opacity-40">
+                            {removing === entryKey ? "Removing…" : "Remove this one"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -5213,6 +5449,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
           <input value={studentSearch} onChange={(e) => setStudentSearch(e.target.value)} placeholder="Search students..."
             className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3" />
+
+          <DuplicateEnrollmentChecker onCheck={onFindDuplicateEnrollments} />
+          <DuplicateDailyLogChecker onCheck={onFindDuplicateDailyLogs} onRemove={onRemoveDailyLogDuplicate} />
 
           <div className="flex gap-2 mb-3">
             <input value={newStudentName} onChange={(e) => setNewStudentName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitNewStudent()}
@@ -8866,10 +9105,17 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
 
 function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, onFamilyLinked, deepLinkGroupId, deepLinkIsDirect }) {
   const loggedByName = loggedInTeacher?.name || null;
-  // Only stamps a record when someone is actually signed in with a real account — the legacy
-  // class-password flow has no real identity to attribute anything to, so records made that
-  // way simply go unstamped rather than being labeled with something misleading.
-  const withLogger = (obj) => (loggedByName ? { ...obj, loggedBy: loggedByName } : obj);
+  // Stamps every logged record with when it happened, unconditionally — unlike loggedBy just
+  // below, this doesn't depend on a real signed-in identity, since knowing WHEN something was
+  // logged is useful even under the legacy class-password flow. This is what actually lets a
+  // duplicate be resolved with confidence instead of a guess: two entries for the same meal used
+  // to be indistinguishable except by their content, so telling them apart meant reading the
+  // values and reasoning about which one was probably right. Now the admin duplicate-checker can
+  // show exactly when each one was logged and default to suggesting the later one — the one an
+  // actual correction would produce — while still leaving the final call to a person, since a
+  // later timestamp is a strong signal, not a guarantee (a teacher can just as easily re-log the
+  // wrong number by mistake).
+  const withLogger = (obj) => ({ ...obj, loggedAt: new Date().toISOString(), ...(loggedByName ? { loggedBy: loggedByName } : {}) });
   const loadC = useCallback((key, fallback) => loadJSON(`class:${classId}:${key}`, fallback, true), [classId]);
   const saveC = useCallback((key, value) => saveJSON(`class:${classId}:${key}`, value, true), [classId]);
 
@@ -9826,6 +10072,26 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     setGlobalStudentsInClass(gs);
   };
 
+  // Checks whether a student is already enrolled in any OTHER active class before adding them
+  // here — a real, reported incident showed exactly what happens without this check: a teacher
+  // couldn't locate a student who actually belonged to a different class, used this search-and-add
+  // feature reasonably (it's built for pulling in an existing student, and invites exactly this),
+  // and ended up with that child double-enrolled with zero warning at all — invisible until the
+  // child's actual teacher couldn't find them on their own roster anymore. This only reads roster
+  // membership, not full history, since that's all a same-turn safety check needs before someone
+  // taps "Add to class" — the fuller fetchCrossClassHistory below is for browsing a student's
+  // record after the fact, not for blocking a mistake before it happens.
+  const checkStudentEnrollments = async (studentId) => {
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const found = [];
+    for (const cls of allClasses) {
+      if (cls.archived) continue;
+      const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      if (clsRoster.some((s) => s.id === studentId)) found.push({ classId: cls.id, className: cls.name });
+    }
+    return found;
+  };
+
   const addExistingStudent = (globalStudent, scope, periodIds) => {
     if (roster.some((s) => s.id === globalStudent.id)) return; // already in this class
     const rosterEntry = {
@@ -10568,7 +10834,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           loadSampleData={loadSampleData} clearAllData={clearAllData}
           className={className} classId={classId} onRenameClass={onRenameClass} onChangePassword={onChangePassword} onArchiveClass={onArchiveClass} onDeleteClass={onDeleteClass}
           subCode={subCode} onGenerateSubCode={onGenerateSubCode} onClearSubCode={onClearSubCode}
-          globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent}
+          globalStudents={globalStudents} onRefreshGlobalStudents={refreshGlobalStudentsInClass} onAddExistingStudent={addExistingStudent} onCheckStudentEnrollments={checkStudentEnrollments}
           loggedInTeacher={loggedInTeacher} onChangeMySignOff={onChangeMySignOff} onOpenMyAccount={() => setShowMyAccount(true)} onOpenOnboarding={() => setShowOnboarding(true)}
           createFamilyAccount={createFamilyAccount} />
       )}
@@ -20792,17 +21058,35 @@ function StudentContactFields({ student, onUpdateField }) {
   );
 }
 
-function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCancel }) {
+function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCancel, onCheckEnrollments }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
   const [scope, setScope] = useState("full-time");
   const [periodIds, setPeriodIds] = useState([]);
+  const [existingClasses, setExistingClasses] = useState(null); // null = checking; [] = none found
+  const [confirmedAnyway, setConfirmedAnyway] = useState(false);
   const rosterIds = new Set(roster.map((s) => s.id));
   const results = (globalStudents || [])
     .filter((s) => !s.archived && !rosterIds.has(s.id) && s.name.toLowerCase().includes(search.toLowerCase()))
     .slice(0, 8);
   const allPeriods = getAllPeriodsEverywhere(config);
   const togglePeriod = (id) => setPeriodIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const selectStudent = async (s) => {
+    setSelected(s);
+    setConfirmedAnyway(false);
+    setExistingClasses(null);
+    // A real, reported incident happened without this check: a student already enrolled
+    // elsewhere got added to a second class with zero warning, and wasn't found again on
+    // their actual class's own roster until a parent needed a pickup. This is what closes
+    // that gap — checked fresh every time someone is selected, not cached, since enrollment
+    // can genuinely change between one search and the next.
+    const found = onCheckEnrollments ? await onCheckEnrollments(s.id) : [];
+    setExistingClasses(found);
+  };
+
+  const hasConflict = existingClasses && existingClasses.length > 0;
+  const canAdd = !hasConflict || confirmedAnyway;
 
   return (
     <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
@@ -20814,7 +21098,7 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
           <ul className="space-y-1">
             {results.map((s) => (
               <li key={s.id}>
-                <button onClick={() => setSelected(s)} className="w-full text-left bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm hover:border-teal-300">
+                <button onClick={() => selectStudent(s)} className="w-full text-left bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm hover:border-teal-300">
                   {s.name}
                 </button>
               </li>
@@ -20825,6 +21109,23 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
       ) : (
         <>
           <p className="text-sm font-semibold text-stone-800 mb-2">Add {selected.name} — how does this student belong to your class?</p>
+
+          {existingClasses === null && (
+            <p className="text-xs text-stone-400 mb-3">Checking whether {selected.name} is already in another class…</p>
+          )}
+          {hasConflict && (
+            <div className="bg-rose-50 border-2 border-rose-300 rounded-lg p-3 mb-3">
+              <p className="text-sm font-bold text-rose-800 mb-1">Already enrolled elsewhere</p>
+              <p className="text-xs text-rose-700 mb-2">
+                {selected.name} is already in {existingClasses.map((c) => c.className).join(", ")}. Adding them here will enroll them in <b>both</b> classes at the same time — this is very likely not what you want, and can make it hard for the right teacher to find them later.
+              </p>
+              <label className="flex items-start gap-2 text-xs font-semibold text-rose-800">
+                <input type="checkbox" checked={confirmedAnyway} onChange={(e) => setConfirmedAnyway(e.target.checked)} className="mt-0.5" />
+                I understand — add them to this class too, on purpose.
+              </label>
+            </div>
+          )}
+
           <div className="space-y-1.5 mb-3">
             <label className="flex items-center gap-2 text-sm text-stone-700"><input type="radio" checked={scope === "full-time"} onChange={() => setScope("full-time")} /> Full time — regular member of this class</label>
             <label className="flex items-center gap-2 text-sm text-stone-700"><input type="radio" checked={scope === "part-time"} onChange={() => setScope("part-time")} /> Part time — in this class sometimes, no specific periods tracked</label>
@@ -20844,7 +21145,7 @@ function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCanc
             </div>
           )}
           <div className="flex gap-2">
-            <button onClick={() => onAdd(selected, scope, periodIds)} disabled={scope === "periods" && periodIds.length === 0 && allPeriods.length > 0}
+            <button onClick={() => onAdd(selected, scope, periodIds)} disabled={!canAdd || existingClasses === null || (scope === "periods" && periodIds.length === 0 && allPeriods.length > 0)}
               className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
               Add to class
             </button>
@@ -21481,7 +21782,7 @@ function WeeklyMealMenuDayRow({ weekday, items, onSave }) {
   );
 }
 
-function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, classId, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding, createFamilyAccount }) {
+function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStudent, updateStudentField, loadSampleData, clearAllData, className, classId, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, subCode, onGenerateSubCode, onClearSubCode, globalStudents, onRefreshGlobalStudents, onAddExistingStudent, onCheckStudentEnrollments, loggedInTeacher, onChangeMySignOff, onOpenMyAccount, onOpenOnboarding, createFamilyAccount }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
   // Matches by name, case- and whitespace-insensitively, against the two classes deliberately
@@ -21706,7 +22007,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               {showAddExisting ? "Close" : "+ Add an existing student to this class"}
             </button>
             {showAddExisting && (
-              <AddExistingStudentPanel globalStudents={globalStudents} roster={roster} config={config}
+              <AddExistingStudentPanel globalStudents={globalStudents} roster={roster} config={config} onCheckEnrollments={onCheckStudentEnrollments}
                 onAdd={(student, scope, periodIds) => { onAddExistingStudent(student, scope, periodIds); setShowAddExisting(false); }}
                 onCancel={() => setShowAddExisting(false)} />
             )}
