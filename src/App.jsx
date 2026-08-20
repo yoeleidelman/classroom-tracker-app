@@ -2435,7 +2435,17 @@ function AppInner() {
       return;
     }
     try {
-      await signInWithPopup(auth, new GoogleAuthProvider());
+      // Without this, Google can silently reuse whatever session already exists in this browser
+      // (or auto-pick the only account signed into the device) and skip the account chooser
+      // entirely — exactly what made a shared classroom tablet unable to switch away from
+      // whichever teacher happened to sign in with Google first: every later "Continue with
+      // Google" tap just silently re-authenticated as that same account again, with no picker
+      // ever shown, no obvious way to sign in as anyone else, and no error to explain why.
+      // prompt: "select_account" is Google's own documented way to force that chooser to appear
+      // every time, regardless of any existing session.
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      await signInWithPopup(auth, provider);
       // Success updates auth state directly (the same onAuthStateChanged listener above picks
       // it up), so there's nothing further to do here on the happy path.
     } catch (err) {
