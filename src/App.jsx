@@ -9639,15 +9639,26 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
             addIncident(entry);
             if (entry.notifyFamily) {
               const families = await fetchClassFamilies(classId);
-              const groupIds = new Set(
+              // Notifies every matching guardian's own account directly, rather than mapping to
+              // familyGroupId first and resolving that server-side — a real, reported case (one
+              // guardian got a health notification, the other didn't) traced back to exactly that
+              // indirection: two guardians of the same family can end up with a mismatched or
+              // stale familyGroupId (that field is only backfilled when each individual account
+              // signs in, so one guardian's copy can genuinely drift from the other's), and
+              // deduplicating by that field before sending is what let one of them silently drop
+              // out, even though both were already correctly found here as directly-linked
+              // guardians a line earlier. Every guardian actually linked to the affected student
+              // gets notified now, using each one's own real account — nothing left that depends
+              // on the two guardians' familyGroupId values agreeing with each other.
+              const uids = [...new Set(
                 families
                   .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && entry.studentIds.includes(l.studentId)))
-                  .map((f) => f.familyGroupId || f.uid)
-              );
+                  .map((f) => f.uid)
+              )];
               const names = entry.studentIds.map((sid) => roster.find((s) => s.id === sid)?.name).filter(Boolean).join(", ");
               const title = entry.kind === "health" ? `Health note — ${names || "your child"}` : `New note — ${names || "your child"}`;
               const body = entry.categoryLabel || "Check the app for details.";
-              groupIds.forEach((groupId) => notifyFamilyGroup(groupId, title, body, `/?portal=parent`));
+              sendPushNotification(uids, title, body, `/?portal=parent`);
             }
           }}
           classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={navigateView} />
