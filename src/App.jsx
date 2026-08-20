@@ -19,6 +19,7 @@ import { getToken, onMessage } from "firebase/messaging";
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, browserSessionPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithPopup, linkWithCredential } from "firebase/auth";
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component, Fragment } from "react";
+import { createPortal } from "react-dom";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
@@ -12032,7 +12033,24 @@ function TimerWidget() {
       </div>
     </div>
 
-    {fullScreen && (
+    {/* Rendered via a portal straight onto document.body, not in the normal component tree —
+        this is what actually fixes full screen only filling the Class Tools drawer's own width
+        rather than the real screen on some devices. This overlay is already position: fixed,
+        which should mean "relative to the real viewport" — but CSS creates a new containing
+        block for position: fixed descendants under any transformed ancestor, and the Class
+        Tools drawer this widget normally lives inside is exactly that: transform-animated for
+        its own slide-in/out. That's invisible whenever the browser's native Fullscreen API
+        actually succeeds, since real fullscreen moves this element into its own separate
+        rendering context untouched by ordinary page CSS — which is what a laptop, where that
+        API is broadly supported, does. It's a real, reported problem specifically where that API
+        is unavailable or restricted for an arbitrary element like this — a real, plausible
+        limitation on tablet Safari — since the CSS-only fallback that takes over instead was
+        still trapped inside that transformed drawer, filling only its width rather than the
+        actual screen. A portal renders this overlay as a genuine sibling of the drawer in the
+        real DOM, not a descendant of it, so its own fixed positioning is never affected by
+        anything the drawer's own CSS does, independent of whether the Fullscreen API itself
+        works on any given device. */}
+    {fullScreen && createPortal(
       <div ref={fsRef} className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-stone-900 ${finalCountdown ? "animate-pulse" : ""}`}>
         <button onClick={exitFullScreenMode} className="absolute top-4 right-4 md:top-8 md:right-8 text-white bg-white/10 hover:bg-white/20 rounded-full px-4 py-2.5 text-sm md:text-base font-semibold flex items-center gap-2">
           <ChevronLeft size={18} /> Exit full screen
@@ -12056,7 +12074,8 @@ function TimerWidget() {
           )}
           <button onClick={reset} className="bg-white/10 text-white rounded-xl px-8 py-3 text-lg font-bold hover:bg-white/20">Reset</button>
         </div>
-      </div>
+      </div>,
+      document.body
     )}
     </>
   );
@@ -14785,7 +14804,12 @@ function RaffleView({ roster }) {
         </div>
       </div>
 
-      {fullScreen && (
+      {/* Same portal fix as TimerWidget's own fullscreen overlay, and for the same reason — see
+          that comment for the full explanation. Renders straight onto document.body so this
+          overlay's own position: fixed is never affected by whatever CSS any ancestor container
+          happens to be doing, independent of whether the real Fullscreen API works on a given
+          device. */}
+      {fullScreen && createPortal(
         <div ref={fsRef} className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-stone-900">
           <button onClick={exitFullScreenMode} className="absolute top-4 right-4 md:top-8 md:right-8 text-white bg-white/10 hover:bg-white/20 rounded-full px-4 py-2.5 text-sm md:text-base font-semibold flex items-center gap-2">
             <ChevronLeft size={18} /> Exit full screen
@@ -14796,7 +14820,8 @@ function RaffleView({ roster }) {
           <button onClick={spin} disabled={spinning || participants.length === 0} className="bg-white text-stone-900 rounded-xl px-10 py-4 text-xl font-bold hover:bg-stone-100 disabled:opacity-40">
             {spinning ? "Spinning..." : "🎡 Spin the wheel"}
           </button>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
