@@ -8006,16 +8006,14 @@ function ParentHomeworkView({ link }) {
 // is meant to give an elementary-linked family something genuinely useful to land on rather than
 // an empty "nothing logged" card that never applied to their child in the first place, while the
 // full Homework tab (linked at the bottom) stays the place for anything beyond the latest post.
+// Same fix, same reasoning as ParentHomeworkView's own — this preview card lives on the parent's
+// Home screen, the very first thing they see, and had the exact same one-time-load bug
+// independently of the full Homework tab. A card shown first, checked most often, is exactly
+// where a gap like this would be noticed fastest — and exactly where it was still there.
 function HomeworkPreviewCard({ link, onSeeAll }) {
-  const [posts, setPosts] = useState(null); // null = loading
-  useEffect(() => {
-    let cancelled = false;
-    setPosts(null);
-    loadJSON(`class:${link.classId}:homework`, [], true).then((p) => { if (!cancelled) setPosts(p); });
-    return () => { cancelled = true; };
-  }, [link.classId]);
+  const { value: posts, loaded } = useLiveJSONLoaded(`class:${link.classId}:homework`, []);
 
-  if (posts === null) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
+  if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
   const latest = sorted[0];
 
