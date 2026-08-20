@@ -1385,23 +1385,53 @@ function buildSampleData() {
 
 // ---------- Storage helpers ----------
 
-async function loadJSON(key, fallback, shared = false) {
-  try {
-    const ref = doc(db, "data", key);
-    const snap = await getDoc(ref);
-    return snap.exists() ? snap.data().value : fallback;
-  } catch (e) {
-    console.error("Load failed", key, e);
-    return fallback;
+// No retry logic here used to mean a single transient network blip — extremely plausible on
+// shared, busy WiFi, like a school at drop-off with many devices connecting at once — permanently
+// masqueraded as "this document doesn't exist" for that one read, with nothing to distinguish a
+// genuine absence from a failed attempt to check. For most data that's a bearable, temporary
+// glitch. For the teacher-record lookup that runs immediately after every sign-in specifically,
+// it's much worse: Firebase Auth itself had already succeeded — the account is completely valid —
+// but this one read failing silently made the app treat a real teacher as if they had no account
+// at all, with no way to tell the difference from actually not having one. That matches, exactly,
+// a real, reported pattern that no fix aimed at the account itself could ever have explained: the
+// same valid account working on one attempt and not the next, on one device and not another,
+// signing out and immediately being unable to sign back in — none of that is about whether the
+// account is good, since it demonstrably is; it's about whether this one read happened to land
+// during a bad moment on the network. Retries a couple of times with a short, increasing delay
+// before actually giving up, so a load only returns the fallback once a failure has genuinely
+// persisted rather than on the very first transient hiccup.
+async function loadJSON(key, fallback, shared = false, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const ref = doc(db, "data", key);
+      const snap = await getDoc(ref);
+      return snap.exists() ? snap.data().value : fallback;
+    } catch (e) {
+      if (attempt === retries) {
+        console.error("Load failed after retries", key, e);
+        return fallback;
+      }
+      await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+    }
   }
+  return fallback;
 }
 
-async function saveJSON(key, value, shared = false) {
-  try {
-    const ref = doc(db, "data", key);
-    await setDoc(ref, { value });
-  } catch (e) {
-    console.error("Save failed", key, e);
+// Same reasoning as loadJSON's own retry logic just above — a save that silently fails on a
+// transient network blip loses real data with nothing to show for it, not just a display glitch.
+async function saveJSON(key, value, shared = false, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const ref = doc(db, "data", key);
+      await setDoc(ref, { value });
+      return;
+    } catch (e) {
+      if (attempt === retries) {
+        console.error("Save failed after retries", key, e);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+    }
   }
 }
 
