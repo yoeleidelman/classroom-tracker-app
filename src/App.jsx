@@ -974,6 +974,20 @@ function computeSessionTimeline(data, category, config) {
   });
 }
 
+// A temporary, visible diagnostic trail — not a permanent feature — built specifically to
+// actually see what's happening on a device where sign-in visibly succeeds for a fraction of a
+// second and then silently reverts, since two different fixes aimed at two different guesses
+// (a rate-limit lockout, then a storage/persistence failure) were each tried and neither one
+// actually changed what that specific device does, meaning both guesses were wrong or
+// incomplete. On window rather than component state specifically so it survives exactly the
+// sequence being diagnosed — this screen unmounting when sign-in succeeds, then remounting when
+// it bounces back — instead of resetting itself in the middle of the very thing being watched.
+window.__authDebugLog = window.__authDebugLog || [];
+function logAuthDebug(message) {
+  window.__authDebugLog.push(`${new Date().toLocaleTimeString()} — ${message}`);
+  if (window.__authDebugLog.length > 25) window.__authDebugLog.shift();
+}
+
 function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], checkIns: [] }; }
 
 // Silently collapses any duplicate meal (same date + mealType) or nap (same date) entries down to
@@ -2350,18 +2364,22 @@ function AppInner() {
     setPersistence(auth, browserLocalPersistence)
       .catch((err) => {
         console.error("browserLocalPersistence failed, falling back to session-only persistence", err);
+        logAuthDebug(`local persistence failed: ${err?.code || err?.message || err}`);
         return setPersistence(auth, browserSessionPersistence).catch((err2) => {
           console.error("browserSessionPersistence also failed — signing in may not stay signed in at all on this device", err2);
+          logAuthDebug(`session persistence ALSO failed: ${err2?.code || err2?.message || err2}`);
         });
       })
       .finally(() => {
       unsubscribe = onAuthStateChanged(auth, async (user) => {
+        logAuthDebug(user ? `onAuthStateChanged: signed IN as ${user.email || user.uid}` : "onAuthStateChanged: signed OUT (user is null)");
         setAuthUser(user);
         if (user) {
           const [mine, myFamily] = await Promise.all([
             loadJSON(`teacher:${user.uid}`, null, true),
             loadJSON(`family:${user.uid}`, null, true),
           ]);
+          logAuthDebug(`teacher record: ${mine ? `found, ${(mine.assignedClassIds || []).length} class(es) assigned, active=${mine.active !== false}` : "NOT found"} · family record: ${myFamily ? "found" : "not found"}`);
           // Backfill for any family account created before linkedClassIds/familyGroupId/
           // linkedClassTypes existed — happens once, right when they actually sign in, rather
           // than needing an admin to manually re-save every existing family. A family with no
@@ -2655,9 +2673,12 @@ function AppInner() {
   };
   const signInTeacher = async (email, password) => {
     try {
+      logAuthDebug(`signInWithEmailAndPassword: attempting for ${email}`);
       await signInWithEmailAndPassword(auth, email, password);
+      logAuthDebug("signInWithEmailAndPassword: succeeded");
       return { ok: true };
     } catch (e) {
+      logAuthDebug(`signInWithEmailAndPassword: FAILED — ${e.code || e.message}`);
       // A real, reported case traced back to exactly this: an account that had a genuine string
       // of failed attempts (a mistyped password, autocapitalize altering what got submitted
       // before that was fixed, anything) can trip Firebase's own server-side rate limit — tracked
@@ -6264,6 +6285,18 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute, onS
   const [subCode, setSubCode] = useState("");
   const [subError, setSubError] = useState("");
   const [showForgotPassword, setShowForgotPassword] = useState(false);
+  // Temporary diagnostic display — see logAuthDebug's own comment for why this exists at all.
+  // Re-reads window.__authDebugLog on an interval rather than once, since new entries keep
+  // getting pushed after this screen has already rendered (that's the entire point — this
+  // screen is exactly where someone lands after the bounce-back being diagnosed, and the log
+  // needs to show what happened right up to that moment, not just what had happened by the
+  // time this component's very first render occurred).
+  const [debugLog, setDebugLog] = useState(() => [...(window.__authDebugLog || [])]);
+  const [showDebugLog, setShowDebugLog] = useState(true);
+  useEffect(() => {
+    const interval = setInterval(() => setDebugLog([...(window.__authDebugLog || [])]), 500);
+    return () => clearInterval(interval);
+  }, []);
 
   const trySignIn = async () => {
     if (!email.trim() || !password) return;
@@ -6336,6 +6369,22 @@ function TeacherSignInScreen({ onSignIn, onUseLegacyFlow, onEnterSubstitute, onS
             </div>
           )}
         </div>
+
+        {debugLog.length > 0 && (
+          <div className="mt-4 bg-stone-900 rounded-xl overflow-hidden">
+            <button onClick={() => setShowDebugLog((v) => !v)} className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold text-amber-300">
+              <span>Diagnostic info (temporary) — screenshot this if sign-in isn't working</span>
+              <span>{showDebugLog ? "▾" : "▸"}</span>
+            </button>
+            {showDebugLog && (
+              <div className="px-3 pb-3 max-h-48 overflow-y-auto">
+                {debugLog.map((line, i) => (
+                  <p key={i} className="text-[10px] font-mono text-emerald-300 leading-relaxed">{line}</p>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
