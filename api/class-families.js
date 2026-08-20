@@ -9,11 +9,22 @@
 // check can't be guaranteed that way. That gap is invisible for admin (who has unconditional
 // access), which is exactly why this broke specifically for regular teachers checking their own
 // classroom's families, not for admin browsing the same screen.
+//
+// SAFETY FIX: this used to query only by linkedClassIds (a derived, flattened copy of a family's
+// real class links, kept only because Firestore can't efficiently query "does any object in this
+// studentLinks array have field classId = X" directly). linkedClassIds only gets populated the
+// first time that SPECIFIC guardian signs in after it was added to the app — a real, reported
+// incident traced back to exactly this: one of two guardians on the same child hadn't signed in
+// since, so their own linkedClassIds was still empty even though their studentLinks (the real,
+// authoritative source of truth, set at account creation and never dependent on a later sign-in)
+// was completely correct. They were invisible to this exact query, and so never got notified.
+// Now checks studentLinks directly as the authoritative source, with linkedClassIds only used as
+// a quick pre-check where it's already present — never as the sole basis for exclusion.
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
-const { getFirestore } = require("firebase-admin/firestore");
+const { getFirestore, FieldPath } = require("firebase-admin/firestore");
 
 if (!getApps().length) {
   initializeApp({
@@ -65,14 +76,22 @@ export default async function handler(req, res) {
   }
 
   const db = getFirestore();
-  const snapshot = await db.collection("data").where("value.linkedClassIds", "array-contains", classId).get();
+  // Scoped to just the family:* id range, the same prefix-range pattern used elsewhere in this
+  // app for a live "every document starting with X" query — far cheaper than scanning the whole
+  // data collection, while still not depending on any one field being present or correct.
+  const snapshot = await db.collection("data")
+    .orderBy(FieldPath.documentId())
+    .startAt("family:")
+    .endAt("family:\uf8ff")
+    .get();
+
   const families = [];
   snapshot.forEach((doc) => {
-    // Belt and suspenders: confirm this is actually a family:* record, not some other document
-    // type that coincidentally also has a linkedClassIds field.
-    if (!doc.id.startsWith("family:")) return;
     const f = doc.data().value;
-    if (f) families.push(f);
+    if (!f) return;
+    const viaLinkedClassIds = Array.isArray(f.linkedClassIds) && f.linkedClassIds.includes(classId);
+    const viaStudentLinks = Array.isArray(f.studentLinks) && f.studentLinks.some((l) => l?.classId === classId);
+    if (viaLinkedClassIds || viaStudentLinks) families.push(f);
   });
 
   return res.status(200).json({ families });
