@@ -10049,8 +10049,20 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // NOT defaulted to "everyone" — that's not something that happens to the whole room at once, and
   // assuming it would be actively wrong, not just unnecessary — so those stay tap-the-specific-kid,
   // append-only logs, same as mood and health notes.
-  const setMood = (studentId, date, mood, note) => {
-    const data = studentData[studentId];
+  // Every one of these bulk-logging functions used to read `studentData[studentId]` — already-
+  // loaded local React state — as the base to compute its "remove the old entry for this date,
+  // add the new one" filter from. A real, reported incident showed exactly what that allows: two
+  // separate lunch entries for the same day and the same child, both visible on the parent's own
+  // screen at once — which happens when two sessions (a co-teacher, or the same teacher on two
+  // devices) each hold their own independently-stale snapshot and both write around the same
+  // time, so neither one's "remove the old entry" filter ever sees the other's. Every one of these
+  // now reads that student's true, current record fresh, right before deciding what to change —
+  // the same fix already applied to the class-assignment and attendance-check-in toggles this
+  // session, for the exact same underlying reason.
+  const freshStudentData = async (studentId) => (await loadC(`kriya:${studentId}`, null)) || studentData[studentId] || emptyStudentData();
+
+  const setMood = async (studentId, date, mood, note) => {
+    const data = await freshStudentData(studentId);
     const without = (data.mood || []).filter((m) => m.date !== date);
     persistStudent(studentId, { ...data, mood: [...without, withLogger({ date, mood, ...(note ? { note } : {}) })] });
   };
@@ -10062,26 +10074,26 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // saved alongside it (all items selected → "all", none → "none", some → "some") so anything
   // already reading the plain amount field — the parent-facing daily log, for one — keeps working
   // exactly as before without needing to know about specific items at all.
-  const setMealBulk = (date, mealType, studentAmounts, studentNotes = {}, studentItems = {}) => {
-    Object.entries(studentAmounts).forEach(([studentId, amount]) => {
-      const data = studentData[studentId];
+  const setMealBulk = async (date, mealType, studentAmounts, studentNotes = {}, studentItems = {}) => {
+    for (const [studentId, amount] of Object.entries(studentAmounts)) {
+      const data = await freshStudentData(studentId);
       const without = (data.meals || []).filter((m) => !(m.date === date && m.mealType === mealType));
       const note = studentNotes[studentId];
       const items = studentItems[studentId];
       persistStudent(studentId, { ...data, meals: [...without, withLogger({ date, mealType, amount, ...(note ? { note } : {}), ...(items ? { items } : {}) })] });
-    });
+    }
   };
 
   // studentTimes: { studentId: {start, end} | null } — null means that student is excluded (didn't nap).
   // Still used directly for a one-step "log a completed nap" entry when that's genuinely what's
   // wanted; the normal in-room workflow now goes through startNapBulk/endNapBulk below instead.
-  const setNapBulk = (date, studentTimes) => {
-    Object.entries(studentTimes).forEach(([studentId, times]) => {
-      const data = studentData[studentId];
+  const setNapBulk = async (date, studentTimes) => {
+    for (const [studentId, times] of Object.entries(studentTimes)) {
+      const data = await freshStudentData(studentId);
       const without = (data.naps || []).filter((n) => n.date !== date);
       const entry = times ? withLogger({ date, start: times.start, end: times.end }) : withLogger({ date, skipped: true });
       persistStudent(studentId, { ...data, naps: [...without, entry] });
-    });
+    }
   };
 
   // Begins a nap for each included student — records just the start time, leaving `end` unset
@@ -10089,16 +10101,16 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // woken at their own actual times rather than everyone sharing one forced start-to-finish window.
   // studentTimes: { studentId: startTime | null } — null marks that student as "didn't nap today"
   // (skipped) rather than starting one. studentNotes: { studentId: note } — optional, sparse.
-  const startNapBulk = (date, studentTimes, studentNotes = {}) => {
-    Object.entries(studentTimes).forEach(([studentId, startTime]) => {
-      const data = studentData[studentId];
+  const startNapBulk = async (date, studentTimes, studentNotes = {}) => {
+    for (const [studentId, startTime] of Object.entries(studentTimes)) {
+      const data = await freshStudentData(studentId);
       const without = (data.naps || []).filter((n) => n.date !== date);
       const note = studentNotes[studentId];
       const entry = startTime
         ? withLogger({ date, start: startTime, ...(note ? { note } : {}) })
         : withLogger({ date, skipped: true, ...(note ? { note } : {}) });
       persistStudent(studentId, { ...data, naps: [...without, entry] });
-    });
+    }
   };
 
   // Completes an already-started nap by filling in its end time — finds each student's own
@@ -10106,56 +10118,56 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // THAT SAME entry, rather than creating a new one, so the original start time — and any note
   // added while starting it — are preserved rather than overwritten. A student with nothing
   // in progress is silently skipped rather than creating a stray end-only entry for them.
-  const endNapBulk = (date, studentTimes, studentNotes = {}) => {
-    Object.entries(studentTimes).forEach(([studentId, endTime]) => {
-      const data = studentData[studentId];
+  const endNapBulk = async (date, studentTimes, studentNotes = {}) => {
+    for (const [studentId, endTime] of Object.entries(studentTimes)) {
+      const data = await freshStudentData(studentId);
       const naps = data.naps || [];
       const idx = naps.findIndex((n) => n.date === date && n.start && !n.end);
-      if (idx === -1) return;
+      if (idx === -1) continue;
       const newNote = studentNotes[studentId];
       const combinedNote = newNote ? (naps[idx].note ? `${naps[idx].note} ${newNote}` : newNote) : naps[idx].note;
       const updated = { ...naps[idx], end: endTime, ...(combinedNote ? { note: combinedNote } : {}) };
       persistStudent(studentId, { ...data, naps: naps.map((n, i) => (i === idx ? updated : n)) });
-    });
+    }
   };
 
   // studentIds: array — the same type applied to every selected student in one action.
-  const logDiaperBulk = (date, time, type, studentIds) => {
-    studentIds.forEach((studentId) => {
-      const data = studentData[studentId];
+  const logDiaperBulk = async (date, time, type, studentIds) => {
+    for (const studentId of studentIds) {
+      const data = await freshStudentData(studentId);
       const entry = withLogger({ id: uid(), date, time, type });
       persistStudent(studentId, { ...data, diapers: [...(data.diapers || []), entry] });
-    });
+    }
   };
   // studentTypes: { studentId: type } — same shape as setMealBulk, since diaper time now works the
   // same way meals do: one shared time, everyone defaults to the same type, exceptions get their
   // own value, one action logs everyone at once.
   // studentNotes: { studentId: note } — optional, sparse (only students who actually got one).
-  const logDiaperBulkWithDefaults = (date, time, studentTypes, studentNotes = {}) => {
-    Object.entries(studentTypes).forEach(([studentId, type]) => {
-      const data = studentData[studentId];
+  const logDiaperBulkWithDefaults = async (date, time, studentTypes, studentNotes = {}) => {
+    for (const [studentId, type] of Object.entries(studentTypes)) {
+      const data = await freshStudentData(studentId);
       const note = studentNotes[studentId];
       const entry = withLogger({ id: uid(), date, time, type, ...(note ? { note } : {}) });
       persistStudent(studentId, { ...data, diapers: [...(data.diapers || []), entry] });
-    });
+    }
   };
-  const removeDiaperLog = (studentId, entryId) => {
-    const data = studentData[studentId];
+  const removeDiaperLog = async (studentId, entryId) => {
+    const data = await freshStudentData(studentId);
     persistStudent(studentId, { ...data, diapers: (data.diapers || []).filter((d) => d.id !== entryId) });
   };
 
   // studentNotes: { studentId: note } — optional, sparse. type itself is still one shared value
   // applied to every selected student, same as before; only the note is ever per-student.
-  const logBathroomBulk = (date, time, type, studentIds, studentNotes = {}) => {
-    studentIds.forEach((studentId) => {
-      const data = studentData[studentId];
+  const logBathroomBulk = async (date, time, type, studentIds, studentNotes = {}) => {
+    for (const studentId of studentIds) {
+      const data = await freshStudentData(studentId);
       const note = studentNotes[studentId];
       const entry = withLogger({ id: uid(), date, time, type, ...(note ? { note } : {}) });
       persistStudent(studentId, { ...data, bathroom: [...(data.bathroom || []), entry] });
-    });
+    }
   };
-  const removeBathroomLog = (studentId, entryId) => {
-    const data = studentData[studentId];
+  const removeBathroomLog = async (studentId, entryId) => {
+    const data = await freshStudentData(studentId);
     persistStudent(studentId, { ...data, bathroom: (data.bathroom || []).filter((b) => b.id !== entryId) });
   };
 
@@ -11598,6 +11610,10 @@ const PRESCHOOL_TILES = [
   { id: "health-incident", label: "Health incident", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
   { id: "incident", label: "Incident", icon: AlertTriangle, color: "amber", bulkDefault: "none" },
   { id: "photos", label: "Photos", icon: Camera, color: "amber", bulkDefault: "none", special: "camera" },
+  // Opens PreschoolStudentListView → PreschoolStudentDetailView (via screen === "students" below),
+  // not a bulk-logging screen at all — no bulkDefault, no mealType, none of the shared "select
+  // everyone, log together" machinery the rest of these tiles use applies here.
+  { id: "students", label: "Students", icon: Users, color: "indigo", bulkDefault: "none" },
 ];
 
 // Preschool attendance — same underlying data (setAttendance, config.attendance.statuses) as the
@@ -12177,8 +12193,197 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
   );
 }
 
+// Teacher-facing equivalent of ChildDailyLogView, for exactly the gap that view exists to close
+// on the parent side — but this one reuses data the teacher's own class already has loaded
+// (studentData, incidents, photos) rather than fetching separately, since a teacher browsing
+// their own class's history doesn't need a standalone fetch the way a parent (outside any class's
+// own context) does. Same card layout and date navigation, so what a teacher sees here and what a
+// parent sees on their own end are genuinely the same view of the same data, not two separately
+// built, potentially inconsistent ones.
+function PreschoolStudentDetailView({ student, studentData, incidents, photos, onBack, onLogIncident }) {
+  const [date, setDate] = useState(todayISO());
+  const [viewingPhoto, setViewingPhoto] = useState(null);
+  const data = studentData[student.id] || emptyStudentData();
+
+  const shiftDate = (deltaDays) => {
+    const d = new Date(`${date}T00:00:00`);
+    d.setDate(d.getDate() + deltaDays);
+    setDate(d.toISOString().slice(0, 10));
+  };
+
+  const mood = (data.mood || []).find((m) => m.date === date);
+  const meals = (data.meals || []).filter((m) => m.date === date);
+  const naps = (data.naps || []).filter((n) => n.date === date);
+  const diapers = (data.diapers || []).filter((d) => d.date === date).sort((a, b) => (a.time < b.time ? -1 : 1));
+  const bathroomTrips = (data.bathroom || []).filter((b) => b.date === date).sort((a, b) => (a.time < b.time ? -1 : 1));
+  const checkIns = (data.checkIns || []).filter((c) => c.date === date).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
+  const dayIncidents = (incidents || []).filter((i) => i.date === date && (i.studentIds || []).includes(student.id));
+  const dayPhotos = (photos || []).filter((p) => p.date === date && (p.studentIds || []).includes(student.id));
+
+  const hasAnything = Boolean(mood) || meals.length > 0 || naps.length > 0 || diapers.length > 0 || bathroomTrips.length > 0 || checkIns.length > 0 || dayIncidents.length > 0 || dayPhotos.length > 0;
+
+  const Card = ({ color, title, icon: Icon, children }) => {
+    const st = TILE_STYLES[color];
+    return (
+      <div className={`rounded-xl border-2 p-4 flex gap-3 ${st.tileBg} ${st.tileBorder}`}>
+        {Icon && (
+          <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${st.iconBg}`}>
+            <Icon size={18} className={st.iconText} />
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <p className={`text-xs font-bold uppercase tracking-wide mb-1 ${st.labelText}`}>{title}</p>
+          <div className="text-sm text-stone-700">{children}</div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="app-page">
+      <div className="flex items-center justify-between mb-1">
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm hover:text-stone-800"><ChevronLeft size={16} /> Students</button>
+        {onLogIncident && (
+          <button onClick={() => onLogIncident(student.id)} className="text-xs font-semibold text-teal-700 border border-teal-200 rounded-lg px-3 py-1.5 hover:bg-teal-50">
+            Log incident
+          </button>
+        )}
+      </div>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-4">{student.name}</h1>
+
+      <div className="inline-flex items-center gap-0.5 mb-5">
+        <button onClick={() => shiftDate(-1)} className="text-stone-400 hover:text-teal-700 p-3 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous day"><ChevronLeft size={16} /></button>
+        <div className="relative py-3">
+          <span className="text-sm font-semibold text-stone-800 px-1.5 select-none whitespace-nowrap">{friendlyDateLabel(date)}</span>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()}
+            aria-label="Choose a date" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+        </div>
+        <button onClick={() => shiftDate(1)} disabled={date >= todayISO()} className="text-stone-400 hover:text-teal-700 p-3 -m-1 rounded-full hover:bg-stone-100 disabled:opacity-30" aria-label="Next day"><ChevronRight size={16} /></button>
+      </div>
+
+      {!hasAnything && (
+        <p className="text-sm text-stone-400 text-center py-8">Nothing logged for this day.</p>
+      )}
+
+      {hasAnything && (
+        <div className="space-y-3">
+          {checkIns.map((c) => (
+            <Card key={c.id} color="teal" title="Attendance" icon={Check}>
+              In {formatTime12h(c.checkInTime)}{c.checkOutTime ? ` — Out ${formatTime12h(c.checkOutTime)}` : " — still here"}
+            </Card>
+          ))}
+          {mood && (
+            <Card color="orange" title="Mood" icon={Smile}>
+              {PRESCHOOL_MOOD_OPTIONS.find((m) => m.id === mood.mood)?.emoji} {PRESCHOOL_MOOD_OPTIONS.find((m) => m.id === mood.mood)?.label || mood.mood}
+              {mood.note && <span className="block text-stone-500 mt-0.5">{mood.note}</span>}
+            </Card>
+          )}
+          {meals.map((m, i) => {
+            const isSnack = m.mealType === "snack-am" || m.mealType === "snack-pm";
+            const label = m.mealType === "snack-am" ? "Morning Snack" : m.mealType === "snack-pm" ? "Afternoon Snack" : "Lunch";
+            const perItem = m.items && typeof m.items === "object" ? Object.entries(m.items) : null;
+            return (
+              <Card key={i} color={isSnack ? "fuchsia" : "emerald"} title={label} icon={isSnack ? Apple : Sandwich}>
+                {perItem ? (
+                  <div className="space-y-0.5">
+                    {perItem.map(([item, amountId]) => (
+                      <p key={item}>{item}: {MEAL_AMOUNTS.find((a) => a.id === amountId)?.label || amountId}</p>
+                    ))}
+                  </div>
+                ) : (
+                  <>Ate: {MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount}</>
+                )}
+                {m.note && <span className="block text-stone-500 mt-0.5">{m.note}</span>}
+              </Card>
+            );
+          })}
+          {naps.map((n, i) => (
+            <Card key={i} color="indigo" title="Nap" icon={Moon}>
+              {n.skipped ? "Didn't nap today" : n.start && !n.end ? `Started ${formatTime12h(n.start)} — still sleeping` : `${formatTime12h(n.start)} – ${formatTime12h(n.end)}`}
+              {n.note && <span className="block text-stone-500 mt-0.5">{n.note}</span>}
+            </Card>
+          ))}
+          {diapers.length > 0 && (
+            <Card color="rose" title="Diapers" icon={Baby}>
+              {diapers.map((d, i) => (
+                <p key={i}>{formatTime12h(d.time)} — {DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type}{d.note && <span className="block text-stone-500">{d.note}</span>}</p>
+              ))}
+            </Card>
+          )}
+          {bathroomTrips.length > 0 && (
+            <Card color="teal" title="Bathroom" icon={Droplets}>
+              {bathroomTrips.map((b, i) => (
+                <p key={i}>{formatTime12h(b.time)} — {BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type}{b.note && <span className="block text-stone-500">{b.note}</span>}</p>
+              ))}
+            </Card>
+          )}
+          {dayIncidents.map((inc) => (
+            <Card key={inc.id} color="cyan" title="Health / incident note" icon={HeartPulse}>
+              {inc.description}
+              {(inc.media || []).length > 0 && (
+                <div className={`grid gap-1.5 mt-2 ${inc.media.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+                  {inc.media.map((m, i) => (
+                    <button key={i} onClick={() => setViewingPhoto({ url: m.url, caption: inc.description, type: m.type })}
+                      className="relative aspect-square rounded-lg overflow-hidden bg-white">
+                      {m.type === "video" ? (
+                        <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
+                      ) : (
+                        <img src={m.url} alt="" className="w-full h-full object-cover" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ))}
+          {dayPhotos.length > 0 && (
+            <Card color="amber" title="Photos" icon={Camera}>
+              <div className="grid grid-cols-3 gap-2 mt-1">
+                {dayPhotos.map((p) => (
+                  <button key={p.id} onClick={() => setViewingPhoto(p)} className="aspect-square rounded-lg overflow-hidden bg-white">
+                    <img src={p.url} alt={p.caption || "Class photo"} className="w-full h-full object-cover" />
+                  </button>
+                ))}
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
+      {viewingPhoto && (
+        <PhotoLightbox url={viewingPhoto.url} type={viewingPhoto.type || "photo"} caption={viewingPhoto.caption} onClose={() => setViewingPhoto(null)} />
+      )}
+    </div>
+  );
+}
+
+// Simple, tappable roster — the entry point into PreschoolStudentDetailView. Deliberately its own
+// small screen rather than folding "tap a name for history" into an existing tile (attendance,
+// daily log, etc.) — those already have their own primary tap action, and overloading a second
+// meaning onto the same tap is exactly the kind of ambiguity worth avoiding after everything else
+// found this session.
+function PreschoolStudentListView({ roster, onSelectStudent, onBack }) {
+  return (
+    <div className="app-page">
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Students</h1>
+      <p className="text-xs text-stone-400 mb-4">Tap a student to see their history — any day, any category.</p>
+      <div className="space-y-2">
+        {[...roster].sort((a, b) => a.name.localeCompare(b.name)).map((s) => (
+          <button key={s.id} onClick={() => onSelectStudent(s.id)}
+            className="w-full flex items-center justify-between bg-white border border-stone-200 rounded-xl px-4 py-3 text-left hover:border-teal-300">
+            <span className="font-semibold text-stone-800">{s.name}</span>
+            <ChevronRight size={16} className="text-stone-300" />
+          </button>
+        ))}
+        {roster.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No students in this class yet.</p>}
+      </div>
+    </div>
+  );
+}
+
 function PreschoolDashboardView({ roster, studentData, incidents, photos, config, persistConfig, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, startNapBulk, endNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, classId, submitBlogPost, sendMessageToFamily, navigate }) {
   const [screen, setScreenRaw] = useState(null); // null = dashboard grid
+  const [selectedStudentId, setSelectedStudentId] = useState(null); // for screen === "students" only
   // Pushes a real history entry for every preschool sub-screen — Diapers, Snack, a health
   // incident form, and so on. This was the actual gap behind "Back sometimes leaves the class
   // entirely": ClassApp's own top-level view already goes through navigateView and correctly
@@ -12289,6 +12494,18 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
           navigateScreen(null);
         }} />
     );
+  }
+  if (screen === "students") {
+    if (selectedStudentId) {
+      const student = roster.find((s) => s.id === selectedStudentId);
+      if (!student) { setSelectedStudentId(null); return null; }
+      return (
+        <PreschoolStudentDetailView student={student} studentData={studentData} incidents={incidents} photos={photos}
+          onBack={() => setSelectedStudentId(null)}
+          onLogIncident={(studentId) => openIncidentForm(studentId, "daily-log")} />
+      );
+    }
+    return <PreschoolStudentListView roster={roster} onSelectStudent={setSelectedStudentId} onBack={() => navigateScreen(null)} />;
   }
   return null;
 }
