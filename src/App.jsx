@@ -2691,6 +2691,13 @@ function AppInner() {
       if (e.code === "auth/too-many-requests") {
         return { ok: false, error: "Too many attempts too quickly — this is temporary. Wait a few minutes before trying again, rather than retrying right away." };
       }
+      // Distinct from a wrong password — this account genuinely exists but has been disabled, so
+      // no password will ever work for it until an admin re-enables it. Collapsing this into the
+      // generic message would look exactly like a typo and send someone retrying indefinitely at
+      // something no amount of correct typing could ever fix.
+      if (e.code === "auth/user-disabled") {
+        return { ok: false, error: "This account has been disabled. Contact your admin — this isn't something retrying will fix." };
+      }
       return { ok: false, error: e.code === "auth/invalid-credential" ? "Incorrect email or password." : "Couldn't sign in — try again." };
     }
   };
@@ -2861,6 +2868,26 @@ function AppInner() {
       const data = await response.json();
       if (!response.ok) return { ok: false, error: data.error || "Couldn't reset the password." };
       return { ok: true };
+    } catch {
+      return { ok: false, error: "Couldn't reach the server — try again." };
+    }
+  };
+
+  // Looks up a teacher's REAL account state directly, rather than guessing — built in direct
+  // response to a real, reported pattern that earlier, individually-targeted fixes this session
+  // (a rate-limit guess, a storage-persistence guess) did not actually explain: accounts that
+  // worked, then stopped, across multiple different teachers, not just new accounts with a bad
+  // password. See check-teacher-account.js for the full reasoning.
+  const checkTeacherAccount = async (email) => {
+    try {
+      const response = await fetch("/api/check-teacher-account", {
+        method: "POST",
+        headers: await authHeaders(),
+        body: JSON.stringify({ email }),
+      });
+      const data = await response.json();
+      if (!response.ok) return { ok: false, error: data.error || "Couldn't check this account." };
+      return { ok: true, ...data };
     } catch {
       return { ok: false, error: "Couldn't reach the server — try again." };
     }
@@ -3657,7 +3684,7 @@ function AppInner() {
           globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
-          teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+          teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
           families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin}
@@ -3711,7 +3738,7 @@ function AppInner() {
         globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
-        teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
+        teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
         families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
         programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
@@ -5100,7 +5127,82 @@ function DuplicateDailyLogChecker({ onCheck, onRemove }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+// Looks up a teacher's REAL account state directly rather than guessing — see
+// check-teacher-account.js for the full reasoning behind why this exists. Deliberately shows the
+// raw facts (disabled? when created? when did it last actually sign in? does the Firestore copy
+// of the email match Auth's own copy exactly?) rather than a single "healthy/broken" verdict,
+// since the actual value here is letting a real pattern across several checked accounts become
+// visible — a shared cause is often plainer once several individually-fine-looking accounts sit
+// next to each other than it is from any one account in isolation.
+function TeacherAccountChecker({ onCheck }) {
+  const [email, setEmail] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | checking | done
+  const [result, setResult] = useState(null);
+
+  const runCheck = async () => {
+    if (!email.trim()) return;
+    setStatus("checking");
+    const res = await onCheck(email.trim());
+    setResult(res);
+    setStatus("done");
+  };
+
+  const formatTime = (iso) => {
+    if (!iso) return null;
+    try { return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }); }
+    catch { return iso; }
+  };
+
+  return (
+    <div className="mb-3 bg-stone-50 border border-stone-200 rounded-lg p-3">
+      <p className="text-xs font-semibold text-stone-700 mb-2">Check a teacher's real account state</p>
+      <div className="flex gap-2 mb-2">
+        <input value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runCheck()}
+          placeholder="Their exact sign-in email" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+          className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        <button onClick={runCheck} disabled={status === "checking" || !email.trim()}
+          className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 disabled:opacity-40 shrink-0">
+          {status === "checking" ? "Checking…" : "Check"}
+        </button>
+      </div>
+
+      {status === "done" && result && !result.ok && (
+        <p className="text-xs text-rose-600">{result.error}</p>
+      )}
+
+      {status === "done" && result?.ok && result.authError && (
+        <div className="bg-rose-50 border-2 border-rose-300 rounded-lg p-2.5">
+          <p className="text-xs font-bold text-rose-800">No account found</p>
+          <p className="text-xs text-rose-700 mt-0.5">{result.authError}</p>
+        </div>
+      )}
+
+      {status === "done" && result?.ok && result.authAccount && (
+        <div className={`border-2 rounded-lg p-2.5 space-y-1.5 ${result.authAccount.disabled ? "bg-rose-50 border-rose-300" : "bg-white border-stone-200"}`}>
+          {result.authAccount.disabled && (
+            <p className="text-xs font-bold text-rose-800">⚠ This account is DISABLED — that alone blocks every sign-in attempt, with no other explanation needed.</p>
+          )}
+          <p className="text-xs text-stone-700"><span className="font-semibold">Sign-in email on file:</span> {result.authAccount.email}</p>
+          <p className="text-xs text-stone-700"><span className="font-semibold">Account created:</span> {formatTime(result.authAccount.creationTime)}</p>
+          <p className="text-xs text-stone-700"><span className="font-semibold">Last actually signed in:</span> {result.authAccount.lastSignInTime ? formatTime(result.authAccount.lastSignInTime) : "Never"}</p>
+          <p className="text-xs text-stone-700"><span className="font-semibold">Sign-in method(s):</span> {result.authAccount.providerIds.join(", ") || "none on file"}</p>
+          {result.firestoreRecord ? (
+            <>
+              <p className="text-xs text-stone-700"><span className="font-semibold">Teacher profile:</span> {result.firestoreRecord.name} · {result.firestoreRecord.active ? "active" : "⚠ marked inactive"} · {result.firestoreRecord.assignedClassIds.length} class(es) assigned</p>
+              {!result.firestoreRecord.emailMatchesAuth && (
+                <p className="text-xs font-bold text-amber-700">⚠ The email on this teacher's profile doesn't exactly match their real sign-in email ({result.firestoreRecord.email}) — worth fixing directly, since admin screens show the profile copy, not the real one.</p>
+              )}
+            </>
+          ) : (
+            <p className="text-xs font-bold text-amber-700">⚠ This is a real, valid sign-in account — but no teacher profile exists for it at all. They could sign in but would see nothing.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -5725,6 +5827,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Teacher accounts</p>
           <p className="text-xs text-stone-400 mb-3">Each teacher signs in with their own email and password, and only sees the classes assigned to them here.</p>
+
+          <TeacherAccountChecker onCheck={onCheckTeacherAccount} />
 
           {!showTeacherForm && (
             <button onClick={() => setShowTeacherForm(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
