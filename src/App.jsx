@@ -1482,6 +1482,39 @@ function useLiveJSON(key, fallback) {
   return value;
 }
 
+// Same live subscription as useLiveJSON just above, but also exposing whether the first real
+// snapshot has actually arrived yet — useLiveJSON alone can't distinguish "still loading" from
+// "loaded, and genuinely the fallback value" (e.g. a class with no homework ever posted would sit
+// at its empty-array fallback either way), which matters for any caller that needs to show a
+// real, bounded loading state rather than either flashing "nothing yet" before real data arrives,
+// or showing a loading spinner forever for a genuinely empty result.
+function useLiveJSONLoaded(key, fallback) {
+  const [value, setValue] = useState(fallback);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!key) { setValue(fallback); setLoaded(true); return; }
+    let unsubscribe = () => {};
+    let reconnectTimer = null;
+    let cancelled = false;
+    setLoaded(false);
+
+    const subscribe = () => {
+      const ref = doc(db, "data", key);
+      unsubscribe = onSnapshot(ref,
+        (snap) => { setValue(snap.exists() ? snap.data().value : fallback); setLoaded(true); },
+        (err) => {
+          console.error("Live subscription failed, reconnecting", key, err);
+          if (cancelled) return;
+          reconnectTimer = setTimeout(subscribe, 1500);
+        });
+    };
+    subscribe();
+
+    return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  return { value, loaded };
+}
+
 // The multi-document counterpart to useLiveJSON above — for a teacher's own inbox list, where
 // every family's thread preview needs to stay current at once, not just whichever single thread
 // happens to be open right now. One onSnapshot subscription per key rather than a single query,
@@ -7635,9 +7668,6 @@ function ChildDailyLogView({ link, onBack }) {
 // ClassApp's own closures, since a parent isn't inside any one class's context and may have
 // children in several different classes at once.
 function ParentBlogView({ link, family, onBack }) {
-  const [loading, setLoading] = useState(true);
-  const [posts, setPosts] = useState([]);
-  const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   // scrollContainerRef is the scrollable region itself; contentRef is what's actually growing
   // inside it (images settling into their final size, fonts swapping in) — see useStickToBottom
@@ -7657,20 +7687,13 @@ function ParentBlogView({ link, family, onBack }) {
   const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
   const authorName = family.name || "A family";
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    Promise.all([
-      loadJSON(`class:${link.classId}:blogPosts`, [], true),
-      loadJSON(`class:${link.classId}:config`, {}, true),
-    ]).then(([bp, cfg]) => {
-      if (cancelled) return;
-      setPosts(bp || []);
-      setCommentsEnabled(cfg?.blogCommentsEnabled !== false);
-      setLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, [link.classId]);
+  // Same fix, same reasoning as ChildDailyLogView's own — a teacher posting a blog update should
+  // reach a parent automatically, not only the next time this screen happens to remount.
+  // Live-subscribed rather than one-time loaded.
+  const { value: posts, loaded: postsLoaded } = useLiveJSONLoaded(`class:${link.classId}:blogPosts`, []);
+  const config = useLiveJSON(`class:${link.classId}:config`, {});
+  const commentsEnabled = config?.blogCommentsEnabled !== false;
+  const loading = !postsLoaded;
 
   // Lands on the newest post the instant this screen is actually visible, and — unlike a single
   // scrollIntoView on mount — stays there through anything that grows the feed afterward (an
@@ -7680,7 +7703,9 @@ function ParentBlogView({ link, family, onBack }) {
   // moves the page itself.
   useStickToBottom(scrollContainerRef, contentRef, link.classId);
 
-  const persist = (next) => { setPosts(next); saveJSON(`class:${link.classId}:blogPosts`, next, true); };
+  // The live subscription above picks up this write automatically — no local state to update by
+  // hand, and no risk of it drifting from what's actually saved.
+  const persist = (next) => { saveJSON(`class:${link.classId}:blogPosts`, next, true); };
 
   // One reaction per person per post OR per block (blockId optional — omitted means "the whole
   // post," matching the original behavior for any post that's just one simple block anyway).
@@ -7701,7 +7726,9 @@ function ParentBlogView({ link, family, onBack }) {
         body: JSON.stringify({ classId: link.classId, postId, blockId, emoji }),
       });
       const data = await res.json();
-      if (res.ok) setPosts(data.posts);
+      // The live subscription above picks up the server's own write automatically — nothing to
+      // apply locally here.
+      if (!res.ok) throw new Error(data.error || "Reaction failed");
     } catch {
       // best-effort — if this fails, the post simply doesn't show the reaction; nothing to roll back
     }
@@ -7921,16 +7948,13 @@ function ParentBlogTabContent({ uniqueClasses, selectedIndex, family, onMarkRead
 // Per-child, not per-class like the blog switcher above — a parent thinks "my daughter's
 // homework," not "this class's homework," even on the rare case where two siblings share a
 // class and would see identical content either way.
+// Same fix, same reasoning as ChildDailyLogView's own — a teacher posting homework should reach
+// a parent automatically, not only the next time this screen happens to remount. Live-subscribed
+// rather than one-time loaded.
 function ParentHomeworkView({ link }) {
-  const [posts, setPosts] = useState(null); // null = loading
-  useEffect(() => {
-    let cancelled = false;
-    setPosts(null);
-    loadJSON(`class:${link.classId}:homework`, [], true).then((p) => { if (!cancelled) setPosts(p); });
-    return () => { cancelled = true; };
-  }, [link.classId]);
+  const { value: posts, loaded } = useLiveJSONLoaded(`class:${link.classId}:homework`, []);
 
-  if (posts === null) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
+  if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)); // newest first — homework is "what's due," not a scrollable history
 
   return (
