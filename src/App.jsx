@@ -1447,15 +1447,33 @@ async function saveJSON(key, value, shared = false, retries = 2) {
 // anyone would notice.
 // key === null/undefined is a valid, common case (no thread open yet) — returns fallback and
 // holds off subscribing to anything until a real key is passed in.
+// Re-establishes itself on error rather than just logging or leaving the caller permanently
+// frozen — a Firestore onSnapshot listener's error callback is terminal, not transient: the
+// instant it fires, even from a single momentary network blip, that specific listener stops
+// receiving any further updates for the rest of the session, with nothing auto-reconnecting it on
+// its own. Every caller of this shared hook was silently exposed to that same gap. A short delay
+// before reconnecting avoids hammering a genuinely, persistently denied subscription in a loop.
 function useLiveJSON(key, fallback) {
   const [value, setValue] = useState(fallback);
   useEffect(() => {
     if (!key) { setValue(fallback); return; }
-    const ref = doc(db, "data", key);
-    const unsubscribe = onSnapshot(ref,
-      (snap) => setValue(snap.exists() ? snap.data().value : fallback),
-      (err) => console.error("Live subscription failed", key, err));
-    return () => unsubscribe();
+    let unsubscribe = () => {};
+    let reconnectTimer = null;
+    let cancelled = false;
+
+    const subscribe = () => {
+      const ref = doc(db, "data", key);
+      unsubscribe = onSnapshot(ref,
+        (snap) => setValue(snap.exists() ? snap.data().value : fallback),
+        (err) => {
+          console.error("Live subscription failed, reconnecting", key, err);
+          if (cancelled) return;
+          reconnectTimer = setTimeout(subscribe, 1500);
+        });
+    };
+    subscribe();
+
+    return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
     // fallback deliberately excluded — callers often pass a fresh object/array literal
     // (e.g. { messages: [] }) on every render, and re-subscribing every time that happens would
     // defeat the point of a standing subscription without ever actually changing what it does.
@@ -1472,16 +1490,32 @@ function useLiveJSON(key, fallback) {
 // Returns { [key]: value }; a key with nothing written yet is simply absent from the result
 // rather than present with some placeholder, so a caller can tell "hasn't loaded/sent anything"
 // apart from "loaded and is empty" if that distinction ever matters.
+// Re-establishes itself on error, same reasoning as useLiveJSON's own fix just above — a
+// Firestore onSnapshot listener's error callback is terminal, not transient, and this multi-key
+// variant had the exact same silent gap on every one of its individual per-key subscriptions.
 function useLiveJSONMap(keys) {
   const [values, setValues] = useState({});
   const keysSignature = (keys || []).join("|");
   useEffect(() => {
     const activeKeys = keys || [];
     if (activeKeys.length === 0) { setValues({}); return; }
-    const unsubscribes = activeKeys.map((key) => onSnapshot(doc(db, "data", key),
-      (snap) => setValues((prev) => ({ ...prev, [key]: snap.exists() ? snap.data().value : undefined })),
-      (err) => console.error("Live subscription failed", key, err)));
-    return () => unsubscribes.forEach((unsub) => unsub());
+    let cancelled = false;
+    const reconnectTimers = [];
+    const unsubscribes = activeKeys.map((key) => {
+      let unsubscribe = () => {};
+      const subscribe = () => {
+        unsubscribe = onSnapshot(doc(db, "data", key),
+          (snap) => setValues((prev) => ({ ...prev, [key]: snap.exists() ? snap.data().value : undefined })),
+          (err) => {
+            console.error("Live subscription failed, reconnecting", key, err);
+            if (cancelled) return;
+            reconnectTimers.push(setTimeout(subscribe, 1500));
+          });
+      };
+      subscribe();
+      return () => unsubscribe();
+    });
+    return () => { cancelled = true; reconnectTimers.forEach(clearTimeout); unsubscribes.forEach((unsub) => unsub()); };
     // keys itself deliberately excluded in favor of keysSignature — an array literal is a new
     // reference every render even when its contents haven't actually changed, and re-subscribing
     // every render would mean never keeping a subscription open long enough to be live at all.
@@ -1498,16 +1532,32 @@ function useLiveJSONMap(keys) {
 // stale list, with no visible sign anything was wrong. A live query removes the staleness at its
 // source instead of requiring every write path that touches this data to individually defend
 // against it.
+// Re-establishes itself on error, same reasoning as the other two live-subscription hooks above —
+// a Firestore onSnapshot listener's error callback is terminal, not transient. Without this, the
+// exact class of gap this hook was built to close (an admin's teacher list quietly going stale)
+// could still happen — just from a dropped listener instead of a one-time-only load.
 function useLiveJSONPrefix(prefix) {
   const [values, setValues] = useState([]);
   useEffect(() => {
     if (!prefix) { setValues([]); return; }
-    const col = collection(db, "data");
-    const q = query(col, where(documentId(), ">=", prefix), where(documentId(), "<", `${prefix}\uf8ff`));
-    const unsubscribe = onSnapshot(q,
-      (snap) => setValues(snap.docs.map((d) => d.data().value)),
-      (err) => console.error("Live prefix subscription failed", prefix, err));
-    return () => unsubscribe();
+    let unsubscribe = () => {};
+    let reconnectTimer = null;
+    let cancelled = false;
+
+    const subscribe = () => {
+      const col = collection(db, "data");
+      const q = query(col, where(documentId(), ">=", prefix), where(documentId(), "<", `${prefix}\uf8ff`));
+      unsubscribe = onSnapshot(q,
+        (snap) => setValues(snap.docs.map((d) => d.data().value)),
+        (err) => {
+          console.error("Live prefix subscription failed, reconnecting", prefix, err);
+          if (cancelled) return;
+          reconnectTimer = setTimeout(subscribe, 1500);
+        });
+    };
+    subscribe();
+
+    return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
   }, [prefix]);
   return values;
 }
@@ -2469,13 +2519,38 @@ function AppInner() {
   // sign-in" complaint this exists to eliminate. Scoped to authUser.uid specifically, not
   // currentTeacher — subscribing based on a value this same effect also sets would immediately
   // re-trigger itself in a loop.
+  //
+  // Re-establishes itself on error rather than just logging — this is what actually closes a real,
+  // reported gap: a Firestore onSnapshot listener's error callback is terminal, not transient. The
+  // instant it fires — even from a single momentary network blip, or an auth token that hasn't
+  // fully finished propagating in the few hundred milliseconds right after a fresh sign-in — that
+  // specific listener stops receiving any further updates for the rest of the session, silently,
+  // with nothing auto-reconnecting it the way loadJSON's own retry logic now protects a one-time
+  // read. Without this, a teacher could genuinely be signed in with no live updates flowing at all,
+  // looking no different from one correctly showing their real, current assignment, and any admin
+  // fix made afterward would go unseen until they fully signed out and back in — the exact
+  // "sometimes works, sometimes doesn't, same account" pattern this whole investigation has been
+  // chasing. A short delay before reconnecting avoids hammering a genuinely, persistently denied
+  // subscription in a tight loop.
   useEffect(() => {
     if (!authUser?.uid) return;
-    const ref = doc(db, "data", `teacher:${authUser.uid}`);
-    const unsubscribe = onSnapshot(ref,
-      (snap) => setCurrentTeacher(snap.exists() ? snap.data().value : null),
-      (err) => console.error("Live teacher subscription failed", err));
-    return () => unsubscribe();
+    let unsubscribe = () => {};
+    let reconnectTimer = null;
+    let cancelled = false;
+
+    const subscribe = () => {
+      const ref = doc(db, "data", `teacher:${authUser.uid}`);
+      unsubscribe = onSnapshot(ref,
+        (snap) => setCurrentTeacher(snap.exists() ? snap.data().value : null),
+        (err) => {
+          console.error("Live teacher subscription failed, reconnecting", err);
+          if (cancelled) return;
+          reconnectTimer = setTimeout(subscribe, 1500);
+        });
+    };
+    subscribe();
+
+    return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
   }, [authUser?.uid]);
 
   // Google Sign-In uses a popup, not a redirect. Redirect was the original choice, reasoned as
