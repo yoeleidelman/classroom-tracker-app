@@ -2826,9 +2826,14 @@ function AppInner() {
     try {
       const user = auth.currentUser;
       if (!user) return { ok: false, error: "You're not signed in." };
-      const credential = EmailAuthProvider.credential(user.email, currentPassword);
+      const trimmedNew = newPassword.trim();
+      const credential = EmailAuthProvider.credential(user.email, currentPassword.trim());
       await reauthenticateWithCredential(user, credential);
-      await updatePassword(user, newPassword);
+      // Trimmed here too — the same missing-trim bug already found and fixed in account creation,
+      // admin password reset, and the email-link reset flow. A stray space typed into the new
+      // password here would get permanently stored exactly as typed, unrecoverable by careful
+      // typing at sign-in afterward.
+      await updatePassword(user, trimmedNew);
       return { ok: true };
     } catch (e) {
       if (e.code === "auth/too-many-requests") {
@@ -6431,12 +6436,19 @@ function ResetPasswordScreen({ oobCode, onDone }) {
   }, [oobCode]);
 
   const save = async () => {
-    if (newPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
-    if (newPassword !== confirm) { setError("Passwords don't match."); return; }
+    const trimmedPassword = newPassword.trim();
+    if (trimmedPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (trimmedPassword !== confirm.trim()) { setError("Passwords don't match."); return; }
     setError("");
     setSaving(true);
     try {
-      await confirmPasswordReset(auth, oobCode, newPassword);
+      // Trimmed here, not just at sign-in — a stray leading or trailing space typed into a NEW
+      // password (autocorrect, an accidental space, a copy-paste from elsewhere) would otherwise
+      // get permanently stored exactly as typed, unrecoverable by careful typing at sign-in
+      // afterward since the mismatch already exists in what Firebase itself has on file. This is
+      // the exact self-service tool someone locked out would use to recover — the same missing-
+      // trim bug already found and fixed in account creation and admin password reset, here too.
+      await confirmPasswordReset(auth, oobCode, trimmedPassword);
       setStatus("done");
     } catch {
       setError("That link has expired or was already used — request a new one from the sign-in screen.");
@@ -10417,7 +10429,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     if (!trimmed) return;
     const id = uid();
     const resolvedType = studentType || classType;
-    persistRoster([...roster, { id, name: trimmed, studentType: resolvedType, parentEmail: parentEmail || "", parentPhone: "", notes: "", enrollmentScope: "full-time" }]);
+    const freshRoster = (await loadC("roster", null)) || roster;
+    persistRoster([...freshRoster, { id, name: trimmed, studentType: resolvedType, parentEmail: parentEmail || "", parentPhone: "", notes: "", enrollmentScope: "full-time" }]);
     setStudentData((prev) => ({ ...prev, [id]: emptyStudentData() }));
     // New students are shared school-wide by default from here on, so any teacher can find and add them later.
     const gs = await loadJSON("globalStudents", [], true);
@@ -10528,13 +10541,22 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     return results;
   };
 
-  const removeStudent = (id) => {
-    persistRoster(roster.filter((s) => s.id !== id));
+  // Reads the roster fresh right before computing a removal/edit, rather than trusting the local
+  // `roster` state variable that might have drifted stale — the exact same class of race condition
+  // already found and fixed in the class-assignment, attendance, and daily-log logging paths this
+  // session: two people (or the same teacher on two devices/tabs) each acting from their own
+  // independently-stale snapshot around the same time can otherwise have the second write silently
+  // undo the first — a just-removed student reappearing, or a just-edited field reverting, with
+  // nothing to explain why.
+  const removeStudent = async (id) => {
+    const freshRoster = (await loadC("roster", null)) || roster;
+    persistRoster(freshRoster.filter((s) => s.id !== id));
     if (currentId === id) { navigateView(classType === "preschool" ? "daily-log" : "home"); setCurrentId(null); }
   };
 
-  const updateStudentField = (id, field, value) => {
-    persistRoster(roster.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
+  const updateStudentField = async (id, field, value) => {
+    const freshRoster = (await loadC("roster", null)) || roster;
+    persistRoster(freshRoster.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
   };
 
   const persistAlerts = (next) => { setAlerts(next); saveC("alerts", next); };
