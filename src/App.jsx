@@ -989,6 +989,13 @@ function logAuthDebug(message) {
   if (window.__authDebugLog.length > 25) window.__authDebugLog.shift();
 }
 
+// One shared, single answer for "is this teacher or family account actually still turned on" —
+// previously answered independently, four separate times, in different parts of the app, each
+// its own small chance to get slightly out of sync with the others. A record with no active field
+// at all counts as active, matching every one of those four original checks exactly — an account
+// only ever counts as turned off once something has explicitly set active to false.
+function isAccountActive(record) { return record?.active !== false; }
+
 function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], checkIns: [] }; }
 
 // Silently collapses any duplicate meal (same date + mealType) or nap (same date) entries down to
@@ -4968,7 +4975,7 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
   const [threads, setThreads] = useState({});
   const [openGroup, setOpenGroup] = useState(null);
 
-  const nonAdminTeachers = (teachers || []).filter((t) => t.role !== "admin" && t.active !== false);
+  const nonAdminTeachers = (teachers || []).filter((t) => t.role !== "admin" && isAccountActive(t));
 
   const refresh = useCallback(async () => {
     setOpenGroup(null);
@@ -5578,8 +5585,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showArchivedFamilies, setShowArchivedFamilies] = useState(false);
   const [addingGuardianTo, setAddingGuardianTo] = useState(null); // the family group currently getting a second guardian, or null
   const [viewingFamilyGroupId, setViewingFamilyGroupId] = useState(null);
-  const activeFamilies = (families || []).filter((f) => f.active !== false);
-  const inactiveFamilies = (families || []).filter((f) => f.active === false);
+  const activeFamilies = (families || []).filter(isAccountActive);
+  const inactiveFamilies = (families || []).filter((f) => !isAccountActive(f));
   // Grouped for display so two logins for the same household read as one family with two
   // guardians, not two unrelated entries that happen to share children — falls back to each
   // family's own uid for any record that predates familyGroupId existing.
@@ -6132,7 +6139,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               // already has in memory rather than trusting any one-time "was this linked at
               // creation" message, since that message is long gone on every visit after the one
               // where the account was actually created.
-              const linkedFamily = (families || []).find((f) => f.uid === t.uid && f.active !== false);
+              const linkedFamily = (families || []).find((f) => f.uid === t.uid && isAccountActive(f));
               return (
                 <li key={t.uid} className="bg-white border border-stone-200 rounded-lg p-2.5">
                   <div className="flex items-center justify-between gap-2">
@@ -6326,7 +6333,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                     // Mirrors the same check on the Teachers list, in the opposite direction —
                     // this guardian's own uid matching a teacher record's uid IS the link, looked
                     // up fresh each time rather than relying on a one-time creation message.
-                    const linkedTeacher = (teachers || []).find((t) => t.uid === f.uid && t.active !== false);
+                    const linkedTeacher = (teachers || []).find((t) => t.uid === f.uid && isAccountActive(t));
                     return (
                     <div key={f.uid} className={f !== primary ? "mt-2 pt-2 border-t border-stone-100" : ""}>
                       <div className="flex items-center justify-between gap-2">
