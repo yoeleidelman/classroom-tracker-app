@@ -7578,7 +7578,6 @@ function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, curre
         <img src={url} alt={caption || "Photo"} className="max-w-full max-h-[75vh] rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
       )}
       {hasCarousel && <p className="text-white/60 text-xs mt-2">{currentIndex + 1} of {mediaList.length}</p>}
-      {caption && <p className="text-white text-sm mt-3 text-center max-w-md">{caption}</p>}
       <button onClick={download} disabled={downloading}
         className="mt-4 flex items-center gap-1.5 text-sm font-semibold text-white bg-white/15 hover:bg-white/25 rounded-lg px-4 py-2 disabled:opacity-60">
         {downloading ? <Loader2 className="animate-spin" size={15} /> : <Download size={15} />} {downloading ? "Downloading…" : "Download"}
@@ -14122,7 +14121,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                       ))}
                     </div>
                   )}
-                  {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                  {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
                   {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
                   {!media.length && !block.text && <div className="h-2" />}
                 </ReactableContent>
