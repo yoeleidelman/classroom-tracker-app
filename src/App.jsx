@@ -7629,13 +7629,15 @@ function ChildDailyLogView({ link, onBack }) {
   const classPhotos = useLiveJSON(`class:${link.classId}:photos`, []);
   const loading = !hasLoadedOnce;
 
-  const { data, changed } = useMemo(() => dedupeDailyLogData(rawData || {}), [rawData]);
-  useEffect(() => {
-    // Silent, fire-and-forget, same as the teacher-side load — a parent opening their own child's
-    // daily log is just as valid a moment to heal a leftover duplicate as a teacher opening their
-    // class, and often happens first.
-    if (changed) saveJSON(`class:${link.classId}:kriya:${link.studentId}`, data, true);
-  }, [changed]); // eslint-disable-line react-hooks/exhaustive-deps
+  // display-only now — no write-back. A live onSnapshot subscription can, by Firestore's own
+  // documented behavior, deliver a stale, locally-cached version of this document BEFORE the true
+  // current server state arrives — and if that stale snapshot happened to look like it contained a
+  // duplicate, writing the "cleaned" result back would silently overwrite the real, current,
+  // complete document with a stale, incomplete one — a real, reported case of exactly this:
+  // data that was genuinely there and visible one day, gone (even looking back at that same past
+  // date) the next. This still shows a clean, deduplicated view either way, since that part never
+  // touches the actual stored data — it only stops being destructive.
+  const { data } = useMemo(() => dedupeDailyLogData(rawData || {}), [rawData]);
 
   const incidents = (classIncidents || []).filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId));
   const photos = (classPhotos || []).filter((p) => p.date === date && (p.studentIds || []).includes(link.studentId));
@@ -10172,11 +10174,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       for (const s of finalRoster) {
         if (sampleStudentData && sampleStudentData[s.id]) { dataMap[s.id] = sampleStudentData[s.id]; continue; }
         const raw = await loadC(`kriya:${s.id}`, emptyStudentData());
-        const { data: d, changed } = dedupeDailyLogData(raw);
-        // Silent, fire-and-forget — a leftover duplicate found on load gets healed in the
-        // background without making anyone wait on it; the already-cleaned data is used for
-        // display immediately either way.
-        if (changed) saveC(`kriya:${s.id}`, d);
+        // display-only now — no write-back. See ChildDailyLogView's own matching comment for the
+        // full reasoning: even a one-time read can fall back to a stale local cache on a spotty
+        // connection, and writing a "cleaned" result back from a stale read risks permanently
+        // overwriting real, current data with an incomplete snapshot — a real, reported case of
+        // exactly that. This still shows a clean, deduplicated view either way.
+        const { data: d } = dedupeDailyLogData(raw);
         dataMap[s.id] = { ...emptyStudentData(), ...d };
       }
       setStudentData(dataMap);
