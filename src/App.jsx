@@ -5482,7 +5482,7 @@ function TeacherAccountChecker({ onCheck }) {
           <p className="text-xs text-stone-700"><span className="font-semibold">Sign-in method(s):</span> {result.authAccount.providerIds.join(", ") || "none on file"}</p>
           {result.firestoreRecord ? (
             <>
-              <p className="text-xs text-stone-700"><span className="font-semibold">Teacher profile:</span> {result.firestoreRecord.name} · {result.firestoreRecord.active ? "active" : "⚠ marked inactive"} · {result.firestoreRecord.assignedClassIds.length} class(es) assigned</p>
+              <p className="text-xs text-stone-700"><span className="font-semibold">Teacher profile:</span> {result.firestoreRecord.name} · {isAccountActive(result.firestoreRecord) ? "active" : "⚠ marked inactive"} · {result.firestoreRecord.assignedClassIds.length} class(es) assigned</p>
               {!result.firestoreRecord.emailMatchesAuth && (
                 <p className="text-xs font-bold text-amber-700">⚠ The email on this teacher's profile doesn't exactly match their real sign-in email ({result.firestoreRecord.email}) — worth fixing directly, since admin screens show the profile copy, not the real one.</p>
               )}
@@ -5594,8 +5594,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
     });
   const archivedStudents = (globalStudents || []).filter((s) => s.archived);
-  const activeTeachers = (teachers || []).filter((t) => t.active);
-  const inactiveTeachers = (teachers || []).filter((t) => !t.active);
+  const activeTeachers = (teachers || []).filter(isAccountActive);
+  const inactiveTeachers = (teachers || []).filter((t) => !isAccountActive(t));
   const [showFamilyForm, setShowFamilyForm] = useState(false);
   const [defaultParentPassword, setDefaultParentPassword] = useState("Welcome123");
   const [defaultPwSaved, setDefaultPwSaved] = useState(false);
