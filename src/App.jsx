@@ -7898,6 +7898,27 @@ function ParentBlogView({ link, family, onBack }) {
     }
   };
 
+  // "Read" simply means this family had the Blog tab open with a post loaded — not that they
+  // scrolled to look at it specifically, matching how a person naturally means "I saw it" when
+  // they say they checked the blog. Marks every currently-loaded post the moment this screen is
+  // genuinely open, and again for anything new that arrives while it stays open — safe to call on
+  // every visit, since the endpoint itself only ever records a real change the first time for a
+  // given reader on a given post; every visit after that is a harmless no-op on the server.
+  useEffect(() => {
+    if (!postsLoaded || posts.length === 0) return;
+    (async () => {
+      const headers = await authHeaders();
+      posts.forEach((post) => {
+        if (post.deleted) return;
+        fetch("/api/blog-mark-read", {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ classId: link.classId, postId: post.id }),
+        }).catch(() => {}); // best-effort — a missed read receipt isn't worth surfacing an error over
+      });
+    })();
+  }, [postsLoaded, posts.length]);
+
   const onComment = (postId, text) => {
     if (!text.trim()) return;
     const comment = { id: uid(), text: text.trim(), authorName, authorType: "family", timestamp: new Date().toISOString() };
@@ -9848,6 +9869,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           commentsEnabled={config.blogCommentsEnabled !== false}
           onReact={toggleBlogReaction}
           onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
+          onEditBlock={editBlogPostBlock} onDeletePost={deleteBlogPost}
+          classId={classId}
           navigate={navigateView} />
         );
       case "homework":
@@ -10287,6 +10310,31 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
     notifyClassFamilies(classId, `New post in ${className}`, (title || "").trim() || firstCaption || "Check out the new post", `/?portal=parent&open=blog&classId=${classId}`);
     return entry;
+  };
+  // Any teacher or admin with access to this class can edit or delete any post in its blog, not
+  // only whoever originally posted it — unlike a message, which is one specific person's own
+  // words in a conversation, a classroom blog post is a shared record of the room as a whole, the
+  // same way any of them can already log an incident or update attendance someone else started.
+  // Editing works on one post's one specific part (its own caption) at a time, matching how a
+  // multi-part post already lets each part carry its own separate text — the same edited/
+  // originalText shape a message's own edit already uses, kept for exactly the same reason: the
+  // first-ever original wording stays on record even through a second or third edit later.
+  const editBlogPostBlock = (postId, blockId, newText) => {
+    const next = blogPosts.map((p) => (p.id === postId
+      ? { ...p, blocks: p.blocks.map((b) => (b.id === blockId
+          ? { ...b, text: newText, edited: true, originalText: b.originalText ?? b.text }
+          : b)) }
+      : p));
+    persistBlogPosts(next);
+  };
+  // A soft delete, exactly like a message's own — leaves a "This post was deleted" placeholder
+  // behind rather than vanishing without a trace, and actually clears the photos, video, and text
+  // from storage rather than just hiding them behind the placeholder in the UI.
+  const deleteBlogPost = (postId) => {
+    const next = blogPosts.map((p) => (p.id === postId
+      ? { id: p.id, timestamp: p.timestamp, authorType: p.authorType, loggedBy: p.loggedBy, deleted: true, blocks: [] }
+      : p));
+    persistBlogPosts(next);
   };
   const persistHomeworkPosts = (next) => { setHomeworkPosts(next); saveC("homework", next); };
   // Cadence isn't just a label — it's what lets the parent side show a genuinely useful heading
@@ -14124,19 +14172,55 @@ function WhoReactedSheet({ summary, onClose }) {
   );
 }
 
-function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia }) {
+function WhoReadSheet({ readBy, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end md:items-center md:justify-center bg-black/30" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl md:rounded-2xl w-full md:w-80 max-h-[70vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-stone-100">
+          <p className="text-sm font-semibold text-stone-800">Seen by {readBy.length}</p>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-600 p-1"><X size={18} /></button>
+        </div>
+        <div className="overflow-y-auto py-1">
+          {readBy.map((r, i) => (
+            <div key={i} className="flex items-center px-4 py-2.5">
+              <span className="text-sm text-stone-700">{r.name}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditBlock, onDeletePost }) {
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
   // { blockId, mediaIndex? } — mediaIndex present means "show who reacted to this one specific
   // photo," absent means "show who reacted to this whole block" (a single-media or text block).
   const [whoReactedTarget, setWhoReactedTarget] = useState(null);
+  // Only ever present at all for the teacher side, which is the only caller that actually passes
+  // onEditBlock/onDeletePost in the first place — a parent viewing the exact same post never
+  // gets this UI at all, the same way canModify already keeps a family from editing or deleting
+  // their own sent messages.
+  const [showPostActions, setShowPostActions] = useState(false);
+  const [editingBlockId, setEditingBlockId] = useState(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [showReadBy, setShowReadBy] = useState(false);
   const comments = post.comments || [];
+  const canModify = Boolean(onEditBlock && onDeletePost);
 
   const submitComment = () => {
     if (!commentDraft.trim()) return;
     onComment(post.id, commentDraft);
     setCommentDraft("");
     setCommentsOpen(true);
+  };
+  const startEditBlock = (block) => { setEditingBlockId(block.id); setEditDraft(block.text || ""); };
+  const cancelEditBlock = () => { setEditingBlockId(null); setEditDraft(""); };
+  const saveEditBlock = (blockId) => {
+    onEditBlock(post.id, blockId, editDraft.trim());
+    setEditingBlockId(null);
+    setEditDraft("");
   };
 
   const reactedBlocks = post.blocks.filter((b) => Object.values(b.reactions || {}).some((entries) => (entries || []).length > 0));
@@ -14150,6 +14234,17 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
     .map((r) => ({ ...r, entries: whoReactedReactions[r.key] || [] }))
     .filter((r) => r.entries.length > 0) : [];
 
+  // A soft-deleted post — everything else below (media, reactions, comments) only ever applied
+  // to real content, so this returns its own small placeholder instead of trying to render any
+  // of that against a post that no longer has any.
+  if (post.deleted) {
+    return (
+      <div className="bg-white border border-stone-200 rounded-2xl px-4 py-3.5">
+        <p className="text-sm text-stone-400 italic">This post was deleted.</p>
+      </div>
+    );
+  }
+
   return (
     // Deliberately NOT overflow-hidden at this outer level — that lives on the inner wrapper just
     // below instead, so a reaction badge rendered as a sibling of it (further down) can overlap
@@ -14158,14 +14253,28 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
     // tries to extend past whatever rounded-corner boundary is clipping the photos inside.
     <div className="bg-white border border-stone-200 rounded-2xl relative">
       <div className="rounded-2xl overflow-hidden">
-        <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-2.5">
-          <div className="w-8 h-8 rounded-full bg-teal-100 flex items-center justify-center text-teal-800 text-xs font-bold shrink-0">
-            {(post.loggedBy || "?").split(" ").map((w) => w[0]).slice(0, 2).join("")}
+        <div className="flex items-start justify-between gap-2 px-4 pt-3.5 pb-2.5">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-full bg-teal-100 flex items-center justify-center text-teal-800 text-xs font-bold shrink-0">
+              {(post.loggedBy || "?").split(" ").map((w) => w[0]).slice(0, 2).join("")}
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-stone-900 truncate">{post.loggedBy || "Class"}</p>
+              <p className="text-[11px] text-stone-400 capitalize">{post.authorType} · {formatRelativeTime(post.timestamp)}</p>
+            </div>
           </div>
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-stone-900 truncate">{post.loggedBy || "Class"}</p>
-            <p className="text-[11px] text-stone-400 capitalize">{post.authorType} · {formatRelativeTime(post.timestamp)}</p>
-          </div>
+          {canModify && (
+            <div className="relative shrink-0">
+              <button onClick={() => setShowPostActions((v) => !v)} className="-mt-1 -mr-1 p-1 rounded text-stone-300 hover:text-stone-600">
+                <MoreVertical size={14} />
+              </button>
+              {showPostActions && (
+                <div className="anim-expand-down absolute right-0 top-full mt-1 bg-white border border-stone-200 rounded-xl shadow-lg px-2 py-1.5 z-20 whitespace-nowrap">
+                  <ConfirmDelete onConfirm={() => { onDeletePost(post.id); setShowPostActions(false); }} size={12} label="Delete post" />
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {post.title && <p className="display-font text-base font-bold text-stone-900 px-4 pb-2">{post.title}</p>}
@@ -14209,9 +14318,32 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                         </div>
                       )
                     )}
-                    {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                    {editingBlockId === block.id ? (
+                      <div className="px-4 pt-3">
+                        <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={2} autoFocus
+                          className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1.5" />
+                        <div className="flex gap-1.5">
+                          <button onClick={() => saveEditBlock(block.id)} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-teal-700 text-white">Save</button>
+                          <button onClick={cancelEditBlock} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-stone-100 text-stone-500">Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {block.text && (
+                          <div className="px-4 pt-3 flex items-start justify-between gap-2">
+                            <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" />{block.edited && <span className="text-stone-400 text-xs italic"> (edited)</span>}</p>
+                            {canModify && <button onClick={() => startEditBlock(block)} className="shrink-0 text-[11px] font-semibold text-stone-400 hover:text-stone-600">Edit</button>}
+                          </div>
+                        )}
+                        {!block.text && canModify && (
+                          <div className="px-4 pt-3">
+                            <button onClick={() => startEditBlock(block)} className="text-[11px] font-semibold text-stone-400 hover:text-stone-600">+ Add a caption</button>
+                          </div>
+                        )}
+                      </>
+                    )}
                     {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
-                    {!media.length && !block.text && <div className="h-2" />}
+                    {!media.length && !block.text && !canModify && <div className="h-2" />}
                   </ReactableContent>
                 ) : (
                   // Several photos or videos together — each one reacts on its own now, badge and
@@ -14249,7 +14381,16 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                         </div>
                       ))}
                     </div>
-                    {block.text && (
+                    {editingBlockId === block.id ? (
+                      <div className="px-4 pt-3">
+                        <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={2} autoFocus
+                          className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1.5" />
+                        <div className="flex gap-1.5">
+                          <button onClick={() => saveEditBlock(block.id)} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-teal-700 text-white">Save</button>
+                          <button onClick={cancelEditBlock} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-stone-100 text-stone-500">Cancel</button>
+                        </div>
+                      </div>
+                    ) : block.text ? (
                       // Reacting to the whole post is still its own separate thing, even once a
                       // post has several photos each reacting on their own — the two were never
                       // meant to replace each other. This is exactly the same block-level
@@ -14257,8 +14398,17 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                       // shows up through the exact same badge row at the card's own outer edge,
                       // below, that already handles it — nothing new needed there.
                       <ReactableContent reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)}>
-                        <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>
+                        <div className="px-4 pt-3 flex items-start justify-between gap-2">
+                          <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" />{block.edited && <span className="text-stone-400 text-xs italic"> (edited)</span>}</p>
+                          {canModify && <button onClick={(e) => { e.stopPropagation(); startEditBlock(block); }} className="shrink-0 text-[11px] font-semibold text-stone-400 hover:text-stone-600">Edit</button>}
+                        </div>
                       </ReactableContent>
+                    ) : (
+                      canModify && (
+                        <div className="px-4 pt-3">
+                          <button onClick={() => startEditBlock(block)} className="text-[11px] font-semibold text-stone-400 hover:text-stone-600">+ Add a caption</button>
+                        </div>
+                      )
                     )}
                     {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
                   </>
@@ -14267,6 +14417,12 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
             );
           })}
         </div>
+
+        {canModify && (post.readBy || []).length > 0 && (
+          <button onClick={() => setShowReadBy(true)} className="px-4 pb-1 text-[11px] font-medium text-stone-400 hover:text-stone-600">
+            Seen by {post.readBy.length}
+          </button>
+        )}
 
         {commentsEnabled && (
           <div className="px-4 py-2.5">
@@ -14308,11 +14464,12 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
       )}
 
       {whoReactedBlock && <WhoReactedSheet summary={whoReactedSummary} onClose={() => setWhoReactedTarget(null)} />}
+      {showReadBy && <WhoReadSheet readBy={post.readBy || []} onClose={() => setShowReadBy(false)} />}
     </div>
   );
 }
 
-function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, commentsEnabled, onReact, onComment, navigate }) {
+function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, commentsEnabled, onReact, onComment, onEditBlock, onDeletePost, classId, navigate }) {
   const bottomRef = useRef(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
@@ -14364,7 +14521,8 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
               {sorted.map((post) => (
                 <BlogPostCard key={post.id} post={post} currentUserId={currentUserId}
                   onReact={onReact}
-                  commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
+                  commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia}
+                  onEditBlock={onEditBlock} onDeletePost={onDeletePost} />
               ))}
             </div>
           </>
