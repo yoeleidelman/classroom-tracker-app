@@ -13,6 +13,7 @@ import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, docu
 import { useState, useEffect, useLayoutEffect, useRef, createContext } from "react";
 import { HDate, HebrewCalendar } from "@hebcal/core";
 import * as XLSX from "xlsx";
+import { ref as storageRef, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 
 // ---------- Default content (all editable later via Settings) ----------
 
@@ -2279,4 +2280,129 @@ export function getFlags(data, studentId, incidents, config) {
     }
   }
   return flags.sort((a, b) => b.tier - a.tier);
+}
+// Generic documents (PDF, Word, Excel, etc.) — no compression or format-specific validation the
+// way photos and videos get, just a straight upload with a size cap so one huge file can't stall
+// things indefinitely. The original filename is kept alongside the URL (Storage's own path is a
+// generated id, not something a person would recognize), so whoever receives it sees a real name
+// to download, not a meaningless string.
+export const MAX_FILE_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
+// Roughly 5-6 lines at the composer's own text size — long enough that a real message never
+// feels cramped, capped so one very long paste doesn't push the send button off-screen.
+export const MAX_COMPOSER_HEIGHT = 130;
+export async function uploadOneFile(file, path, onProgress) {
+  if (file.size > MAX_FILE_ATTACHMENT_BYTES) throw new Error("File is too large — the limit is 20MB.");
+  const fileRef = storageRef(storage, path);
+  return new Promise((resolve, reject) => {
+    const task = uploadBytesResumable(fileRef, file, { contentType: file.type || "application/octet-stream" });
+    const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 120000);
+    task.on("state_changed",
+      (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
+      (err) => { clearTimeout(timeoutId); reject(err); },
+      async () => {
+        clearTimeout(timeoutId);
+        try { resolve(await getDownloadURL(task.snapshot.ref)); }
+        catch (err) { reject(err); }
+      }
+    );
+  });
+}
+// Surfaces the real Firebase error code/message rather than a generic "something went wrong" —
+// storage/unauthorized specifically means Storage Rules are rejecting the request (missing,
+// unpublished, or evaluating false against this account's real data), which is a completely
+// different, much more specific problem than a slow or dropped connection, and worth being able
+// to tell apart at a glance rather than guessing blind.
+export function describeUploadError(err) {
+  if (err?.message === "timeout") return "That's taking too long — check your connection and try again.";
+  const code = err?.code ? ` (${err.code})` : "";
+  return `Couldn't upload${code} — ${err?.message || "unknown error"}.`;
+}
+// Reads a video file's actual duration client-side, entirely locally — no upload needed just to
+// check length. Rejects clips over the limit before any bytes ever go to Storage, since there's no
+// value in letting someone wait through an upload only to find out afterward it was too long.
+export const MAX_VIDEO_SECONDS = 30;
+export function validateVideoDuration(file, maxSeconds = MAX_VIDEO_SECONDS) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(video.src);
+      if (video.duration > maxSeconds) {
+        reject(new Error(`Videos must be ${maxSeconds} seconds or shorter — this one is about ${Math.round(video.duration)}s. Trim it and try again.`));
+      } else {
+        resolve(video.duration);
+      }
+    };
+    video.onerror = () => { URL.revokeObjectURL(video.src); reject(new Error("Couldn't read that video file — try a different one.")); };
+    video.src = URL.createObjectURL(file);
+  });
+}
+// Shared by the Photos tile, the class blog, and message attachments — same compress-then-upload-
+// with-timeout pipeline everywhere, so a fix or improvement made in one place benefits all of them.
+// Module-level rather than tucked inside one component, since both the teacher side and the parent
+// side need to upload images.
+export async function uploadOneImage(file, path, onProgress) {
+  const fileRef = storageRef(storage, path);
+  const compressed = await compressImageFile(file);
+  return new Promise((resolve, reject) => {
+    const task = uploadBytesResumable(fileRef, compressed, { contentType: "image/jpeg" });
+    const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 45000);
+    task.on("state_changed",
+      (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
+      (err) => { clearTimeout(timeoutId); reject(err); },
+      async () => {
+        clearTimeout(timeoutId);
+        try { resolve(await getDownloadURL(task.snapshot.ref)); }
+        catch (err) { reject(err); }
+      }
+    );
+  });
+}
+// Videos aren't compressed client-side the way photos are — real video transcoding in the browser
+// is heavy, complex infrastructure genuinely out of scope here. Instead, length is kept in check by
+// rejecting anything over the duration limit before upload even starts, and the upload itself gets
+// a longer timeout than a photo would, since even a short raw clip is a much bigger file than a
+// compressed image.
+export async function uploadOneVideo(file, path, onProgress) {
+  await validateVideoDuration(file);
+  const fileRef = storageRef(storage, path);
+  return new Promise((resolve, reject) => {
+    const task = uploadBytesResumable(fileRef, file, { contentType: file.type || "video/mp4" });
+    const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 120000);
+    task.on("state_changed",
+      (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
+      (err) => { clearTimeout(timeoutId); reject(err); },
+      async () => {
+        clearTimeout(timeoutId);
+        try { resolve(await getDownloadURL(task.snapshot.ref)); }
+        catch (err) { reject(err); }
+      }
+    );
+  });
+}
+
+export function compressImageFile(file, maxDimension = 2048, quality = 0.9) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxDimension || height > maxDimension) {
+        if (width > height) { height = Math.round(height * (maxDimension / width)); width = maxDimension; }
+        else { width = Math.round(width * (maxDimension / height)); height = maxDimension; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (!blob) { reject(new Error("Couldn't process that image.")); return; }
+        resolve(blob);
+      }, "image/jpeg", quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't read that image file.")); };
+    img.src = url;
+  });
 }
