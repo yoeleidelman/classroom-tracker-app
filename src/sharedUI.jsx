@@ -10,11 +10,13 @@
 
 import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { ChevronLeft, Plus, Loader2, ChevronRight, X, Camera, Download, Sparkles, Play, FileText, Paperclip, MoreVertical, Music, Send } from "lucide-react";
+import { auth } from "./firebase";
+import { sendPasswordResetEmail } from "firebase/auth";
 import {
   uid, isIOSDevice, isRunningStandalone, isThisDeviceEnabled, enableNotificationsFor, disableNotificationsFor,
   useVisualViewportHeight, useStickToBottom, uploadOneFile, uploadOneImage, uploadOneVideo,
   validateVideoDuration, describeUploadError, MAX_FILE_ATTACHMENT_BYTES, MAX_COMPOSER_HEIGHT,
-  buildStyleInstructions, authHeaders,
+  buildStyleInstructions, authHeaders, shouldHideGoogleSignIn,
 } from "./core.jsx";
 
 export function NotificationToggle({ uid, accentColor = "#0f766e" }) {
@@ -619,3 +621,102 @@ Write a short, warm, clear reply — 1-3 sentences, matching the tone of a real 
   const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
   return text; // pure in-app AI-assist for the message composer — never has an email path, so never gets the disclaimer
 }
+export function GoogleSignInSection({ onSignInWithGoogle, pendingGoogleLink, onCompleteGoogleLink, googleSignInError }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [linking, setLinking] = useState(false);
+
+  if (pendingGoogleLink) {
+    const submit = async () => {
+      if (!password) return;
+      setError("");
+      setLinking(true);
+      const result = await onCompleteGoogleLink(password);
+      setLinking(false);
+      if (!result.ok) setError(result.error);
+    };
+    return (
+      <div className="bg-white border border-stone-200 rounded-2xl p-4 mb-4 shadow-sm">
+        <p className="text-sm font-semibold text-stone-800 mb-1">Connect your Google account</p>
+        <p className="text-xs text-stone-500 mb-3">You already have an account for {pendingGoogleLink.email} — enter its password once to connect Google. After that, either one signs you in.</p>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="Password" autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-2 focus:border-teal-500 focus:outline-none" />
+        {error && <p className="text-xs text-rose-600 mb-2">{error}</p>}
+        <button onClick={submit} disabled={linking || !password} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          {linking ? "Connecting..." : "Connect account"}
+        </button>
+      </div>
+    );
+  }
+
+  // Hidden entirely on an installed, standalone iOS PWA — see shouldHideGoogleSignIn for why
+  // showing it and explaining the failure after a tap isn't the right call here. The caller
+  // (TeacherSignInScreen / ParentSignInScreen) checks this same function to also skip the "OR"
+  // divider that would otherwise sit above nothing.
+  if (shouldHideGoogleSignIn()) return null;
+
+  return (
+    <div className="mb-4">
+      <button onClick={onSignInWithGoogle} className="w-full flex items-center justify-center gap-2 bg-white border border-stone-300 rounded-lg py-2.5 text-sm font-semibold text-stone-700 hover:bg-stone-50">
+        <svg width="16" height="16" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.5 5.1 29.5 3 24 3 12.4 3 3 12.4 3 24s9.4 21 21 21 21-9.4 21-21c0-1.4-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.1 8 3l6-6C34.5 5.1 29.5 3 24 3c-7.7 0-14.4 4.4-17.7 10.7z"/><path fill="#4CAF50" d="M24 45c5.4 0 10.3-2.1 14-5.5l-6.5-5.5C29.4 35.9 26.8 37 24 37c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 40.5 16.2 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.2 5.7l6.5 5.5C39.5 37 44 31 44 24c0-1.4-.1-2.7-.4-3.5z"/></svg>
+        Continue with Google
+      </button>
+      {googleSignInError && (
+        <p className="text-xs text-rose-600 mt-2">
+          Couldn't open Google sign-in. <span className="text-stone-400">({googleSignInError})</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function ForgotPasswordModal({ onClose }) {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+
+  const send = async () => {
+    if (!email.trim()) return;
+    setSending(true);
+    setError("");
+    try {
+      await sendPasswordResetEmail(auth, email.trim(), { url: window.location.origin + window.location.pathname });
+      setSent(true);
+    } catch (err) {
+      // auth/user-not-found is deliberately treated as success from here on out — see comment
+      // above the component.
+      if (err.code === "auth/user-not-found" || err.code === "auth/invalid-email") setSent(true);
+      else setError("Something went wrong sending that email. Try again in a moment.");
+    }
+    setSending(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-lg font-bold text-stone-900" style={{ fontFamily: "Georgia, serif" }}>Reset your password</p>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-600"><X size={20} /></button>
+        </div>
+        {sent ? (
+          <>
+            <p className="text-sm text-stone-600 mb-4">If an account exists for that email, a reset link is on its way — check your inbox (and spam folder) in the next few minutes.</p>
+            <button onClick={onClose} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Done</button>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-stone-600 mb-3">Enter the email on your account and we'll send you a link to set a new password.</p>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder="Email" autoFocus className="w-full rounded-lg border border-stone-300 px-3 py-2.5 text-sm mb-3 focus:border-teal-500 focus:outline-none" />
+            {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
+            <button onClick={send} disabled={sending || !email.trim()} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+              {sending ? "Sending..." : "Send reset link"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+

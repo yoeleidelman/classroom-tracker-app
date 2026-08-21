@@ -2406,3 +2406,11 @@ export function compressImageFile(file, maxDimension = 2048, quality = 0.9) {
     img.src = url;
   });
 }
+export function formatTime12h(hhmm) {
+  if (!hhmm || !hhmm.includes(":")) return hhmm || "";
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+}
