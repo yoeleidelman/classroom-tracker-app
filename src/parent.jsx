@@ -22,6 +22,7 @@ import {
 } from "./core.jsx";
 import {
   NotificationToggle, ConversationThreadView, PhotoLightbox, GoogleSignInSection, ForgotPasswordModal,
+  TabBadge,
 } from "./sharedUI.jsx";
 
 export function ParentSignInScreen({ onSignIn, isSignedInAsSomethingElse, onSignInWithGoogle, pendingGoogleLink, onCompleteGoogleLink, googleSignInError }) {
@@ -874,17 +875,6 @@ export function ParentHomeworkTabContent({ links, selectedIndex, onMarkRead }) {
   }, [selectedLink?.classId, selectedLink?.studentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <ParentHomeworkView link={selectedLink} />;
-}
-
-// A small reusable numbered pill — same shape every place a tab needs to show "N new things,"
-// on either side of the app.
-export function TabBadge({ count }) {
-  if (!count || count <= 0) return null;
-  return (
-    <span className="absolute -top-1.5 -right-2.5 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[10px] font-bold leading-none">
-      {count > 9 ? "9+" : count}
-    </span>
-  );
 }
 
 export function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogCount = 0, unreadHomeworkCount = 0, showHomework = true }) {

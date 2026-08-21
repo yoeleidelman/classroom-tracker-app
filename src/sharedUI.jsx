@@ -8,9 +8,9 @@
 // only by the conversation view specifically, not broadly enough to belong in core.jsx's own
 // foundation.
 
-import { useState, useEffect, useRef, useCallback, Fragment } from "react";
+import { useState, useEffect, useRef, useCallback, useContext, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { ChevronLeft, Plus, Loader2, ChevronRight, X, Camera, Download, Sparkles, Play, FileText, Paperclip, MoreVertical, Music, Send, Check, Minus, Phone, Trash2, Mail, Copy } from "lucide-react";
+import { ChevronLeft, Plus, Loader2, ChevronRight, X, Camera, Download, Sparkles, Play, FileText, Paperclip, MoreVertical, Music, Send, Check, Minus, Phone, Trash2, Mail, Copy, Settings as SettingsIcon, ClipboardList, Newspaper, Calendar, Home as HomeIcon, BookOpen, Star, Wrench } from "lucide-react";
 import { auth } from "./firebase";
 import { sendPasswordResetEmail } from "firebase/auth";
 import {
@@ -18,7 +18,8 @@ import {
   useVisualViewportHeight, useStickToBottom, uploadOneFile, uploadOneImage, uploadOneVideo,
   validateVideoDuration, describeUploadError, MAX_FILE_ATTACHMENT_BYTES, MAX_COMPOSER_HEIGHT,
   buildStyleInstructions, authHeaders, shouldHideGoogleSignIn, COLOR_CHOICES, GlobalAppStyles, PAGE,
-  addDaysISO, getScheduleForDate, isoDate, loadJSON, todayISO,
+  addDaysISO, getScheduleForDate, isoDate, loadJSON, todayISO, ClassContext, AppModeContext,
+  HEBREW_MONTHS, LinkPreviewCard, LinkifiedText, extractFirstUrl,
 } from "./core.jsx";
 
 export function NotificationToggle({ uid, accentColor = "#0f766e" }) {
@@ -1747,3 +1748,77 @@ export function Section({ title, children }) {
     </div>
   );
 }
+
+// A small reusable numbered pill — same shape every place a tab needs to show "N new things,"
+// on either side of the app.
+export function TabBadge({ count }) {
+  if (!count || count <= 0) return null;
+  return (
+    <span className="absolute -top-1.5 -right-2.5 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[10px] font-bold leading-none">
+      {count > 9 ? "9+" : count}
+    </span>
+  );
+}
+export function Header({ navigate }) {
+  const { className, onSwitchClass, switchLabel } = useContext(ClassContext);
+  const { canSwitchToParent, switchToParent } = useContext(AppModeContext);
+  return (
+    <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center gap-2">
+        <img src="/logo-transparent.png" alt="" className="w-16 h-16 object-contain shrink-0 -my-2" />
+        <div>
+          <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
+          {className && (
+            <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-teal-700">{className} · {switchLabel || "Switch class"}</button>
+          )}
+          {canSwitchToParent && (
+            <button onClick={switchToParent} className="block text-xs text-stone-400 hover:text-teal-700">Switch to Parent view</button>
+          )}
+        </div>
+      </div>
+      <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
+        <SettingsIcon size={18} />
+      </button>
+    </div>
+  );
+}
+
+export function MainTabs({ active, navigate }) {
+  const { classType, commUnreadCount } = useContext(ClassContext);
+  const tabs = classType === "preschool"
+    ? [
+        { id: "attendance", label: "Attendance", icon: Check },
+        { id: "daily-log", label: "Daily Log", icon: ClipboardList },
+        { id: "communication", label: "Comm", icon: Mail, count: commUnreadCount },
+        { id: "blog", label: "Blog", icon: Newspaper },
+        { id: "planner", label: "Planner", icon: Calendar },
+      ]
+    : [
+        { id: "home", label: "Home", icon: HomeIcon },
+        { id: "assessments", label: "Assessments", icon: BookOpen },
+        { id: "points", label: "Points", icon: Star },
+        { id: "communication", label: "Comm", icon: Mail, count: commUnreadCount },
+        { id: "blog", label: "Blog", icon: Newspaper },
+        { id: "homework", label: "Homework", icon: FileText },
+        { id: "planner", label: "Planner", icon: Calendar },
+        { id: "tools", label: "Tools", icon: Wrench },
+      ];
+  return (
+    <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-full overflow-x-auto no-scrollbar">
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        const isActive = active === t.id;
+        return (
+          <button key={t.id} onClick={() => navigate(t.id)}
+            className={`flex-1 flex items-center justify-center rounded-md py-1.5 text-xs font-semibold whitespace-nowrap px-1 ${isActive ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+            <span className="relative inline-flex items-center gap-1.5">
+              <Icon size={14} /> {t.label}
+              <TabBadge count={t.count} />
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
