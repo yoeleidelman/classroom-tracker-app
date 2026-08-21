@@ -2414,3 +2414,16 @@ export function formatTime12h(hhmm) {
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12}:${String(m).padStart(2, "0")} ${period}`;
 }
+export const HEBREW_MONTHS = [
+  { id: "TISHREI", label: "Tishrei" }, { id: "CHESHVAN", label: "Cheshvan" }, { id: "KISLEV", label: "Kislev" },
+  { id: "TEVET", label: "Tevet" }, { id: "SHVAT", label: "Shvat" }, { id: "ADAR", label: "Adar" },
+  { id: "NISAN", label: "Nisan" }, { id: "IYYAR", label: "Iyyar" }, { id: "SIVAN", label: "Sivan" },
+  { id: "TAMUZ", label: "Tamuz" }, { id: "AV", label: "Av" }, { id: "ELUL", label: "Elul" },
+];
+export const MEAL_AMOUNTS = [
+  { id: "all", label: "All" },
+  { id: "most", label: "Most" },
+  { id: "some", label: "Some" },
+  { id: "none", label: "None" },
+  { id: "refused", label: "Refused" },
+];

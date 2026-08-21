@@ -9,14 +9,16 @@
 // foundation.
 
 import { useState, useEffect, useRef, useCallback, Fragment } from "react";
-import { ChevronLeft, Plus, Loader2, ChevronRight, X, Camera, Download, Sparkles, Play, FileText, Paperclip, MoreVertical, Music, Send } from "lucide-react";
+import { createPortal } from "react-dom";
+import { ChevronLeft, Plus, Loader2, ChevronRight, X, Camera, Download, Sparkles, Play, FileText, Paperclip, MoreVertical, Music, Send, Check, Minus, Phone, Trash2, Mail, Copy } from "lucide-react";
 import { auth } from "./firebase";
 import { sendPasswordResetEmail } from "firebase/auth";
 import {
   uid, isIOSDevice, isRunningStandalone, isThisDeviceEnabled, enableNotificationsFor, disableNotificationsFor,
   useVisualViewportHeight, useStickToBottom, uploadOneFile, uploadOneImage, uploadOneVideo,
   validateVideoDuration, describeUploadError, MAX_FILE_ATTACHMENT_BYTES, MAX_COMPOSER_HEIGHT,
-  buildStyleInstructions, authHeaders, shouldHideGoogleSignIn,
+  buildStyleInstructions, authHeaders, shouldHideGoogleSignIn, COLOR_CHOICES, GlobalAppStyles, PAGE,
+  addDaysISO, getScheduleForDate, isoDate, loadJSON, todayISO,
 } from "./core.jsx";
 
 export function NotificationToggle({ uid, accentColor = "#0f766e" }) {
@@ -720,3 +722,1028 @@ export function ForgotPasswordModal({ onClose }) {
   );
 }
 
+// ---------- Points ----------
+
+export const WHEEL_COLORS = ["#0e6e62", "#c0362c", "#b7791f", "#2e7d5b", "#b5651d", "#8a5763", "#756d4f", "#8a6f4a"];
+
+// Deliberately a real, stable top-level component (not defined inline inside RaffleView) —
+// if it were recreated on every render, React would treat each render's version as a brand
+// new component type and remount the div from scratch on every state change, which silently
+// destroys the CSS transition the spin animation depends on (there'd be no "previous rotation"
+// for the browser to animate from, so it would just snap straight to the final angle).
+export function RaffleWheel({ size, wheelBackground, rotation, participants }) {
+  const sliceDeg = participants.length > 0 ? 360 / participants.length : 360;
+  const labelRadius = size * 0.33;
+  const fontSize = Math.max(8, Math.min(size * 0.045, size * 0.9 / Math.max(participants.length, 1)));
+  return (
+    <div className="relative" style={{ width: size, height: size }}>
+      <div className="absolute left-1/2 -translate-x-1/2 z-10" style={{ top: -size * 0.04 }}>
+        <div style={{ width: 0, height: 0, borderLeft: `${size * 0.035}px solid transparent`, borderRight: `${size * 0.035}px solid transparent`, borderTop: `${size * 0.06}px solid #2b2723` }} />
+      </div>
+      <div className="rounded-full shadow-lg relative" style={{ width: size, height: size, background: wheelBackground, transform: `rotate(${rotation}deg)`, transition: "transform 5s cubic-bezier(0.33, 1, 0.68, 1)" }}>
+        {participants.map((p, i) => {
+          const centerAngle = i * sliceDeg + sliceDeg / 2;
+          // Un-rotated text reads left-to-right, which in this rotation system corresponds to
+          // "pointing right" (90°) — so subtracting 90° is what actually aligns the text along
+          // the slice's own radial axis (center-to-edge), rather than across it. Flipped 180° on
+          // whichever half would otherwise read upside-down, checked against the real final
+          // rotation, not the raw slice angle.
+          let netRotation = centerAngle - 90;
+          const normalized = ((netRotation % 360) + 360) % 360;
+          if (normalized > 90 && normalized < 270) netRotation += 180;
+          const innerRotation = netRotation - centerAngle;
+          return (
+            <div key={p.id} className="absolute" style={{ top: "50%", left: "50%", width: 0, height: 0 }}>
+              <div style={{ transform: `rotate(${centerAngle}deg) translateY(-${labelRadius}px) rotate(${innerRotation}deg)` }}>
+                <span className="text-white font-bold whitespace-nowrap" style={{ fontSize, textShadow: "0 1px 3px rgba(0,0,0,0.5)", display: "inline-block", transform: "translate(-50%, -50%)" }}>
+                  {p.name}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="absolute rounded-full bg-white border-4 border-stone-800 flex items-center justify-center" style={{ width: size * 0.16, height: size * 0.16, top: "50%", left: "50%", transform: "translate(-50%, -50%)" }}>
+        <span style={{ fontSize: size * 0.06 }}>🎉</span>
+      </div>
+    </div>
+  );
+}
+
+export function RaffleLegend({ participants }) {
+  return (
+    <div className="flex flex-wrap gap-2 justify-center max-w-md">
+      {participants.map((s, i) => (
+        <span key={s.id} className="flex items-center gap-1.5 text-xs font-medium">
+          <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: WHEEL_COLORS[i % WHEEL_COLORS.length] }} />
+          {s.name}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export function RaffleView({ roster }) {
+  const [selectedIds, setSelectedIds] = useState(roster.map((s) => s.id)); // starts with everyone in
+  const [spinning, setSpinning] = useState(false);
+  const [winner, setWinner] = useState(null);
+  const [rotation, setRotation] = useState(0);
+  const [fullScreen, setFullScreen] = useState(false);
+  const fsRef = useRef(null);
+
+  useEffect(() => {
+    if (fullScreen && fsRef.current && !document.fullscreenElement) {
+      fsRef.current.requestFullscreen?.().catch(() => {});
+    }
+  }, [fullScreen]);
+
+  useEffect(() => {
+    const handler = () => { if (!document.fullscreenElement) setFullScreen(false); };
+    document.addEventListener("fullscreenchange", handler);
+    return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
+
+  const exitFullScreenMode = () => {
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    setFullScreen(false);
+  };
+
+  const toggle = (id) => setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const participants = roster.filter((s) => selectedIds.includes(s.id));
+
+  // Only shared programs carry sourceClassName (a regular class's own roster doesn't need
+  // grouping, since every student is already in the same one class).
+  const groupedByClass = roster.some((s) => s.sourceClassName)
+    ? roster.reduce((acc, s) => {
+        const key = s.sourceClassName || "Other";
+        (acc[key] = acc[key] || []).push(s);
+        return acc;
+      }, {})
+    : null;
+
+  const sliceDeg = participants.length > 0 ? 360 / participants.length : 360;
+  const gradientStops = participants.map((_, i) => {
+    const color = WHEEL_COLORS[i % WHEEL_COLORS.length];
+    return `${color} ${i * sliceDeg}deg ${(i + 1) * sliceDeg}deg`;
+  }).join(", ");
+  const wheelBackground = participants.length > 0 ? `conic-gradient(${gradientStops})` : "#e7dfcf";
+
+  const spin = () => {
+    if (participants.length === 0 || spinning) return;
+    setWinner(null);
+    setSpinning(true);
+    const winnerIndex = Math.floor(Math.random() * participants.length);
+    const sliceCenterAngle = winnerIndex * sliceDeg + sliceDeg / 2;
+    const neededFinalMod = (360 - sliceCenterAngle) % 360;
+    const extraSpins = 6 + Math.floor(Math.random() * 3);
+    setRotation((prev) => {
+      const prevMod = ((prev % 360) + 360) % 360;
+      let delta = neededFinalMod - prevMod;
+      if (delta < 0) delta += 360;
+      return prev + delta + extraSpins * 360;
+    });
+    setTimeout(() => {
+      setWinner(participants[winnerIndex]);
+      setSpinning(false);
+    }, 5000);
+  };
+
+  return (
+    <div>
+      <p className="text-xs text-stone-400 mb-4">Pick who's entered, then spin — no outside websites needed.</p>
+
+      <div className="flex gap-1.5 mb-2">
+        <button onClick={() => setSelectedIds(roster.map((s) => s.id))} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-full px-3 py-1 hover:bg-teal-50">Select all</button>
+        <button onClick={() => setSelectedIds([])} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-full px-3 py-1 hover:bg-stone-50">Select none</button>
+      </div>
+      <div className="mb-5 md:w-[32rem]">
+        {groupedByClass ? (
+          Object.entries(groupedByClass).map(([className, students]) => (
+            <div key={className} className="mb-3">
+              <p className="text-xs font-semibold text-stone-500 uppercase mb-1.5">{className}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {students.map((s) => (
+                  <button key={s.id} onClick={() => toggle(s.id)}
+                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedIds.includes(s.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-500 border-stone-300"}`}>
+                    {s.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {roster.map((s) => (
+              <button key={s.id} onClick={() => toggle(s.id)}
+                className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${selectedIds.includes(s.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-500 border-stone-300"}`}>
+                {s.name}
+              </button>
+            ))}
+          </div>
+        )}
+        {roster.length === 0 && <p className="text-xs text-stone-400">Add students first.</p>}
+      </div>
+
+      <div className="flex flex-col items-center bg-white border border-stone-200 rounded-xl p-6 md:w-[32rem]">
+        <RaffleWheel size={240} wheelBackground={wheelBackground} rotation={rotation} participants={participants} />
+        <div className="mt-4 mb-4"><RaffleLegend participants={participants} /></div>
+
+        {winner && !spinning && (
+          <div className="mb-4 text-center">
+            <p className="text-2xl font-bold text-emerald-700">🎉 {winner.name} 🎉</p>
+          </div>
+        )}
+
+        <div className="flex gap-2 w-full">
+          <button onClick={spin} disabled={spinning || participants.length === 0} className="flex-1 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+            {spinning ? "Spinning..." : "🎡 Spin the wheel"}
+          </button>
+          <button onClick={() => setFullScreen(true)} disabled={participants.length === 0} className="px-4 text-sm font-semibold text-teal-700 border border-teal-300 rounded-lg hover:bg-teal-50 disabled:opacity-40">⛶ Full screen</button>
+        </div>
+      </div>
+
+      {/* Same portal fix as TimerWidget's own fullscreen overlay, and for the same reason — see
+          that comment for the full explanation. Renders straight onto document.body so this
+          overlay's own position: fixed is never affected by whatever CSS any ancestor container
+          happens to be doing, independent of whether the real Fullscreen API works on a given
+          device. */}
+      {fullScreen && createPortal(
+        <div ref={fsRef} className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-stone-900">
+          <button onClick={exitFullScreenMode} className="absolute top-4 right-4 md:top-8 md:right-8 text-white bg-white/10 hover:bg-white/20 rounded-full px-4 py-2.5 text-sm md:text-base font-semibold flex items-center gap-2">
+            <ChevronLeft size={18} /> Exit full screen
+          </button>
+          <RaffleWheel size={Math.min(500, typeof window !== "undefined" ? window.innerHeight * 0.55 : 400)} wheelBackground={wheelBackground} rotation={rotation} participants={participants} />
+          <div className="mt-6 mb-6 text-white"><RaffleLegend participants={participants} /></div>
+          {winner && !spinning && <p className="text-4xl md:text-6xl font-bold text-emerald-400 mb-8 animate-pulse">🎉 {winner.name} 🎉</p>}
+          <button onClick={spin} disabled={spinning || participants.length === 0} className="bg-white text-stone-900 rounded-xl px-10 py-4 text-xl font-bold hover:bg-stone-100 disabled:opacity-40">
+            {spinning ? "Spinning..." : "🎡 Spin the wheel"}
+          </button>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+export function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, programMode, programName, onBackFromProgram, backLabel, programs, onOpenProgram }) {
+  const [subTab, setSubTab] = useState("rewards");
+  const cats = config.points?.categories || [];
+  const [activeId, setActiveId] = useState(cats[0]?.id || null);
+  const active = cats.find((c) => c.id === activeId) || cats[0];
+  const [showForm, setShowForm] = useState(cats.length === 0);
+  const [form, setForm] = useState({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
+
+  useEffect(() => { if (!activeId && cats[0]) setActiveId(cats[0].id); }, [cats, activeId]);
+  useEffect(() => { if (programMode && subTab === "classlog") setSubTab("rewards"); }, [programMode, subTab]);
+
+  // Only shared programs carry sourceClassName (a regular class's own roster doesn't need
+  // grouping, since every student is already in that one class) — grouped list of
+  // [className, students[]] pairs when applicable, null otherwise.
+  const pointsRosterGrouped = roster.some((s) => s.sourceClassName)
+    ? Object.entries(roster.filter(participatesInPoints).reduce((acc, s) => {
+        const key = s.sourceClassName || "Other";
+        (acc[key] = acc[key] || []).push(s);
+        return acc;
+      }, {}))
+    : null;
+
+  const submitForm = () => {
+    const label = form.label.trim();
+    if (!label) return;
+    const newCat = { id: uid(), ...form, label };
+    onAddCategory(newCat);
+    setActiveId(newCat.id);
+    setShowForm(false);
+    setForm({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
+  };
+
+  return (
+    <div className={PAGE}>
+      {programMode ? (
+        <div className="flex items-center justify-between mb-5">
+          <div>
+            <button onClick={onBackFromProgram} className="flex items-center text-stone-500 text-sm hover:text-stone-800 mb-1"><ChevronLeft size={16} /> {backLabel || "Back to my class"}</button>
+            <h1 className="display-font text-xl font-bold text-stone-900">{programName}</h1>
+            <p className="text-xs text-stone-400">Shared program — points and raffles only, combined across every class in it.</p>
+          </div>
+        </div>
+      ) : (
+        <>
+          <Header navigate={navigate} />
+          <MainTabs active="points" navigate={navigate} />
+        </>
+      )}
+
+      {!programMode && (programs || []).length > 0 && (
+        <div className="bg-violet-50 border border-violet-200 rounded-xl p-3 mb-5 md:w-96">
+          <p className="text-xs font-semibold text-violet-900 mb-2">Shared programs this class is part of</p>
+          <div className="flex flex-wrap gap-1.5">
+            {programs.map((p) => (
+              <button key={p.id} onClick={() => onOpenProgram(p.id)} className="text-xs font-semibold bg-white border border-violet-300 text-violet-700 rounded-full px-3 py-1.5 hover:bg-violet-100">
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className={`flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 ${programMode ? "md:w-72" : "md:w-96"}`}>
+        <button onClick={() => setSubTab("rewards")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "rewards" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Rewards</button>
+        {!programMode && (
+          <button onClick={() => setSubTab("classlog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "classlog" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Class Log</button>
+        )}
+        <button onClick={() => setSubTab("raffle")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "raffle" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Raffle</button>
+      </div>
+
+      {subTab === "classlog" && !programMode ? (
+        <ClassLogView config={config} plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark} />
+      ) : subTab === "raffle" ? (
+        <RaffleView roster={roster} />
+      ) : (
+      <>
+      <div className="flex flex-wrap items-center gap-1.5 mb-5">
+        {cats.map((c) => (
+          <button key={c.id} onClick={() => { setActiveId(c.id); setShowForm(false); }}
+            className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${activeId === c.id && !showForm ? `bg-${c.color}-500 text-white border-${c.color}-500` : "text-stone-600 border-stone-300"}`}>
+            {c.label}
+          </button>
+        ))}
+        <button onClick={() => setShowForm(true)}
+          className={`flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed ${showForm ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300"}`}>
+          <Plus size={12} /> Add category
+        </button>
+      </div>
+
+      {showForm && (
+        <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-96">
+          <p className="text-sm font-semibold text-stone-800 mb-3">New points category</p>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Name</label>
+          <input value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+            placeholder="e.g. Diligence Points" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+
+          <div className="flex gap-2 mb-3">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-stone-500 mb-1">Tracked</label>
+              <select value={form.scope} onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                <option value="individual">Per-student</option>
+                <option value="class">Whole class</option>
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-stone-500 mb-1">Display</label>
+              <select value={form.displayMode} onChange={(e) => setForm((f) => ({ ...f, displayMode: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                <option value="bar">Fill-up visual</option>
+                <option value="counter">Simple counter</option>
+                <option value="checkx">Check / X tally</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex gap-2 mb-3">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-stone-500 mb-1">Add amount</label>
+              <input type="number" min={1} value={form.increment} onChange={(e) => setForm((f) => ({ ...f, increment: Math.max(1, Number(e.target.value) || 1) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            </div>
+            {!form.indefinite && (
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-stone-500 mb-1">Reward at</label>
+                <input type="number" min={0} value={form.threshold} onChange={(e) => setForm((f) => ({ ...f, threshold: Math.max(0, Number(e.target.value) || 0) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+              </div>
+            )}
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-stone-500 mb-1">Color</label>
+              <select value={form.color} onChange={(e) => setForm((f) => ({ ...f, color: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 mb-3 text-xs text-stone-600">
+            <input type="checkbox" checked={form.indefinite} onChange={(e) => setForm((f) => ({ ...f, indefinite: e.target.checked, threshold: e.target.checked ? 0 : (f.threshold || 10) }))} />
+            No cap — just count up indefinitely (good for lines memorized, books read, and other ongoing totals)
+          </label>
+
+          <label className="block text-xs font-medium text-stone-500 mb-1">Reward description</label>
+          <input value={form.rewardMessage} onChange={(e) => setForm((f) => ({ ...f, rewardMessage: e.target.value }))}
+            placeholder="e.g. Pizza party" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
+
+          <div className="flex gap-2">
+            <button onClick={submitForm} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Create category</button>
+            {cats.length > 0 && <button onClick={() => setShowForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>}
+          </div>
+        </div>
+      )}
+
+      {!showForm && active && (
+        active.displayMode === "checkx" ? (
+          active.scope === "class" ? (
+            <ClassCheckXCard cat={active}
+              checkValue={classPoints[`${active.id}:check`] || 0}
+              xValue={classPoints[`${active.id}:x`] || 0}
+              onCheck={() => addClassPoints(`${active.id}:check`, 1)}
+              onX={() => addClassPoints(`${active.id}:x`, 1)}
+              onReset={() => { resetClassPoints(`${active.id}:check`); resetClassPoints(`${active.id}:x`); }} />
+          ) : (
+            <div className="space-y-1.5">
+              {pointsRosterGrouped ? (
+                pointsRosterGrouped.map(([className, students]) => (
+                  <div key={className} className="mb-3">
+                    <p className="text-xs font-semibold text-stone-500 uppercase mb-1.5">{className}</p>
+                    <div className="space-y-1.5">
+                      {students.map((s) => {
+                        const checks = studentData[s.id]?.points?.[`${active.id}:check`] || 0;
+                        const xs = studentData[s.id]?.points?.[`${active.id}:x`] || 0;
+                        return (
+                          <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
+                            <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
+                            <span className="text-sm font-bold text-emerald-700 shrink-0">{checks} ✓</span>
+                            <span className="text-sm font-bold text-rose-700 shrink-0">{xs} ✗</span>
+                            <div className="flex items-center gap-1.5 ml-auto">
+                              <button onClick={() => addPoints(s.id, `${active.id}:check`, 1)} className="w-8 h-8 flex items-center justify-center text-white bg-emerald-600 rounded-full hover:bg-emerald-700 text-sm font-bold">✓</button>
+                              <button onClick={() => addPoints(s.id, `${active.id}:x`, 1)} className="w-8 h-8 flex items-center justify-center text-white bg-rose-600 rounded-full hover:bg-rose-700 text-sm font-bold">✗</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))
+              ) : roster.filter(participatesInPoints).map((s) => {
+                const checks = studentData[s.id]?.points?.[`${active.id}:check`] || 0;
+                const xs = studentData[s.id]?.points?.[`${active.id}:x`] || 0;
+                return (
+                  <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
+                    <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
+                    <span className="text-sm font-bold text-emerald-700 shrink-0">{checks} ✓</span>
+                    <span className="text-sm font-bold text-rose-700 shrink-0">{xs} ✗</span>
+                    <div className="flex items-center gap-1.5 ml-auto">
+                      <button onClick={() => addPoints(s.id, `${active.id}:check`, 1)} className="w-8 h-8 flex items-center justify-center text-white bg-emerald-600 rounded-full hover:bg-emerald-700 text-sm font-bold">✓</button>
+                      <button onClick={() => addPoints(s.id, `${active.id}:x`, 1)} className="w-8 h-8 flex items-center justify-center text-white bg-rose-600 rounded-full hover:bg-rose-700 text-sm font-bold">✗</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
+        ) : active.scope === "class" ? (
+          <ClassPointsCard cat={active} value={classPoints[active.id] || 0}
+            onAdd={() => addClassPoints(active.id, active.increment || 1)}
+            onSubtract={() => addClassPoints(active.id, -(active.increment || 1))}
+            onReset={() => resetClassPoints(active.id)} />
+        ) : (
+          <div className="space-y-1.5">
+            {pointsRosterGrouped ? (
+              pointsRosterGrouped.map(([className, students]) => (
+                <div key={className} className="mb-3">
+                  <p className="text-xs font-semibold text-stone-500 uppercase mb-1.5">{className}</p>
+                  <div className="space-y-1.5">
+                    {students.map((s) => {
+                      const pts = studentData[s.id]?.points?.[active.id] || 0;
+                      const ready = active.threshold > 0 && pts >= active.threshold;
+                      return (
+                        <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
+                          <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
+                          <span className="text-sm font-bold text-stone-800 w-12 shrink-0">{pts}{active.threshold ? ` / ${active.threshold}` : ""}</span>
+                          {active.displayMode === "bar" && active.threshold > 0 && (
+                            <div className="w-24 shrink-0"><FillMeter value={pts} max={active.threshold} color={active.color} size="sm" /></div>
+                          )}
+                          {ready && <span className="text-xs text-amber-700 font-semibold">🎉 Ready</span>}
+                          <div className="flex items-center gap-1.5 ml-auto">
+                            <button onClick={() => addPoints(s.id, active.id, -(active.increment || 1))} className="w-7 h-7 flex items-center justify-center text-stone-400 border border-stone-200 rounded-full hover:bg-stone-50">
+                              <Minus size={12} />
+                            </button>
+                            <button onClick={() => addPoints(s.id, active.id, active.increment || 1)} className={`w-7 h-7 flex items-center justify-center text-white bg-${active.color}-500 rounded-full hover:opacity-90`}>
+                              <Plus size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))
+            ) : roster.filter(participatesInPoints).map((s) => {
+              const pts = studentData[s.id]?.points?.[active.id] || 0;
+              const ready = active.threshold > 0 && pts >= active.threshold;
+              return (
+                <div key={s.id} className="bg-white rounded-xl border border-stone-200 px-3 py-2 flex items-center gap-3 flex-wrap">
+                  <span className="font-medium text-stone-800 text-sm w-36 truncate shrink-0">{s.name}</span>
+                  <span className="text-sm font-bold text-stone-800 w-12 shrink-0">{pts}{active.threshold ? ` / ${active.threshold}` : ""}</span>
+                  {active.displayMode === "bar" && active.threshold > 0 && (
+                    <div className="w-24 shrink-0"><FillMeter value={pts} max={active.threshold} color={active.color} size="sm" /></div>
+                  )}
+                  {ready && <span className="text-xs text-amber-700 font-semibold">🎉 Ready</span>}
+                  <div className="flex items-center gap-1.5 ml-auto">
+                    <button onClick={() => addPoints(s.id, active.id, -(active.increment || 1))} className="w-7 h-7 flex items-center justify-center text-stone-400 border border-stone-200 rounded-full hover:bg-stone-50">
+                      <Minus size={12} />
+                    </button>
+                    <button onClick={() => addPoints(s.id, active.id, active.increment || 1)} className={`w-7 h-7 flex items-center justify-center text-white bg-${active.color}-500 rounded-full hover:opacity-90`}>
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+export function FillMeter({ value, max, color, size = "lg" }) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  if (size === "sm") {
+    return (
+      <div className="w-full h-3 bg-stone-100 rounded-full overflow-hidden mt-1.5 mb-2">
+        <div className={`h-full bg-gradient-to-r from-${color}-400 to-${color}-600 rounded-full transition-all duration-500`} style={{ width: `${pct}%` }} />
+      </div>
+    );
+  }
+  return (
+    <div className="relative mx-auto" style={{ width: 96, height: 140 }}>
+      <div className="absolute inset-0 rounded-t-xl rounded-b-[2rem] border-2 border-stone-300 bg-stone-50 overflow-hidden">
+        <div className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-${color}-600 to-${color}-400 transition-all duration-700 ease-out`} style={{ height: `${pct}%` }}>
+          <div className="absolute -top-1 left-0 right-0 h-2 bg-white/30 rounded-full" />
+        </div>
+        <div className="absolute top-3 left-3 w-3 h-8 bg-white/40 rounded-full rotate-6 pointer-events-none" />
+      </div>
+    </div>
+  );
+}
+
+// ---------- Class behavior log (period-by-period daily tally) ----------
+
+export function weekRange(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const sunday = new Date(d);
+  sunday.setDate(d.getDate() - d.getDay());
+  const days = [];
+  for (let i = 0; i < 7; i++) days.push(addDaysISO(isoDate(sunday), i));
+  return days;
+}
+
+export function ClassLogView({ config, plannerDays, behaviorLogData, adjustBehaviorMark }) {
+  const [date, setDate] = useState(todayISO());
+  const [summaryView, setSummaryView] = useState("day"); // day | week
+
+  const markTypes = config.points?.behaviorLog?.markTypes || [];
+  const summaryMode = config.points?.behaviorLog?.summaryMode || "daily";
+  const dayTypeMap = {};
+  (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
+
+  const entry = plannerDays?.[date] || {};
+  const dayType = entry.dayType ? dayTypeMap[entry.dayType] : null;
+  const template = getScheduleForDate(date, dayType, config, plannerDays);
+  const noSchool = dayType?.hidesAttendance;
+
+  const dayTotals = (dateKey) => {
+    const dayData = behaviorLogData?.[dateKey] || {};
+    const totals = {};
+    markTypes.forEach((m) => (totals[m.id] = 0));
+    Object.values(dayData).forEach((periodMarks) => {
+      Object.entries(periodMarks || {}).forEach(([markId, count]) => {
+        totals[markId] = (totals[markId] || 0) + count;
+      });
+    });
+    return totals;
+  };
+
+  const weekDates = weekRange(date);
+  const weekTotalsByPeriod = (periodId) => {
+    const totals = {};
+    markTypes.forEach((m) => (totals[m.id] = 0));
+    weekDates.forEach((d) => {
+      const marks = behaviorLogData?.[d]?.[periodId] || {};
+      markTypes.forEach((m) => (totals[m.id] += marks[m.id] || 0));
+    });
+    return totals;
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-5 flex-wrap">
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        {dayType && (
+          <span className={`text-xs font-semibold px-2 py-1 rounded-full bg-${dayType.color}-100 text-${dayType.color}-700`}>{dayType.label}</span>
+        )}
+        {(summaryMode === "weekly" || summaryMode === "both") && (
+          <div className="flex gap-1 bg-stone-100 rounded-lg p-1 ml-auto">
+            <button onClick={() => setSummaryView("day")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${summaryView === "day" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Today</button>
+            <button onClick={() => setSummaryView("week")} className={`text-xs font-semibold px-2.5 py-1 rounded-md ${summaryView === "week" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>This Week</button>
+          </div>
+        )}
+      </div>
+
+      {noSchool ? (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">{dayType.label} — no classes logged this day.</p>
+      ) : !template || template.length === 0 ? (
+        <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-6 text-center">
+          {entry.dayType ? `No schedule template assigned to "${dayType?.label}" yet — set one in Settings.` : "Set this day's type in the Planner calendar first, so its class periods show up here."}
+        </p>
+      ) : summaryView === "week" ? (
+        <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-stone-50 border-b border-stone-200">
+                <th className="text-left px-3 py-2 font-semibold text-stone-600">Period</th>
+                {markTypes.map((m) => <th key={m.id} className="text-center px-3 py-2 font-semibold text-stone-600">{m.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {template.map((slot) => {
+                const totals = weekTotalsByPeriod(slot.id);
+                return (
+                  <tr key={slot.id} className="border-b border-stone-100 last:border-0">
+                    <td className="px-3 py-2 text-stone-700 font-medium">{slot.label}</td>
+                    {markTypes.map((m) => <td key={m.id} className="text-center px-3 py-2 text-stone-800 font-semibold">{totals[m.id]}</td>)}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="text-[10px] text-stone-400 px-3 py-2">Week of {weekDates[0]} – {weekDates[6]}</p>
+        </div>
+      ) : (
+        <>
+          <div className="space-y-2 mb-4">
+            {template.map((slot) => {
+              const marks = behaviorLogData?.[date]?.[slot.id] || {};
+              return (
+                <div key={slot.id} className="bg-white border border-stone-200 rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-semibold text-stone-800">{slot.label}</span>
+                    <span className="text-[10px] text-stone-400">{slot.startTime}–{slot.endTime}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {markTypes.map((m) => (
+                      <div key={m.id} className="flex items-center gap-1.5 bg-stone-50 rounded-lg px-2 py-1">
+                        <span className={`text-xs font-semibold text-${m.color}-700`}>{m.label}</span>
+                        <span className="text-sm font-bold text-stone-800 w-5 text-center">{marks[m.id] || 0}</span>
+                        <button onClick={() => adjustBehaviorMark(date, slot.id, m.id, 1)} className={`flex items-center justify-center w-6 h-6 rounded-full bg-${m.color}-500 text-white hover:opacity-90`}><Plus size={12} /></button>
+                        <button onClick={() => adjustBehaviorMark(date, slot.id, m.id, -1)} className="flex items-center justify-center w-6 h-6 rounded-full border border-stone-300 text-stone-500 hover:bg-stone-100"><Minus size={12} /></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {(summaryMode === "daily" || summaryMode === "both") && (
+            <div className="bg-teal-50 border border-teal-200 rounded-xl p-3">
+              <p className="text-xs font-semibold text-teal-900 mb-1.5">Today's totals</p>
+              <div className="flex gap-4">
+                {markTypes.map((m) => (
+                  <span key={m.id} className="text-sm">
+                    <span className={`font-bold text-${m.color}-700`}>{dayTotals(date)[m.id] || 0}</span>
+                    <span className="text-stone-500 ml-1">{m.label}{(dayTotals(date)[m.id] || 0) === 1 ? "" : "s"}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function ClassCheckXCard({ cat, checkValue, xValue, onCheck, onX, onReset }) {
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 p-6 md:w-96">
+      <p className="text-stone-500 text-sm mb-3">{cat.label}</p>
+      <div className="flex items-center justify-center gap-8 mb-5">
+        <div className="text-center">
+          <p className="display-font text-4xl font-bold text-emerald-700">{checkValue}</p>
+          <p className="text-xs text-stone-400 mt-0.5">✓ checks</p>
+        </div>
+        <div className="text-center">
+          <p className="display-font text-4xl font-bold text-rose-700">{xValue}</p>
+          <p className="text-xs text-stone-400 mt-0.5">✗ x's</p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button onClick={onCheck} className="flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold text-white bg-emerald-600 rounded-lg py-2.5 hover:bg-emerald-700">
+          ✓ Check
+        </button>
+        <button onClick={onX} className="flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold text-white bg-rose-600 rounded-lg py-2.5 hover:bg-rose-700">
+          ✗ X
+        </button>
+      </div>
+      {(checkValue > 0 || xValue > 0) && (
+        <button onClick={onReset} className="w-full mt-2 text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg py-2 hover:bg-stone-50">Reset tally</button>
+      )}
+    </div>
+  );
+}
+
+export function ClassPointsCard({ cat, value, onAdd, onSubtract, onReset }) {
+  const ready = cat.threshold > 0 && value >= cat.threshold;
+  return (
+    <div className="bg-white rounded-2xl border border-stone-200 p-6 md:w-96">
+      <p className="text-stone-500 text-sm mb-1">{cat.label}</p>
+      <p className="display-font text-4xl font-bold text-stone-900 mb-3">{value}{cat.threshold ? <span className="text-lg text-stone-400"> / {cat.threshold}</span> : null}</p>
+      {cat.displayMode === "bar" && cat.threshold > 0 && (
+        <div className="flex justify-center mb-4"><FillMeter value={value} max={cat.threshold} color={cat.color} size="lg" /></div>
+      )}
+      {ready && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+          <p className="text-sm font-semibold text-amber-900">🎉 Reward ready</p>
+          <p className="text-xs text-amber-700">{cat.rewardMessage}</p>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <button onClick={onAdd} className={`flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold text-white bg-${cat.color}-500 rounded-lg py-2.5 hover:opacity-90`}>
+          <Plus size={14} /> Add {cat.increment || 1}
+        </button>
+        <button onClick={onSubtract} className="px-4 flex items-center justify-center text-stone-500 border border-stone-200 rounded-lg hover:bg-stone-50"><Minus size={14} /></button>
+        {ready && <button onClick={onReset} className="px-4 flex items-center justify-center text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg hover:bg-stone-50">Reward given — reset</button>}
+      </div>
+    </div>
+  );
+}
+
+export async function generateClassAnnouncementMessage(topic, config, teacher) {
+  const teacherName = teacher?.name;
+  const prompt = `${buildStyleInstructions(config, teacherName)}
+
+This one is a class-wide announcement going out to every parent at once — not about any one student. Regardless of the tone described above, write this specific message in a formal, official register appropriate for a broadcast notice — clear, businesslike, no casual phrasing — since this is what parents expect from an official class-wide notice.
+
+STRICT RULES:
+- Use ONLY the information given below. Do not invent specifics (times, amounts, locations) that weren't stated.
+- If the topic is vague or missing a detail, write around it naturally rather than inventing one.
+
+What this announcement is about, in the teacher's own words: ${topic}
+
+Write a short, clear announcement — 2-4 sentences. Output only the message text, nothing else.`;
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 600, messages: [{ role: "user", content: prompt }] }),
+  });
+  const data = await response.json();
+  const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+  return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
+}
+// Fixed content, not AI-generated — login credentials need to be exact, not paraphrased.
+export function buildParentLoginEmail(parentName, childNames, studentTypes, parentEmail, defaultPassword) {
+  const portalUrl = `${window.location.origin}${window.location.pathname}?portal=parent`;
+
+  const subject = `Your SJA School App Login Information`;
+  const body = `Hi ${parentName || "there"},
+
+I'm reaching out regarding the new SJA School App that we will be using for communication between parents, teachers, and the school. The app will keep you connected with messages, school and classroom updates, pictures, and other important information.
+
+Your login information is:
+Login: ${parentEmail}
+Temporary password: ${defaultPassword}
+
+Access the SJA School App here:
+${portalUrl}
+
+Once you have logged in, you can change the temporary password by opening the app's Settings and selecting the option to change your password.
+
+INSTALLING THE APP
+
+ANDROID
+1. Open the link above using Google Chrome.
+2. Tap the three-dot menu beside the address bar.
+3. Select "Install app" or "Add to Home screen," depending on the option shown on your device.
+4. Follow the prompts to complete the installation.
+5. Open the SJA app from the icon on your Home screen.
+6. Open Settings within the app and turn on notifications. When your device asks for permission, tap "Allow."
+
+iPHONE OR iPAD
+1. Open the link above using Safari.
+2. Tap the Share button.
+3. Scroll down and select "Add to Home Screen."
+4. Make sure "Open as Web App" is enabled if that option appears, and then tap "Add."
+5. Open the SJA app using the new icon on your Home Screen.
+6. Open Settings within the app and enable notifications. When your device asks for permission, tap "Allow."
+
+Enabling notifications is important so that you receive messages, announcements, and classroom updates promptly.
+
+If you have any questions or experience difficulty with any part of the setup process, please reply to this email. I will be happy to guide you and make sure that you are fully set up with the app.
+
+Warmly,
+Rabbi Eidelman
+SJA`;
+
+  return { subject, body };
+}
+
+export function StudentContactFields({ student, onUpdateField }) {
+  const [defaultPassword, setDefaultPassword] = useState("Welcome123");
+  useEffect(() => { loadJSON("defaultParentPassword", "Welcome123", true).then(setDefaultPassword); }, []);
+
+  const emailParent = (parentName, parentEmail) => {
+    const { subject, body } = buildParentLoginEmail(parentName, [student.name], [student.studentType], parentEmail, defaultPassword);
+    // window.location.href, not a synthetic click on a detached <a> — Chrome's handoff of a
+    // mailto: link to the OS's registered mail app is measurably less reliable for a
+    // programmatic click on an element that was never actually attached to the page than for a
+    // real navigation, and this became visible specifically once the email body grew past what
+    // it used to be (the longer install instructions push the encoded URL close to a length
+    // that's historically been fragile for that OS-level handoff). This is the standard, more
+    // dependable way to trigger a mailto: link from JS.
+    window.location.href = `mailto:${encodeURIComponent(parentEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  };
+
+  return (
+    <div className="px-3 pb-3 border-t border-stone-100 pt-2 md:grid md:grid-cols-2 md:gap-2">
+      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 1</p>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+        <input value={student.parent1Name || ""} onChange={(e) => onUpdateField(student.id, "parent1Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+        <input type="tel" value={student.parentPhone || ""} onChange={(e) => onUpdateField(student.id, "parentPhone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Email (primary contact)</label>
+        <div className="flex gap-1.5">
+          <input type="email" value={student.parentEmail || ""} onChange={(e) => onUpdateField(student.id, "parentEmail", e.target.value)} placeholder="parent@example.com" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          {student.parentEmail && (
+            <button onClick={() => emailParent(student.parent1Name, student.parentEmail)} className="shrink-0 h-fit text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 hover:bg-teal-50 whitespace-nowrap">
+              Email login info
+            </button>
+          )}
+        </div>
+      </div>
+
+      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Parent / Guardian 2</p>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Name</label>
+        <input value={student.parent2Name || ""} onChange={(e) => onUpdateField(student.id, "parent2Name", e.target.value)} placeholder="Full name" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Phone</label>
+        <input type="tel" value={student.parent2Phone || ""} onChange={(e) => onUpdateField(student.id, "parent2Phone", e.target.value)} placeholder="(555) 555-5555" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Email</label>
+        <div className="flex gap-1.5">
+          <input type="email" value={student.parent2Email || ""} onChange={(e) => onUpdateField(student.id, "parent2Email", e.target.value)} placeholder="parent2@example.com" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+          {student.parent2Email && (
+            <button onClick={() => emailParent(student.parent2Name, student.parent2Email)} className="shrink-0 h-fit text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-2.5 py-1.5 hover:bg-teal-50 whitespace-nowrap">
+              Email login info
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Home address</label>
+        <input value={student.homeAddress || ""} onChange={(e) => onUpdateField(student.id, "homeAddress", e.target.value)} placeholder="Street, city, zip" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+
+      <p className="md:col-span-2 text-[10px] font-semibold text-stone-400 uppercase mt-1 mb-0.5">Birthday</p>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Hebrew birthday — month</label>
+        <select value={student.hebrewBirthdayMonth || ""} onChange={(e) => onUpdateField(student.id, "hebrewBirthdayMonth", e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-2">
+          <option value="">Not set</option>
+          {HEBREW_MONTHS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Hebrew birthday — day</label>
+        <input type="number" min={1} max={30} value={student.hebrewBirthdayDay || ""} onChange={(e) => onUpdateField(student.id, "hebrewBirthdayDay", e.target.value ? Number(e.target.value) : "")} placeholder="1–30" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Gregorian birthday (optional)</label>
+        <input type="date" value={student.gregorianBirthday || ""} onChange={(e) => onUpdateField(student.id, "gregorianBirthday", e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+      <div>
+        <label className="block text-[10px] text-stone-400 mb-0.5">Preferred celebration date (optional)</label>
+        <input type="date" value={student.preferredCelebrationDate || ""} onChange={(e) => onUpdateField(student.id, "preferredCelebrationDate", e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      </div>
+
+      <div className="md:col-span-2">
+        <label className="block text-[10px] text-stone-400 mb-0.5">Notes</label>
+        <textarea value={student.notes || ""} onChange={(e) => onUpdateField(student.id, "notes", e.target.value)} rows={2} placeholder="Anything worth remembering about this student" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+      </div>
+    </div>
+  );
+}
+export function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
+  const [name, setName] = useState(teacher?.name || "");
+  const [nameSaved, setNameSaved] = useState(false);
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwSuccess, setPwSuccess] = useState(false);
+
+  const saveName = async () => {
+    if (!name.trim()) return;
+    await onUpdateName(name.trim());
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  const submitPasswordChange = async () => {
+    setPwError("");
+    if (newPw.length < 6) { setPwError("New password needs to be at least 6 characters."); return; }
+    if (newPw !== confirmPw) { setPwError("New passwords don't match."); return; }
+    setPwSaving(true);
+    const result = await onChangePassword(currentPw, newPw);
+    setPwSaving(false);
+    if (!result.ok) { setPwError(result.error); return; }
+    setPwSuccess(true);
+    setCurrentPw(""); setNewPw(""); setConfirmPw("");
+    setTimeout(() => setPwSuccess(false), 3000);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center overflow-y-auto p-4">
+      <GlobalAppStyles />
+      <div className="bg-white rounded-2xl max-w-md w-full my-8">
+        <div className="flex items-center justify-between p-4 border-b border-stone-200">
+          <p className="display-font text-xl font-bold text-stone-900">My Account</p>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-700 p-1"><ChevronRight size={22} /></button>
+        </div>
+        <div className="p-4 space-y-5">
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Your name</label>
+            <div className="flex gap-2">
+              <input value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+              <button onClick={saveName} className="bg-teal-700 text-white rounded-lg px-3 py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
+            </div>
+            {nameSaved && <p className="text-xs text-emerald-600 mt-1">Saved.</p>}
+          </div>
+
+          <div className="pt-4 border-t border-stone-200">
+            <p className="text-sm font-semibold text-stone-800 mb-2">Change password</p>
+            <input type="password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} placeholder="Current password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="New password (6+ characters)" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            <input type="password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} placeholder="Confirm new password" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+            {pwError && <p className="text-xs text-rose-600 mb-2">{pwError}</p>}
+            {pwSuccess && <p className="text-xs text-emerald-600 mb-2">✓ Password changed.</p>}
+            <button onClick={submitPasswordChange} disabled={pwSaving || !currentPw || !newPw || !confirmPw} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+              {pwSaving ? "Changing..." : "Change password"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+export function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
+  const [copied, setCopied] = useState(false);
+  const bccParam = bcc && bcc.length > 0 ? `&bcc=${encodeURIComponent(bcc.join(","))}` : "";
+  const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email || "")}${bccParam}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  // Gmail's compose-link BCC field can occasionally drop a name partway through once a link gets
+  // very long — a real limitation on Gmail's end. That's worth flagging, but the choice of how to
+  // handle it belongs to the teacher, not this component — "Open in Gmail" always stays available,
+  // and anything missing can be fixed by hand right there in the compose window it opens.
+  const riskyLength = gmailHref.length > 1800;
+
+  const copyToClipboard = async () => {
+    try {
+      const toLine = email ? `To: ${email}\n` : "";
+      const bccLine = bcc && bcc.length > 0 ? `Bcc: ${bcc.join(", ")}\n` : "";
+      await navigator.clipboard.writeText(`${toLine}${bccLine}Subject: ${subject}\n\n${body}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* clipboard permission denied — button just won't show feedback */ }
+  };
+
+  const btnClass = size === "small"
+    ? "flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5"
+    : "flex items-center gap-1 text-xs font-semibold rounded-lg px-3 py-2";
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <a href={gmailHref} target="_blank" rel="noopener noreferrer" className={`${btnClass} text-white bg-teal-700 hover:bg-teal-800`}>
+          <Mail size={13} /> Open in Gmail
+        </a>
+        <button onClick={copyToClipboard} className={`${btnClass} text-stone-600 border border-stone-300 hover:bg-stone-50`}>
+          <Copy size={13} /> {copied ? "Copied!" : "Copy message"}
+        </button>
+      </div>
+      {riskyLength && (
+        <p className="text-xs text-amber-700 mt-1.5">
+          This list is long enough that Gmail can occasionally drop a name partway through — worth a quick check in the compose window before sending. Add anyone missing right there, or use "Copy message" if you'd rather be certain.
+        </p>
+      )}
+    </div>
+  );
+}
+export function ArchiveOrDeleteMenu({ onArchive, onDeletePermanently, size }) {
+  const [open, setOpen] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => { setOpen(false); setConfirmingDelete(false); }, 5000);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  if (!open) {
+    return <button onClick={() => setOpen(true)} className="text-stone-400 hover:text-red-500 p-1"><Trash2 size={size || 14} /></button>;
+  }
+
+  if (confirmingDelete) {
+    return (
+      <div className="flex items-center gap-1">
+        <button onClick={() => { onDeletePermanently(); setOpen(false); }} className="text-[10px] font-semibold text-white bg-red-600 rounded-full px-2 py-1 whitespace-nowrap">Delete forever?</button>
+        <button onClick={() => { setOpen(false); setConfirmingDelete(false); }} className="text-[10px] text-stone-400 px-1">Cancel</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <button onClick={() => { onArchive(); setOpen(false); }} title="Keep the data, just hide it — you can bring it back later" className="text-[10px] font-semibold text-stone-600 border border-stone-300 rounded-full px-2 py-1 whitespace-nowrap hover:bg-stone-50">Archive</button>
+      <button onClick={() => setConfirmingDelete(true)} title="Permanently remove — cannot be undone" className="text-[10px] font-semibold text-red-600 border border-red-200 rounded-full px-2 py-1 whitespace-nowrap hover:bg-red-50">Delete</button>
+      <button onClick={() => setOpen(false)} className="text-[10px] text-stone-400 px-1">Cancel</button>
+    </div>
+  );
+}
+
+export function ConfirmDelete({ onConfirm, size, label, className, confirmText, armedClassName }) {
+  const [armed, setArmed] = useState(false);
+
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  if (label) {
+    return armed ? (
+      <button onClick={() => { onConfirm(); setArmed(false); }} className={armedClassName || "text-xs font-semibold text-white bg-red-500 rounded-full px-2 py-1 whitespace-nowrap"}>
+        {confirmText || "Confirm delete?"}
+      </button>
+    ) : (
+      <button onClick={() => setArmed(true)} className={className || "text-xs text-stone-400 hover:text-red-500"}>
+        {label}
+      </button>
+    );
+  }
+
+  return armed ? (
+    <button onClick={() => { onConfirm(); setArmed(false); }}
+      className="flex items-center gap-1 text-[10px] font-semibold text-white bg-red-500 rounded-full px-1.5 py-0.5 whitespace-nowrap">
+      <Trash2 size={size || 13} /> Sure?
+    </button>
+  ) : (
+    <button onClick={() => setArmed(true)} className="text-stone-300 hover:text-red-500 p-1">
+      <Trash2 size={size || 13} />
+    </button>
+  );
+}
+
+export function Section({ title, children }) {
+  return (
+    <div className="mb-6 min-w-0">
+      <h2 className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">{title}</h2>
+      <div className="bg-white border border-stone-200 rounded-xl p-3 overflow-hidden">{children}</div>
+    </div>
+  );
+}
