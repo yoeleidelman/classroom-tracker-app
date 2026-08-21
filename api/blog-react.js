@@ -1,17 +1,20 @@
 // api/blog-react.js
-// Applies a reaction to a blog post (or one specific block within it) entirely server-side —
-// this exists specifically because Firestore rules cannot express "you may only modify your own
-// entry inside a nested array of reaction objects." The existing client-side rule for blogPosts
-// can only validate that the overall array length doesn't change (blocking mass deletion or a
-// fake post being injected), which is real protection, but leaves a real gap underneath it: any
-// signed-in family or teacher could, via a direct write bypassing the app's own UI, spoof any
-// OTHER person's name and id onto a reaction entry, as long as the total count didn't change.
+// Applies a reaction to a blog post — to one specific photo or video within a multi-media block,
+// to a whole block that has just one piece of media (or none), or to a post overall — entirely
+// server-side. This exists specifically because Firestore rules cannot express "you may only
+// modify your own entry inside a nested array of reaction objects." The existing client-side rule
+// for blogPosts can only validate that the overall array length doesn't change (blocking mass
+// deletion or a fake post being injected), which is real protection, but leaves a real gap
+// underneath it: any signed-in family or teacher could, via a direct write bypassing the app's
+// own UI, spoof any OTHER person's name and id onto a reaction entry, as long as the total count
+// didn't change.
 //
 // The fix is to never let the client supply who's reacting at all. This endpoint reads the
 // caller's OWN identity from their own account record — a family's stored name and shared
 // familyGroupId, or a teacher's stored name and uid — using the same server-verified auth token
 // every other secured endpoint in this app relies on, and applies the reaction using that. The
-// request body only ever carries WHAT they reacted with (an emoji key), never WHO is reacting.
+// request body only ever carries WHAT they reacted with (an emoji key) and WHERE (which post,
+// optionally which block, optionally which specific photo within it), never WHO is reacting.
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
@@ -76,7 +79,7 @@ async function requireIdentityAndClassAccess(req, classId) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { classId, postId, blockId, emoji } = req.body || {};
+  const { classId, postId, blockId, mediaIndex, emoji } = req.body || {};
   if (!classId || !postId || !emoji) return res.status(400).json({ error: "classId, postId, and emoji are required." });
   if (!BLOG_REACTION_KEYS.includes(emoji)) return res.status(400).json({ error: "Not a recognized reaction." });
 
@@ -104,9 +107,21 @@ export default async function handler(req, res) {
 
       let updated;
       if (blockId) {
-        const nextBlocks = post.blocks.map((b) => (b.id === blockId
-          ? { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId, reactorName) }
-          : b));
+        const nextBlocks = post.blocks.map((b) => {
+          if (b.id !== blockId) return b;
+          // A reaction targets one specific photo/video within this block only when the block
+          // actually has more than one — for a single-media block, "the photo" and "the block"
+          // are the exact same thing, so this stays exactly as it always has: one reactions
+          // object on the block itself, not a second, redundant copy one level down.
+          const media = b.media || [];
+          if (typeof mediaIndex === "number" && media.length > 1 && media[mediaIndex]) {
+            const nextMedia = media.map((m, i) => (i === mediaIndex
+              ? { ...m, reactions: computeSingleChoiceReactions(m.reactions, emoji, reactorId, reactorName) }
+              : m));
+            return { ...b, media: nextMedia };
+          }
+          return { ...b, reactions: computeSingleChoiceReactions(b.reactions, emoji, reactorId, reactorName) };
+        });
         updated = posts.map((p) => (p.id === postId ? { ...p, blocks: nextBlocks } : p));
       } else {
         const reactions = computeSingleChoiceReactions(post.reactions, emoji, reactorId, reactorName);

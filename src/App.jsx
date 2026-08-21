@@ -7532,7 +7532,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
 // blog post shouldn't need two different lightbox experiences depending on what was tapped.
 // Carousel navigation (arrows + swipe) is optional — only active when a caller passes a mediaList,
 // so every other usage of this component keeps behaving exactly as it did before.
-function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, currentIndex, onNavigate }) {
+function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, currentIndex, onNavigate, reactions, currentUserId, onReact }) {
   const [downloading, setDownloading] = useState(false);
   const touchStartX = useRef(null);
   const hasCarousel = Array.isArray(mediaList) && mediaList.length > 1 && typeof currentIndex === "number";
@@ -7562,6 +7562,19 @@ function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, curre
     if (Math.abs(delta) > 50) { if (delta > 0) goPrev(); else goNext(); }
     touchStartX.current = null;
   };
+  // Only present at all for the one caller (the blog) that actually has a reaction system —
+  // every other place this lightbox opens from (messages, incidents, the daily log) simply
+  // doesn't pass these, so nothing changes for them.
+  const canReact = typeof onReact === "function";
+  const [whoReactedOpen, setWhoReactedOpen] = useState(false);
+  const whoReactedSummary = BLOG_REACTIONS
+    .map((r) => ({ ...r, entries: (reactions || {})[r.key] || [] }))
+    .filter((r) => r.entries.length > 0);
+  const photoContent = type === "video" ? (
+    <video src={url} controls autoPlay playsInline className="max-w-full max-h-[75vh] rounded-lg" onClick={(e) => e.stopPropagation()} />
+  ) : (
+    <img src={url} alt={caption || "Photo"} className="max-w-full max-h-[75vh] rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
+  );
   return (
     <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={onClose}
       onTouchStart={hasCarousel ? onTouchStart : undefined} onTouchEnd={hasCarousel ? onTouchEnd : undefined}>
@@ -7572,16 +7585,24 @@ function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, curre
       {hasCarousel && currentIndex < mediaList.length - 1 && (
         <button onClick={goNext} className="absolute right-2 md:right-4 top-1/2 -translate-y-1/2 text-white bg-black/50 rounded-full p-2 hover:bg-black/70"><ChevronRight size={24} /></button>
       )}
-      {type === "video" ? (
-        <video src={url} controls autoPlay playsInline className="max-w-full max-h-[75vh] rounded-lg" onClick={(e) => e.stopPropagation()} />
-      ) : (
-        <img src={url} alt={caption || "Photo"} className="max-w-full max-h-[75vh] rounded-lg object-contain" onClick={(e) => e.stopPropagation()} />
-      )}
+      {canReact ? (
+        // Same long-press-to-react gesture as the feed, wrapping the photo itself here — with the
+        // reaction badge overlapping its own bottom-left edge specifically, the same "half on, half
+        // off" feel as the feed's own badge on the card, just anchored to the photo rather than a
+        // whole post now that reacting can target one specific photo.
+        <div className="relative" onClick={(e) => e.stopPropagation()}>
+          <ReactableContent reactions={reactions} currentUserId={currentUserId} onReact={onReact}>
+            {photoContent}
+          </ReactableContent>
+          <ReactionBadge reactions={reactions} onOpen={() => setWhoReactedOpen(true)} className="absolute -bottom-2 left-3" />
+        </div>
+      ) : photoContent}
       {hasCarousel && <p className="text-white/60 text-xs mt-2">{currentIndex + 1} of {mediaList.length}</p>}
       <button onClick={download} disabled={downloading}
         className="mt-4 flex items-center gap-1.5 text-sm font-semibold text-white bg-white/15 hover:bg-white/25 rounded-lg px-4 py-2 disabled:opacity-60">
         {downloading ? <Loader2 className="animate-spin" size={15} /> : <Download size={15} />} {downloading ? "Downloading…" : "Download"}
       </button>
+      {whoReactedOpen && <WhoReactedSheet summary={whoReactedSummary} onClose={() => setWhoReactedOpen(false)} />}
     </div>
   );
 }
@@ -7845,13 +7866,13 @@ function ParentBlogView({ link, family, onBack }) {
   // overall length doesn't change, not which specific entry changed or who's allowed to touch
   // it), so this hands off to a server that determines identity itself, from the caller's own
   // verified, signed-in account — never from anything the client sends.
-  const onReact = async (postId, emoji, blockId) => {
+  const onReact = async (postId, emoji, blockId, mediaIndex) => {
     try {
       const headers = await authHeaders();
       const res = await fetch("/api/blog-react", {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ classId: link.classId, postId, blockId, emoji }),
+        body: JSON.stringify({ classId: link.classId, postId, blockId, mediaIndex, emoji }),
       });
       const data = await res.json();
       // The live subscription above picks up the server's own write automatically — nothing to
@@ -7880,7 +7901,14 @@ function ParentBlogView({ link, family, onBack }) {
         ...(block.photoUrls || []).map((url) => ({ url, type: "photo" })),
         ...(block.videoUrl ? [{ url: block.videoUrl, type: "video" }] : []),
       ];
-      return media.map((m) => ({ ...m, caption: block.text }));
+      // Matches the server's own rule exactly (see api/blog-react.js): a block with only one
+      // piece of media reacts as the block itself, the same as it always has — only once a block
+      // genuinely holds more than one photo or video does each one need its own separate
+      // reactions, since only then is there any real ambiguity to resolve in the first place.
+      return media.map((m, mediaIndex) => ({
+        ...m, caption: block.text, postId: post.id, blockId: block.id, mediaIndex,
+        reactions: media.length > 1 ? (m.reactions || {}) : (block.reactions || {}),
+      }));
     })
   );
   const openMedia = (url) => {
@@ -7929,6 +7957,8 @@ function ParentBlogView({ link, family, onBack }) {
       {lightboxIndex !== null && allMedia[lightboxIndex] && (
         <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
           mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
+          reactions={allMedia[lightboxIndex].reactions} currentUserId={reactorId}
+          onReact={(emoji) => onReact(allMedia[lightboxIndex].postId, emoji, allMedia[lightboxIndex].blockId, allMedia[lightboxIndex].mediaIndex)}
           onClose={() => setLightboxIndex(null)} />
       )}
     </div>
@@ -10276,13 +10306,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // Firestore's own rule for this document can only validate the array's overall length, not
   // which specific entry changed, so identity has to be determined server-side, from the
   // caller's own verified account, never trusted from anything the client sends.
-  const toggleBlogReaction = async (postId, emoji, blockId) => {
+  const toggleBlogReaction = async (postId, emoji, blockId, mediaIndex) => {
     try {
       const headers = await authHeaders();
       const res = await fetch("/api/blog-react", {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ classId, postId, blockId, emoji }),
+        body: JSON.stringify({ classId, postId, blockId, mediaIndex, emoji }),
       });
       const data = await res.json();
       if (res.ok) persistBlogPosts(data.posts);
@@ -14027,7 +14057,9 @@ function WhoReactedSheet({ summary, onClose }) {
 function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia }) {
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
-  const [whoReactedBlockId, setWhoReactedBlockId] = useState(null);
+  // { blockId, mediaIndex? } — mediaIndex present means "show who reacted to this one specific
+  // photo," absent means "show who reacted to this whole block" (a single-media or text block).
+  const [whoReactedTarget, setWhoReactedTarget] = useState(null);
   const comments = post.comments || [];
 
   const submitComment = () => {
@@ -14038,9 +14070,14 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
   };
 
   const reactedBlocks = post.blocks.filter((b) => Object.values(b.reactions || {}).some((entries) => (entries || []).length > 0));
-  const whoReactedBlock = whoReactedBlockId ? post.blocks.find((b) => b.id === whoReactedBlockId) : null;
+  const whoReactedBlock = whoReactedTarget ? post.blocks.find((b) => b.id === whoReactedTarget.blockId) : null;
+  const whoReactedReactions = whoReactedBlock
+    ? (typeof whoReactedTarget.mediaIndex === "number"
+        ? (whoReactedBlock.media?.[whoReactedTarget.mediaIndex]?.reactions || {})
+        : (whoReactedBlock.reactions || {}))
+    : {};
   const whoReactedSummary = whoReactedBlock ? BLOG_REACTIONS
-    .map((r) => ({ ...r, entries: (whoReactedBlock.reactions || {})[r.key] || [] }))
+    .map((r) => ({ ...r, entries: whoReactedReactions[r.key] || [] }))
     .filter((r) => r.entries.length > 0) : [];
 
   return (
@@ -14073,58 +14110,79 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
             ];
             return (
               <div key={block.id} className="py-3 first:pt-0 last:pb-0">
-                <ReactableContent reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)}>
-                  {media.length === 1 && (
-                    media[0].type === "audio" ? (
-                      <div className="px-4 pt-3">
-                        <div className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 mb-1">
-                          <Music size={16} className="text-stone-400 shrink-0" />
-                          <p className="text-xs font-semibold text-stone-700 truncate">{media[0].name || "Audio"}</p>
+                {media.length <= 1 ? (
+                  // A single piece of media (or none) reacts as the whole block, exactly as
+                  // before — there's no real ambiguity to resolve when there's only one thing on
+                  // screen to react to in the first place.
+                  <ReactableContent reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)}>
+                    {media.length === 1 && (
+                      media[0].type === "audio" ? (
+                        <div className="px-4 pt-3">
+                          <div className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 mb-1">
+                            <Music size={16} className="text-stone-400 shrink-0" />
+                            <p className="text-xs font-semibold text-stone-700 truncate">{media[0].name || "Audio"}</p>
+                          </div>
+                          <audio src={media[0].url} controls className="w-full" style={{ height: "36px" }} />
                         </div>
-                        <audio src={media[0].url} controls className="w-full" style={{ height: "36px" }} />
-                      </div>
-                    ) : (
-                      <div className="relative cursor-pointer" onClick={() => onOpenMedia(media[0].url)}>
-                        {media[0].type === "video" ? (
-                          <>
-                            <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
-                            <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                              <div className="bg-white/90 rounded-full p-3"><Play size={20} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
-                            </div>
-                          </>
-                        ) : (
-                          <img src={media[0].url} alt="" className="w-full aspect-[4/3] object-cover" />
-                        )}
-                      </div>
-                    )
-                  )}
-                  {media.length > 1 && (
-                    <div className="grid grid-cols-2 gap-0.5">
-                      {media.map((m, i) => (
-                        <div key={i} className="relative aspect-square cursor-pointer" onClick={() => m.type !== "audio" && onOpenMedia(m.url)}>
-                          {m.type === "video" ? (
+                      ) : (
+                        <div className="relative cursor-pointer" onClick={() => onOpenMedia(media[0].url)}>
+                          {media[0].type === "video" ? (
                             <>
-                              <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
+                              <video src={media[0].url} muted playsInline className="w-full aspect-[4/3] object-cover pointer-events-none" />
                               <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                                <div className="bg-white/90 rounded-full p-2"><Play size={13} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                                <div className="bg-white/90 rounded-full p-3"><Play size={20} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
                               </div>
                             </>
-                          ) : m.type === "audio" ? (
-                            <div className="w-full h-full bg-stone-50 flex flex-col items-center justify-center gap-1.5 p-2 cursor-default">
+                          ) : (
+                            <img src={media[0].url} alt="" className="w-full aspect-[4/3] object-cover" />
+                          )}
+                        </div>
+                      )
+                    )}
+                    {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                    {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
+                    {!media.length && !block.text && <div className="h-2" />}
+                  </ReactableContent>
+                ) : (
+                  // Several photos or videos together — each one reacts on its own now, badge and
+                  // all landing on its own bottom-left edge, the same "half on, half off" feel as
+                  // a whole post's badge, just anchored to one photo specifically instead.
+                  <>
+                    <div className="grid grid-cols-2 gap-0.5">
+                      {media.map((m, i) => (
+                        <div key={i} className="relative">
+                          {m.type === "audio" ? (
+                            <div className="w-full aspect-square bg-stone-50 flex flex-col items-center justify-center gap-1.5 p-2 cursor-default">
                               <Music size={20} className="text-stone-400" />
                               <p className="text-[10px] font-semibold text-stone-600 text-center truncate w-full px-1">{m.name || "Audio"}</p>
                             </div>
                           ) : (
-                            <img src={m.url} alt="" className="w-full h-full object-cover" />
+                            <ReactableContent reactions={m.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id, i)}>
+                              <div className="relative aspect-square cursor-pointer" onClick={() => onOpenMedia(m.url)}>
+                                {m.type === "video" ? (
+                                  <>
+                                    <video src={m.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
+                                    <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                                      <div className="bg-white/90 rounded-full p-2"><Play size={13} fill="currentColor" className="text-stone-800 ml-0.5" /></div>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <img src={m.url} alt="" className="w-full h-full object-cover" />
+                                )}
+                              </div>
+                            </ReactableContent>
+                          )}
+                          {m.type !== "audio" && Object.values(m.reactions || {}).some((entries) => (entries || []).length > 0) && (
+                            <ReactionBadge reactions={m.reactions} onOpen={() => setWhoReactedTarget({ blockId: block.id, mediaIndex: i })}
+                              className="absolute -bottom-1.5 left-1.5 scale-90 origin-bottom-left z-10" />
                           )}
                         </div>
                       ))}
                     </div>
-                  )}
-                  {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
-                  {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
-                  {!media.length && !block.text && <div className="h-2" />}
-                </ReactableContent>
+                    {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                    {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
+                  </>
+                )}
               </div>
             );
           })}
@@ -14164,12 +14222,12 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
       {reactedBlocks.length > 0 && (
         <div className="absolute -bottom-3 left-3 right-3 flex flex-wrap gap-1.5 z-10">
           {reactedBlocks.map((block) => (
-            <ReactionBadge key={block.id} reactions={block.reactions} onOpen={() => setWhoReactedBlockId(block.id)} />
+            <ReactionBadge key={block.id} reactions={block.reactions} onOpen={() => setWhoReactedTarget({ blockId: block.id })} />
           ))}
         </div>
       )}
 
-      {whoReactedBlock && <WhoReactedSheet summary={whoReactedSummary} onClose={() => setWhoReactedBlockId(null)} />}
+      {whoReactedBlock && <WhoReactedSheet summary={whoReactedSummary} onClose={() => setWhoReactedTarget(null)} />}
     </div>
   );
 }
@@ -14193,7 +14251,14 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
         ...(block.photoUrls || []).map((url) => ({ url, type: "photo" })),
         ...(block.videoUrl ? [{ url: block.videoUrl, type: "video" }] : []),
       ];
-      return media.map((m) => ({ ...m, caption: block.text }));
+      // Matches the server's own rule exactly (see api/blog-react.js): a block with only one
+      // piece of media reacts as the block itself, the same as it always has — only once a block
+      // genuinely holds more than one photo or video does each one need its own separate
+      // reactions, since only then is there any real ambiguity to resolve in the first place.
+      return media.map((m, mediaIndex) => ({
+        ...m, caption: block.text, postId: post.id, blockId: block.id, mediaIndex,
+        reactions: media.length > 1 ? (m.reactions || {}) : (block.reactions || {}),
+      }));
     })
   );
   const openMedia = (url) => {
@@ -14234,6 +14299,8 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
       {lightboxIndex !== null && allMedia[lightboxIndex] && (
         <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
           mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
+          reactions={allMedia[lightboxIndex].reactions} currentUserId={currentUserId}
+          onReact={(emoji) => onReact(allMedia[lightboxIndex].postId, emoji, allMedia[lightboxIndex].blockId, allMedia[lightboxIndex].mediaIndex)}
           onClose={() => setLightboxIndex(null)} />
       )}
     </div>
