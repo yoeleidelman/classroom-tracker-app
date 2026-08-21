@@ -127,6 +127,17 @@ export default async function handler(req, res) {
         url: url || "/",
         icon: icon || "/icons-parent/icon-192.png",
       },
+      // Every device this app registers is a Web Push token (obtained via the service worker and
+      // a VAPID key), never a native Android or iOS app token — so this is the one delivery-speed
+      // setting that actually applies here. Without it, a push defaults to normal urgency, which
+      // both Android and iOS are free to sit on for minutes at a time to conserve battery,
+      // especially once the screen's been off a while — a real, reported delay, not a theoretical
+      // one. "high" is the maximum level the Web Push standard (RFC 8030) defines, telling the
+      // browser and OS to wake the device and deliver this right away instead of batching it in
+      // with other, less time-sensitive background traffic.
+      webpush: {
+        headers: { Urgency: "high" },
+      },
     });
 
     // Any token FCM rejects as no-longer-valid gets removed from its owner's stored list — grouped

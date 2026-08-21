@@ -578,8 +578,11 @@ function isViewingNotificationTarget(url) {
       // all is unambiguous.
       return typeof active.threadKey === "string" && active.threadKey.startsWith("admin-");
     }
-    if (openType === "blog") return active.tab === "blog";
-    if (openType === "homework") return active.tab === "homework";
+    // Blog and homework notifications are deliberately never suppressed this way. Unlike a
+    // conversation thread, being on the Blog or Homework tab doesn't mean the specific new post
+    // this notification is about has actually been seen — the tab has no per-post identity to
+    // check against, only a class. Suppressing on tab alone was silently swallowing notifications
+    // for anyone simply scrolling that tab when a new, unrelated post came in.
     return false;
   } catch {
     return false;
