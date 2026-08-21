@@ -3497,6 +3497,53 @@ function AppInner() {
       .map(([studentId, v]) => ({ studentId, name: v.name, classes: v.classes }));
   };
 
+  // A real, reported case — a parent couldn't see what a teacher logged for their own child, and
+  // crucially, neither could the teacher, looking at that exact same child's own detail view. That
+  // rules out anything about how the data gets displayed (a live-mirror problem would still show
+  // real data once actually reached) and points somewhere the earlier duplicate-enrollment check
+  // above can't see at all: that one groups by studentId, so it only ever catches the SAME id
+  // showing up in more than one class. It has no way to notice two DIFFERENT ids that happen to
+  // share a name — which is exactly what would make logging look like it's silently vanishing:
+  // a teacher logging against roster entry A, while whatever's actually being viewed (a parent's
+  // own studentLink, or even a stale reference on the teacher's own side) points at a completely
+  // separate, empty roster entry B that just happens to have the identical name. Searches every
+  // roster and every family's studentLinks directly by name, case-insensitively, and surfaces
+  // every distinct id found under that name along with what data — if any — actually exists under
+  // each one, so a mismatch like this becomes directly visible instead of inferred.
+  const checkStudentDataIntegrity = async (name) => {
+    const trimmedName = (name || "").trim().toLowerCase();
+    if (!trimmedName) return { rosterEntries: [], familyLinks: [] };
+
+    const allClasses = await loadJSON("schoolClasses", [], true);
+    const activeClasses = (allClasses || []).filter((c) => !c.archived);
+    const rosterEntries = [];
+    for (const cls of activeClasses) {
+      const roster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      for (const s of roster) {
+        if ((s.name || "").trim().toLowerCase() !== trimmedName) continue;
+        const kriya = await loadJSON(`class:${cls.id}:kriya:${s.id}`, null, true);
+        const counts = kriya ? {
+          meals: (kriya.meals || []).length, naps: (kriya.naps || []).length,
+          checkIns: (kriya.checkIns || []).length, diapers: (kriya.diapers || []).length,
+          bathroom: (kriya.bathroom || []).length, mood: (kriya.mood || []).length,
+        } : null;
+        rosterEntries.push({ classId: cls.id, className: cls.name, studentId: s.id, hasAnyData: kriya ? Object.values(counts).some((n) => n > 0) : false, counts });
+      }
+    }
+
+    const allFamilies = await loadAllWithPrefix("family:");
+    const familyLinks = [];
+    (allFamilies || []).forEach((f) => {
+      (f.studentLinks || []).forEach((l) => {
+        if ((l.studentName || "").trim().toLowerCase() !== trimmedName) return;
+        const matchesCurrentRoster = rosterEntries.some((r) => r.classId === l.classId && r.studentId === l.studentId);
+        familyLinks.push({ guardianName: f.name, guardianEmail: f.email, classId: l.classId, className: l.className, studentId: l.studentId, matchesCurrentRoster });
+      });
+    });
+
+    return { rosterEntries, familyLinks };
+  };
+
   // Finds any preschool student with more than one meal entry for the same day and meal type, or
   // more than one nap entry for the same day — exactly the duplicate a real, reported bug allowed
   // to happen before the underlying race condition was fixed (see freshStudentData). That fix
@@ -3825,7 +3872,7 @@ function AppInner() {
       if (!classId) {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
           currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
-          globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate}
+          globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate} onCheckStudentDataIntegrity={checkStudentDataIntegrity}
           schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
@@ -3879,7 +3926,7 @@ function AppInner() {
   if (!classId) {
     if (isAdminSession) {
       return <AdminDashboard registry={registry} onEnterClass={enterClassAsAdmin} onCreate={createClass} onRefresh={refreshRegistry} onLogout={logoutAdmin} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
-        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate}
+        globalStudents={globalStudents} onRefreshStudents={refreshGlobalStudents} onAddStudent={addGlobalStudent} onUpdateStudent={updateGlobalStudent} onArchiveStudent={archiveGlobalStudent} onRestoreStudent={restoreGlobalStudent} onDeleteStudent={deleteGlobalStudentPermanently} onBulkAddStudents={bulkAddGlobalStudents} onFindDuplicateEnrollments={findDuplicateEnrollments} onFindDuplicateDailyLogs={findDuplicateDailyLogs} onRemoveDailyLogDuplicate={removeDailyLogDuplicate} onCheckStudentDataIntegrity={checkStudentDataIntegrity}
         schoolEvents={schoolEvents} onRefreshEvents={refreshSchoolEvents} onAddEvent={addSchoolEvent} onUpdateEvent={updateSchoolEvent} onRemoveEvent={removeSchoolEvent}
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
@@ -5158,6 +5205,82 @@ function DuplicateEnrollmentChecker({ onCheck }) {
 // to tell which of two entries is the "right" one automatically (no timestamp is stored on these,
 // only who logged them) — so this surfaces every duplicate found and lets an admin remove
 // whichever one is wrong by hand, rather than guessing on their behalf.
+// Same purpose as the checkers above, for a different real, reported gap neither of them can see:
+// a teacher logging real data for a specific child, where neither the parent NOR the teacher's
+// own detail view for that exact child shows it. That combination rules out a live-mirror problem
+// (real data reaching a screen late is still real data once it arrives) and points at something
+// deeper — most plausibly two different roster entries that happen to share a name, so whatever's
+// being logged and whatever's being viewed are actually two separate, disconnected records. Search
+// is by name specifically, not by picking a single roster entry, since the entire point is to find
+// EVERY entry sharing that name, including ones that wouldn't otherwise be reachable from any one
+// class's own roster screen.
+function StudentDataIntegrityChecker({ onCheck }) {
+  const [name, setName] = useState("");
+  const [status, setStatus] = useState("idle"); // idle | checking | done
+  const [result, setResult] = useState(null);
+
+  const runCheck = async () => {
+    if (!name.trim()) return;
+    setStatus("checking");
+    const res = await onCheck(name.trim());
+    setResult(res);
+    setStatus("done");
+  };
+
+  return (
+    <div className="mb-3 bg-stone-50 border border-stone-200 rounded-lg p-3">
+      <p className="text-xs font-semibold text-stone-700 mb-2">Check a student's real data — every roster entry and family link sharing this name</p>
+      <div className="flex gap-2 mb-2">
+        <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && runCheck()}
+          placeholder="Student's name" className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        <button onClick={runCheck} disabled={status === "checking" || !name.trim()}
+          className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 disabled:opacity-40 shrink-0">
+          {status === "checking" ? "Checking…" : "Check"}
+        </button>
+      </div>
+
+      {status === "done" && result && (
+        <div className="space-y-2">
+          {result.rosterEntries.length === 0 ? (
+            <p className="text-xs text-rose-600">No roster entry found with this exact name in any active class.</p>
+          ) : (
+            <>
+              {result.rosterEntries.length > 1 && (
+                <p className="text-xs font-bold text-rose-800 bg-rose-50 border-2 border-rose-300 rounded-lg p-2">
+                  ⚠ Found {result.rosterEntries.length} separate roster entries with this exact name — these are different student records, even though they share a name. Data logged against one will never show up under another.
+                </p>
+              )}
+              {result.rosterEntries.map((r, i) => (
+                <div key={i} className="bg-white border border-stone-200 rounded-lg p-2.5">
+                  <p className="text-xs font-semibold text-stone-800">{r.className}</p>
+                  <p className="text-[11px] text-stone-400 font-mono">{r.studentId}</p>
+                  <p className="text-xs text-stone-600 mt-1">
+                    {r.hasAnyData
+                      ? `Has data: ${Object.entries(r.counts).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(", ")}`
+                      : "No data logged under this entry at all."}
+                  </p>
+                </div>
+              ))}
+            </>
+          )}
+
+          {result.familyLinks.length > 0 && (
+            <div className="mt-2">
+              <p className="text-xs font-semibold text-stone-700 mb-1">Family links to this name:</p>
+              {result.familyLinks.map((l, i) => (
+                <div key={i} className={`text-xs rounded-lg p-2 mb-1 ${l.matchesCurrentRoster ? "bg-white border border-stone-200 text-stone-600" : "bg-amber-50 border-2 border-amber-300 text-amber-800 font-semibold"}`}>
+                  {l.guardianName} ({l.guardianEmail}) → {l.className}
+                  {!l.matchesCurrentRoster && " — ⚠ this link's own student id doesn't match any current roster entry above at all"}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DuplicateDailyLogChecker({ onCheck, onRemove }) {
   const [status, setStatus] = useState("idle"); // idle | checking | done
   const [results, setResults] = useState([]);
@@ -5346,7 +5469,7 @@ function TeacherAccountChecker({ onCheck }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -5798,6 +5921,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
           <DuplicateEnrollmentChecker onCheck={onFindDuplicateEnrollments} />
           <DuplicateDailyLogChecker onCheck={onFindDuplicateDailyLogs} onRemove={onRemoveDailyLogDuplicate} />
+          <StudentDataIntegrityChecker onCheck={onCheckStudentDataIntegrity} />
 
           <div className="flex gap-2 mb-3">
             <input value={newStudentName} onChange={(e) => setNewStudentName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submitNewStudent()}
