@@ -8,37 +8,16 @@
 // SECURITY: without verifying the caller first, anyone who found this URL could reset ANY
 // teacher's password, including an admin's own — every request must prove, via a real Firebase ID
 // token, that it comes from an existing, active admin before anything happens. Mirrors
-// create-teacher.js's own requireAdmin check exactly, for the same reason.
+// create-teacher.js's own requireAdmin check exactly, for the same reason — the two used to
+// carry their own separate, word-for-word copies of it.
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+import { requireAdmin, trimAndCheckPassword } from "./_lib/account-helpers.js";
 
 if (!getApps().length) {
   initializeApp({
     credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
   });
-}
-
-async function requireAdmin(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) throw { status: 401, message: "Sign-in required." };
-
-  const auth = getAuth();
-  let decoded;
-  try {
-    decoded = await auth.verifyIdToken(token);
-  } catch {
-    throw { status: 401, message: "Sign-in session is invalid or expired." };
-  }
-
-  const db = getFirestore();
-  const callerDoc = await db.collection("data").doc(`teacher:${decoded.uid}`).get();
-  const caller = callerDoc.exists ? callerDoc.data().value : null;
-  if (!caller || caller.active === false || caller.role !== "admin") {
-    throw { status: 403, message: "Admin access required." };
-  }
-  return decoded;
 }
 
 export default async function handler(req, res) {
@@ -51,18 +30,13 @@ export default async function handler(req, res) {
   }
 
   const { uid, newPassword } = req.body || {};
-  const trimmedPassword = (newPassword || "").trim();
-  if (!uid || !trimmedPassword || trimmedPassword.length < 6) {
+  const { trimmed: trimmedPassword, valid: passwordValid } = trimAndCheckPassword(newPassword);
+  if (!uid || !passwordValid) {
     return res.status(400).json({ error: "A teacher and a password of at least 6 characters are required." });
   }
 
   try {
     const auth = getAuth();
-    // Trimmed here, not just on the sign-in side — an untrimmed password stored here would be
-    // permanently wrong no matter how carefully anyone typed it afterward at sign-in, since the
-    // mismatch would already be baked into the account itself. This file was also, separately,
-    // never actually deployed at all until now — found only by tracing a real, reported sign-in
-    // failure back through account creation, not by anything failing loudly.
     await auth.updateUser(uid, { password: trimmedPassword });
     return res.status(200).json({ ok: true });
   } catch (err) {

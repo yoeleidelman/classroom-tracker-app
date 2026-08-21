@@ -25,6 +25,7 @@
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
+import { trimAndCheckPassword, createOrLinkAuthUser } from "./_lib/account-helpers.js";
 
 if (!getApps().length) {
   initializeApp({
@@ -34,6 +35,10 @@ if (!getApps().length) {
 
 // Verifies the request comes from a signed-in, active teacher or admin, and returns their own
 // record so the handler can additionally check which classes a non-admin caller may link to.
+// Deliberately its own, separate check from the shared requireAdmin used elsewhere — this file's
+// actual rule (any active staff, not just admins) is genuinely different, confirmed while first
+// reading every file this session before consolidating anything, so it stays local rather than
+// being forced into the shared admin-only check.
 async function requireActiveStaff(req) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -68,8 +73,8 @@ export default async function handler(req, res) {
 
   const { name, email, password, studentLinks, familyGroupId } = req.body || {};
   const trimmedEmail = (email || "").trim();
-  const trimmedPassword = (password || "").trim();
-  if (!name || !trimmedEmail || !trimmedPassword || trimmedPassword.length < 6) {
+  const { trimmed: trimmedPassword, valid: passwordValid } = trimAndCheckPassword(password);
+  if (!name || !trimmedEmail || !passwordValid) {
     return res.status(400).json({ error: "Family name, email, and a password of at least 6 characters are required." });
   }
 
@@ -86,18 +91,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    const auth = getAuth();
-    let userRecord;
-    let linkedExisting = false;
-
-    try {
-      userRecord = await auth.createUser({ email: trimmedEmail, password: trimmedPassword, displayName: name });
-    } catch (err) {
-      if (err.code !== "auth/email-already-exists") throw err;
-      // Already has a login (e.g. this person is also a teacher) — reuse it rather than fail.
-      userRecord = await auth.getUserByEmail(trimmedEmail);
-      linkedExisting = true;
-    }
+    // Already has a login (e.g. this person is also a teacher)? Reuses it rather than failing —
+    // see createOrLinkAuthUser's own comment for why.
+    const { userRecord, linkedExisting } = await createOrLinkAuthUser({ email: trimmedEmail, password: trimmedPassword, displayName: name });
 
     const db = getFirestore();
     const ref = db.collection("data").doc(`family:${userRecord.uid}`);
