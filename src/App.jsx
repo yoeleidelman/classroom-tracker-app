@@ -996,6 +996,23 @@ function logAuthDebug(message) {
 // only ever counts as turned off once something has explicitly set active to false.
 function isAccountActive(record) { return record?.active !== false; }
 
+// Same idea as isAccountActive just above, for a separate, genuinely different question: is this
+// specific person an admin. Consolidates the two places that gate behavior for the CURRENTLY
+// signed-in person based on their own role (deciding what screen to route into, deciding whether
+// to auto-start onboarding) — deliberately not the places elsewhere that filter OTHER people out
+// of a list, since that's a different job asking a related but distinct question, not this one.
+function isAdminRole(record) { return record?.role === "admin"; }
+
+// A third, related question — not "is this the signed-in person's own role" (isAdminRole above),
+// but "should this OTHER teacher be offered as an option" — for the two places that build a
+// pick-a-teacher list (a default selection, and the full dropdown itself) where an admin
+// shouldn't be offered as a regular teacher to message, and neither should anyone whose account
+// has been turned off. These two used to check this slightly differently from each other — one
+// checked only the role, the other checked role and active status together — a real, pre-existing
+// inconsistency that could have left the default selection pointing at someone not actually
+// offered as an option in the dropdown itself. Both now agree.
+function isRegularActiveTeacher(record) { return !isAdminRole(record) && isAccountActive(record); }
+
 function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], periodAttendance: [], homework: [], points: {}, communications: [], mood: [], meals: [], naps: [], diapers: [], bathroom: [], checkIns: [] }; }
 
 // Silently collapses any duplicate meal (same date + mealType) or nap (same date) entries down to
@@ -3875,7 +3892,7 @@ function AppInner() {
         </div>
       );
     }
-    if (currentTeacher.role === "admin") {
+    if (isAdminRole(currentTeacher)) {
       if (!classId) {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
           currentTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
@@ -4970,12 +4987,12 @@ function ClassMessagingLabelsEditor({ activeClasses, teachers }) {
 function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, families }) {
   const [section, setSection] = useState("classroom"); // "classroom" | "direct"
   const [selectedClassId, setSelectedClassId] = useState(activeClasses[0]?.id || "");
-  const [selectedTeacherUid, setSelectedTeacherUid] = useState((teachers || []).find((t) => t.role !== "admin")?.uid || "");
+  const [selectedTeacherUid, setSelectedTeacherUid] = useState((teachers || []).find(isRegularActiveTeacher)?.uid || "");
   const [groups, setGroups] = useState(null);
   const [threads, setThreads] = useState({});
   const [openGroup, setOpenGroup] = useState(null);
 
-  const nonAdminTeachers = (teachers || []).filter((t) => t.role !== "admin" && isAccountActive(t));
+  const nonAdminTeachers = (teachers || []).filter(isRegularActiveTeacher);
 
   const refresh = useCallback(async () => {
     setOpenGroup(null);
@@ -10198,7 +10215,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // the initial default config) and only if this teacher has never opened it before. Never fires
   // for an admin just browsing into the class — this is for the class's own teacher.
   useEffect(() => {
-    if (!loading && !config.onboarding?.started && loggedInTeacher?.role !== "admin") {
+    if (!loading && !config.onboarding?.started && !isAdminRole(loggedInTeacher)) {
       setShowOnboarding(true);
     }
   }, [loading]); // eslint-disable-line
