@@ -2903,10 +2903,13 @@ function AppInner() {
     }
   };
 
+  // The live subscription that keeps currentTeacher current for the rest of the session already
+  // watches this exact same document — a save immediately followed by that document changing is
+  // precisely what it's built to catch, on its own, a moment later. No separate local update
+  // needed here to reflect it.
   const changeMyName = async (newName) => {
     if (!currentTeacher) return;
     await updateTeacherRecord(currentTeacher.uid, { name: newName });
-    setCurrentTeacher((prev) => ({ ...prev, name: newName }));
   };
 
   const changeMyFamilyName = async (newName) => {
@@ -2915,10 +2918,10 @@ function AppInner() {
     setAuthResolvedFamily((prev) => ({ ...prev, name: newName }));
   };
 
+  // Same reasoning as changeMyName just above.
   const changeMySignOff = async (newSignOff) => {
     if (!currentTeacher) return;
     await updateTeacherRecord(currentTeacher.uid, { messageSignOff: newSignOff });
-    setCurrentTeacher((prev) => ({ ...prev, messageSignOff: newSignOff }));
   };
 
   // Pushing a real history entry here (not just changing React state) is what makes the Android
