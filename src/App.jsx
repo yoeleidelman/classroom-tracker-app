@@ -355,13 +355,28 @@ function extractFirstUrl(text) {
 // at every odd index — checking that directly, rather than re-running the (stateful, global-
 // flagged) regex against each piece, since re-testing a `g`-flagged regex advances its own
 // lastIndex between calls and produces wrong results on exactly this kind of repeated use.
+// WhatsApp-style: *word* becomes bold, matching that app's own rule closely — the asterisks have
+// to sit directly against real text on both sides ("*word*" bolds, "* word *" does not, since a
+// space right inside either asterisk means it wasn't meant as a bold marker), and never spans
+// across a line break, so two unrelated asterisks in different paragraphs of the same message
+// can't accidentally bold everything in between.
+const BOLD_PATTERN = /\*(\S(?:[^*\n]*\S)?)\*/g;
+function renderBoldSegments(text, keyPrefix) {
+  return text.split(BOLD_PATTERN).map((seg, j) => {
+    if (!seg) return null;
+    // split() with a capturing regex interleaves the captured groups into the result — every ODD
+    // index here is bold content, the same alternating shape this file's own URL-splitting below
+    // already relies on.
+    return j % 2 === 1 ? <strong key={`${keyPrefix}-${j}`}>{seg}</strong> : <span key={`${keyPrefix}-${j}`}>{seg}</span>;
+  });
+}
 function LinkifiedText({ text, className, linkClassName }) {
   const parts = (text || "").split(URL_PATTERN);
   return (
     <>
       {parts.map((part, i) => {
         if (!part) return null;
-        if (i % 2 === 0) return <span key={i}>{part}</span>;
+        if (i % 2 === 0) return <span key={i}>{renderBoldSegments(part, i)}</span>;
         const trailingMatch = part.match(/[.,!?;:)]+$/);
         const trailing = trailingMatch ? trailingMatch[0] : "";
         const urlPart = trailing ? part.slice(0, -trailing.length) : part;
@@ -13928,20 +13943,33 @@ const BLOG_REACTIONS = [
 // clips its overflow, which a post card does, to keep photos correctly inside its rounded corners.
 function ReactableContent({ reactions, currentUserId, onReact, children }) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  // Decided fresh every time the picker actually opens, from wherever this element really sits
-  // on screen at that moment — not a fixed side — so it lands correctly whether this is the left
-  // or right photo in a grid, or a full-width post where either side has room either way.
-  const [pickerAlign, setPickerAlign] = useState("left");
+  // Fixed-position viewport coordinates, computed fresh every time the picker actually opens
+  // from wherever the pressed element really sits on screen at that moment, then clamped to stay
+  // fully within the current viewport — not the left/right side of the pressed element itself,
+  // and not a spot that could be scrolled out of view on a long, scrolled post.
+  const [pickerPos, setPickerPos] = useState({ top: 0, left: 0 });
   const pressTimer = useRef(null);
   const longPressFired = useRef(false);
   const wrapperRef = useRef(null);
+  // The picker itself is portaled straight to document.body (below) rather than left as a normal
+  // DOM child of wrapperRef — a transform anywhere up the ancestor chain (even a harmless,
+  // visually-invisible one) silently changes what a fixed-positioned descendant is actually
+  // positioned relative to, which is exactly what was quietly breaking this. Because of that
+  // portal, the picker's real DOM node no longer sits inside wrapperRef the way it used to, so
+  // the "was this click outside" check below needs its own separate ref for it — otherwise every
+  // click ON the picker, including picking an emoji, would register as a click outside it instead.
+  const pickerRef = useRef(null);
   // A plain, unique object — its own identity is all that's needed here, to tell "was that
   // broadcast from me, or from some other picker" below; nothing about its contents matters.
   const instanceId = useRef({}).current;
 
   useEffect(() => {
     if (!pickerOpen) return;
-    const onClickOutside = (e) => { if (wrapperRef.current && !wrapperRef.current.contains(e.target)) setPickerOpen(false); };
+    const onClickOutside = (e) => {
+      const inWrapper = wrapperRef.current && wrapperRef.current.contains(e.target);
+      const inPicker = pickerRef.current && pickerRef.current.contains(e.target);
+      if (!inWrapper && !inPicker) setPickerOpen(false);
+    };
     document.addEventListener("mousedown", onClickOutside);
     // Only one reaction picker should ever be open across the whole page at once. Each instance
     // manages its own open/closed state independently — with several reactable photos now able
@@ -13967,7 +13995,24 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
       if (navigator.vibrate) navigator.vibrate(10); // a light haptic tick, matching the native long-press feel
       if (wrapperRef.current) {
         const rect = wrapperRef.current.getBoundingClientRect();
-        setPickerAlign(rect.left + rect.width / 2 > window.innerWidth / 2 ? "right" : "left");
+        // Measured against the real rendered picker directly, not guessed — seven buttons at
+        // their actual size plus the picker's own padding and border came to 289x46px; both
+        // rounded up further here on purpose so the clamping math below stays reliably
+        // conservative even if that ever shifts slightly (a font change, a browser rendering
+        // emoji a hair wider).
+        const pickerWidth = 300;
+        const pickerHeight = 56;
+        const margin = 8;
+        let left = rect.left + rect.width / 2 - pickerWidth / 2;
+        left = Math.max(margin, Math.min(left, window.innerWidth - pickerWidth - margin));
+        // Prefers just above the pressed spot, exactly as it always has — but on a long, scrolled
+        // post, "above" the exact point someone pressed can itself already be scrolled out of
+        // view, off the top of the screen entirely, which is exactly what was reported. Falls
+        // back to just below instead whenever there genuinely isn't room above within the
+        // CURRENT viewport specifically, not the full page.
+        let top = rect.top - pickerHeight - margin;
+        if (top < margin) top = rect.bottom + margin;
+        setPickerPos({ top, left });
       }
       document.dispatchEvent(new CustomEvent("blog-reaction-picker-open", { detail: instanceId }));
       setPickerOpen(true);
@@ -14003,15 +14048,17 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
         {children}
       </div>
 
-      {pickerOpen && (
-        <div className={`anim-expand-up absolute bottom-full ${pickerAlign === "right" ? "right-3" : "left-3"} mb-2 bg-white border border-stone-200 rounded-2xl shadow-lg px-2 py-1.5 flex items-center gap-0.5 z-20`}>
+      {pickerOpen && createPortal(
+        <div ref={pickerRef} className="anim-expand-up fixed bg-white border border-stone-200 rounded-2xl shadow-lg px-2 py-1.5 flex items-center gap-0.5 z-[60]"
+          style={{ top: `${pickerPos.top}px`, left: `${pickerPos.left}px` }}>
           {BLOG_REACTIONS.map((r) => (
             <button key={r.key} onClick={() => choose(r.key)}
               className={`text-xl leading-none p-1.5 rounded-full hover:bg-stone-100 hover:scale-110 transition-transform ${myReaction?.key === r.key ? "bg-teal-50" : ""}`}>
               {r.emoji}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
