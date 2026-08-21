@@ -13928,15 +13928,33 @@ const BLOG_REACTIONS = [
 // clips its overflow, which a post card does, to keep photos correctly inside its rounded corners.
 function ReactableContent({ reactions, currentUserId, onReact, children }) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Decided fresh every time the picker actually opens, from wherever this element really sits
+  // on screen at that moment — not a fixed side — so it lands correctly whether this is the left
+  // or right photo in a grid, or a full-width post where either side has room either way.
+  const [pickerAlign, setPickerAlign] = useState("left");
   const pressTimer = useRef(null);
   const longPressFired = useRef(false);
   const wrapperRef = useRef(null);
+  // A plain, unique object — its own identity is all that's needed here, to tell "was that
+  // broadcast from me, or from some other picker" below; nothing about its contents matters.
+  const instanceId = useRef({}).current;
 
   useEffect(() => {
     if (!pickerOpen) return;
     const onClickOutside = (e) => { if (wrapperRef.current && !wrapperRef.current.contains(e.target)) setPickerOpen(false); };
     document.addEventListener("mousedown", onClickOutside);
-    return () => document.removeEventListener("mousedown", onClickOutside);
+    // Only one reaction picker should ever be open across the whole page at once. Each instance
+    // manages its own open/closed state independently — with several reactable photos now able
+    // to sit side by side in the same post, long-pressing a second one before closing the first
+    // used to leave both open at once, stacking a new bar on top of every one already open rather
+    // than replacing it. Any instance opening broadcasts this event; every other open one closes
+    // itself in response.
+    const onOtherOpened = (e) => { if (e.detail !== instanceId) setPickerOpen(false); };
+    document.addEventListener("blog-reaction-picker-open", onOtherOpened);
+    return () => {
+      document.removeEventListener("mousedown", onClickOutside);
+      document.removeEventListener("blog-reaction-picker-open", onOtherOpened);
+    };
   }, [pickerOpen]);
 
   const safeReactions = reactions || {};
@@ -13947,6 +13965,11 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
     pressTimer.current = setTimeout(() => {
       longPressFired.current = true;
       if (navigator.vibrate) navigator.vibrate(10); // a light haptic tick, matching the native long-press feel
+      if (wrapperRef.current) {
+        const rect = wrapperRef.current.getBoundingClientRect();
+        setPickerAlign(rect.left + rect.width / 2 > window.innerWidth / 2 ? "right" : "left");
+      }
+      document.dispatchEvent(new CustomEvent("blog-reaction-picker-open", { detail: instanceId }));
       setPickerOpen(true);
     }, 450);
   };
@@ -13981,7 +14004,7 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
       </div>
 
       {pickerOpen && (
-        <div className="anim-expand-up absolute bottom-full left-3 mb-2 bg-white border border-stone-200 rounded-2xl shadow-lg px-2 py-1.5 flex items-center gap-0.5 z-20">
+        <div className={`anim-expand-up absolute bottom-full ${pickerAlign === "right" ? "right-3" : "left-3"} mb-2 bg-white border border-stone-200 rounded-2xl shadow-lg px-2 py-1.5 flex items-center gap-0.5 z-20`}>
           {BLOG_REACTIONS.map((r) => (
             <button key={r.key} onClick={() => choose(r.key)}
               className={`text-xl leading-none p-1.5 rounded-full hover:bg-stone-100 hover:scale-110 transition-transform ${myReaction?.key === r.key ? "bg-teal-50" : ""}`}>
@@ -14179,7 +14202,17 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                         </div>
                       ))}
                     </div>
-                    {block.text && <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                    {block.text && (
+                      // Reacting to the whole post is still its own separate thing, even once a
+                      // post has several photos each reacting on their own — the two were never
+                      // meant to replace each other. This is exactly the same block-level
+                      // reaction a single-photo post already has (no mediaIndex at all), so it
+                      // shows up through the exact same badge row at the card's own outer edge,
+                      // below, that already handles it — nothing new needed there.
+                      <ReactableContent reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)}>
+                        <p className="text-sm text-stone-700 leading-relaxed px-4 pt-3 whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>
+                      </ReactableContent>
+                    )}
                     {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
                   </>
                 )}
