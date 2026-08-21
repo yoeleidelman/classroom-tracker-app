@@ -19,35 +19,13 @@
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
-const { getAuth } = require("firebase-admin/auth");
 const { getFirestore, FieldPath } = require("firebase-admin/firestore");
+const { requireActiveStaff } = require("./_lib/account-helpers.js");
 
 if (!getApps().length) {
   initializeApp({
     credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
   });
-}
-
-async function requireActiveStaff(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) throw { status: 401, message: "Sign-in required." };
-
-  const auth = getAuth();
-  let decoded;
-  try {
-    decoded = await auth.verifyIdToken(token);
-  } catch {
-    throw { status: 401, message: "Sign-in session is invalid or expired." };
-  }
-
-  const db = getFirestore();
-  const callerDoc = await db.collection("data").doc(`teacher:${decoded.uid}`).get();
-  const caller = callerDoc.exists ? callerDoc.data().value : null;
-  if (!caller || caller.active === false) {
-    throw { status: 403, message: "Staff access required." };
-  }
-  return caller;
 }
 
 export default async function handler(req, res) {

@@ -14,8 +14,7 @@
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
-const { getAuth } = require("firebase-admin/auth");
-const { getFirestore } = require("firebase-admin/firestore");
+const { requireActiveAccount } = require("./_lib/account-helpers.js");
 const dns = require("dns").promises;
 const net = require("net");
 
@@ -23,30 +22,6 @@ if (!getApps().length) {
   initializeApp({
     credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
   });
-}
-
-async function requireActiveAccount(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) throw { status: 401, message: "Sign-in required." };
-
-  const auth = getAuth();
-  let decoded;
-  try {
-    decoded = await auth.verifyIdToken(token);
-  } catch {
-    throw { status: 401, message: "Sign-in session is invalid or expired." };
-  }
-
-  const db = getFirestore();
-  const [teacherDoc, familyDoc] = await Promise.all([
-    db.collection("data").doc(`teacher:${decoded.uid}`).get(),
-    db.collection("data").doc(`family:${decoded.uid}`).get(),
-  ]);
-  const teacherActive = teacherDoc.exists && teacherDoc.data().value?.active !== false;
-  const familyActive = familyDoc.exists && familyDoc.data().value?.active !== false;
-  if (!teacherActive && !familyActive) throw { status: 403, message: "Account not recognized." };
-  return decoded;
 }
 
 // True for any IP that shouldn't be reachable from a public-facing fetch: loopback, private

@@ -17,22 +17,30 @@ export function trimAndCheckPassword(raw, minLength = 6) {
   return { trimmed, valid: trimmed.length >= minLength };
 }
 
-// Verifies a request comes from a signed-in, active admin specifically — used by the two files
-// where that's the exact rule (creating a teacher account, resetting one's password). Throws
-// {status, message} on any failure so each handler can respond with its own wording without
-// leaking why it failed.
-export async function requireAdmin(req) {
+// The one piece every api/*.js file in this app needed before deciding WHO a request is from -
+// parse the bearer token, ask Firebase whether it's genuinely valid right now. Previously
+// rewritten, identically, at the top of ten separate files. Returns the decoded token (with
+// .uid) on success; throws the same {status, message} shape every caller already expects, so
+// swapping this in changes nothing about how any of them respond to a bad or missing token.
+export async function verifyRequestToken(req) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!token) throw { status: 401, message: "Sign-in required." };
 
   const auth = getAuth();
-  let decoded;
   try {
-    decoded = await auth.verifyIdToken(token);
+    return await auth.verifyIdToken(token);
   } catch {
     throw { status: 401, message: "Sign-in session is invalid or expired." };
   }
+}
+
+// Verifies a request comes from a signed-in, active admin specifically — the exact rule shared
+// by creating a teacher account, resetting one's password, and checking a teacher's real account
+// state. Throws {status, message} on any failure so each handler can respond with its own wording
+// without leaking why it failed.
+export async function requireAdmin(req) {
+  const decoded = await verifyRequestToken(req);
 
   const db = getFirestore();
   const callerDoc = await db.collection("data").doc(`teacher:${decoded.uid}`).get();
@@ -41,6 +49,42 @@ export async function requireAdmin(req) {
     throw { status: 403, message: "Admin access required." };
   }
   return decoded;
+}
+
+// Verifies a request comes from ANY signed-in, currently-active account - teacher or family,
+// whichever this uid turns out to be - without caring which one, or requiring anything more
+// specific than "this is a real, currently-active person using the app." The rule shared by
+// three otherwise-unrelated endpoints (an AI-assist tool, a link-preview fetcher, and the push-
+// notification sender) that each just need to confirm a genuine, active caller before doing their
+// own actual job - none of them care about role or class access beyond that.
+export async function requireActiveAccount(req) {
+  const decoded = await verifyRequestToken(req);
+
+  const db = getFirestore();
+  const [teacherDoc, familyDoc] = await Promise.all([
+    db.collection("data").doc(`teacher:${decoded.uid}`).get(),
+    db.collection("data").doc(`family:${decoded.uid}`).get(),
+  ]);
+  const teacherActive = teacherDoc.exists && teacherDoc.data().value?.active !== false;
+  const familyActive = familyDoc.exists && familyDoc.data().value?.active !== false;
+  if (!teacherActive && !familyActive) throw { status: 403, message: "Account not recognized." };
+  return decoded;
+}
+
+// Verifies a request comes from a signed-in, active member of staff - any role, not just admins -
+// and returns their own record so a caller can make its own further, more specific decision (like
+// which classes they're allowed to touch) on top of this. The rule shared by creating a family
+// account and looking up which families a staff member can message.
+export async function requireActiveStaff(req) {
+  const decoded = await verifyRequestToken(req);
+
+  const db = getFirestore();
+  const callerDoc = await db.collection("data").doc(`teacher:${decoded.uid}`).get();
+  const caller = callerDoc.exists ? callerDoc.data().value : null;
+  if (!caller || caller.active === false) {
+    throw { status: 403, message: "Staff access required." };
+  }
+  return caller;
 }
 
 // Firebase Auth allows exactly one account per email, full stop — there's no way around that, and

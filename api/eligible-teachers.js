@@ -19,8 +19,8 @@
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
-const { getAuth } = require("firebase-admin/auth");
 const { getFirestore } = require("firebase-admin/firestore");
+const { verifyRequestToken } = require("./_lib/account-helpers.js");
 
 if (!getApps().length) {
   initializeApp({
@@ -29,17 +29,7 @@ if (!getApps().length) {
 }
 
 async function requireActiveFamily(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) throw { status: 401, message: "Sign-in required." };
-
-  const auth = getAuth();
-  let decoded;
-  try {
-    decoded = await auth.verifyIdToken(token);
-  } catch {
-    throw { status: 401, message: "Sign-in session is invalid or expired." };
-  }
+  const decoded = await verifyRequestToken(req);
 
   const db = getFirestore();
   const familyDoc = await db.collection("data").doc(`family:${decoded.uid}`).get();

@@ -13,33 +13,12 @@
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
+import { requireAdmin } from "./_lib/account-helpers.js";
 
 if (!getApps().length) {
   initializeApp({
     credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
   });
-}
-
-async function requireAdmin(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) throw { status: 401, message: "Sign-in required." };
-
-  const auth = getAuth();
-  let decoded;
-  try {
-    decoded = await auth.verifyIdToken(token);
-  } catch {
-    throw { status: 401, message: "Sign-in session is invalid or expired." };
-  }
-
-  const db = getFirestore();
-  const callerDoc = await db.collection("data").doc(`teacher:${decoded.uid}`).get();
-  const caller = callerDoc.exists ? callerDoc.data().value : null;
-  if (!caller || caller.active === false || caller.role !== "admin") {
-    throw { status: 403, message: "Admin access required." };
-  }
-  return decoded;
 }
 
 export default async function handler(req, res) {

@@ -1,9 +1,9 @@
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
-const { getAuth } = require("firebase-admin/auth");
 const { getFirestore } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
+const { requireActiveAccount } = require("./_lib/account-helpers.js");
 
 if (!getApps().length) {
   initializeApp({
@@ -16,29 +16,6 @@ if (!getApps().length) {
 // account's devices. Every request must now prove it comes from a signed-in, active teacher or
 // family account (notifications legitimately flow from both directions — a teacher posting a
 // blog update, a family messaging the office — so this isn't limited to one role).
-async function requireActiveAccount(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) throw { status: 401, message: "Sign-in required." };
-
-  const auth = getAuth();
-  let decoded;
-  try {
-    decoded = await auth.verifyIdToken(token);
-  } catch {
-    throw { status: 401, message: "Sign-in session is invalid or expired." };
-  }
-
-  const db = getFirestore();
-  const [teacherDoc, familyDoc] = await Promise.all([
-    db.collection("data").doc(`teacher:${decoded.uid}`).get(),
-    db.collection("data").doc(`family:${decoded.uid}`).get(),
-  ]);
-  const teacherActive = teacherDoc.exists && teacherDoc.data().value?.active !== false;
-  const familyActive = familyDoc.exists && familyDoc.data().value?.active !== false;
-  if (!teacherActive && !familyActive) throw { status: 403, message: "Account not recognized." };
-  return decoded;
-}
 
 // Takes a list of account uids (teacher or family — the same push-tokens:{uid} shape covers
 // both) and a notification to send, looks up every device each of them has enabled, and sends to

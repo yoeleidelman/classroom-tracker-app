@@ -23,42 +23,13 @@
 // studentLinks/linkedClassIds — so both logins resolve to the exact same children and the exact
 // same conversations, without needing to re-pick students for the second parent.
 import { initializeApp, getApps, cert } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
-import { trimAndCheckPassword, createOrLinkAuthUser } from "./_lib/account-helpers.js";
+import { trimAndCheckPassword, createOrLinkAuthUser, requireActiveStaff } from "./_lib/account-helpers.js";
 
 if (!getApps().length) {
   initializeApp({
     credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY)),
   });
-}
-
-// Verifies the request comes from a signed-in, active teacher or admin, and returns their own
-// record so the handler can additionally check which classes a non-admin caller may link to.
-// Deliberately its own, separate check from the shared requireAdmin used elsewhere — this file's
-// actual rule (any active staff, not just admins) is genuinely different, confirmed while first
-// reading every file this session before consolidating anything, so it stays local rather than
-// being forced into the shared admin-only check.
-async function requireActiveStaff(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) throw { status: 401, message: "Sign-in required." };
-
-  const auth = getAuth();
-  let decoded;
-  try {
-    decoded = await auth.verifyIdToken(token);
-  } catch {
-    throw { status: 401, message: "Sign-in session is invalid or expired." };
-  }
-
-  const db = getFirestore();
-  const callerDoc = await db.collection("data").doc(`teacher:${decoded.uid}`).get();
-  const caller = callerDoc.exists ? callerDoc.data().value : null;
-  if (!caller || caller.active === false) {
-    throw { status: 403, message: "Staff access required." };
-  }
-  return caller;
 }
 
 export default async function handler(req, res) {
