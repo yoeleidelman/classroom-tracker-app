@@ -7611,44 +7611,18 @@ function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, curre
 // moment it happens, with no refresh or re-navigation needed — that this screen was NOT actually
 // meeting: its data used to load once, with a plain one-time read, when this screen first opened.
 // A teacher logging something afterward, while a parent already had this exact screen open,
-// produced no visible change at all until the parent happened to leave and come back. This is
-// what actually makes it live: a genuine Firestore subscription per source (the child's own daily
-// log, the class's incidents, the class's photos), each independently reconnecting itself if its
-// connection ever drops (see useLiveJSON's own comment for why that matters), so a change on the
-// teacher's side is reflected here within moments, automatically, exactly matching what "mirror
-// image" was always supposed to mean.
-function useLiveChildDailyLog(classId, studentId) {
-  const [rawData, setRawData] = useState(null);
-  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
-  useEffect(() => {
-    if (!classId || !studentId) return;
-    let unsubscribe = () => {};
-    let reconnectTimer = null;
-    let cancelled = false;
-    setHasLoadedOnce(false);
-
-    const subscribe = () => {
-      const ref = doc(db, "data", `class:${classId}:kriya:${studentId}`);
-      unsubscribe = onSnapshot(ref,
-        (snap) => { setRawData(snap.exists() ? snap.data().value : {}); setHasLoadedOnce(true); },
-        (err) => {
-          console.error("Live child daily-log subscription failed, reconnecting", err);
-          if (cancelled) return;
-          reconnectTimer = setTimeout(subscribe, 1500);
-        });
-    };
-    subscribe();
-
-    return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
-  }, [classId, studentId]);
-  return { rawData, hasLoadedOnce };
-}
+// produced no visible change at all until the parent happened to leave and come back. Fixed by
+// making every source here (the child's own daily log, the class's incidents, the class's photos)
+// a genuine live subscription instead — the child's own log specifically via useLiveJSONLoaded
+// below, the same shared hook used everywhere else in the app for this, rather than a separate,
+// custom one — so a change on the teacher's side is reflected here within moments, automatically,
+// exactly matching what "mirror image" was always supposed to mean.
 
 function ChildDailyLogView({ link, onBack }) {
   const [date, setDate] = useState(todayISO());
   const [viewingPhoto, setViewingPhoto] = useState(null);
 
-  const { rawData, hasLoadedOnce } = useLiveChildDailyLog(link.classId, link.studentId);
+  const { value: rawData, loaded: hasLoadedOnce } = useLiveJSONLoaded(`class:${link.classId}:kriya:${link.studentId}`, {});
   const classIncidents = useLiveJSON(`class:${link.classId}:incidents`, []);
   const classPhotos = useLiveJSON(`class:${link.classId}:photos`, []);
   const loading = !hasLoadedOnce;
