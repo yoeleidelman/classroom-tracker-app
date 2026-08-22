@@ -7898,26 +7898,23 @@ function ParentBlogView({ link, family, onBack }) {
     }
   };
 
-  // "Read" simply means this family had the Blog tab open with a post loaded — not that they
-  // scrolled to look at it specifically, matching how a person naturally means "I saw it" when
-  // they say they checked the blog. Marks every currently-loaded post the moment this screen is
-  // genuinely open, and again for anything new that arrives while it stays open — safe to call on
-  // every visit, since the endpoint itself only ever records a real change the first time for a
-  // given reader on a given post; every visit after that is a harmless no-op on the server.
-  useEffect(() => {
-    if (!postsLoaded || posts.length === 0) return;
+  // Marks read only once a specific post has genuinely sat visible on this family's screen for a
+  // real moment — see the matching, more detailed reasoning on BlogPostCard's own onGenuinelyRead,
+  // which is what actually decides when to call this for any given post. For a family with more
+  // than one child, the Blog tab has to default to showing somebody's feed the instant it opens —
+  // but switching to a different child before this ever fires unmounts that first child's cards
+  // entirely, clearing this before it can run; a post only ever gets marked once it's genuinely
+  // been on screen long enough, default child or explicitly chosen one alike.
+  const markPostRead = (postId) => {
     (async () => {
       const headers = await authHeaders();
-      posts.forEach((post) => {
-        if (post.deleted) return;
-        fetch("/api/blog-mark-read", {
-          method: "POST",
-          headers: { ...headers, "Content-Type": "application/json" },
-          body: JSON.stringify({ classId: link.classId, postId: post.id }),
-        }).catch(() => {}); // best-effort — a missed read receipt isn't worth surfacing an error over
-      });
+      fetch("/api/blog-mark-read", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ classId: link.classId, postId }),
+      }).catch(() => {}); // best-effort — a missed read receipt isn't worth surfacing an error over
     })();
-  }, [postsLoaded, posts.length]);
+  };
 
   const onComment = (postId, text) => {
     if (!text.trim()) return;
@@ -7983,7 +7980,8 @@ function ParentBlogView({ link, family, onBack }) {
               <div className="space-y-4">
                 {sorted.map((post) => (
                   <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
-                    commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
+                    commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia}
+                    onGenuinelyRead={markPostRead} />
                 ))}
               </div>
             </>
@@ -8047,7 +8045,7 @@ function getInitials(fullName) {
   return (words[0][0] + words[words.length - 1][0]).toUpperCase();
 }
 
-function ChildSwitcher({ labels, selectedIndex, onSelect }) {
+function ChildSwitcher({ labels, counts, selectedIndex, onSelect }) {
   const containerRef = useRef(null);
   const BASE_PX = 14; // text-sm, the largest size a name is ever shown at
   const MIN_PX = 10; // never shrinks past this, however many children or however long a name
@@ -8119,8 +8117,13 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
     <div ref={containerRef} className="flex bg-white border-t border-stone-200 overflow-hidden">
       {displayLabels.map((label, i) => (
         <button key={i} onClick={() => onSelect(i)} style={{ fontSize: `${fontPx}px` }}
-          className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis text-center ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
+          className={`flex-1 py-2.5 px-3 font-semibold whitespace-nowrap overflow-hidden text-ellipsis text-center relative ${i > 0 ? "border-l border-l-stone-200" : ""} ${selectedIndex === i ? "text-white bg-[#5F9F9E]" : "text-stone-500 hover:bg-stone-50"}`}>
           {label}
+          {counts?.[i] > 0 && (
+            <span className={`ml-1 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full text-[10px] font-bold ${selectedIndex === i ? "bg-white/25 text-white" : "bg-rose-500 text-white"}`}>
+              {counts[i]}
+            </span>
+          )}
         </button>
       ))}
     </div>
@@ -8130,12 +8133,13 @@ function ChildSwitcher({ labels, selectedIndex, onSelect }) {
 // Split out from an inline expression specifically so it can use its own effect — marking a
 // class's blog as read has to happen when THAT class is actually the one being looked at, and
 // needs to re-fire every time the switcher changes which one that is.
-function ParentBlogTabContent({ uniqueClasses, selectedIndex, family, onMarkRead }) {
-  const selectedLink = uniqueClasses[selectedIndex] || uniqueClasses[0];
-  useEffect(() => {
-    if (selectedLink) onMarkRead(selectedLink.classId);
-  }, [selectedLink?.classId]); // eslint-disable-line react-hooks/exhaustive-deps
-
+function ParentBlogTabContent({ links, selectedStudentId, family }) {
+  // Resolves the selected child straight to their own class's blog — falls back to the first
+  // child's class whenever nothing's been explicitly chosen yet (selectedStudentId still null,
+  // meaning the tab was just opened and landed on somebody by default), the same reasoning as
+  // before, now working from the same per-child list the switcher itself uses rather than a
+  // separately class-deduplicated one that no longer lines up with the switcher's own indexing.
+  const selectedLink = links.find((l) => l.studentId === selectedStudentId) || links[0];
   return <ParentBlogView link={selectedLink} family={family} />;
 }
 
@@ -8557,7 +8561,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       const last = thread?.messages?.[thread.messages.length - 1];
       if (isThreadUnread(readState, `teacher-${t.uid}`, last, "family")) {
         const unreadCount = countUnreadInThread(readState, `teacher-${t.uid}`, thread.messages, "family");
-        results.push({ threadKey: `teacher-${t.uid}`, kind: "teacher", title: t.name, preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
+        // classIds carried through here too, same as t's own shape — a grade-level coordinator's
+        // thread naturally has none, which correctly means it won't attribute to any one specific
+        // child's own count below, only a teacher genuinely tied to that child's own class does.
+        results.push({ threadKey: `teacher-${t.uid}`, kind: "teacher", classIds: t.classIds || [], title: t.name, preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
       }
     }
     setUnreadThreads(results);
@@ -8569,20 +8576,30 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => clearInterval(interval);
   }, [refreshUnreadThreads]);
 
-  // Same read-state document as messages, just a different key shape per class
-  // ("blog-{classId}" instead of "class-{classId}") — a post counts as new if it's newer than
-  // the last time this class's blog was actually opened, not just newer than account creation.
+  // A post's own readBy list — recorded server-side, once a post has genuinely sat visible on
+  // this family's screen for a real moment (see BlogPostCard's own onGenuinelyRead) — is now the
+  // single source of truth for whether it's been read: the same data this family's own read
+  // receipts already use, not a separate per-class timestamp cutoff kept in sync alongside it.
+  const [unreadBlogByChild, setUnreadBlogByChild] = useState({}); // { [studentId]: count } — the per-child breakdown the switcher shows
   const refreshUnreadBlogCount = useCallback(async () => {
     if (!fullTimeStudentLinks) return;
+    const reactorId = family.familyGroupId || family.uid;
     const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
-    const readState = await getReadState(family.uid);
-    let total = 0;
+    const unreadByClass = {};
     for (const l of uniqueClasses) {
       const posts = await loadJSON(`class:${l.classId}:blogPosts`, [], true); // eslint-disable-line no-await-in-loop
-      const lastRead = readState[`blog-${l.classId}`];
-      total += posts.filter((p) => !lastRead || new Date(p.timestamp) > new Date(lastRead)).length;
+      unreadByClass[l.classId] = posts.filter((p) => !p.deleted && !(p.readBy || []).some((r) => r.id === reactorId)).length;
     }
-    setUnreadBlogCount(total);
+    // Top level: one distinct post counts once, even if it happens to reach two siblings sharing
+    // a class — summing unreadByClass's own values already achieves exactly this, since it's
+    // keyed per unique class, never per child, so a shared class's posts are never counted twice.
+    setUnreadBlogCount(Object.values(unreadByClass).reduce((sum, n) => sum + n, 0));
+    // Per child: the same class's count applied to every child actually enrolled in it — two
+    // siblings sharing a class both correctly show the same number, since the same real posts
+    // genuinely apply to both of them.
+    const byChild = {};
+    fullTimeStudentLinks.forEach((l) => { byChild[l.studentId] = unreadByClass[l.classId] || 0; });
+    setUnreadBlogByChild(byChild);
   }, [family, fullTimeStudentLinks]);
 
   useEffect(() => { refreshUnreadBlogCount(); }, [refreshUnreadBlogCount]);
@@ -8591,12 +8608,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => clearInterval(interval);
   }, [refreshUnreadBlogCount]);
 
-  const markBlogRead = async (classId) => {
-    const posts = await loadJSON(`class:${classId}:blogPosts`, [], true);
-    const latest = posts[posts.length - 1];
-    if (latest) await markThreadRead(family.uid, `blog-${classId}`);
-    refreshUnreadBlogCount();
-  };
 
   const [unreadHomeworkCount, setUnreadHomeworkCount] = useState(0);
   const refreshUnreadHomeworkCount = useCallback(async () => {
@@ -8633,15 +8644,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // marked read, a whole thread gets dismissed), the badge is recomputed from scratch against
   // this account's own genuinely current unread state and set to match exactly — cleared
   // entirely, via clearAppBadge, only when the true total is zero.
+  // Individual unread messages summed across every thread, not a count of how many threads merely
+  // HAVE something unread — matching the same unit the per-child breakdown below already uses, so
+  // "3 unread" at the top and "2 for Ezra, 1 for Maya" underneath always add up to the same story.
+  const unreadMessagesTotal = unreadThreads.reduce((sum, t) => sum + (t.unreadCount || 1), 0);
   useEffect(() => {
     if (!("setAppBadge" in navigator)) return;
-    const total = unreadThreads.length + unreadBlogCount + unreadHomeworkCount;
+    const total = unreadMessagesTotal + unreadBlogCount + unreadHomeworkCount;
     try {
       if (total > 0) navigator.setAppBadge(total);
       else navigator.clearAppBadge();
     } catch { /* Badging API not available on this platform — nothing to fall back to */ }
     resetBackgroundBadgeCounter();
-  }, [unreadThreads.length, unreadBlogCount, unreadHomeworkCount]);
+  }, [unreadMessagesTotal, unreadBlogCount, unreadHomeworkCount]);
 
   const dismissUnread = async (item) => {
     await markThreadRead(family.uid, item.threadKey);
@@ -8773,22 +8788,20 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A blog deep link can arrive before the full-time-only class list has finished loading (that
-  // fetch is async and starts as null) — this resolves the actual tab index the moment that list
-  // is genuinely ready, rather than looking it up too early against an empty array.
+  // fetch is async and starts as null) — this resolves the actual child to select the moment that
+  // list is genuinely ready, rather than looking it up too early against an empty array.
   useEffect(() => {
     if (!pendingDeepLinkClassId || !fullTimeStudentLinks) return;
-    const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
-    const idx = uniqueClasses.findIndex((l) => l.classId === pendingDeepLinkClassId);
-    if (idx !== -1) setSelectedBlogClassIndex(idx);
+    const matchingLink = fullTimeStudentLinks.find((l) => l.classId === pendingDeepLinkClassId);
+    if (matchingLink) setSelectedStudentId(matchingLink.studentId);
     setPendingDeepLinkClassId(null);
   }, [pendingDeepLinkClassId, fullTimeStudentLinks]);
 
-  // Same reasoning as the blog resolver above, but against the un-deduped (per-child) list, since
-  // the homework switcher is per-child rather than per-class.
+  // Same reasoning as the blog resolver above.
   useEffect(() => {
     if (!pendingHomeworkDeepLinkClassId || !fullTimeStudentLinks) return;
-    const idx = fullTimeStudentLinks.findIndex((l) => l.classId === pendingHomeworkDeepLinkClassId);
-    if (idx !== -1) setSelectedHomeworkChildIndex(idx);
+    const matchingLink = fullTimeStudentLinks.find((l) => l.classId === pendingHomeworkDeepLinkClassId);
+    if (matchingLink) setSelectedStudentId(matchingLink.studentId);
     setPendingHomeworkDeepLinkClassId(null);
   }, [pendingHomeworkDeepLinkClassId, fullTimeStudentLinks]);
 
@@ -9176,21 +9189,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           ) : fullTimeStudentLinks.length === 0 ? (
             <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
           ) : (() => {
-            const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
-            // Blog switches by CLASS, not directly by child — so getting from "the shared
-            // selectedStudentId" to "which of these class tabs is that" has to go through that
-            // child's own classId first (two siblings sharing a class collapse into the same
-            // single tab here either way). Picking a different class tab, in the other direction,
-            // sets selectedStudentId back to whichever child that class's own link entry belongs
-            // to — a reasonable stand-in for "this class" everywhere else selectedStudentId gets
-            // used, even on a shared class, since anyone in it is in the class that was just
-            // chosen.
-            const selectedChildLink = fullTimeStudentLinks.find((l) => l.studentId === selectedStudentId);
-            const blogIndex = selectedChildLink ? uniqueClasses.findIndex((c) => c.classId === selectedChildLink.classId) : -1;
-            return (
-              <ParentBlogTabContent uniqueClasses={uniqueClasses} selectedIndex={blogIndex >= 0 ? blogIndex : 0}
-                family={family} onMarkRead={markBlogRead} />
-            );
+            const uniqueChildren = [...new Map(fullTimeStudentLinks.map((l) => [l.studentId, l])).values()];
+            return <ParentBlogTabContent links={uniqueChildren} selectedStudentId={selectedStudentId} family={family} />;
           })()
         ) : parentTab === "homework" ? (
           fullTimeStudentLinks === null ? (
@@ -9317,21 +9317,30 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     }
     if (parentTab === "blog") {
       if (!fullTimeStudentLinks) return null;
-      const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
-      if (uniqueClasses.length <= 1) return null;
-      const selectedChildLink = fullTimeStudentLinks.find((l) => l.studentId === selectedStudentId);
-      const blogIndex = selectedChildLink ? uniqueClasses.findIndex((c) => c.classId === selectedChildLink.classId) : -1;
+      const uniqueChildren = [...new Map(fullTimeStudentLinks.map((l) => [l.studentId, l])).values()];
+      if (uniqueChildren.length <= 1) return null;
       return {
-        labels: uniqueClasses.map((l) => l.studentName),
-        selectedIndex: blogIndex >= 0 ? blogIndex : 0,
-        onSelect: (i) => setSelectedStudentId(uniqueClasses[i]?.studentId),
+        labels: uniqueChildren.map((l) => l.studentName),
+        counts: uniqueChildren.map((l) => unreadBlogByChild[l.studentId] || 0),
+        selectedIndex: findChildIndex(uniqueChildren, selectedStudentId),
+        onSelect: (i) => setSelectedStudentId(uniqueChildren[i]?.studentId),
       };
     }
     if (parentTab === "messages") {
       const uniqueChildren = [...new Map((family?.studentLinks || []).map((l) => [l.studentId, l])).values()];
       if (uniqueChildren.length <= 1) return null;
+      // Every class thread carries its own classId; a teacher-direct thread carries classIds
+      // instead (plural, since a teacher can cover more than one class) — office messages
+      // (kind === "admin") deliberately never count toward any one child, staying under Contact
+      // office instead, exactly as already agreed. A child's own count sums every OTHER thread
+      // that's actually theirs either way — two siblings sharing a class both correctly see the
+      // same number, since the same real messages genuinely apply to both.
+      const countForChild = (childLink) => unreadThreads
+        .filter((t) => t.kind === "class" ? t.classId === childLink.classId : t.kind === "teacher" ? (t.classIds || []).includes(childLink.classId) : false)
+        .reduce((sum, t) => sum + (t.unreadCount || 1), 0);
       return {
         labels: uniqueChildren.map((l) => l.studentName),
+        counts: uniqueChildren.map(countForChild),
         selectedIndex: findChildIndex(uniqueChildren, selectedStudentId),
         onSelect: (i) => setSelectedStudentId(uniqueChildren[i]?.studentId),
       };
@@ -9386,14 +9395,14 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             text="These tabs are how you get around — Messages, Blog, Homework, and more."
             onNext={advanceTour} onSkip={dismissTour}>
             <div className="bg-white border-t border-stone-200 max-w-lg mx-auto">
-              <ParentMainTabs active={parentTab} navigate={navigateParentTab} unreadMessagesCount={unreadThreads.length} unreadBlogCount={unreadBlogCount}
+              <ParentMainTabs active={parentTab} navigate={navigateParentTab} unreadMessagesCount={unreadMessagesTotal} unreadBlogCount={unreadBlogCount}
                 unreadHomeworkCount={unreadHomeworkCount} showHomework={(fullTimeStudentLinks || []).some((l) => l.classType !== "preschool")} />
             </div>
           </TourHint>
         )}
         {activeSwitcherConfig && (
           <div className="max-w-lg mx-auto">
-            <ChildSwitcher labels={activeSwitcherConfig.labels} selectedIndex={activeSwitcherConfig.selectedIndex} onSelect={activeSwitcherConfig.onSelect} />
+            <ChildSwitcher labels={activeSwitcherConfig.labels} counts={activeSwitcherConfig.counts} selectedIndex={activeSwitcherConfig.selectedIndex} onSelect={activeSwitcherConfig.onSelect} />
           </div>
         )}
       </div>
@@ -14192,7 +14201,37 @@ function WhoReadSheet({ readBy, onClose }) {
   );
 }
 
-function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditBlock, onDeletePost }) {
+function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditBlock, onDeletePost, onGenuinelyRead }) {
+  const cardRef = useRef(null);
+  const alreadyRead = (post.readBy || []).some((r) => r.id === currentUserId);
+  // Marks read only once this specific post has genuinely sat visible on screen for a real
+  // moment — not the instant the Blog tab opens, and not just because it happened to be the
+  // default child shown. A post scrolled past in a blink, or one loaded in the background behind
+  // a different child's feed, never starts this clock at all; one that's actually being looked at
+  // does, whether that's the default view or something explicitly switched to — the same
+  // "genuinely seen" standard either way, resolving the exact case where marking only on an
+  // explicit switch would have wrongly left a truly-read default post looking unread forever.
+  useEffect(() => {
+    if (!onGenuinelyRead || post.deleted || alreadyRead) return;
+    let timer = null;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          timer = setTimeout(() => onGenuinelyRead(post.id), 1500);
+        } else if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      },
+      { threshold: 0.6 } // most of the card has to actually be on screen, not just a sliver at the edge
+    );
+    if (cardRef.current) observer.observe(cardRef.current);
+    return () => {
+      if (timer) clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [onGenuinelyRead, post.id, post.deleted, alreadyRead]);
+
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
   // { blockId, mediaIndex? } — mediaIndex present means "show who reacted to this one specific
@@ -14251,7 +14290,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
     // the true bottom-left edge of the WHOLE card — including past the comment box, the actual
     // outer boundary of the white box a person sees — rather than being clipped the moment it
     // tries to extend past whatever rounded-corner boundary is clipping the photos inside.
-    <div className="bg-white border border-stone-200 rounded-2xl relative">
+    <div ref={cardRef} className="bg-white border border-stone-200 rounded-2xl relative">
       <div className="rounded-2xl overflow-hidden">
         <div className="flex items-start justify-between gap-2 px-4 pt-3.5 pb-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
