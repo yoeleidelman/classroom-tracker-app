@@ -7908,10 +7908,14 @@ function ParentBlogView({ link, family, onBack }) {
   const markPostRead = (postId) => {
     (async () => {
       const headers = await authHeaders();
-      fetch("/api/blog-mark-read", {
+      // Shares api/blog-react.js's own endpoint with actual reactions, rather than its own
+      // separate file — Vercel's free plan caps a deployment at 12 serverless functions total,
+      // already fully used, and this was by far the cleanest of the existing files to fold this
+      // into: nearly identical server-side identity logic already existed in both.
+      fetch("/api/blog-react", {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ classId: link.classId, postId }),
+        body: JSON.stringify({ classId: link.classId, postId, action: "markRead" }),
       }).catch(() => {}); // best-effort — a missed read receipt isn't worth surfacing an error over
     })();
   };
