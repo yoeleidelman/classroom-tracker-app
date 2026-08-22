@@ -25,7 +25,7 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
-const { getFirestore } = require("firebase-admin/firestore");
+const { getFirestore, FieldPath } = require("firebase-admin/firestore");
 
 if (!getApps().length) {
   initializeApp({
@@ -158,6 +158,65 @@ async function handleMarkRead(req, res, classId, postId, actorId, actorName) {
   return res.status(200).json({ ok: true, posts: nextPosts });
 }
 
+// Fills in likely reads for a post from BEFORE this app tracked reads per-post at all — using
+// the older, class-level "last time this family opened the Blog tab" timestamp that was already
+// being recorded well before that. If a family's own last-opened moment for this class falls at
+// or after this specific post's own timestamp, it's a reasonable sign they were around to see
+// it — not a certainty the way a genuine, timed read is, which is exactly why every entry this
+// adds is marked inferred: true rather than folded in as an indistinguishable, ordinary read.
+// Runs once per post, ever — post.backfilled marks that this already happened, so opening the
+// Blog tab a second time doesn't repeat the same class-wide scan for every post again.
+async function handleBackfillReads(req, res, classId, postId) {
+  const db = getFirestore();
+  const ref = db.collection("data").doc(`class:${classId}:blogPosts`);
+  const snap = await ref.get();
+  const posts = snap.exists ? snap.data().value || [] : [];
+  const post = posts.find((p) => p.id === postId);
+  if (!post) return res.status(404).json({ error: "Post not found." });
+  if (post.backfilled) return res.status(200).json({ ok: true, posts });
+
+  // Same prefix-range family lookup api/class-families.js already uses to find every family
+  // actually linked to this class — checking studentLinks directly as the authoritative source,
+  // not just the derived linkedClassIds shortcut, for the same reason that file does: the
+  // shortcut only ever gets populated the first time that specific guardian signs back in after
+  // it was added, so relying on it alone can miss a real family that just hasn't happened to sign
+  // in again yet.
+  const familiesSnap = await db.collection("data")
+    .orderBy(FieldPath.documentId())
+    .startAt("family:")
+    .endAt("family:\uf8ff")
+    .get();
+  const linkedFamilies = [];
+  familiesSnap.forEach((doc) => {
+    const f = doc.data().value;
+    if (!f) return;
+    const viaLinkedClassIds = Array.isArray(f.linkedClassIds) && f.linkedClassIds.includes(classId);
+    const viaStudentLinks = Array.isArray(f.studentLinks) && f.studentLinks.some((l) => l?.classId === classId);
+    if (viaLinkedClassIds || viaStudentLinks) linkedFamilies.push(f);
+  });
+
+  const postTime = new Date(post.timestamp);
+  const existingReadBy = post.readBy || [];
+  const alreadyRecorded = new Set(existingReadBy.map((r) => r.id));
+  const inferredEntries = [];
+  for (const f of linkedFamilies) {
+    const groupId = f.familyGroupId || f.uid;
+    if (alreadyRecorded.has(groupId)) continue; // eslint-disable-line no-continue
+    const stateDoc = await db.collection("data").doc(`read-state:${f.uid}`).get(); // eslint-disable-line no-await-in-loop
+    const state = stateDoc.exists ? stateDoc.data().value || {} : {};
+    const lastOpened = state[`blog-${classId}`];
+    if (lastOpened && new Date(lastOpened) >= postTime) {
+      inferredEntries.push({ id: groupId, name: f.name || "Family", inferred: true });
+      alreadyRecorded.add(groupId);
+    }
+  }
+
+  const nextReadBy = [...existingReadBy, ...inferredEntries];
+  const updated = posts.map((p) => (p.id === postId ? { ...p, readBy: nextReadBy, backfilled: true } : p));
+  await ref.set({ value: updated });
+  return res.status(200).json({ ok: true, posts: updated });
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -175,6 +234,7 @@ export default async function handler(req, res) {
 
   try {
     if (action === "markRead") return await handleMarkRead(req, res, classId, postId, actorId, actorName);
+    if (action === "backfillReads") return await handleBackfillReads(req, res, classId, postId);
     return await handleReact(req, res, classId, postId, actorId, actorName);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

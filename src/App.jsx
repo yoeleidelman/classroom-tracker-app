@@ -14242,8 +14242,15 @@ function WhoReadSheet({ readBy, onClose }) {
             <p className="text-sm text-stone-400 px-4 py-4 text-center">No one has seen this yet.</p>
           ) : (
             readBy.map((r, i) => (
-              <div key={i} className="flex items-center px-4 py-2.5">
+              <div key={i} className="flex items-center gap-1.5 px-4 py-2.5">
                 <span className="text-sm text-stone-700">{r.name}</span>
+                {/* inferred means a real read was never actually recorded for this specific post —
+                    it's a family's OWN older "last opened the Blog tab" moment, from before this
+                    app tracked reads per-post at all, falling after this post's own timestamp.
+                    A reasonable sign they were around to see it, genuinely not the same certainty
+                    as an actual, timed read, which is exactly why this says so plainly rather than
+                    folding it in as an indistinguishable, ordinary one. */}
+                {r.inferred && <span className="text-[10px] text-stone-400 italic">probably</span>}
               </div>
             ))
           )}
@@ -14524,6 +14531,32 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
   const bottomRef = useRef(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  // Fills in likely reads for any post from before this app tracked reads per-post at all —
+  // once per post, ever, using the same server-side inference api/blog-react.js's own
+  // backfillReads action already runs (a family's older, class-level "last opened the Blog tab"
+  // timestamp, checked against this specific post's own timestamp). Only ever fires for a post
+  // that hasn't already been through this (post.backfilled), so it's a real one-time catch-up on
+  // whatever's still missing it, not a repeated scan every time this screen happens to load.
+  // firedFor tracks which posts THIS component instance has already asked about, purely to avoid
+  // re-asking every time posts itself updates for some unrelated reason (a new comment, say) —
+  // the server side is already safely idempotent regardless, this is just about not being wasteful.
+  const firedFor = useRef(new Set());
+  useEffect(() => {
+    const unbackfilled = posts.filter((p) => !p.deleted && !p.backfilled && !firedFor.current.has(p.id));
+    if (unbackfilled.length === 0) return;
+    unbackfilled.forEach((p) => firedFor.current.add(p.id));
+    (async () => {
+      const headers = await authHeaders();
+      unbackfilled.forEach((post) => {
+        fetch("/api/blog-react", {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ classId, postId: post.id, action: "backfillReads" }),
+        }).catch(() => {}); // best-effort — a missed backfill isn't worth surfacing an error over, and simply tries again the next time this loads fresh
+      });
+    })();
+  }, [posts, classId]);
+
   // Same reasoning as the parent side's own blog view fix — useLayoutEffect, not useEffect, is
   // what makes this genuinely start at the bottom rather than flash the top of the feed for one
   // frame before jumping there. useEffect runs after the browser paints; useLayoutEffect runs
