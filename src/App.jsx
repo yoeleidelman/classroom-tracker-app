@@ -9744,6 +9744,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [incidents, setIncidents] = useState([]);
   const [photos, setPhotos] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
+  // Which existing post is currently open in the full compose screen for editing, or null when
+  // that screen is instead being used to write a brand-new one — set right before navigating to
+  // "blog-compose", cleared again on the way back out either way.
+  const [editingBlogPost, setEditingBlogPost] = useState(null);
   const [homeworkPosts, setHomeworkPosts] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
   const [classPoints, setClassPoints] = useState({});
@@ -9882,7 +9886,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           commentsEnabled={config.blogCommentsEnabled !== false}
           onReact={toggleBlogReaction}
           onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
-          onEditBlock={editBlogPostBlock} onDeletePost={deleteBlogPost}
+          onEditPost={(post) => { setEditingBlogPost(post); navigateView("blog-compose"); }} onDeletePost={deleteBlogPost}
           classId={classId}
           navigate={navigateView} />
         );
@@ -10324,22 +10328,60 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     notifyClassFamilies(classId, `New post in ${className}`, (title || "").trim() || firstCaption || "Check out the new post", `/?portal=parent&open=blog&classId=${classId}`);
     return entry;
   };
+  // A full post edit — every block, every photo/video, all editable together, not just one
+  // part's caption. Uploads only the genuinely NEW media a block picked up during this edit;
+  // anything that was already there keeps its own real url and, critically, its own existing
+  // reactions — adding one more photo to a part shouldn't reset every reaction that part's
+  // earlier photos had already collected. A block's own edited/originalText marker only applies
+  // when its caption text genuinely changed from what it was — adding a photo without touching
+  // the words shouldn't falsely claim the caption itself was edited. A brand-new block (added
+  // during this edit) starts with no reaction history of its own, since none exists yet.
+  const editFullBlogPost = async (postId, title, blocksInput, onProgress) => {
+    const totalItems = blocksInput.reduce((sum, b) => sum + (b.mediaItems || []).filter((m) => !m.existing).length, 0);
+    let uploadedCount = 0;
+    const finalBlocks = [];
+    for (const block of blocksInput) {
+      const media = [];
+      for (const item of block.mediaItems || []) {
+        if (item.existing) {
+          media.push({ url: item.url, type: item.type, name: item.name || null, reactions: item.originalReactions || {} });
+          continue; // eslint-disable-line no-continue
+        }
+        const reportProgress = () => { if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalItems, 1)) * 100)); };
+        let url;
+        if (item.type === "video") {
+          const ext = (item.file.name || "").split(".").pop() || "mp4";
+          url = await uploadOneVideo(item.file, `blog/${classId}/${postId}/${uid()}.${ext}`, reportProgress);
+        } else if (item.type === "audio") {
+          const ext = (item.file.name || "").split(".").pop() || "mp3";
+          url = await uploadOneFile(item.file, `blog/${classId}/${postId}/${uid()}.${ext}`, reportProgress);
+        } else {
+          url = await uploadOneImage(item.file, `blog/${classId}/${postId}/${uid()}.jpg`, reportProgress);
+        }
+        media.push({ url, type: item.type, name: item.type === "audio" ? item.file.name : null, reactions: {} });
+        uploadedCount++;
+        if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
+      }
+      const trimmedText = (block.text || "").trim();
+      const isExistingBlock = Boolean(block.existingBlockId);
+      const textActuallyChanged = isExistingBlock && trimmedText !== (block.originalCaptionText || "");
+      finalBlocks.push({
+        id: block.existingBlockId || uid(),
+        media,
+        text: trimmedText,
+        reactions: isExistingBlock ? (block.originalBlockReactions || {}) : {},
+        ...(textActuallyChanged ? { edited: true, originalText: block.originalEditedFrom ?? block.originalCaptionText } : {}),
+      });
+    }
+    const next = blogPosts.map((p) => (p.id === postId
+      ? { ...p, title: (title || "").trim() || null, blocks: finalBlocks }
+      : p));
+    persistBlogPosts(next);
+  };
   // Any teacher or admin with access to this class can edit or delete any post in its blog, not
   // only whoever originally posted it — unlike a message, which is one specific person's own
   // words in a conversation, a classroom blog post is a shared record of the room as a whole, the
   // same way any of them can already log an incident or update attendance someone else started.
-  // Editing works on one post's one specific part (its own caption) at a time, matching how a
-  // multi-part post already lets each part carry its own separate text — the same edited/
-  // originalText shape a message's own edit already uses, kept for exactly the same reason: the
-  // first-ever original wording stays on record even through a second or third edit later.
-  const editBlogPostBlock = (postId, blockId, newText) => {
-    const next = blogPosts.map((p) => (p.id === postId
-      ? { ...p, blocks: p.blocks.map((b) => (b.id === blockId
-          ? { ...b, text: newText, edited: true, originalText: b.originalText ?? b.text }
-          : b)) }
-      : p));
-    persistBlogPosts(next);
-  };
   // A soft delete, exactly like a message's own — leaves a "This post was deleted" placeholder
   // behind rather than vanishing without a trace, and actually clears the photos, video, and text
   // from storage rather than just hiding them behind the placeholder in the UI.
@@ -11375,7 +11417,9 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
 
       {view === "blog-compose" && (
-        <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher} onSubmit={submitBlogPost} onBack={() => navigateView("blog")} />
+        <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher} onSubmit={submitBlogPost}
+          onSubmitEdit={editFullBlogPost} editingPost={editingBlogPost}
+          onBack={() => { setEditingBlogPost(null); navigateView("blog"); }} />
       )}
 
 
@@ -14209,7 +14253,7 @@ function WhoReadSheet({ readBy, onClose }) {
   );
 }
 
-function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditBlock, onDeletePost, onGenuinelyRead }) {
+function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditPost, onDeletePost, onGenuinelyRead }) {
   const cardRef = useRef(null);
   const alreadyRead = (post.readBy || []).some((r) => r.id === currentUserId);
   // Marks read only once this specific post has genuinely sat visible on screen for a real
@@ -14246,15 +14290,13 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
   // photo," absent means "show who reacted to this whole block" (a single-media or text block).
   const [whoReactedTarget, setWhoReactedTarget] = useState(null);
   // Only ever present at all for the teacher side, which is the only caller that actually passes
-  // onEditBlock/onDeletePost in the first place — a parent viewing the exact same post never
-  // gets this UI at all, the same way canModify already keeps a family from editing or deleting
-  // their own sent messages.
+  // onEditPost/onDeletePost in the first place — a parent viewing the exact same post never gets
+  // this UI at all, the same way canModify already keeps a family from editing or deleting their
+  // own sent messages.
   const [showPostActions, setShowPostActions] = useState(false);
-  const [editingBlockId, setEditingBlockId] = useState(null);
-  const [editDraft, setEditDraft] = useState("");
   const [showReadBy, setShowReadBy] = useState(false);
   const comments = post.comments || [];
-  const canModify = Boolean(onEditBlock && onDeletePost);
+  const canModify = Boolean(onEditPost && onDeletePost);
 
   const submitComment = () => {
     if (!commentDraft.trim()) return;
@@ -14262,18 +14304,6 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
     setCommentDraft("");
     setCommentsOpen(true);
   };
-  const startEditBlock = (block) => { setEditingBlockId(block.id); setEditDraft(block.text || ""); };
-  const cancelEditBlock = () => { setEditingBlockId(null); setEditDraft(""); };
-  const saveEditBlock = (blockId) => {
-    onEditBlock(post.id, blockId, editDraft.trim());
-    setEditingBlockId(null);
-    setEditDraft("");
-  };
-  // Which block "Edit" in the ⋯ menu actually opens — the block that already has a caption, since
-  // that's genuinely "the post's text" in the overwhelmingly common single-block case; falling
-  // back to the very first block only when none has one yet, so there's still somewhere for a
-  // brand-new caption to go.
-  const editableBlock = post.blocks.find((b) => b.text) || post.blocks[0];
 
   const reactedBlocks = post.blocks.filter((b) => Object.values(b.reactions || {}).some((entries) => (entries || []).length > 0));
   const whoReactedBlock = whoReactedTarget ? post.blocks.find((b) => b.id === whoReactedTarget.blockId) : null;
@@ -14322,7 +14352,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
               </button>
               {showPostActions && (
                 <div className="anim-expand-down absolute right-0 top-full mt-1 bg-white border border-stone-200 rounded-xl shadow-lg py-1 z-20 w-36">
-                  <button onClick={() => { startEditBlock(editableBlock); setShowPostActions(false); }}
+                  <button onClick={() => { onEditPost(post); setShowPostActions(false); }}
                     className="w-full text-left text-xs font-semibold text-stone-700 hover:bg-stone-50 px-3 py-2">
                     Edit
                   </button>
@@ -14380,23 +14410,10 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                         </div>
                       )
                     )}
-                    {editingBlockId === block.id ? (
+                    {block.text && (
                       <div className="px-4 pt-3">
-                        <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={2} autoFocus
-                          className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1.5" />
-                        <div className="flex gap-1.5">
-                          <button onClick={() => saveEditBlock(block.id)} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-teal-700 text-white">Save</button>
-                          <button onClick={cancelEditBlock} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-stone-100 text-stone-500">Cancel</button>
-                        </div>
+                        <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" />{block.edited && <span className="text-stone-400 text-xs italic"> (edited)</span>}</p>
                       </div>
-                    ) : (
-                      <>
-                        {block.text && (
-                          <div className="px-4 pt-3">
-                            <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" />{block.edited && <span className="text-stone-400 text-xs italic"> (edited)</span>}</p>
-                          </div>
-                        )}
-                      </>
                     )}
                     {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
                     {!media.length && !block.text && !canModify && <div className="h-2" />}
@@ -14437,16 +14454,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                         </div>
                       ))}
                     </div>
-                    {editingBlockId === block.id ? (
-                      <div className="px-4 pt-3">
-                        <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={2} autoFocus
-                          className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1.5" />
-                        <div className="flex gap-1.5">
-                          <button onClick={() => saveEditBlock(block.id)} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-teal-700 text-white">Save</button>
-                          <button onClick={cancelEditBlock} className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-stone-100 text-stone-500">Cancel</button>
-                        </div>
-                      </div>
-                    ) : block.text ? (
+                    {block.text ? (
                       // Reacting to the whole post is still its own separate thing, even once a
                       // post has several photos each reacting on their own — the two were never
                       // meant to replace each other. This is exactly the same block-level
@@ -14512,7 +14520,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
   );
 }
 
-function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, commentsEnabled, onReact, onComment, onEditBlock, onDeletePost, classId, navigate }) {
+function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, commentsEnabled, onReact, onComment, onEditPost, onDeletePost, classId, navigate }) {
   const bottomRef = useRef(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
@@ -14565,7 +14573,7 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
                 <BlogPostCard key={post.id} post={post} currentUserId={currentUserId}
                   onReact={onReact}
                   commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia}
-                  onEditBlock={onEditBlock} onDeletePost={onDeletePost} />
+                  onEditPost={onEditPost} onDeletePost={onDeletePost} />
               ))}
             </div>
           </>
@@ -14588,9 +14596,24 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
   );
 }
 
-function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
-  const [title, setTitle] = useState("");
-  const [blocks, setBlocks] = useState([{ id: uid(), text: "", mediaItems: [] }]);
+function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, editingPost, onBack }) {
+  const [title, setTitle] = useState(editingPost?.title || "");
+  // Editing an existing post starts from its real blocks, not a blank one — each existing photo
+  // or video carries its own url (not a file to upload) plus existing: true, so submit knows to
+  // keep it exactly as-is rather than re-uploading it, and originalReactions so those don't get
+  // silently reset just because the block itself was touched. originalCaptionText and
+  // originalEditedFrom (the block's own true first-ever wording, if it had already been edited
+  // before this session) are both carried along purely so a genuine text change can still be told
+  // apart from "nothing about the caption itself actually changed" once this gets saved.
+  const [blocks, setBlocks] = useState(
+    editingPost
+      ? editingPost.blocks.map((b) => ({
+          id: b.id, text: b.text || "",
+          mediaItems: (b.media || []).map((m) => ({ id: uid(), url: m.url, type: m.type, name: m.name, existing: true, originalReactions: m.reactions })),
+          existingBlockId: b.id, originalCaptionText: b.text || "", originalEditedFrom: b.originalText, originalBlockReactions: b.reactions,
+        }))
+      : [{ id: uid(), text: "", mediaItems: [] }]
+  );
   const [posting, setPosting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
@@ -14644,7 +14667,7 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
     }
   };
 
-  const hasContent = blocks.some((b) => b.text.trim() || b.mediaItems.some((m) => m.file));
+  const hasContent = blocks.some((b) => b.text.trim() || b.mediaItems.some((m) => m.file || m.existing));
 
   const submit = async () => {
     if (!hasContent) { setError("Add at least a photo, a video, or some text first."); return; }
@@ -14652,8 +14675,11 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
     setPosting(true);
     setProgress(0);
     try {
-      const cleanBlocks = blocks.map((b) => ({ ...b, mediaItems: b.mediaItems.filter((m) => m.file) })); // drop rejected videos, never sent
-      await onSubmit(title, cleanBlocks, setProgress);
+      // Keeps both a genuinely new upload (m.file) AND an existing, already-uploaded item
+      // (m.existing) — dropping only a rejected video that never had a usable file to begin with.
+      const cleanBlocks = blocks.map((b) => ({ ...b, mediaItems: b.mediaItems.filter((m) => m.file || m.existing) }));
+      if (editingPost) await onSubmitEdit(editingPost.id, title, cleanBlocks, setProgress);
+      else await onSubmit(title, cleanBlocks, setProgress);
       onBack();
     } catch (err) {
       setError(describeUploadError(err));
@@ -14661,12 +14687,12 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
     setPosting(false);
   };
 
-  const activeBlockCount = blocks.filter((b) => b.text.trim() || b.mediaItems.some((m) => m.file)).length;
+  const activeBlockCount = blocks.filter((b) => b.text.trim() || b.mediaItems.some((m) => m.file || m.existing)).length;
 
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-4">New blog post</h1>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-4">{editingPost ? "Edit post" : "New blog post"}</h1>
       <div className="md:w-96 space-y-3">
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Give this post a title (optional)"
           className="w-full display-font text-base font-bold rounded-lg border border-stone-300 px-3 py-2 outline-none focus:border-teal-400" />
@@ -14687,14 +14713,14 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
                           <p className="text-[10px] text-rose-600 text-center">{m.error}</p>
                         </div>
                       ) : m.type === "video" ? (
-                        <video src={m.preview} className="w-full aspect-square object-cover rounded-lg" />
+                        <video src={m.url || m.preview} className="w-full aspect-square object-cover rounded-lg" />
                       ) : m.type === "audio" ? (
                         <div className="w-full aspect-square rounded-lg bg-stone-50 border border-stone-200 flex flex-col items-center justify-center gap-2 p-2">
                           <Music size={22} className="text-stone-400" />
                           <p className="text-[10px] text-stone-600 font-semibold text-center truncate w-full px-1">{m.name}</p>
                         </div>
                       ) : (
-                        <img src={m.preview} alt="" className="w-full aspect-square object-cover rounded-lg" />
+                        <img src={m.url || m.preview} alt="" className="w-full aspect-square object-cover rounded-lg" />
                       )}
                       <button onClick={() => removeMedia(block.id, m.id)} className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1"><X size={12} /></button>
                     </div>
@@ -14735,7 +14761,9 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onBack }) {
         <button onClick={addBlock} className="text-xs font-semibold text-teal-700">+ Add another part to this post</button>
         {error && <p className="text-xs text-rose-600">{error}</p>}
         <button onClick={submit} disabled={posting} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">
-          {posting ? `Posting… ${progress}%` : activeBlockCount > 1 ? "Post all parts together" : "Post"}
+          {posting
+            ? (editingPost ? `Saving… ${progress}%` : `Posting… ${progress}%`)
+            : editingPost ? "Save changes" : activeBlockCount > 1 ? "Post all parts together" : "Post"}
         </button>
       </div>
     </div>
