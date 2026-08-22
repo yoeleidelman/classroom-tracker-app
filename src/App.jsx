@@ -14194,11 +14194,15 @@ function WhoReadSheet({ readBy, onClose }) {
           <button onClick={onClose} className="text-stone-400 hover:text-stone-600 p-1"><X size={18} /></button>
         </div>
         <div className="overflow-y-auto py-1">
-          {readBy.map((r, i) => (
-            <div key={i} className="flex items-center px-4 py-2.5">
-              <span className="text-sm text-stone-700">{r.name}</span>
-            </div>
-          ))}
+          {readBy.length === 0 ? (
+            <p className="text-sm text-stone-400 px-4 py-4 text-center">No one has seen this yet.</p>
+          ) : (
+            readBy.map((r, i) => (
+              <div key={i} className="flex items-center px-4 py-2.5">
+                <span className="text-sm text-stone-700">{r.name}</span>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </div>
@@ -14265,6 +14269,11 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
     setEditingBlockId(null);
     setEditDraft("");
   };
+  // Which block "Edit" in the ⋯ menu actually opens — the block that already has a caption, since
+  // that's genuinely "the post's text" in the overwhelmingly common single-block case; falling
+  // back to the very first block only when none has one yet, so there's still somewhere for a
+  // brand-new caption to go.
+  const editableBlock = post.blocks.find((b) => b.text) || post.blocks[0];
 
   const reactedBlocks = post.blocks.filter((b) => Object.values(b.reactions || {}).some((entries) => (entries || []).length > 0));
   const whoReactedBlock = whoReactedTarget ? post.blocks.find((b) => b.id === whoReactedTarget.blockId) : null;
@@ -14312,8 +14321,18 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                 <MoreVertical size={14} />
               </button>
               {showPostActions && (
-                <div className="anim-expand-down absolute right-0 top-full mt-1 bg-white border border-stone-200 rounded-xl shadow-lg px-2 py-1.5 z-20 whitespace-nowrap">
-                  <ConfirmDelete onConfirm={() => { onDeletePost(post.id); setShowPostActions(false); }} size={12} label="Delete post" />
+                <div className="anim-expand-down absolute right-0 top-full mt-1 bg-white border border-stone-200 rounded-xl shadow-lg py-1 z-20 w-36">
+                  <button onClick={() => { startEditBlock(editableBlock); setShowPostActions(false); }}
+                    className="w-full text-left text-xs font-semibold text-stone-700 hover:bg-stone-50 px-3 py-2">
+                    Edit
+                  </button>
+                  <button onClick={() => { setShowReadBy(true); setShowPostActions(false); }}
+                    className="w-full text-left text-xs font-semibold text-stone-700 hover:bg-stone-50 px-3 py-2">
+                    Seen by {(post.readBy || []).length}
+                  </button>
+                  <div className="px-3 py-2">
+                    <ConfirmDelete onConfirm={() => { onDeletePost(post.id); setShowPostActions(false); }} size={12} label="Delete post" />
+                  </div>
                 </div>
               )}
             </div>
@@ -14373,14 +14392,8 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                     ) : (
                       <>
                         {block.text && (
-                          <div className="px-4 pt-3 flex items-start justify-between gap-2">
-                            <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" />{block.edited && <span className="text-stone-400 text-xs italic"> (edited)</span>}</p>
-                            {canModify && <button onClick={() => startEditBlock(block)} className="shrink-0 text-[11px] font-semibold text-stone-400 hover:text-stone-600">Edit</button>}
-                          </div>
-                        )}
-                        {!block.text && canModify && (
                           <div className="px-4 pt-3">
-                            <button onClick={() => startEditBlock(block)} className="text-[11px] font-semibold text-stone-400 hover:text-stone-600">+ Add a caption</button>
+                            <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" />{block.edited && <span className="text-stone-400 text-xs italic"> (edited)</span>}</p>
                           </div>
                         )}
                       </>
@@ -14441,18 +14454,11 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
                       // shows up through the exact same badge row at the card's own outer edge,
                       // below, that already handles it — nothing new needed there.
                       <ReactableContent reactions={block.reactions} currentUserId={currentUserId} onReact={(emoji) => onReact(post.id, emoji, block.id)}>
-                        <div className="px-4 pt-3 flex items-start justify-between gap-2">
+                        <div className="px-4 pt-3">
                           <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap"><LinkifiedText text={block.text} linkClassName="underline text-teal-700 hover:text-teal-900" />{block.edited && <span className="text-stone-400 text-xs italic"> (edited)</span>}</p>
-                          {canModify && <button onClick={(e) => { e.stopPropagation(); startEditBlock(block); }} className="shrink-0 text-[11px] font-semibold text-stone-400 hover:text-stone-600">Edit</button>}
                         </div>
                       </ReactableContent>
-                    ) : (
-                      canModify && (
-                        <div className="px-4 pt-3">
-                          <button onClick={() => startEditBlock(block)} className="text-[11px] font-semibold text-stone-400 hover:text-stone-600">+ Add a caption</button>
-                        </div>
-                      )
-                    )}
+                    ) : null}
                     {block.text && extractFirstUrl(block.text) && <div className="px-4 pt-1.5"><LinkPreviewCard url={extractFirstUrl(block.text)} /></div>}
                   </>
                 )}
@@ -14460,12 +14466,6 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
             );
           })}
         </div>
-
-        {canModify && (post.readBy || []).length > 0 && (
-          <button onClick={() => setShowReadBy(true)} className="px-4 pb-1 text-[11px] font-medium text-stone-400 hover:text-stone-600">
-            Seen by {post.readBy.length}
-          </button>
-        )}
 
         {commentsEnabled && (
           <div className="px-4 py-2.5">
