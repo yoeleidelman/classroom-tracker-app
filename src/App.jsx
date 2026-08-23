@@ -7930,7 +7930,7 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
       const res = await fetch("/api/blog-react", {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ classId: link.classId, postId, blockId, mediaIndex, emoji }),
+        body: JSON.stringify({ classId: link.classId, postId, blockId, mediaIndex, emoji, actingAs: "family" }),
       });
       const data = await res.json();
       // The live subscription above picks up the server's own write automatically — nothing to
@@ -7968,7 +7968,7 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
       const res = await fetch("/api/blog-react", {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ classId: link.classId, postId, action: "markRead" }),
+        body: JSON.stringify({ classId: link.classId, postId, action: "markRead", actingAs: "family" }),
       }).catch(() => null);
       // Reconciles the badge against the real, server-confirmed state once it actually arrives —
       // the optimistic decrement above is what a person genuinely sees first, immediately, with
@@ -10534,7 +10534,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const res = await fetch("/api/blog-react", {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ classId, postId, blockId, mediaIndex, emoji }),
+        body: JSON.stringify({ classId, postId, blockId, mediaIndex, emoji, actingAs: "teacher" }),
       });
       const data = await res.json();
       if (res.ok) persistBlogPosts(data.posts);
@@ -14670,7 +14670,7 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
         fetch("/api/blog-react", {
           method: "POST",
           headers: { ...headers, "Content-Type": "application/json" },
-          body: JSON.stringify({ classId, postId: post.id, action: "backfillReads" }),
+          body: JSON.stringify({ classId, postId: post.id, action: "backfillReads", actingAs: "teacher" }),
         }).catch(() => {}); // best-effort — a missed backfill isn't worth surfacing an error over, and simply tries again the next time this loads fresh
       });
     })();

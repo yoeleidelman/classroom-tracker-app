@@ -50,7 +50,7 @@ function computeSingleChoiceReactions(existingReactions, emoji, reactorId, react
   return reactions;
 }
 
-async function requireIdentityAndClassAccess(req, classId) {
+async function requireIdentityAndClassAccess(req, classId, actingAs) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!token) throw { status: 401, message: "Sign-in required." };
@@ -71,16 +71,38 @@ async function requireIdentityAndClassAccess(req, classId) {
   const teacher = teacherDoc.exists ? teacherDoc.data().value : null;
   const family = familyDoc.exists ? familyDoc.data().value : null;
 
-  if (teacher && teacher.active !== false) {
+  // Returns null only when this role genuinely doesn't exist or is inactive for this account —
+  // that's "try the other role." A record that DOES exist but lacks access to this specific class
+  // throws immediately instead, since that's a real, definitive rejection for the role actually
+  // being asked about, not a reason to go check whether some other, unrelated role might work.
+  const asTeacher = () => {
+    if (!teacher || teacher.active === false) return null;
     const isAdmin = teacher.role === "admin";
     const hasAccess = isAdmin || (teacher.assignedClassIds || []).includes(classId);
     if (!hasAccess) throw { status: 403, message: "You don't have access to this class." };
     return { actorId: decoded.uid, actorName: teacher.name || "Teacher" };
-  }
-  if (family && family.active !== false) {
+  };
+  const asFamily = () => {
+    if (!family || family.active === false) return null;
     if (!(family.linkedClassIds || []).includes(classId)) throw { status: 403, message: "You don't have access to this class." };
     return { actorId: family.familyGroupId || family.uid, actorName: family.name || "Family" };
-  }
+  };
+
+  // A single login can genuinely hold both roles at once — a teacher previewing their own class's
+  // blog exactly as a parent would see it, using the app's own "Switch to Parent view," is a real,
+  // supported case, not an edge case. Without knowing which experience actually made this request,
+  // checking teacher first whenever both existed meant every action a dual-role account took while
+  // genuinely using the family-facing side of the app got silently mislabeled as the teacher's own
+  // — the identity WAS technically real and did have access, so nothing ever errored, it just
+  // recorded the wrong one, every time. actingAs trusts what the caller already knows about
+  // itself, falling back to whichever role genuinely exists only when the caller hasn't said —
+  // every request already in production, from before this field existed, has no such value.
+  if (actingAs === "family") { const r = asFamily(); if (r) return r; }
+  if (actingAs === "teacher") { const r = asTeacher(); if (r) return r; }
+  const teacherResult = asTeacher();
+  if (teacherResult) return teacherResult;
+  const familyResult = asFamily();
+  if (familyResult) return familyResult;
   throw { status: 403, message: "Account not recognized." };
 }
 
@@ -248,17 +270,18 @@ export default async function handler(req, res) {
 
   // Defaults to "react" — every reaction request already in production, before this action field
   // existed at all, has no such field and must keep working exactly as it always has.
-  const { classId, postId, action = "react", storageKey, familyUid, readStateKey } = req.body || {};
+  const { classId, postId, action = "react", storageKey, familyUid, readStateKey, actingAs } = req.body || {};
 
   if (action === "backfillMessageRead") {
     if (!classId || !storageKey || !familyUid || !readStateKey) {
       return res.status(400).json({ error: "classId, storageKey, familyUid, and readStateKey are required." });
     }
     try {
-      // Only the teacher (or admin) actually viewing this thread can trigger a check of it — the
-      // same class-access verification every other action here already requires, just without
-      // needing a postId, which this action has no use for at all.
-      await requireIdentityAndClassAccess(req, classId);
+      // Always genuinely the teacher's own action specifically — triggered only by a teacher
+      // opening a specific thread, never ambiguous the way a dual-role account's OWN blog reading
+      // can be, so this one always asks for the teacher role explicitly rather than leaving it to
+      // be inferred.
+      await requireIdentityAndClassAccess(req, classId, "teacher");
       return await handleBackfillMessageRead(req, res, storageKey, familyUid, readStateKey);
     } catch (err) {
       if (err.status) return res.status(err.status).json({ error: err.message });
@@ -270,7 +293,7 @@ export default async function handler(req, res) {
 
   let actorId, actorName;
   try {
-    ({ actorId, actorName } = await requireIdentityAndClassAccess(req, classId));
+    ({ actorId, actorName } = await requireIdentityAndClassAccess(req, classId, actingAs));
   } catch (err) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
