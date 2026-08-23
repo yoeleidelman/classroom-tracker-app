@@ -7848,7 +7848,7 @@ function ChildDailyLogView({ link, onBack }) {
 // Self-contained, like ChildDailyLogView — fetches directly by classId rather than depending on
 // ClassApp's own closures, since a parent isn't inside any one class's context and may have
 // children in several different classes at once.
-function ParentBlogView({ link, family, onBack }) {
+function ParentBlogView({ link, family, onBack, onRead }) {
   const [lightboxIndex, setLightboxIndex] = useState(null);
   // scrollContainerRef is the scrollable region itself; contentRef is what's actually growing
   // inside it (images settling into their final size, fonts swapping in) — see useStickToBottom
@@ -7929,11 +7929,16 @@ function ParentBlogView({ link, family, onBack }) {
       // separate file — Vercel's free plan caps a deployment at 12 serverless functions total,
       // already fully used, and this was by far the cleanest of the existing files to fold this
       // into: nearly identical server-side identity logic already existed in both.
-      fetch("/api/blog-react", {
+      const res = await fetch("/api/blog-react", {
         method: "POST",
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ classId: link.classId, postId, action: "markRead" }),
-      }).catch(() => {}); // best-effort — a missed read receipt isn't worth surfacing an error over
+      }).catch(() => null);
+      // Refreshes the actual badge count right away rather than leaving it to catch up on its own
+      // slower, periodic poll — otherwise a post could sit genuinely, correctly marked read for up
+      // to that entire polling interval before the number on screen agreed with it, which reads as
+      // "this doesn't work" even though it already quietly does.
+      if (res?.ok) onRead?.();
     })();
   };
 
@@ -8154,14 +8159,14 @@ function ChildSwitcher({ labels, counts, selectedIndex, onSelect }) {
 // Split out from an inline expression specifically so it can use its own effect — marking a
 // class's blog as read has to happen when THAT class is actually the one being looked at, and
 // needs to re-fire every time the switcher changes which one that is.
-function ParentBlogTabContent({ links, selectedStudentId, family }) {
+function ParentBlogTabContent({ links, selectedStudentId, family, onRead }) {
   // Resolves the selected child straight to their own class's blog — falls back to the first
   // child's class whenever nothing's been explicitly chosen yet (selectedStudentId still null,
   // meaning the tab was just opened and landed on somebody by default), the same reasoning as
   // before, now working from the same per-child list the switcher itself uses rather than a
   // separately class-deduplicated one that no longer lines up with the switcher's own indexing.
   const selectedLink = links.find((l) => l.studentId === selectedStudentId) || links[0];
-  return <ParentBlogView link={selectedLink} family={family} />;
+  return <ParentBlogView link={selectedLink} family={family} onRead={onRead} />;
 }
 
 // Per-child, not per-class like the blog switcher above — a parent thinks "my daughter's
@@ -9234,7 +9239,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
           ) : (() => {
             const uniqueChildren = [...new Map(fullTimeStudentLinks.map((l) => [l.studentId, l])).values()];
-            return <ParentBlogTabContent links={uniqueChildren} selectedStudentId={selectedStudentId} family={family} />;
+            return <ParentBlogTabContent links={uniqueChildren} selectedStudentId={selectedStudentId} family={family} onRead={refreshUnreadBlogCount} />;
           })()
         ) : parentTab === "homework" ? (
           fullTimeStudentLinks === null ? (
