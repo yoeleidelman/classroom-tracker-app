@@ -7416,19 +7416,35 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   // right place" by scroll offset, but reading as a jarring jump rather than history smoothly
   // extending upward the way it does in any real messaging app.
   const pendingScrollAnchorRef = useRef(null);
+  // Guards against triggering a second reveal before the first one has actually repositioned the
+  // scroll — scroll events fire many times a second, so without this, one continuous upward
+  // scroll gesture near the top could otherwise fire several reveals back to back.
+  const isLoadingMoreRef = useRef(false);
   useLayoutEffect(() => {
     const anchor = pendingScrollAnchorRef.current;
     if (!anchor) return;
     pendingScrollAnchorRef.current = null;
     const container = scrollContainerRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+    if (container) container.scrollTop = container.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+    isLoadingMoreRef.current = false;
   }, [visibleMessageCount]);
-  const loadEarlierMessages = () => {
+  // Reveals more history the instant scrolling nears the top of what's currently loaded — no
+  // button, no visible seam, matching how scrolling up in any real messaging app actually feels.
+  // All the messages are already in memory (see the messages prop itself) — this only ever
+  // decides how many of them are actually in the page, so revealing more is instant, with nothing
+  // to wait on.
+  useEffect(() => {
     const container = scrollContainerRef.current;
-    if (container) pendingScrollAnchorRef.current = { scrollHeight: container.scrollHeight, scrollTop: container.scrollTop };
-    setVisibleMessageCount((c) => c + MESSAGES_PAGE_SIZE);
-  };
+    if (!container || !hasOlderMessages) return;
+    const onScroll = () => {
+      if (isLoadingMoreRef.current || container.scrollTop > 150) return;
+      isLoadingMoreRef.current = true;
+      pendingScrollAnchorRef.current = { scrollHeight: container.scrollHeight, scrollTop: container.scrollTop };
+      setVisibleMessageCount((c) => c + MESSAGES_PAGE_SIZE);
+    };
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [hasOlderMessages]);
   // A parent's own sent-message bubble picks up the school's turquoise instead of the app's
   // default teal-700 — matching the highlight already used for the active tab. Scoped tightly to
   // myRole === "family" specifically (not just "mine"), since this same component and this same
@@ -7461,13 +7477,6 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
         <div ref={contentRef} className="space-y-2">
         {messages.length === 0 && (
           <p className="text-sm text-stone-400 text-center py-8">No messages yet — say hello.</p>
-        )}
-        {hasOlderMessages && (
-          <div className="text-center pb-1">
-            <button onClick={loadEarlierMessages} className="text-xs font-semibold text-teal-700 hover:text-teal-900 px-3 py-1.5">
-              Load earlier messages
-            </button>
-          </div>
         )}
         {visibleMessages.map((m) => {
           const mine = m.senderType === myRole;
