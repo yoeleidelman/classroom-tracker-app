@@ -4750,6 +4750,50 @@ function NotificationToggle({ uid, accentColor = "#0f766e" }) {
   );
 }
 
+// Unprompted popup for anyone who still has notifications off — re-shown every 2 days for as
+// long as that stays true, and never shown at all once it isn't. Reuses NotificationToggle's own
+// enableNotificationsFor for the actual request, so the two never drift into handling the same
+// action two different ways.
+function NotificationReminderModal({ uid, onClose }) {
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState(null); // null | "enabled" | { error }
+
+  const handleEnable = async () => {
+    setBusy(true);
+    const res = await enableNotificationsFor(uid);
+    setBusy(false);
+    if (res.ok) setOutcome("enabled");
+    else setOutcome({ error: res.needsInstall ? "Add this app to your home screen first (Share → Add to Home Screen), then open it from that icon." : (res.error || "Something went wrong — try again.") });
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-5 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+        {outcome === "enabled" ? (
+          <>
+            <p className="text-sm font-semibold text-emerald-700 mb-1">Notifications turned on ✓</p>
+            <p className="text-xs text-stone-500 mb-4">You'll be notified about important school updates from now on.</p>
+            <button onClick={onClose} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Done</button>
+          </>
+        ) : (
+          <>
+            <p className="text-2xl mb-2">🔔</p>
+            <p className="text-base font-semibold text-stone-800 mb-1">Turn on notifications?</p>
+            <p className="text-sm text-stone-500 mb-4">Your notifications are off — turn them on so you don't miss important updates from the school.</p>
+            {outcome?.error && <p className="text-xs text-rose-600 mb-3">{outcome.error}</p>}
+            <div className="flex gap-2">
+              <button onClick={onClose} className="flex-1 text-sm font-semibold text-stone-500 border border-stone-300 rounded-lg py-2.5 hover:bg-stone-50">Not now</button>
+              <button onClick={handleEnable} disabled={busy} className="flex-1 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
+                {busy ? "…" : "Turn on"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function OfficeContactSettings() {
   const [phone, setPhone] = useState("");
   const [draft, setDraft] = useState("");
@@ -8528,6 +8572,31 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // on the same device, not just once ever for whoever happened to be first.
   useEffect(() => { recordStandaloneUsageIfApplicable(family.uid); }, [family.uid]);
 
+  // Whether to show the "your notifications are off" popup right now — checked once per real
+  // session, never assumed from a cached value. Re-checks the actual current status fresh each
+  // time specifically so this never bothers anyone who's already turned it on: the moment that
+  // becomes true, the very next check simply stops finding a reason to show it, with nothing
+  // further needed to make that happen. For as long as it's still off, re-shown every 2 days —
+  // the timestamp gets saved the instant it's decided to show, not on dismissal, so a "not now"
+  // tap still correctly counts as this round's reminder rather than leaving it perpetually due.
+  const [showNotifReminder, setShowNotifReminder] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (isIOSDevice() && !isRunningStandalone()) return; // nothing this popup could actually offer yet
+      if (!("Notification" in window) || Notification.permission === "denied") return; // nothing a tap here could fix directly
+      const alreadyOn = await isThisDeviceEnabled(family.uid);
+      if (alreadyOn || cancelled) return;
+      const reminderRecord = await loadJSON(`notif-reminder:${family.uid}`, null, true);
+      const lastShownAt = reminderRecord?.lastShownAt ? new Date(reminderRecord.lastShownAt).getTime() : 0;
+      const dueForReminder = Date.now() - lastShownAt >= 2 * 24 * 60 * 60 * 1000;
+      if (!dueForReminder || cancelled) return;
+      await saveJSON(`notif-reminder:${family.uid}`, { lastShownAt: new Date().toISOString() }, true);
+      if (!cancelled) setShowNotifReminder(true);
+    })();
+    return () => { cancelled = true; };
+  }, [family.uid]);
+
   // Every tab switch gets its own real, individually-poppable history entry now — a parent
   // stepping back should always land exactly one step behind wherever they actually were, never
   // skip past several taps at once or land outside the app entirely. An earlier version of this
@@ -9646,6 +9715,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <GlobalAppStyles />
+      {showNotifReminder && <NotificationReminderModal uid={family.uid} onClose={() => setShowNotifReminder(false)} />}
       <div className="sticky top-0 z-20 shadow-md" style={{ paddingTop: "env(safe-area-inset-top)", background: "linear-gradient(120deg, #ffffff 0%, #f1f1ee 100%)", borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
         <div className="max-w-lg mx-auto px-3 py-3 flex items-start justify-between gap-2">
           <div className="flex items-start gap-2 shrink-0">
