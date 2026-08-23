@@ -5045,6 +5045,7 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
       <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages}
         myRole={section === "classroom" ? "teacher" : "admin"} readOnly={section !== "classroom"}
         threadKey={section === "classroom" ? `classroom-${openGroup.groupId}` : `teacher-direct-${openGroup.groupId}`}
+        lastReadByFamily={thread.lastReadByFamily}
         onBack={() => { setOpenGroup(null); refresh(); }}
         onSend={section === "classroom" ? async (text) => { await sendAsAdminToClass(openGroup.groupId, text); await refresh(); } : undefined} />
     );
@@ -7152,8 +7153,16 @@ function AttachmentMenuButton({ onPickFile, onPickFiles }) {
   );
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false, lastReadBeforeOpen }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily }) {
   const [text, setText] = useState("");
+  // The id of the LAST message from me that the family has actually read — matching the standard
+  // "seen" placement in any messaging app, right under the newest one that qualifies, not
+  // repeated under every older one it's equally true of. One-way and teacher-only: nothing here
+  // ever tells a family whether their OWN messages were read by a teacher, only the reverse — see
+  // recordMessageReadByFamily, where the family's own side of this same field actually gets set.
+  const lastReadOwnMessageId = myRole === "teacher" && lastReadByFamily
+    ? [...messages].reverse().find((m) => m.senderType === myRole && new Date(lastReadByFamily) >= new Date(m.timestamp))?.id
+    : null;
   const [sending, setSending] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
   const [roughNote, setRoughNote] = useState("");
@@ -7354,6 +7363,9 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           // the accountability reasoning behind soft delete itself: the point is a school having
           // a stable, trustworthy record of what it told a family, not the reverse.
           const canModify = mine && myRole !== "family" && onEdit && onDelete && !m.deleted;
+          // Shown only under the single newest message that qualifies (lastReadOwnMessageId,
+          // computed once above), not repeated under every earlier one it's equally true of.
+          const showReadReceipt = m.id === lastReadOwnMessageId;
           const divider = m.id === firstUnreadId && (
             <div className="flex items-center gap-2 py-1">
               <div className="flex-1 h-px bg-rose-200" />
@@ -7468,6 +7480,11 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                         {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
                         {m.edited && <span className="italic"> · edited</span>}
                       </p>
+                      {showReadReceipt && (
+                        <p className={`text-[10px] mt-0.5 ${mine ? "text-teal-100" : "text-stone-400"}`}>
+                          Seen at {new Date(lastReadByFamily).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                        </p>
+                      )}
                     </div>
                   </>
                 )}
@@ -8672,14 +8689,35 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
   };
 
+  // Writes lastReadByFamily onto the shared thread document itself — not this family's own
+  // private read-state document, which a teacher has no access to and shouldn't (it also covers
+  // this family's blog status, admin-thread status, and every other class's status too). This one
+  // field lives on the exact document a teacher already legitimately reads to see the
+  // conversation itself, so surfacing it there doesn't expose anything beyond what's already
+  // visible to them. One-way only, by design — nothing here ever tells a family whether their OWN
+  // messages have been read by a teacher, only the reverse.
+  //
+  // The very first time this runs for a given thread, it seeds lastReadByFamily from this
+  // family's own already-existing per-thread read timestamp (previousReadTimestamp) rather than
+  // just "now" — that older value is real history, from before this feature ever existed, not
+  // something invented after the fact. Every visit after that simply reflects "now," since the
+  // thread already carries its own real value by then.
+  const recordMessageReadByFamily = async (storageKey, previousReadTimestamp) => {
+    const existing = (await loadJSON(storageKey, null, true)) || { messages: [] };
+    const newTimestamp = existing.lastReadByFamily ? new Date().toISOString() : (previousReadTimestamp || new Date().toISOString());
+    await saveJSON(storageKey, { ...existing, lastReadByFamily: newTimestamp }, true);
+  };
+
   const openMessagesFor = async (classId) => {
     setMessagingClassId(classId);
     const url = new URL(window.location.href);
     url.searchParams.set("thread", `class:${classId}`);
     window.history.pushState({ thread: `class:${classId}` }, "", url);
     const readState = await getReadState(family.uid);
-    setLastReadBeforeOpen(readState[`class-${classId}`] || null);
+    const previousReadTimestamp = readState[`class-${classId}`] || null;
+    setLastReadBeforeOpen(previousReadTimestamp);
     await markThreadRead(family.uid, `class-${classId}`);
+    recordMessageReadByFamily(`class:${classId}:messages:${family.uid}`, previousReadTimestamp).catch(() => {});
   };
 
   // Not scoped to any class — this is a shared line to the office, not a specific classroom, so
@@ -8722,8 +8760,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     url.searchParams.set("thread", `teacher:${teacherUid}`);
     window.history.pushState({ thread: `teacher:${teacherUid}` }, "", url);
     const readState = await getReadState(family.uid);
-    setLastReadBeforeOpen(readState[`teacher-${teacherUid}`] || null);
+    const previousReadTimestamp = readState[`teacher-${teacherUid}`] || null;
+    setLastReadBeforeOpen(previousReadTimestamp);
     await markThreadRead(family.uid, `teacher-${teacherUid}`);
+    recordMessageReadByFamily(`teacher-messages:${teacherUid}:${family.uid}`, previousReadTimestamp).catch(() => {});
   };
 
   // Restores whichever thread (or none) the URL says is open — fires on the hardware/gesture back
@@ -9559,7 +9599,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" teacher={loggedInTeacher} threadKey={`teacher-direct-${openGroup.groupId}`}
-          lastReadBeforeOpen={lastReadBeforeOpen}
+          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
           onBack={() => { setOpenGroup(null); refresh(); }}
           onSend={async (text, attachments) => { await sendMessage(openGroup.groupId, text, attachments); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
@@ -17449,7 +17489,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
-          lastReadBeforeOpen={lastReadBeforeOpen}
+          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
           onBack={() => { window.history.back(); refresh(); }}
           onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
@@ -17467,7 +17507,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`teacher-direct-${openDirectGroup.groupId}`}
-          lastReadBeforeOpen={lastReadBeforeOpen}
+          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
           onSend={async (text, attachments) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
