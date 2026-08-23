@@ -7399,6 +7399,36 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   const firstUnreadId = lastReadBeforeOpen
     ? messages.find((m) => m.senderType !== myRole && !m.deleted && new Date(m.timestamp) > new Date(lastReadBeforeOpen))?.id || null
     : null;
+  // Long-running threads build up real history over a school year — every message in one was, up
+  // to this point, rendered as a real, live piece of the page at once regardless of whether it was
+  // ever going to be looked at, which is exactly what made scrolling feel steadily less smooth the
+  // longer a conversation went on. Shows only the most recent MESSAGES_PAGE_SIZE by default, with
+  // older history revealed a page at a time on request rather than all up front.
+  const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGES_PAGE_SIZE);
+  // Starts fresh at the most recent page every time a genuinely different thread opens — otherwise
+  // an earlier conversation's own "load more" clicks would carry over into this one.
+  useEffect(() => { setVisibleMessageCount(MESSAGES_PAGE_SIZE); }, [threadKey]);
+  const hasOlderMessages = messages.length > visibleMessageCount;
+  const visibleMessages = hasOlderMessages ? messages.slice(-visibleMessageCount) : messages;
+  // Keeps whatever message the person was actually looking at anchored in exactly the same spot
+  // the moment older ones are revealed above it. Without this, inserting content above the current
+  // scroll position pushes everything already on screen further down — technically still "in the
+  // right place" by scroll offset, but reading as a jarring jump rather than history smoothly
+  // extending upward the way it does in any real messaging app.
+  const pendingScrollAnchorRef = useRef(null);
+  useLayoutEffect(() => {
+    const anchor = pendingScrollAnchorRef.current;
+    if (!anchor) return;
+    pendingScrollAnchorRef.current = null;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+  }, [visibleMessageCount]);
+  const loadEarlierMessages = () => {
+    const container = scrollContainerRef.current;
+    if (container) pendingScrollAnchorRef.current = { scrollHeight: container.scrollHeight, scrollTop: container.scrollTop };
+    setVisibleMessageCount((c) => c + MESSAGES_PAGE_SIZE);
+  };
   // A parent's own sent-message bubble picks up the school's turquoise instead of the app's
   // default teal-700 — matching the highlight already used for the active tab. Scoped tightly to
   // myRole === "family" specifically (not just "mine"), since this same component and this same
@@ -7432,7 +7462,14 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
         {messages.length === 0 && (
           <p className="text-sm text-stone-400 text-center py-8">No messages yet — say hello.</p>
         )}
-        {messages.map((m) => {
+        {hasOlderMessages && (
+          <div className="text-center pb-1">
+            <button onClick={loadEarlierMessages} className="text-xs font-semibold text-teal-700 hover:text-teal-900 px-3 py-1.5">
+              Load earlier messages
+            </button>
+          </div>
+        )}
+        {visibleMessages.map((m) => {
           const mine = m.senderType === myRole;
           // Edit/delete only ever apply to staff's own sent messages, never a family's — matches
           // the accountability reasoning behind soft delete itself: the point is a school having
@@ -18066,6 +18103,10 @@ const MAX_FILE_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
 // Roughly 5-6 lines at the composer's own text size — long enough that a real message never
 // feels cramped, capped so one very long paste doesn't push the send button off-screen.
 const MAX_COMPOSER_HEIGHT = 130;
+// How many messages a thread shows by default before "Load earlier" is needed — enough that most
+// visits never need it at all, small enough that a long-running thread's full history never has
+// to exist in the page at once just because it exists in the database.
+const MESSAGES_PAGE_SIZE = 40;
 async function uploadOneFile(file, path, onProgress) {
   if (file.size > MAX_FILE_ATTACHMENT_BYTES) throw new Error("File is too large — the limit is 20MB.");
   const fileRef = storageRef(storage, path);
