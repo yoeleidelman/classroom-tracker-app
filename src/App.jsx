@@ -5665,6 +5665,28 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [viewingFamilyGroupId, setViewingFamilyGroupId] = useState(null);
   const activeFamilies = (families || []).filter((f) => f.active !== false);
   const inactiveFamilies = (families || []).filter((f) => f.active === false);
+  // Whether each PARENT ACCOUNT individually — not each family, not each household — has at
+  // least one device with notifications on. Two guardians on the same family can have entirely
+  // different answers: one's phone enabled, the other's never set up, and collapsing that into a
+  // single family-level yes/no would hide exactly the gap worth knowing about. Keyed by each
+  // guardian's own uid, matching how push-tokens is itself already stored — one document per
+  // account, never shared between two guardians even in the same household.
+  const [notificationStatusByUid, setNotificationStatusByUid] = useState({});
+  const activeFamilyUidsKey = activeFamilies.map((f) => f.uid).join(",");
+  useEffect(() => {
+    if (adminTab !== "families" || activeFamilies.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(
+        activeFamilies.map(async (f) => {
+          const data = await loadJSON(`push-tokens:${f.uid}`, null, true);
+          return [f.uid, (data?.tokens?.length || 0) > 0];
+        })
+      );
+      if (!cancelled) setNotificationStatusByUid(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [adminTab, activeFamilyUidsKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // Grouped for display so two logins for the same household read as one family with two
   // guardians, not two unrelated entries that happen to share children — falls back to each
   // family's own uid for any record that predates familyGroupId existing.
@@ -6413,6 +6435,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                     // this guardian's own uid matching a teacher record's uid IS the link, looked
                     // up fresh each time rather than relying on a one-time creation message.
                     const linkedTeacher = (teachers || []).find((t) => t.uid === f.uid && t.active !== false);
+                    const notifStatus = notificationStatusByUid[f.uid]; // undefined while still loading
                     return (
                     <div key={f.uid} className={f !== primary ? "mt-2 pt-2 border-t border-stone-100" : ""}>
                       <div className="flex items-center justify-between gap-2">
@@ -6420,6 +6443,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                         <ArchiveOrDeleteMenu onArchive={() => onDeactivateFamily(f.uid)} onDeletePermanently={() => onDeleteFamily(f.uid)} size={14} />
                       </div>
                       <p className="text-xs text-stone-400 mt-0.5">{f.email}</p>
+                      {notifStatus !== undefined && (
+                        <p className={`text-[11px] font-semibold rounded-md px-2 py-1 mt-1 inline-block ${notifStatus ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-stone-500 bg-stone-50 border border-stone-200"}`}>
+                          {notifStatus ? "🔔 Notifications on" : "🔕 Notifications off"}
+                        </p>
+                      )}
                       {linkedTeacher && (
                         <p className="text-[11px] font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-md px-2 py-1 mt-1 inline-block">
                           ↔ Same login also signs in as {linkedTeacher.role === "admin" ? "an admin" : "a teacher"} — {linkedTeacher.name}
