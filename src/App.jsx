@@ -1954,6 +1954,15 @@ function isRunningStandalone() {
 function isIOSDevice() {
   return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 }
+// Records the one, simple fact worth knowing for gauging real engagement: has this account EVER
+// been used with the app actually installed, not just open in an ordinary browser tab. Fires
+// once per authenticated session that's genuinely running standalone — the write is cheap and
+// idempotent (just re-saves the same "yes" and a fresh timestamp), so there's no need to first
+// check whether it was already recorded before saving again.
+async function recordStandaloneUsageIfApplicable(uid) {
+  if (!isRunningStandalone()) return;
+  await saveJSON(`app-installed:${uid}`, { everInstalled: true, lastSeenAt: new Date().toISOString() }, true);
+}
 // Google's own sign-in system deliberately refuses to work inside a WebView, which is exactly
 // what an installed, standalone iOS PWA runs as — not a bug in this app, and not something either
 // a popup or a redirect can work around (confirmed independently across Firebase's own issue
@@ -5672,6 +5681,10 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   // each guardian's own uid, matching how push-tokens is itself already stored — one document
   // per account, never shared between two guardians even in the same household.
   const [notificationStatusByUid, setNotificationStatusByUid] = useState({});
+  // Whether each PARENT ACCOUNT has ever actually used the app installed, not just in a browser
+  // tab — see recordStandaloneUsageIfApplicable for where this gets recorded in the first place.
+  // undefined = still loading, false = never recorded (or genuinely never installed), true = yes.
+  const [installedStatusByUid, setInstalledStatusByUid] = useState({});
   const activeFamilyUidsKey = activeFamilies.map((f) => f.uid).join(",");
   useEffect(() => {
     if (adminTab !== "families" || activeFamilies.length === 0) return;
@@ -5679,11 +5692,17 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
     (async () => {
       const entries = await Promise.all(
         activeFamilies.map(async (f) => {
-          const data = await loadJSON(`push-tokens:${f.uid}`, null, true);
-          return [f.uid, data?.tokens?.length || 0];
+          const [pushData, installData] = await Promise.all([
+            loadJSON(`push-tokens:${f.uid}`, null, true),
+            loadJSON(`app-installed:${f.uid}`, null, true),
+          ]);
+          return [f.uid, pushData?.tokens?.length || 0, Boolean(installData?.everInstalled)];
         })
       );
-      if (!cancelled) setNotificationStatusByUid(Object.fromEntries(entries));
+      if (!cancelled) {
+        setNotificationStatusByUid(Object.fromEntries(entries.map(([uid, count]) => [uid, count])));
+        setInstalledStatusByUid(Object.fromEntries(entries.map(([uid, , installed]) => [uid, installed])));
+      }
     })();
     return () => { cancelled = true; };
   }, [adminTab, activeFamilyUidsKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -6436,6 +6455,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                     // up fresh each time rather than relying on a one-time creation message.
                     const linkedTeacher = (teachers || []).find((t) => t.uid === f.uid && t.active !== false);
                     const deviceCount = notificationStatusByUid[f.uid]; // undefined while still loading
+                    const everInstalled = installedStatusByUid[f.uid]; // undefined while still loading
                     return (
                     <div key={f.uid} className={f !== primary ? "mt-2 pt-2 border-t border-stone-100" : ""}>
                       <div className="flex items-center justify-between gap-2">
@@ -6443,11 +6463,18 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                         <ArchiveOrDeleteMenu onArchive={() => onDeactivateFamily(f.uid)} onDeletePermanently={() => onDeleteFamily(f.uid)} size={14} />
                       </div>
                       <p className="text-xs text-stone-400 mt-0.5">{f.email}</p>
-                      {deviceCount !== undefined && (
-                        <p className={`text-[11px] font-semibold rounded-md px-2 py-1 mt-1 inline-block ${deviceCount > 0 ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-stone-500 bg-stone-50 border border-stone-200"}`}>
-                          {deviceCount > 0 ? `🔔 Notifications on — ${deviceCount} device${deviceCount === 1 ? "" : "s"}` : "🔕 Notifications off"}
-                        </p>
-                      )}
+                      <div className="flex flex-wrap gap-1.5 mt-1">
+                        {deviceCount !== undefined && (
+                          <p className={`text-[11px] font-semibold rounded-md px-2 py-1 inline-block ${deviceCount > 0 ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-stone-500 bg-stone-50 border border-stone-200"}`}>
+                            {deviceCount > 0 ? `🔔 Notifications on — ${deviceCount} device${deviceCount === 1 ? "" : "s"}` : "🔕 Notifications off"}
+                          </p>
+                        )}
+                        {everInstalled !== undefined && (
+                          <p className={`text-[11px] font-semibold rounded-md px-2 py-1 inline-block ${everInstalled ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-stone-500 bg-stone-50 border border-stone-200"}`}>
+                            {everInstalled ? "📱 App installed" : "🌐 Browser only"}
+                          </p>
+                        )}
+                      </div>
                       {linkedTeacher && (
                         <p className="text-[11px] font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-md px-2 py-1 mt-1 inline-block">
                           ↔ Same login also signs in as {linkedTeacher.role === "admin" ? "an admin" : "a teacher"} — {linkedTeacher.name}
@@ -8494,6 +8521,12 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
 
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
   const [parentTab, setParentTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home"); // "home" | "messages" | "blog" | "homework" | "settings" — persistent top bar, not a toggled overlay
+
+  // Records, once per real session here, whether this family is actually using the app installed
+  // rather than just in a browser tab — the other half of gauging genuine engagement, alongside
+  // notification status. Keyed on family.uid so it fires again for a different account signing in
+  // on the same device, not just once ever for whoever happened to be first.
+  useEffect(() => { recordStandaloneUsageIfApplicable(family.uid); }, [family.uid]);
 
   // Every tab switch gets its own real, individually-poppable history entry now — a parent
   // stepping back should always land exactly one step behind wherever they actually were, never
