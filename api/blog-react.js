@@ -1,26 +1,28 @@
 // api/blog-react.js
-// Handles two related blog post actions from one endpoint — reacting to a post, and marking a
-// post as read — merged together specifically to stay within Vercel's Hobby-plan limit of 12
-// serverless functions per deployment. The two were originally separate files; combining them
-// cost nothing functionally, since they already shared nearly identical server-side identity
-// logic, and it freed up the one function slot a Hobby-plan deployment actually had left. Which
-// behavior a request wants is chosen by its own explicit "action" field, never inferred from
-// which other fields happen to be present.
+// Handles several related, small server-side actions from one endpoint — reacting to a blog post,
+// marking a post as read, backfilling likely blog reads from before per-post tracking existed, and
+// (despite the file's own name, kept for the sake of not renaming it and touching every existing
+// caller) backfilling a single message thread's own read status the same way. All merged together
+// specifically to stay within Vercel's Hobby-plan limit of 12 serverless functions per deployment —
+// each began life as its own idea, but all share nearly identical server-side identity logic, and
+// combining them freed up the function slots a Hobby-plan deployment actually had left. Which
+// behavior a request wants is chosen by its own explicit "action" field, never inferred from which
+// other fields happen to be present.
 //
-// Both exist server-side for the same underlying reason: Firestore rules cannot express "you may
-// only modify your own entry inside a nested array," whether that array is reactions or readers.
-// The existing client-side rule for blogPosts can only validate that the overall array length
-// doesn't change (blocking mass deletion or a fake post being injected), which is real
-// protection, but leaves a real gap underneath it: any signed-in family or teacher could, via a
-// direct write bypassing the app's own UI, spoof any OTHER person's name and id onto a reaction
-// or a read record, as long as the total count didn't change.
+// These exist server-side for the same underlying reason: Firestore rules cannot express "you may
+// only modify your own entry inside a nested array or a shared document," whether that's a blog
+// post's reactions, its readers, or a message thread's own read status. A client-side rule can
+// only validate things like "the overall array length doesn't change," which is real protection,
+// but leaves a real gap underneath it: a signed-in family or teacher could, via a direct write
+// bypassing the app's own UI, spoof any OTHER person's name and id onto a reaction or a read
+// record, as long as the shape of the change looked plausible.
 //
-// The fix is to never let the client supply who's acting at all. This endpoint reads the
-// caller's OWN identity from their own account record — a family's stored name and shared
-// familyGroupId, or a teacher's stored name and uid — using the same server-verified auth token
-// every other secured endpoint in this app relies on. The request body only ever carries WHAT
-// action to take and WHERE (which post, optionally which block, optionally which specific photo
-// within it, for a reaction), never WHO is acting.
+// The fix is to never let the client supply who's acting at all. This endpoint reads the caller's
+// OWN identity from their own account record — a family's stored name and shared familyGroupId, or
+// a teacher's stored name and uid — using the same server-verified auth token every other secured
+// endpoint in this app relies on. The request body only ever carries WHAT action to take and WHERE
+// (which post, optionally which block, optionally which specific photo within it, or which message
+// thread), never WHO is acting.
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
@@ -217,12 +219,53 @@ async function handleBackfillReads(req, res, classId, postId) {
   return res.status(200).json({ ok: true, posts: updated });
 }
 
+// Same reasoning as handleBackfillReads above, applied to one specific message thread instead of
+// a whole class's worth of blog readers — a message thread only ever has one other party on it
+// to begin with, so this never needs to scan every family the way the blog version does, only
+// check the one family this exact thread already belongs to. Triggered by the TEACHER's own
+// viewing rather than waiting on the family to reopen a thread they may have no real reason to
+// revisit, the same practical gap the blog version's own automatic, viewer-triggered backfill
+// was built to close.
+async function handleBackfillMessageRead(req, res, storageKey, familyUid, readStateKey) {
+  const db = getFirestore();
+  const threadRef = db.collection("data").doc(storageKey);
+  const threadSnap = await threadRef.get();
+  const thread = threadSnap.exists ? threadSnap.data().value : null;
+  if (!thread) return res.status(404).json({ error: "Thread not found." });
+  if (thread.lastReadByFamily) return res.status(200).json({ ok: true }); // already has a real value — nothing to backfill
+
+  const stateDoc = await db.collection("data").doc(`read-state:${familyUid}`).get();
+  const state = stateDoc.exists ? stateDoc.data().value || {} : {};
+  const lastRead = state[readStateKey];
+  if (!lastRead) return res.status(200).json({ ok: true, backfilled: false }); // nothing to backfill from — this family never actually read this thread
+
+  await threadRef.set({ value: { ...thread, lastReadByFamily: lastRead } });
+  return res.status(200).json({ ok: true, backfilled: true });
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   // Defaults to "react" — every reaction request already in production, before this action field
   // existed at all, has no such field and must keep working exactly as it always has.
-  const { classId, postId, action = "react" } = req.body || {};
+  const { classId, postId, action = "react", storageKey, familyUid, readStateKey } = req.body || {};
+
+  if (action === "backfillMessageRead") {
+    if (!classId || !storageKey || !familyUid || !readStateKey) {
+      return res.status(400).json({ error: "classId, storageKey, familyUid, and readStateKey are required." });
+    }
+    try {
+      // Only the teacher (or admin) actually viewing this thread can trigger a check of it — the
+      // same class-access verification every other action here already requires, just without
+      // needing a postId, which this action has no use for at all.
+      await requireIdentityAndClassAccess(req, classId);
+      return await handleBackfillMessageRead(req, res, storageKey, familyUid, readStateKey);
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      return res.status(500).json({ error: err.message || "Something went wrong." });
+    }
+  }
+
   if (!classId || !postId) return res.status(400).json({ error: "classId and postId are required." });
 
   let actorId, actorName;

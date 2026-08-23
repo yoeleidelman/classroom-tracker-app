@@ -1816,6 +1816,22 @@ async function markThreadRead(viewerId, threadKey) {
   await saveJSON(`read-state:${viewerId}`, state, true);
 }
 
+// Triggered by a TEACHER's own viewing of a specific thread, rather than waiting on the family to
+// reopen one they may have no real reason to revisit — the same practical gap blog's own
+// automatic, viewer-triggered backfill was built to close, just scoped to the one thread and one
+// family it already, specifically belongs to rather than scanning every family a whole class has.
+// Server-side, since a teacher has no direct access to a family's own private read-state document
+// (nor should they) — this asks the one secured endpoint that already does to check it on their
+// behalf, without ever exposing the raw data itself to the client making the request.
+async function backfillMessageReadIfNeeded(classId, storageKey, familyUid, readStateKey) {
+  const headers = await authHeaders();
+  fetch("/api/blog-react", {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ classId, action: "backfillMessageRead", storageKey, familyUid, readStateKey }),
+  }).catch(() => {}); // best-effort — a missed backfill isn't worth surfacing an error over, and simply tries again the next time this thread is opened
+}
+
 // Generic across every thread shape in the app (class messages, admin messages) — all of them
 // store the same { messages: [...] } document, keyed differently, so these take the actual
 // storage key directly rather than trying to derive it from a thread's shorter display key.
@@ -7153,7 +7169,7 @@ function AttachmentMenuButton({ onPickFile, onPickFiles }) {
   );
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead }) {
   const [text, setText] = useState("");
   // The id of the LAST message from me that the family has actually read — matching the standard
   // "seen" placement in any messaging app, right under the newest one that qualifies, not
@@ -7163,6 +7179,14 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   const lastReadOwnMessageId = myRole === "teacher" && lastReadByFamily
     ? [...messages].reverse().find((m) => m.senderType === myRole && new Date(lastReadByFamily) >= new Date(m.timestamp))?.id
     : null;
+  // Backfills this specific thread's own read status the moment a teacher opens it, if it doesn't
+  // already have a real value — see backfillMessageReadIfNeeded's own, more detailed reasoning for
+  // why this exists at all. Runs once per thread actually opened, not on every render — threadKey
+  // itself changing is what genuinely means a different thread is now being looked at.
+  useEffect(() => {
+    if (!onBackfillRead || lastReadByFamily) return;
+    onBackfillRead();
+  }, [threadKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [sending, setSending] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
   const [roughNote, setRoughNote] = useState("");
@@ -7946,6 +7970,12 @@ function ParentBlogView({ link, family, onBack, onRead }) {
     if (!text.trim()) return;
     const comment = { id: uid(), text: text.trim(), authorName, authorType: "family", timestamp: new Date().toISOString() };
     persist(posts.map((p) => (p.id === postId ? { ...p, comments: [...(p.comments || []), comment] } : p)));
+    // Commenting is even stronger proof of having read a post than the visibility timer alone —
+    // reuses the exact same secure, idempotent mark-read call rather than a separate mechanism,
+    // so a comment always counts toward "Seen by," even for the rare case where the visibility
+    // observer somehow never got the full 1.5 seconds it normally needs (a very fast reply typed
+    // the instant the post appeared, say).
+    markPostRead(postId);
   };
 
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
@@ -17495,6 +17525,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
           lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
+          onBackfillRead={() => backfillMessageReadIfNeeded(classId, storageKey, openGroup.groupId, `class-${classId}`)}
           onBack={() => { window.history.back(); refresh(); }}
           onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
@@ -17513,6 +17544,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`teacher-direct-${openDirectGroup.groupId}`}
           lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
+          onBackfillRead={() => backfillMessageReadIfNeeded(classId, storageKey, openDirectGroup.groupId, `teacher-${loggedInTeacher.uid}`)}
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
           onSend={async (text, attachments) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
