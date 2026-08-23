@@ -7941,13 +7941,9 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
     }
   };
 
-  // Marks read only once a specific post has genuinely sat visible on this family's screen for a
-  // real moment — see the matching, more detailed reasoning on BlogPostCard's own onGenuinelyRead,
-  // which is what actually decides when to call this for any given post. For a family with more
-  // than one child, the Blog tab has to default to showing somebody's feed the instant it opens —
-  // but switching to a different child before this ever fires unmounts that first child's cards
-  // entirely, clearing this before it can run; a post only ever gets marked once it's genuinely
-  // been on screen long enough, default child or explicitly chosen one alike.
+  // The actual mark-read call, server-verified and idempotent — see the effect right below for
+  // WHEN this now actually gets triggered (every currently-unread post, the moment this specific
+  // child's blog is the one being shown).
   const optimisticallyMarked = useRef(new Set());
   const markPostRead = (postId) => {
     // Guards against a genuine, if narrow, race: scrolling a post out of view and back into it
@@ -7978,15 +7974,31 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
     })();
   };
 
+  // Marks every currently-unread post as read the moment THIS specific child's blog is what's
+  // actually being shown — reaching this screen at all already required a real, deliberate click
+  // (opening Blog in the first place, or picking this specific child's own tab), so that click
+  // itself is the signal. No longer measures how much of any one post happened to be on screen,
+  // or for how long — a post taller than the screen showing it could never satisfy that kind of
+  // check anyway, no matter how thoroughly it was actually read. Also fires again if a new post
+  // arrives while this same screen is still open — someone actively looking at this exact view
+  // when it appears has, by the same reasoning, already seen it.
+  useEffect(() => {
+    if (!postsLoaded) return;
+    posts.forEach((post) => {
+      if (post.deleted) return;
+      const alreadyRead = (post.readBy || []).some((r) => r.id === reactorId);
+      if (!alreadyRead) markPostRead(post.id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [postsLoaded, posts, link.classId]);
+
   const onComment = (postId, text) => {
     if (!text.trim()) return;
     const comment = { id: uid(), text: text.trim(), authorName, authorType: "family", timestamp: new Date().toISOString() };
     persist(posts.map((p) => (p.id === postId ? { ...p, comments: [...(p.comments || []), comment] } : p)));
-    // Commenting is even stronger proof of having read a post than the visibility timer alone —
-    // reuses the exact same secure, idempotent mark-read call rather than a separate mechanism,
-    // so a comment always counts toward "Seen by," even for the rare case where the visibility
-    // observer somehow never got the full 1.5 seconds it normally needs (a very fast reply typed
-    // the instant the post appeared, say).
+    // Redundant with the mark-all-as-read effect above in the ordinary case (this screen already
+    // being open is what makes commenting possible at all) — kept anyway as a harmless, idempotent
+    // safeguard, not the primary mechanism.
     markPostRead(postId);
   };
 
@@ -8048,8 +8060,7 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
               <div className="space-y-4">
                 {sorted.map((post) => (
                   <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
-                    commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia}
-                    onGenuinelyRead={markPostRead} />
+                    commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
                 ))}
               </div>
             </>
@@ -8644,10 +8655,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => clearInterval(interval);
   }, [refreshUnreadThreads]);
 
-  // A post's own readBy list — recorded server-side, once a post has genuinely sat visible on
-  // this family's screen for a real moment (see BlogPostCard's own onGenuinelyRead) — is now the
-  // single source of truth for whether it's been read: the same data this family's own read
-  // receipts already use, not a separate per-class timestamp cutoff kept in sync alongside it.
+  // A post's own readBy list — recorded server-side the moment a child's blog is genuinely opened
+  // to (see ParentBlogView's own mark-all-as-read effect) — is the single source of truth for
+  // whether it's been read: the same data this family's own read receipts already use, not a
+  // separate per-class timestamp cutoff kept in sync alongside it.
   const [unreadBlogByChild, setUnreadBlogByChild] = useState({}); // { [studentId]: count } — the per-child breakdown the switcher shows
   const refreshUnreadBlogCount = useCallback(async () => {
     if (!fullTimeStudentLinks) return;
@@ -14377,44 +14388,8 @@ function WhoReadSheet({ readBy, onClose }) {
   );
 }
 
-function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditPost, onDeletePost, onGenuinelyRead }) {
-  const cardRef = useRef(null);
+function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditPost, onDeletePost }) {
   const alreadyRead = (post.readBy || []).some((r) => r.id === currentUserId);
-  // Marks read once this specific post has genuinely sat visible on screen — not the instant the
-  // Blog tab opens, and not just because it happened to be the default child shown. A post
-  // scrolled past in a genuine blink never starts this clock at all; one that's actually being
-  // looked at does, whether that's the default view or something explicitly switched to. Kept
-  // short on purpose — 300ms is well past a true accidental flash during fast scrolling, but far
-  // below what registers as "a delay" to a person actually looking at the post.
-  //
-  // The threshold below is deliberately low, and that's the real fix here, not an oversight — a
-  // real post, not a short test snippet, is routinely several screens tall once it has an actual
-  // paragraph of writing in it, and "most of the whole card visible at once" (this used to require
-  // 60%) can mathematically never happen for a card taller than the screen showing it, no matter
-  // how thoroughly someone actually reads it top to bottom. The 300ms duration above is what
-  // genuinely protects against a false positive from scrolling straight past something — the
-  // percentage only needs to confirm SOME real, meaningful part of the post is actually on screen,
-  // not the sliver-at-the-edge case a bare 0 threshold would allow through.
-  useEffect(() => {
-    if (!onGenuinelyRead || post.deleted || alreadyRead) return;
-    let timer = null;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          timer = setTimeout(() => onGenuinelyRead(post.id), 300);
-        } else if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-      },
-      { threshold: 0.1 }
-    );
-    if (cardRef.current) observer.observe(cardRef.current);
-    return () => {
-      if (timer) clearTimeout(timer);
-      observer.disconnect();
-    };
-  }, [onGenuinelyRead, post.id, post.deleted, alreadyRead]);
 
   const [commentDraft, setCommentDraft] = useState("");
   const [commentsOpen, setCommentsOpen] = useState((post.comments || []).length === 0);
@@ -14465,7 +14440,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
     // the true bottom-left edge of the WHOLE card — including past the comment box, the actual
     // outer boundary of the white box a person sees — rather than being clipped the moment it
     // tries to extend past whatever rounded-corner boundary is clipping the photos inside.
-    <div ref={cardRef} className="bg-white border border-stone-200 rounded-2xl relative">
+    <div className="bg-white border border-stone-200 rounded-2xl relative">
       <div className="rounded-2xl overflow-hidden">
         <div className="flex items-start justify-between gap-2 px-4 pt-3.5 pb-2.5">
           <div className="flex items-center gap-2.5 min-w-0">
