@@ -5665,12 +5665,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [viewingFamilyGroupId, setViewingFamilyGroupId] = useState(null);
   const activeFamilies = (families || []).filter((f) => f.active !== false);
   const inactiveFamilies = (families || []).filter((f) => f.active === false);
-  // Whether each PARENT ACCOUNT individually — not each family, not each household — has at
-  // least one device with notifications on. Two guardians on the same family can have entirely
-  // different answers: one's phone enabled, the other's never set up, and collapsing that into a
-  // single family-level yes/no would hide exactly the gap worth knowing about. Keyed by each
-  // guardian's own uid, matching how push-tokens is itself already stored — one document per
-  // account, never shared between two guardians even in the same household.
+  // How many devices each PARENT ACCOUNT individually — not each family, not each household —
+  // currently has notifications registered on, not just whether they do. One device on and one
+  // off on the same account is exactly the distinction worth keeping visible: still genuinely
+  // reachable, but not as thoroughly set up as an account with every device enabled. Keyed by
+  // each guardian's own uid, matching how push-tokens is itself already stored — one document
+  // per account, never shared between two guardians even in the same household.
   const [notificationStatusByUid, setNotificationStatusByUid] = useState({});
   const activeFamilyUidsKey = activeFamilies.map((f) => f.uid).join(",");
   useEffect(() => {
@@ -5680,7 +5680,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       const entries = await Promise.all(
         activeFamilies.map(async (f) => {
           const data = await loadJSON(`push-tokens:${f.uid}`, null, true);
-          return [f.uid, (data?.tokens?.length || 0) > 0];
+          return [f.uid, data?.tokens?.length || 0];
         })
       );
       if (!cancelled) setNotificationStatusByUid(Object.fromEntries(entries));
@@ -6435,7 +6435,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                     // this guardian's own uid matching a teacher record's uid IS the link, looked
                     // up fresh each time rather than relying on a one-time creation message.
                     const linkedTeacher = (teachers || []).find((t) => t.uid === f.uid && t.active !== false);
-                    const notifStatus = notificationStatusByUid[f.uid]; // undefined while still loading
+                    const deviceCount = notificationStatusByUid[f.uid]; // undefined while still loading
                     return (
                     <div key={f.uid} className={f !== primary ? "mt-2 pt-2 border-t border-stone-100" : ""}>
                       <div className="flex items-center justify-between gap-2">
@@ -6443,9 +6443,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                         <ArchiveOrDeleteMenu onArchive={() => onDeactivateFamily(f.uid)} onDeletePermanently={() => onDeleteFamily(f.uid)} size={14} />
                       </div>
                       <p className="text-xs text-stone-400 mt-0.5">{f.email}</p>
-                      {notifStatus !== undefined && (
-                        <p className={`text-[11px] font-semibold rounded-md px-2 py-1 mt-1 inline-block ${notifStatus ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-stone-500 bg-stone-50 border border-stone-200"}`}>
-                          {notifStatus ? "🔔 Notifications on" : "🔕 Notifications off"}
+                      {deviceCount !== undefined && (
+                        <p className={`text-[11px] font-semibold rounded-md px-2 py-1 mt-1 inline-block ${deviceCount > 0 ? "text-emerald-700 bg-emerald-50 border border-emerald-200" : "text-stone-500 bg-stone-50 border border-stone-200"}`}>
+                          {deviceCount > 0 ? `🔔 Notifications on — ${deviceCount} device${deviceCount === 1 ? "" : "s"}` : "🔕 Notifications off"}
                         </p>
                       )}
                       {linkedTeacher && (
