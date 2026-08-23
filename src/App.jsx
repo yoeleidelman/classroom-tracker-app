@@ -7427,9 +7427,16 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                 </div>
 
                 {openActionsFor === m.id && (
-                  <div className="anim-expand-down mx-3.5 mb-1.5 flex gap-1.5">
-                    <button onClick={() => startEdit(m)} className={`text-[11px] font-semibold px-2 py-1 rounded-md ${mine ? `${mineBubble.dark} text-white ${mineBubble.darkHover}` : "bg-stone-100 text-stone-700 hover:bg-stone-200"}`}>Edit</button>
-                    <ConfirmDelete onConfirm={() => confirmDelete(m.id)} size={12} label="Delete" />
+                  <div className="anim-expand-down mx-3.5 mb-1.5 space-y-1.5">
+                    <div className="flex gap-1.5">
+                      <button onClick={() => startEdit(m)} className={`text-[11px] font-semibold px-2 py-1 rounded-md ${mine ? `${mineBubble.dark} text-white ${mineBubble.darkHover}` : "bg-stone-100 text-stone-700 hover:bg-stone-200"}`}>Edit</button>
+                      <ConfirmDelete onConfirm={() => confirmDelete(m.id)} size={12} label="Delete" />
+                    </div>
+                    {showReadReceipt && (
+                      <p className={`text-[10px] ${mine ? mineBubble.lightText : "text-stone-400"}`}>
+                        Seen at {new Date(lastReadByFamily).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -7504,11 +7511,6 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                         {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
                         {m.edited && <span className="italic"> · edited</span>}
                       </p>
-                      {showReadReceipt && (
-                        <p className={`text-[10px] mt-0.5 ${mine ? "text-teal-100" : "text-stone-400"}`}>
-                          Seen at {new Date(lastReadByFamily).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-                        </p>
-                      )}
                     </div>
                   </>
                 )}
@@ -14273,7 +14275,11 @@ function WhoReactedSheet({ summary, onClose }) {
   const [activeKey, setActiveKey] = useState(summary.length > 1 ? "all" : summary[0]?.key);
   const shown = activeKey === "all" ? allEntries : allEntries.filter((e) => e.key === activeKey);
 
-  return (
+  // Rendered through a portal for the exact same reason WhoReadSheet, right below, now is — a
+  // transform anywhere up the ancestor chain silently changes what "fixed position" is actually
+  // measured against, and a long blog post is exactly where that would otherwise leave this
+  // needing a scroll to even find, instead of appearing at the bottom of the real, current screen.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-end md:items-center md:justify-center bg-black/30" onClick={onClose}>
       <div className="bg-white rounded-t-2xl md:rounded-2xl w-full md:w-80 max-h-[70vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-1 px-3 pt-3 pb-2 border-b border-stone-100 overflow-x-auto no-scrollbar">
@@ -14300,12 +14306,20 @@ function WhoReactedSheet({ summary, onClose }) {
           ))}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
 function WhoReadSheet({ readBy, onClose }) {
-  return (
+  // Rendered through a portal straight to the true top level of the page — the exact same fix,
+  // for the exact same underlying reason, as the per-photo reaction picker earlier tonight: a
+  // transform anywhere up the ancestor chain (even a harmless, purely-technical one with no
+  // visual effect at all) silently changes what "fixed position" is actually measured against.
+  // Without this, a long blog post could leave this sheet positioned against that ancestor's own
+  // top instead of the real screen — requiring a scroll to even find it, rather than appearing at
+  // the bottom of whatever's actually currently in view, which is the whole point of "fixed."
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-end md:items-center md:justify-center bg-black/30" onClick={onClose}>
       <div className="bg-white rounded-t-2xl md:rounded-2xl w-full md:w-80 max-h-[70vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-stone-100">
@@ -14331,7 +14345,8 @@ function WhoReadSheet({ readBy, onClose }) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
