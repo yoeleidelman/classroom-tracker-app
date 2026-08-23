@@ -7556,7 +7556,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                       );
                     })()}
                     <div className="px-3.5 pb-2.5 pt-1">
-                      {m.text && <p className="text-sm whitespace-pre-wrap"><LinkifiedText text={m.text} linkClassName={mine ? "underline text-teal-100 hover:text-white" : "underline text-teal-700 hover:text-teal-900"} /></p>}
+                      {m.text && <p className="text-base whitespace-pre-wrap"><LinkifiedText text={m.text} linkClassName={mine ? "underline text-teal-100 hover:text-white" : "underline text-teal-700 hover:text-teal-900"} /></p>}
                       {m.text && extractFirstUrl(m.text) && <LinkPreviewCard url={extractFirstUrl(m.text)} />}
                       <p className={`text-[10px] mt-1 ${mine ? "text-teal-100" : "text-stone-400"}`}>
                         {new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
