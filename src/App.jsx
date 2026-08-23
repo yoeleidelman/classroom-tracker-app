@@ -7874,7 +7874,7 @@ function ChildDailyLogView({ link, onBack }) {
 // Self-contained, like ChildDailyLogView — fetches directly by classId rather than depending on
 // ClassApp's own closures, since a parent isn't inside any one class's context and may have
 // children in several different classes at once.
-function ParentBlogView({ link, family, onBack, onRead }) {
+function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
   const [lightboxIndex, setLightboxIndex] = useState(null);
   // scrollContainerRef is the scrollable region itself; contentRef is what's actually growing
   // inside it (images settling into their final size, fonts swapping in) — see useStickToBottom
@@ -7948,7 +7948,17 @@ function ParentBlogView({ link, family, onBack, onRead }) {
   // but switching to a different child before this ever fires unmounts that first child's cards
   // entirely, clearing this before it can run; a post only ever gets marked once it's genuinely
   // been on screen long enough, default child or explicitly chosen one alike.
+  const optimisticallyMarked = useRef(new Set());
   const markPostRead = (postId) => {
+    // Guards against a genuine, if narrow, race: scrolling a post out of view and back into it
+    // again before the server has actually responded could otherwise fire this a second time for
+    // the exact same post, double-decrementing the optimistic count below even though the real,
+    // server-side record itself is already safely idempotent regardless. Purely a client-side
+    // bookkeeping ref — never triggers a re-render, and only ever needs to last as long as this
+    // one screen stays open.
+    if (optimisticallyMarked.current.has(postId)) return;
+    optimisticallyMarked.current.add(postId);
+    onOptimisticRead?.(link.classId);
     (async () => {
       const headers = await authHeaders();
       // Shares api/blog-react.js's own endpoint with actual reactions, rather than its own
@@ -7960,10 +7970,10 @@ function ParentBlogView({ link, family, onBack, onRead }) {
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ classId: link.classId, postId, action: "markRead" }),
       }).catch(() => null);
-      // Refreshes the actual badge count right away rather than leaving it to catch up on its own
-      // slower, periodic poll — otherwise a post could sit genuinely, correctly marked read for up
-      // to that entire polling interval before the number on screen agreed with it, which reads as
-      // "this doesn't work" even though it already quietly does.
+      // Reconciles the badge against the real, server-confirmed state once it actually arrives —
+      // the optimistic decrement above is what a person genuinely sees first, immediately, with
+      // no network round trip standing in the way of it; this is what makes sure that number
+      // stays truthful afterward, not what someone is actually waiting on to see it change at all.
       if (res?.ok) onRead?.();
     })();
   };
@@ -8191,14 +8201,14 @@ function ChildSwitcher({ labels, counts, selectedIndex, onSelect }) {
 // Split out from an inline expression specifically so it can use its own effect — marking a
 // class's blog as read has to happen when THAT class is actually the one being looked at, and
 // needs to re-fire every time the switcher changes which one that is.
-function ParentBlogTabContent({ links, selectedStudentId, family, onRead }) {
+function ParentBlogTabContent({ links, selectedStudentId, family, onRead, onOptimisticRead }) {
   // Resolves the selected child straight to their own class's blog — falls back to the first
   // child's class whenever nothing's been explicitly chosen yet (selectedStudentId still null,
   // meaning the tab was just opened and landed on somebody by default), the same reasoning as
   // before, now working from the same per-child list the switcher itself uses rather than a
   // separately class-deduplicated one that no longer lines up with the switcher's own indexing.
   const selectedLink = links.find((l) => l.studentId === selectedStudentId) || links[0];
-  return <ParentBlogView link={selectedLink} family={family} onRead={onRead} />;
+  return <ParentBlogView link={selectedLink} family={family} onRead={onRead} onOptimisticRead={onOptimisticRead} />;
 }
 
 // Per-child, not per-class like the blog switcher above — a parent thinks "my daughter's
@@ -8659,6 +8669,23 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     fullTimeStudentLinks.forEach((l) => { byChild[l.studentId] = unreadByClass[l.classId] || 0; });
     setUnreadBlogByChild(byChild);
   }, [family, fullTimeStudentLinks]);
+
+  // Purely local, zero-network-latency update — the moment a post is genuinely confirmed read,
+  // the badge reflects it immediately, not after however long a round trip to the server and back
+  // happens to take. The actual server write (markPostRead) still runs in the background for the
+  // real, lasting record, and refreshUnreadBlogCount still runs once that resolves too, purely as
+  // reconciliation — this is only ever about how fast the NUMBER on screen catches up to what's
+  // already genuinely true, which is what a person actually sees first.
+  const decrementUnreadBlogCountOptimistically = useCallback((classId) => {
+    setUnreadBlogCount((prev) => Math.max(0, prev - 1));
+    setUnreadBlogByChild((prev) => {
+      const next = { ...prev };
+      (fullTimeStudentLinks || []).forEach((l) => {
+        if (l.classId === classId && next[l.studentId] > 0) next[l.studentId] -= 1;
+      });
+      return next;
+    });
+  }, [fullTimeStudentLinks]);
 
   useEffect(() => { refreshUnreadBlogCount(); }, [refreshUnreadBlogCount]);
   useEffect(() => {
@@ -9271,7 +9298,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <p className="text-sm text-stone-400 text-center py-8">No classes linked yet.</p>
           ) : (() => {
             const uniqueChildren = [...new Map(fullTimeStudentLinks.map((l) => [l.studentId, l])).values()];
-            return <ParentBlogTabContent links={uniqueChildren} selectedStudentId={selectedStudentId} family={family} onRead={refreshUnreadBlogCount} />;
+            return <ParentBlogTabContent links={uniqueChildren} selectedStudentId={selectedStudentId} family={family} onRead={refreshUnreadBlogCount} onOptimisticRead={decrementUnreadBlogCountOptimistically} />;
           })()
         ) : parentTab === "homework" ? (
           fullTimeStudentLinks === null ? (
@@ -14353,20 +14380,22 @@ function WhoReadSheet({ readBy, onClose }) {
 function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment, onOpenMedia, onEditPost, onDeletePost, onGenuinelyRead }) {
   const cardRef = useRef(null);
   const alreadyRead = (post.readBy || []).some((r) => r.id === currentUserId);
-  // Marks read only once this specific post has genuinely sat visible on screen for a real
-  // moment — not the instant the Blog tab opens, and not just because it happened to be the
-  // default child shown. A post scrolled past in a blink, or one loaded in the background behind
-  // a different child's feed, never starts this clock at all; one that's actually being looked at
-  // does, whether that's the default view or something explicitly switched to — the same
-  // "genuinely seen" standard either way, resolving the exact case where marking only on an
-  // explicit switch would have wrongly left a truly-read default post looking unread forever.
+  // Marks read once this specific post has genuinely sat visible on screen — not the instant the
+  // Blog tab opens, and not just because it happened to be the default child shown. A post
+  // scrolled past in a genuine blink never starts this clock at all; one that's actually being
+  // looked at does, whether that's the default view or something explicitly switched to. Kept
+  // short on purpose — 300ms is well past a true accidental flash during fast scrolling, but far
+  // below what registers as "a delay" to a person actually looking at the post; a much longer
+  // window here was the real reason a badge could still look stuck to someone genuinely reading a
+  // post right in front of them, even though the post itself would have correctly cleared soon
+  // after.
   useEffect(() => {
     if (!onGenuinelyRead || post.deleted || alreadyRead) return;
     let timer = null;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          timer = setTimeout(() => onGenuinelyRead(post.id), 1500);
+          timer = setTimeout(() => onGenuinelyRead(post.id), 300);
         } else if (timer) {
           clearTimeout(timer);
           timer = null;
