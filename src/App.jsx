@@ -14385,10 +14385,16 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
   // scrolled past in a genuine blink never starts this clock at all; one that's actually being
   // looked at does, whether that's the default view or something explicitly switched to. Kept
   // short on purpose — 300ms is well past a true accidental flash during fast scrolling, but far
-  // below what registers as "a delay" to a person actually looking at the post; a much longer
-  // window here was the real reason a badge could still look stuck to someone genuinely reading a
-  // post right in front of them, even though the post itself would have correctly cleared soon
-  // after.
+  // below what registers as "a delay" to a person actually looking at the post.
+  //
+  // The threshold below is deliberately low, and that's the real fix here, not an oversight — a
+  // real post, not a short test snippet, is routinely several screens tall once it has an actual
+  // paragraph of writing in it, and "most of the whole card visible at once" (this used to require
+  // 60%) can mathematically never happen for a card taller than the screen showing it, no matter
+  // how thoroughly someone actually reads it top to bottom. The 300ms duration above is what
+  // genuinely protects against a false positive from scrolling straight past something — the
+  // percentage only needs to confirm SOME real, meaningful part of the post is actually on screen,
+  // not the sliver-at-the-edge case a bare 0 threshold would allow through.
   useEffect(() => {
     if (!onGenuinelyRead || post.deleted || alreadyRead) return;
     let timer = null;
@@ -14401,7 +14407,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
           timer = null;
         }
       },
-      { threshold: 0.6 } // most of the card has to actually be on screen, not just a sliver at the edge
+      { threshold: 0.1 }
     );
     if (cardRef.current) observer.observe(cardRef.current);
     return () => {
