@@ -1803,6 +1803,35 @@ async function notifyClassFamilies(classId, title, body, url) {
   await sendPushNotification(uids, title, body, url);
 }
 
+// A defensive wrapper around history.back(), for every "Back" button whose own screen depends on
+// it — reported live as sometimes just not working, several clicks in a row producing nothing.
+// The normal case should already work correctly on its own: a real pushState was made when the
+// screen opened, and back() should simply reverse it, letting a popstate listener elsewhere clear
+// the matching state. This exists for whatever case that ISN'T true in — some browsers, and some
+// installed-app / PWA window contexts especially, have their own real quirks around exactly where
+// a history stack's boundary sits, and a person stuck on a screen that won't close has no way to
+// tell the difference between "this needs one more click" and "this button is simply broken."
+// Checks the actual URL after a short delay rather than assuming success: if back() genuinely
+// worked, the query param naming this open screen is already gone by the time this runs. If it's
+// still there, forces the same close directly — the state clears immediately either way, from the
+// person's own point of view, whether the history API cooperated this time or not. paramName can
+// be left null for a screen with no single param naming it (leaving a whole section entirely,
+// say) — success then falls back to simply asking "did the URL change at all."
+function safeGoBack(paramName, fallbackClose) {
+  const beforeHref = window.location.href;
+  window.history.back();
+  setTimeout(() => {
+    const stillOpen = paramName ? new URLSearchParams(window.location.search).has(paramName) : false;
+    if (window.location.href !== beforeHref && !stillOpen) return; // back() genuinely worked — nothing more to do
+    fallbackClose();
+    if (paramName) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete(paramName);
+      window.history.replaceState({}, "", url);
+    }
+  }, 250);
+}
+
 // Tracks what each PERSON has actually seen, separate from the messages themselves — "have I seen
 // this" belongs to the individual, not the conversation. Two guardians on one family, or two
 // co-teachers on one class, can each be at a different point in the exact same shared thread.
@@ -2971,18 +3000,7 @@ function AppInner() {
   // of sync with what the person on screen could see. Popping the entry enterAssignedClass already
   // pushed, instead of layering a new one on top of it, is what keeps those back in sync.
   const backToTeacherClassPicker = () => {
-    if (window.history.state?.classId) {
-      window.history.back();
-    } else {
-      // No class-entry to pop back through (e.g. this class was reached by a fresh page load
-      // rather than a tap from the picker) — fall back to clearing state directly rather than
-      // risk history.back() leaving the app entirely.
-      setClassId(null);
-      setClassName("");
-      const url = new URL(window.location.href);
-      url.searchParams.delete("classId");
-      window.history.replaceState({ classId: null }, "", url);
-    }
+    safeGoBack("classId", () => { setClassId(null); setClassName(""); });
   };
 
   // The actual back-button handler — fires on the hardware/gesture back press, and on the
@@ -9055,7 +9073,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         <GlobalAppStyles />
         <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
           lastReadBeforeOpen={lastReadBeforeOpen}
-          onBack={() => window.history.back()}
+          onBack={() => safeGoBack("thread", () => setMessagingClassId(null))}
           onSend={async (text, attachments) => { await sendMessageToTeacher(messagingClassId, text, attachments); }} />
       </div>
     );
@@ -9074,7 +9092,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             tapped through from. */}
         <ConversationThreadView title={teacherName} subtitle="Direct message" messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
           lastReadBeforeOpen={lastReadBeforeOpen}
-          onBack={() => window.history.back()}
+          onBack={() => safeGoBack("thread", () => setMessagingTeacherUid(null))}
           onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }} />
       </div>
     );
@@ -9084,7 +9102,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ContactOfficeView adminThread={adminThread} onBack={() => window.history.back()} />
+        <ContactOfficeView adminThread={adminThread} onBack={() => safeGoBack("thread", () => setMessagingAdmin(false))} />
       </div>
     );
   }
@@ -17264,7 +17282,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
-          onBack={() => { window.history.back(); refresh(); }}
+          onBack={() => { safeGoBack("thread", () => setOpenGroup(null)); refresh(); }}
           onSend={async (text, attachments) => { await sendToFamily(openGroup.groupId, text, attachments); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
@@ -17551,7 +17569,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
           lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
           onBackfillRead={() => backfillMessageReadIfNeeded(classId, storageKey, openGroup.groupId, `class-${classId}`)}
-          onBack={() => { window.history.back(); refresh(); }}
+          onBack={() => { safeGoBack("thread", () => setOpenGroup(null)); refresh(); }}
           onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }} />
@@ -17582,7 +17600,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     <div className={PAGE}>
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
-      <button onClick={() => window.history.back()} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <button onClick={() => safeGoBack(null, () => navigate("home"))} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-lg font-bold text-stone-900 mb-3">{mode === "direct" ? "My Direct Messages" : "Classroom Messages"}</h1>
 
       <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[28rem]">
