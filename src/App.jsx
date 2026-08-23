@@ -1832,6 +1832,22 @@ function safeGoBack(paramName, fallbackClose) {
   }, 250);
 }
 
+// Module-level, not component state or even a component-local ref — genuinely global, shared by
+// every screen and every render, for exactly one reason: guards against a rapid double-tap on a
+// check-in/out toggle (parent-side or teacher-side, any of the several screens with one) causing
+// two overlapping read-modify-write cycles against the same student's record, which has no way on
+// its own to know a second tap even happened before its own write landed — two overlapping reads
+// of the same stale data can each independently decide the wrong final result, and whichever
+// write finishes last silently wins, which looks exactly like the button not responding, tap
+// after tap. A component-local ref should already solve this in theory, and did in an isolated
+// test built specifically to check it — but empirically, directly tested against the real app,
+// did not reliably behave the same way there, for a reason not fully pinned down. This sidesteps
+// that uncertainty entirely: a plain module-level variable has no lifecycle of its own to get
+// tangled up in at all, immune to however a specific component happens to render, re-render, or
+// get remounted.
+const inFlightCheckInToggles = new Set();
+const inFlightClassAssignmentToggles = new Set();
+
 // Tracks what each PERSON has actually seen, separate from the messages themselves — "have I seen
 // this" belongs to the individual, not the conversation. Two guardians on one family, or two
 // co-teachers on one class, can each be at a different point in the exact same shared thread.
@@ -5542,6 +5558,22 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showTeacherForm, setShowTeacherForm] = useState(false);
   const [teacherCreatedNote, setTeacherCreatedNote] = useState(null);
   const [editingTeacherUid, setEditingTeacherUid] = useState(null);
+  // Which specific "uid-classId" assignments currently have a save actually in flight — guards
+  // against the exact race a repeated tap could otherwise cause: see inFlightClassAssignmentToggles'
+  // own, more detailed reasoning for why this lives at module level rather than as component state.
+  const [classToggleBusy, setClassToggleBusy] = useState(new Set()); // mirrors the module-level set, purely for the UI below to react to
+  const toggleTeacherClassGuarded = async (uid, classId) => {
+    const key = `${uid}-${classId}`;
+    if (inFlightClassAssignmentToggles.has(key)) return;
+    inFlightClassAssignmentToggles.add(key);
+    setClassToggleBusy(new Set(inFlightClassAssignmentToggles));
+    try {
+      await onToggleTeacherClass(uid, classId);
+    } finally {
+      inFlightClassAssignmentToggles.delete(key);
+      setClassToggleBusy(new Set(inFlightClassAssignmentToggles));
+    }
+  };
   const [overviewDate, setOverviewDate] = useState(todayISO());
   const [overviewData, setOverviewData] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -6214,10 +6246,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                         {activeClasses.length === 0 && <p className="text-xs text-stone-400">No classes yet.</p>}
                         {activeClasses.map((c) => {
                           const assigned = (t.assignedClassIds || []).includes(c.id);
+                          const toggling = classToggleBusy.has(`${t.uid}-${c.id}`);
                           return (
-                            <button key={c.id} onClick={() => onToggleTeacherClass(t.uid, c.id)}
-                              className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${assigned ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
-                              {c.name}
+                            <button key={c.id} onClick={() => toggleTeacherClassGuarded(t.uid, c.id)} disabled={toggling}
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full border disabled:opacity-50 ${assigned ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                              {c.name}{toggling ? "…" : ""}
                             </button>
                           );
                         })}
@@ -8584,6 +8617,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   }, [family]);
 
   const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
+  // Which children currently have a check-in/out request actually in flight — a Set, not a single
+  // flag, since checking in two different kids at once should never block each other; this only
+  // ever guards a SPECIFIC child against a second tap on THEM specifically landing before their
+  // own first one has actually finished. See inFlightCheckInToggles' own, more detailed reasoning
+  // for why the actual guard lives at module level rather than as component state or a ref.
+  const [checkInBusy, setCheckInBusy] = useState(new Set()); // mirrors the module-level set, purely for the UI below to react to
   // A scan doesn't perform anything by itself — it only unlocks the ability to act, which then
   // has to be used deliberately per child. Locks again the moment they leave this screen, so
   // getting back to it always means scanning again, not something that stays open in the
@@ -8984,12 +9023,23 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // open (which might not even be the class this specific link belongs to), or opening a new one
   // under this link's class if nothing is open anywhere yet. See getUnifiedCheckInStatus/
   // toggleUnifiedCheckIn for the full reasoning on why this can't just look at one class alone.
+  // Guards against the exact race a repeated tap could otherwise cause: skips outright if this
+  // specific child already has a request in flight, rather than starting a second read-modify-
+  // write cycle against data the first one hasn't finished changing yet.
   const toggleCheckInByFamily = async (link) => {
-    const allLinksForChild = (family?.studentLinks || []).filter((l) => l.studentId === link.studentId);
-    const byLabel = `Parent: ${family?.name || "Family"}`;
-    const result = await toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel);
-    await refreshCheckInStatus();
-    return result;
+    if (inFlightCheckInToggles.has(link.studentId)) return;
+    inFlightCheckInToggles.add(link.studentId);
+    setCheckInBusy(new Set(inFlightCheckInToggles));
+    try {
+      const allLinksForChild = (family?.studentLinks || []).filter((l) => l.studentId === link.studentId);
+      const byLabel = `Parent: ${family?.name || "Family"}`;
+      const result = await toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel);
+      await refreshCheckInStatus();
+      return result;
+    } finally {
+      inFlightCheckInToggles.delete(link.studentId);
+      setCheckInBusy(new Set(inFlightCheckInToggles));
+    }
   };
 
   // Keyed by family.uid, not myGroupId — this guardian's own private line with the classroom's
@@ -9169,6 +9219,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 const schoolDayToday = status?.schoolDayToday !== false; // default to allowed until status has loaded
                 const confirming = confirmingRepeatChild === link.studentId;
                 const allClassNames = (status?.links || [link]).map((l) => l.className).join(", ");
+                const isBusy = checkInBusy.has(link.studentId);
                 return (
                   <div key={link.studentId} className={`rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
                     <div className="flex items-center justify-between gap-3">
@@ -9193,8 +9244,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                         <div className="flex flex-col items-end gap-1.5 shrink-0">
                           <span className="text-[10px] text-stone-500">Log another visit today?</span>
                           <div className="flex gap-1.5">
-                            <button onClick={() => { toggleCheckInByFamily(link); setConfirmingRepeatChild(null); }}
-                              className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes</button>
+                            <button onClick={() => { toggleCheckInByFamily(link); setConfirmingRepeatChild(null); }} disabled={isBusy}
+                              className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">Yes</button>
                             <button onClick={() => setConfirmingRepeatChild(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
                           </div>
                         </div>
@@ -9204,8 +9255,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                           if (!isIn && hasCompletedToday) { setConfirmingRepeatChild(link.studentId); return; }
                           toggleCheckInByFamily(link);
                         }}
-                          className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
-                          {isIn ? "Check out" : "Check in"}
+                          disabled={isBusy}
+                          className={`text-xs font-bold px-4 py-2.5 rounded-lg shrink-0 disabled:opacity-50 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                          {isBusy ? "…" : isIn ? "Check out" : "Check in"}
                         </button>
                       )}
                     </div>
@@ -12779,13 +12831,28 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
   const date = todayISO();
   const schoolDay = isSchoolDay(date, config, plannerDays);
   const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
+  // Guards the exact same race a repeated tap could otherwise cause here as on the family's own
+  // side of this same action — see inFlightCheckInToggles' own, more detailed reasoning for why
+  // this lives at module level rather than as component state or a ref.
+  const [checkInBusy, setCheckInBusy] = useState(new Set()); // mirrors the module-level set, purely for the UI below to react to
+  const toggleGuarded = async (studentId) => {
+    if (inFlightCheckInToggles.has(studentId)) return;
+    inFlightCheckInToggles.add(studentId);
+    setCheckInBusy(new Set(inFlightCheckInToggles));
+    try {
+      await toggleCheckInByTeacher(studentId);
+    } finally {
+      inFlightCheckInToggles.delete(studentId);
+      setCheckInBusy(new Set(inFlightCheckInToggles));
+    }
+  };
 
   const handleTap = (studentId, isIn, checkIns) => {
     if (!isIn && wouldBeRepeatCheckIn(checkIns, date)) {
       setConfirmingRepeatFor(studentId);
       return;
     }
-    toggleCheckInByTeacher(studentId);
+    toggleGuarded(studentId);
   };
 
   return (
@@ -12811,6 +12878,7 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
           const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
           const isIn = Boolean(openEntry);
           const confirming = confirmingRepeatFor === s.id;
+          const isBusy = checkInBusy.has(s.id);
           return (
             <div key={s.id} className={`rounded-xl border-2 p-4 flex flex-wrap items-center justify-between gap-3 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
               <div>
@@ -12831,14 +12899,14 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
               {confirming ? (
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-stone-500">Log another visit today?</span>
-                  <button onClick={() => { toggleCheckInByTeacher(s.id); setConfirmingRepeatFor(null); }}
-                    className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes, check in</button>
+                  <button onClick={() => { toggleGuarded(s.id); setConfirmingRepeatFor(null); }} disabled={isBusy}
+                    className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">Yes, check in</button>
                   <button onClick={() => setConfirmingRepeatFor(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
                 </div>
               ) : (
-                <button onClick={() => handleTap(s.id, isIn, checkIns)}
-                  className={`text-sm font-bold px-5 py-3 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
-                  {isIn ? "Check out" : "Check in"}
+                <button onClick={() => handleTap(s.id, isIn, checkIns)} disabled={isBusy}
+                  className={`text-sm font-bold px-5 py-3 rounded-xl disabled:opacity-50 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                  {isBusy ? "…" : isIn ? "Check out" : "Check in"}
                 </button>
               )}
             </div>
@@ -12859,6 +12927,10 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
   const [loading, setLoading] = useState(true);
   const [families, setFamilies] = useState([]); // [{ key, students: [{ id, name, classId, className, links, checkIns }] }]
   const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
+  // Guards the exact same race a repeated tap could otherwise cause here as on every other
+  // version of this same check-in action — see inFlightCheckInToggles' own, more detailed
+  // reasoning for why this lives at module level rather than as component state or a ref.
+  const [checkInBusy, setCheckInBusy] = useState(new Set()); // mirrors the module-level set, purely for the UI below to react to
   const date = todayISO();
 
   // Was previously one entry PER CLASS a student was enrolled in — a student genuinely enrolled
@@ -12911,13 +12983,21 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
       setConfirmingRepeatFor(student.id);
       return;
     }
-    const byLabel = loggedByName ? `Teacher: ${loggedByName}` : "Teacher";
-    // student.classId here is already "whichever class is actually open, or the first one if
-    // none is" — toggleUnifiedCheckIn re-derives the true open class itself regardless, this
-    // is just the fallback for a brand new check-in.
-    await toggleUnifiedCheckIn(student.id, student.links, student.classId, byLabel);
-    await refresh();
-    setConfirmingRepeatFor(null);
+    if (inFlightCheckInToggles.has(student.id)) return;
+    inFlightCheckInToggles.add(student.id);
+    setCheckInBusy(new Set(inFlightCheckInToggles));
+    try {
+      const byLabel = loggedByName ? `Teacher: ${loggedByName}` : "Teacher";
+      // student.classId here is already "whichever class is actually open, or the first one if
+      // none is" — toggleUnifiedCheckIn re-derives the true open class itself regardless, this
+      // is just the fallback for a brand new check-in.
+      await toggleUnifiedCheckIn(student.id, student.links, student.classId, byLabel);
+      await refresh();
+      setConfirmingRepeatFor(null);
+    } finally {
+      inFlightCheckInToggles.delete(student.id);
+      setCheckInBusy(new Set(inFlightCheckInToggles));
+    }
   };
 
   return (
@@ -12937,6 +13017,7 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
               const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
               const isIn = Boolean(openEntry);
               const confirming = confirmingRepeatFor === s.id;
+              const isBusy = checkInBusy.has(s.id);
               return (
                 <div key={s.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${isIn ? "text-emerald-800" : ""}`}>
                   <div>
@@ -12957,13 +13038,13 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
                   {confirming ? (
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-stone-500">Log another visit today?</span>
-                      <button onClick={() => handleTap(s, false)} className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes, check in</button>
+                      <button onClick={() => handleTap(s, false)} disabled={isBusy} className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">Yes, check in</button>
                       <button onClick={() => setConfirmingRepeatFor(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
                     </div>
                   ) : (
-                    <button onClick={() => handleTap(s, isIn)}
-                      className={`text-sm font-bold px-4 py-2.5 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
-                      {isIn ? "Check out" : "Check in"}
+                    <button onClick={() => handleTap(s, isIn)} disabled={isBusy}
+                      className={`text-sm font-bold px-4 py-2.5 rounded-xl disabled:opacity-50 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                      {isBusy ? "…" : isIn ? "Check out" : "Check in"}
                     </button>
                   )}
                 </div>
