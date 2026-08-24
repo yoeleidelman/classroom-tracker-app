@@ -8994,6 +8994,22 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const latest = posts[posts.length - 1];
     if (latest) await markThreadRead(family.uid, `homework-${classId}`);
     refreshUnreadHomeworkCount();
+    // Separate from the badge-count mechanism just above, which only ever tracks a single "last
+    // visited" timestamp per class — this is what actually lets a teacher see WHO, specifically,
+    // has seen any one homework post, the same way blog posts already work. Marks every
+    // currently-posted, not-yet-read-by-this-account post, not just the latest one, matching
+    // blog's own "opening this tab is what marks everything currently loaded as seen" reasoning.
+    const headers = await authHeaders();
+    posts.forEach((post) => {
+      if ((post.readBy || []).some((r) => r.id === family.uid)) return;
+      fetch("/api/blog-react", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ classId, postId: post.id, action: "markRead", collection: "homework", actingAs: "family" }),
+      }).catch(() => {
+        // best-effort — if this fails, the post simply doesn't record this read; nothing to roll back
+      });
+    });
   };
 
   // The app icon's own badge count — separate from an actual popup notification, and previously
@@ -15274,6 +15290,10 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
 // newest post, so it's the next thing in view rather than requiring a scroll back to the top.
 function TeacherHomeworkView({ posts, navigate }) {
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  // Which post's "Seen by" sheet is currently open, if any — holds the post itself (not just an
+  // id) so the sheet has its own current readBy to show without needing a second lookup back into
+  // sorted/posts.
+  const [showReadByFor, setShowReadByFor] = useState(null);
   return (
     <div className={PAGE}>
       <Header navigate={navigate} />
@@ -15314,6 +15334,9 @@ function TeacherHomeworkView({ posts, navigate }) {
                     <span className="text-xs font-semibold text-stone-700 truncate">{post.attachmentName || "Attached file"}</span>
                   </a>
                 )}
+                <button onClick={() => setShowReadByFor(post)} className="text-xs font-semibold text-stone-400 hover:text-teal-700 mt-2">
+                  Seen by {(post.readBy || []).length}
+                </button>
               </div>
             ))}
           </div>
@@ -15322,6 +15345,7 @@ function TeacherHomeworkView({ posts, navigate }) {
           + New homework
         </button>
       </div>
+      {showReadByFor && <WhoReadSheet readBy={showReadByFor.readBy || []} onClose={() => setShowReadByFor(null)} />}
     </div>
   );
 }

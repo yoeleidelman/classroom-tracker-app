@@ -159,9 +159,9 @@ async function handleReact(req, res, classId, postId, actorId, actorName) {
   return res.status(200).json({ ok: true, posts: nextPosts });
 }
 
-async function handleMarkRead(req, res, classId, postId, actorId, actorName) {
+async function handleMarkRead(req, res, classId, postId, actorId, actorName, collection) {
   const db = getFirestore();
-  const ref = db.collection("data").doc(`class:${classId}:blogPosts`);
+  const ref = db.collection("data").doc(`class:${classId}:${collection}`);
   // Same atomic-transaction reasoning as handleReact above — two people opening the same post
   // within the same moment shouldn't be able to race and lose one of their read records to the
   // other's write landing second.
@@ -172,10 +172,9 @@ async function handleMarkRead(req, res, classId, postId, actorId, actorName) {
     if (!post) throw { status: 404, message: "Post not found." };
 
     const existingReadBy = post.readBy || [];
-    // Idempotent on purpose — a parent opening the Blog tab marks every currently-loaded post
-    // read every time, including ones they've already read before, so this has to be cheap and
-    // safe to call repeatedly without growing the list or writing anything when nothing's
-    // actually new.
+    // Idempotent on purpose — a parent opening the tab marks every currently-loaded post read
+    // every time, including ones they've already read before, so this has to be cheap and safe to
+    // call repeatedly without growing the list or writing anything when nothing's actually new.
     if (existingReadBy.some((r) => r.id === actorId)) return posts;
 
     const nextReadBy = [...existingReadBy, { id: actorId, name: actorName, readAt: new Date().toISOString() }];
@@ -275,7 +274,7 @@ export default async function handler(req, res) {
 
   // Defaults to "react" — every reaction request already in production, before this action field
   // existed at all, has no such field and must keep working exactly as it always has.
-  const { classId, postId, action = "react", storageKey, familyUid, readStateKey, actingAs } = req.body || {};
+  const { classId, postId, action = "react", storageKey, familyUid, readStateKey, actingAs, collection = "blogPosts" } = req.body || {};
 
   if (action === "backfillMessageRead") {
     if (!classId || !storageKey || !familyUid || !readStateKey) {
@@ -304,7 +303,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    if (action === "markRead") return await handleMarkRead(req, res, classId, postId, actorId, actorName);
+    // collection defaults to "blogPosts" — every markRead request already in production, before
+    // homework had its own read-tracking at all, has no such field and must keep working exactly
+    // as it always did. homework is the one other value this ever actually takes right now,
+    // sharing this same endpoint and this same underlying handler rather than a separate file —
+    // see markPostRead's own comment, client-side, for why: the deployment is already at Vercel's
+    // 12-function cap.
+    if (action === "markRead") return await handleMarkRead(req, res, classId, postId, actorId, actorName, collection);
     if (action === "backfillReads") return await handleBackfillReads(req, res, classId, postId);
     // Deliberately individualActorId here, not the shared actorId above — a reaction is a
     // personal, individual expression the same way a like or an emoji reply is anywhere else,
