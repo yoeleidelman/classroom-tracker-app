@@ -8848,7 +8848,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // card with nothing to tap that meant anything. Every check-in-related use of studentLinks below
   // filters through this one shared list rather than each repeating the same classType check
   // separately, so all of them can never quietly drift out of sync with each other.
-  const preschoolStudentLinks = (family.studentLinks || []).filter((l) => l.classType === "preschool");
+  // Built from fullTimeStudentLinks specifically, NOT family.studentLinks directly — a raw link
+  // from family.studentLinks has no classType field of its own at all (confirmed directly: the
+  // very first version of this filter checked l.classType against family.studentLinks and matched
+  // nothing, for anyone, since that field was never actually there to match in the first place).
+  // fullTimeStudentLinks already does the real work of joining each link against its own class's
+  // config to find the genuine classType, which is the only place that fact actually lives.
+  const preschoolStudentLinks = (fullTimeStudentLinks || []).filter((l) => l.classType === "preschool");
 
   // Live-subscribed, not loaded once — whichever of these three is actually open updates the
   // instant a new message lands, on either side of the conversation, with nobody needing to back
@@ -9216,7 +9222,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       next[studentId] = { isIn: status.isIn, entries: status.allTodaysEntries, schoolDayToday: classSchoolDayCache[relevantClassId], links };
     }
     setCheckInStatus(next);
-  }, [family]);
+  }, [family, fullTimeStudentLinks]);
 
   useEffect(() => { refreshCheckInStatus(); }, [refreshCheckInStatus]);
 
