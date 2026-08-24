@@ -8236,8 +8236,15 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
   };
 
   return (
-    <div ref={outerRef} className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh" }}>
-      {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3 shrink-0"><ChevronLeft size={16} /> Back</button>}
+    // app-page's own vertical padding is deliberately overridden to 0 here and moved inside the
+    // scrollable region below instead (see contentRef's own pt-6/pb-6) — this element's box is
+    // what useRemainingViewportHeight sizes and clips against, so padding living directly on IT
+    // creates a fixed, non-scrolling dead zone the same size as that padding, sitting between the
+    // real sticky header above and wherever the scrollable content's own clipping boundary
+    // actually starts. Content appeared to vanish a beat before it ever reached the visible header
+    // — because it genuinely was being clipped earlier, by this padding, not by the header at all.
+    <div ref={outerRef} className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh", paddingTop: 0, paddingBottom: 0 }}>
+      {onBack && <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3 mt-6 shrink-0"><ChevronLeft size={16} /> Back</button>}
 
       {/* This is the piece that actually makes "already at the bottom, no visible adjustment"
           possible during a live swipe preview, not just a direct tap — its own bounded,
@@ -8246,7 +8253,7 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
           this is only rendering as a preview of wherever an in-progress swipe is headed and some
           other tab is still the one actually on screen. */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto no-scrollbar">
-        <div ref={contentRef}>
+        <div ref={contentRef} className="pt-6 pb-6">
           {/* Scrolls away with the rest of the feed, same as it always did — this only needed to
               move inside the scrollable region, not become fixed above it. */}
           <div className="flex items-center gap-2.5 mb-5 bg-white border border-stone-200 rounded-xl px-3 py-2.5">
@@ -9796,7 +9803,16 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           costing every sticky element inside a tab its own ability to stick during ordinary
           scrolling. */}
       <div ref={swipeContainerRef} className={`max-w-lg mx-auto relative ${(dragOffsetPx !== 0 || dragAnimating || dragTargetTab) ? "overflow-hidden" : ""}`} style={{ minHeight: "70vh" }} onTouchStart={onTabAreaTouchStart} onTouchEnd={onTabAreaTouchEnd}>
-      <div className="px-4 py-5" style={{ transform: `translateX(${dragOffsetPx}px)`, transition: dragAnimating ? "transform 0.22s ease-out" : "none" }}>
+      {/* Top padding deliberately dropped for the blog tab specifically — ParentBlogView already
+          measures its own top position (useRemainingViewportHeight) to size its own internal,
+          independently-scrollable region, and manages its own top/bottom breathing room inside
+          THAT scrollable area now (see its own contentRef). Padding living out here instead, on
+          this same non-scrolling wrapper, sat between the real sticky header and wherever
+          ParentBlogView's own scroll boundary actually started — content appeared to vanish a
+          beat before it ever reached the visible header, because it genuinely was being clipped
+          that much earlier, by this padding, not by the header at all. Every other tab keeps this
+          exactly as it always was; none of them measure or manage their own height this way.  */}
+      <div className={`px-4 pb-5 ${parentTab === "blog" ? "" : "pt-5"}`} style={{ transform: `translateX(${dragOffsetPx}px)`, transition: dragAnimating ? "transform 0.22s ease-out" : "none" }}>
 
       {renderTabContent(parentTab)}
       </div>
@@ -9807,7 +9823,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         // purely a visual preview mid-drag, and should never be tappable — any interaction should
         // go to the real tab underneath (or, once the drag commits, to this same content after it
         // becomes the genuine current tab and pointer events resume normally).
-        <div className="absolute top-0 left-0 right-0 px-4 py-5" style={{ pointerEvents: "none" }}>
+        <div className={`absolute top-0 left-0 right-0 px-4 pb-5 ${dragTargetTab === "blog" ? "" : "pt-5"}`} style={{ pointerEvents: "none" }}>
           <div
             style={{
               transform: `translateX(${dragOffsetPx + (dragOffsetPx < 0 ? swipeTrackWidth.current : -swipeTrackWidth.current)}px)`,
