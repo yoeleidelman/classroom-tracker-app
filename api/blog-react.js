@@ -80,12 +80,17 @@ async function requireIdentityAndClassAccess(req, classId, actingAs) {
     const isAdmin = teacher.role === "admin";
     const hasAccess = isAdmin || (teacher.assignedClassIds || []).includes(classId);
     if (!hasAccess) throw { status: 403, message: "You don't have access to this class." };
-    return { actorId: decoded.uid, actorName: teacher.name || "Teacher" };
+    return { actorId: decoded.uid, individualActorId: decoded.uid, actorName: teacher.name || "Teacher" };
   };
   const asFamily = () => {
     if (!family || family.active === false) return null;
     if (!(family.linkedClassIds || []).includes(classId)) throw { status: 403, message: "You don't have access to this class." };
-    return { actorId: family.familyGroupId || family.uid, actorName: family.name || "Family" };
+    // actorId stays shared across every guardian in the household — read receipts and unread
+    // counts are meant to be one shared, family-level fact, the same as messages already treat
+    // it: if either parent has seen it, the family has seen it. individualActorId exists
+    // specifically for reactions, where the opposite is true — see handleReact's own reasoning
+    // for why a reaction needs each guardian kept genuinely separate instead.
+    return { actorId: family.familyGroupId || family.uid, individualActorId: family.uid, actorName: family.name || "Family" };
   };
 
   // A single login can genuinely hold both roles at once — a teacher previewing their own class's
@@ -291,9 +296,9 @@ export default async function handler(req, res) {
 
   if (!classId || !postId) return res.status(400).json({ error: "classId and postId are required." });
 
-  let actorId, actorName;
+  let actorId, individualActorId, actorName;
   try {
-    ({ actorId, actorName } = await requireIdentityAndClassAccess(req, classId, actingAs));
+    ({ actorId, individualActorId, actorName } = await requireIdentityAndClassAccess(req, classId, actingAs));
   } catch (err) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
@@ -301,7 +306,13 @@ export default async function handler(req, res) {
   try {
     if (action === "markRead") return await handleMarkRead(req, res, classId, postId, actorId, actorName);
     if (action === "backfillReads") return await handleBackfillReads(req, res, classId, postId);
-    return await handleReact(req, res, classId, postId, actorId, actorName);
+    // Deliberately individualActorId here, not the shared actorId above — a reaction is a
+    // personal, individual expression the same way a like or an emoji reply is anywhere else,
+    // never meant to be shared just because two guardians happen to share a household. Using the
+    // shared id here was the actual, confirmed bug: one guardian reacting silently overwrote the
+    // other's, since the toggle logic below (correctly) treats a repeated id as "the same person
+    // changing their mind," which is exactly true for messages and exactly wrong for reactions.
+    return await handleReact(req, res, classId, postId, individualActorId, actorName);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     return res.status(500).json({ error: err.message || "Something went wrong." });

@@ -8087,7 +8087,17 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
   // lets this land at the bottom with zero visible adjustment, during a swipe included, not just
   // on a direct tap.
   const viewportHeight = useRemainingViewportHeight(outerRef);
+  // reactorId stays the shared, family-wide identity — it's used below only for read status
+  // ("has this family seen this post"), which is genuinely meant to be one shared fact across
+  // every guardian. myReactionId is deliberately different: the server now keeps each guardian's
+  // OWN reaction genuinely separate (see api/blog-react.js's own reasoning for why), so telling
+  // the UI which reaction is "mine" has to match that same individual identity, not the shared
+  // one — using the shared id here was the other half of the actual bug: even once the server
+  // stopped merging two guardians' reactions together, the screen would have still shown either
+  // guardian's own reaction as highlighted for BOTH of them, since it was asking "does this match
+  // our shared family id" instead of "does this match ME specifically."
   const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
+  const myReactionId = family.uid;
   const authorName = family.name || "A family";
 
   // Same fix, same reasoning as ChildDailyLogView's own — a teacher posting a blog update should
@@ -8255,7 +8265,7 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
               <p className="text-center text-[11px] text-stone-400 mb-4">Beginning of the class blog</p>
               <div className="space-y-4">
                 {sorted.map((post) => (
-                  <BlogPostCard key={post.id} post={post} currentUserId={reactorId} onReact={onReact}
+                  <BlogPostCard key={post.id} post={post} currentUserId={myReactionId} onReact={onReact}
                     commentsEnabled={commentsEnabled} onComment={onComment} onOpenMedia={openMedia} />
                 ))}
               </div>
@@ -8266,7 +8276,7 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
       {lightboxIndex !== null && allMedia[lightboxIndex] && (
         <PhotoLightbox url={allMedia[lightboxIndex].url} type={allMedia[lightboxIndex].type} caption={allMedia[lightboxIndex].caption}
           mediaList={allMedia} currentIndex={lightboxIndex} onNavigate={setLightboxIndex}
-          reactions={allMedia[lightboxIndex].reactions} currentUserId={reactorId}
+          reactions={allMedia[lightboxIndex].reactions} currentUserId={myReactionId}
           onReact={(emoji) => onReact(allMedia[lightboxIndex].postId, emoji, allMedia[lightboxIndex].blockId, allMedia[lightboxIndex].mediaIndex)}
           onClose={() => setLightboxIndex(null)} />
       )}
