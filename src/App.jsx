@@ -5731,26 +5731,32 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   // undefined = still loading, false = never recorded (or genuinely never installed), true = yes.
   const [installedStatusByUid, setInstalledStatusByUid] = useState({});
   const activeFamilyUidsKey = activeFamilies.map((f) => f.uid).join(",");
-  useEffect(() => {
+  const refreshEngagementStatus = useCallback(async () => {
     if (adminTab !== "families" || activeFamilies.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      const entries = await Promise.all(
-        activeFamilies.map(async (f) => {
-          const [pushData, installData] = await Promise.all([
-            loadJSON(`push-tokens:${f.uid}`, null, true),
-            loadJSON(`app-installed:${f.uid}`, null, true),
-          ]);
-          return [f.uid, pushData?.tokens?.length || 0, Boolean(installData?.everInstalled)];
-        })
-      );
-      if (!cancelled) {
-        setNotificationStatusByUid(Object.fromEntries(entries.map(([uid, count]) => [uid, count])));
-        setInstalledStatusByUid(Object.fromEntries(entries.map(([uid, , installed]) => [uid, installed])));
-      }
-    })();
-    return () => { cancelled = true; };
+    const entries = await Promise.all(
+      activeFamilies.map(async (f) => {
+        const [pushData, installData] = await Promise.all([
+          loadJSON(`push-tokens:${f.uid}`, null, true),
+          loadJSON(`app-installed:${f.uid}`, null, true),
+        ]);
+        return [f.uid, pushData?.tokens?.length || 0, Boolean(installData?.everInstalled)];
+      })
+    );
+    setNotificationStatusByUid(Object.fromEntries(entries.map(([uid, count]) => [uid, count])));
+    setInstalledStatusByUid(Object.fromEntries(entries.map(([uid, , installed]) => [uid, installed])));
   }, [adminTab, activeFamilyUidsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { refreshEngagementStatus(); }, [refreshEngagementStatus]);
+  // Reported live as inaccurate: this screen only ever fetched once, the moment the Families tab
+  // was first opened — a family enabling notifications or opening the app installed for the first
+  // time afterward, while an admin just kept looking at this same, already-loaded screen, would
+  // never actually show up until they happened to navigate away and back. Refreshing on a timer,
+  // the same pattern several other unread/engagement counts in this app already use, is what
+  // actually keeps this honest for as long as someone's genuinely sitting on this tab watching it.
+  useEffect(() => {
+    if (adminTab !== "families") return;
+    const interval = setInterval(refreshEngagementStatus, 20000);
+    return () => clearInterval(interval);
+  }, [adminTab, refreshEngagementStatus]);
   // Grouped for display so two logins for the same household read as one family with two
   // guardians, not two unrelated entries that happen to share children — falls back to each
   // family's own uid for any record that predates familyGroupId existing.
@@ -10742,6 +10748,26 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setLoading(false);
     })();
   }, [classId]);
+
+  // Reported live as inaccurate: "Seen by" on a homework post kept showing just the one person
+  // who happened to have viewed it at the exact moment this class was first entered — because
+  // that's genuinely the only moment blogPosts/homeworkPosts ever loaded at all. A parent reading
+  // it five minutes into the same teacher session, with the class never re-entered, would be
+  // completely invisible here even though the real, underlying data already had them recorded
+  // correctly. Refreshing on a timer, the same pattern already used elsewhere in this app for
+  // exactly this kind of "stays open a while, needs to notice new things arriving" screen, is what
+  // actually keeps this honest — this is deliberately scoped to just these two, not a wider
+  // conversion of every other piece of data this same class loads, most of which isn't affected by
+  // — or wasn't reported as having — this same problem.
+  useEffect(() => {
+    if (!classId) return;
+    const interval = setInterval(async () => {
+      const [freshBlog, freshHomework] = await Promise.all([loadC("blogPosts", []), loadC("homework", [])]);
+      setBlogPosts(freshBlog);
+      setHomeworkPosts(freshHomework);
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [classId, loadC]);
 
   // One-time auto-trigger for the guided setup wizard — fires once real data has loaded (not on
   // the initial default config) and only if this teacher has never opened it before. Never fires
