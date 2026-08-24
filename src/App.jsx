@@ -3978,7 +3978,8 @@ function AppInner() {
       if (myClasses.length === 0 && (currentTeacher.messagingClassTypes || []).length > 0) {
         return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff} deepLinkGroupId={pendingStaffDeepLink?.groupId} />;
       }
-      return <TeacherClassPicker teacherName={currentTeacher.name} classes={myClasses} onSelect={enterAssignedClass} onSignOut={signOutStaff} />;
+      return <TeacherClassPicker teacherName={currentTeacher.name} classes={myClasses} onSelect={enterAssignedClass} onSignOut={signOutStaff}
+        rawAssignedClassIds={currentTeacher.assignedClassIds || []} registry={registry} />;
     }
     return (
       <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
@@ -9849,7 +9850,31 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
 }
 
 
-function TeacherClassPicker({ teacherName, classes, onSelect, onSignOut }) {
+function TeacherClassPicker({ teacherName, classes, onSelect, onSignOut, rawAssignedClassIds = [], registry = [] }) {
+  // Same reasoning as the equivalent panel on the sign-in screen (see logAuthDebug's own
+  // comment) — but THIS screen is the one actually reached when this specific problem happens,
+  // not the sign-in screen itself, which has already unmounted by the time anyone would see
+  // "no classes assigned." Reported live: the sign-in screen's own panel doesn't help here at
+  // all, since it's already gone by the time this message ever shows. This re-reads the exact
+  // same underlying log (still sitting in memory from the same sign-in moment, whether or not
+  // anyone caught it at the time) directly on the screen where the problem is actually visible.
+  const [debugLog, setDebugLog] = useState(() => [...(window.__authDebugLog || [])]);
+  const [showDebugLog, setShowDebugLog] = useState(true);
+  useEffect(() => {
+    const interval = setInterval(() => setDebugLog([...(window.__authDebugLog || [])]), 500);
+    return () => clearInterval(interval);
+  }, []);
+  // What each of the teacher's own assigned class ids actually resolves to, right now, against
+  // the real class list — distinguishes "genuinely has zero classes assigned" from "assigned to
+  // something that no longer matches anything active" (an archived class, or an id that doesn't
+  // exist in the registry at all), which look identical from the assignedClassIds count alone but
+  // point to completely different problems.
+  const idBreakdown = rawAssignedClassIds.map((id) => {
+    const match = registry.find((c) => c.id === id);
+    if (!match) return `${id} — not found in the class list at all`;
+    return `${id} — "${match.name}"${match.archived ? " (archived)" : ""}`;
+  });
+
   return (
     <div className="min-h-screen flex items-center justify-center px-4 py-10" style={{ background: "linear-gradient(180deg, #f6f2e9 0%, #fbf8f1 100%)" }}>
       <GlobalAppStyles />
@@ -9876,6 +9901,33 @@ function TeacherClassPicker({ teacherName, classes, onSelect, onSignOut }) {
         <button onClick={onSignOut} className="w-full text-xs font-semibold text-stone-400 hover:text-teal-700 text-center mt-4">
           Sign out
         </button>
+
+        {classes.length === 0 && (
+          <div className="mt-4 bg-stone-900 rounded-xl overflow-hidden">
+            <button onClick={() => setShowDebugLog((v) => !v)} className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold text-amber-300">
+              <span>Diagnostic info (temporary) — screenshot this</span>
+              <span>{showDebugLog ? "▾" : "▸"}</span>
+            </button>
+            {showDebugLog && (
+              <div className="px-3 pb-3 max-h-64 overflow-y-auto space-y-2">
+                <div>
+                  <p className="text-[10px] font-bold text-stone-400 mb-0.5">Sign-in trail:</p>
+                  {debugLog.length === 0 && <p className="text-[10px] font-mono text-stone-500">(empty — this screen was reached without a fresh sign-in this session)</p>}
+                  {debugLog.map((line, i) => (
+                    <p key={i} className="text-[10px] font-mono text-emerald-300 leading-relaxed">{line}</p>
+                  ))}
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold text-stone-400 mb-0.5">This account's assigned class ids ({rawAssignedClassIds.length}), checked against {registry.length} total class(es) in the school:</p>
+                  {idBreakdown.length === 0 && <p className="text-[10px] font-mono text-stone-500">(none — this account's own record lists zero assigned classes)</p>}
+                  {idBreakdown.map((line, i) => (
+                    <p key={i} className="text-[10px] font-mono text-sky-300 leading-relaxed">{line}</p>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
