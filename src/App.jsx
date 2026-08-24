@@ -8842,6 +8842,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // second guardian, where the group id and the individual uid are the same thing anyway.
   const myGroupId = family.familyGroupId || family.uid;
 
+  // QR check-in/out tracks attendance for preschool classes only — an elementary child has never
+  // had any check-in data to show, so showing them here at all was really just an empty, useless
+  // card with nothing to tap that meant anything. Every check-in-related use of studentLinks below
+  // filters through this one shared list rather than each repeating the same classType check
+  // separately, so all of them can never quietly drift out of sync with each other.
+  const preschoolStudentLinks = (family.studentLinks || []).filter((l) => l.classType === "preschool");
+
   // Live-subscribed, not loaded once — whichever of these three is actually open updates the
   // instant a new message lands, on either side of the conversation, with nobody needing to back
   // out and reopen the thread (or reload the whole app) to see it arrive. Only ever one of the
@@ -9187,7 +9194,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const next = {};
     const classSchoolDayCache = {}; // classId -> boolean, deduped so shared classes aren't fetched twice
     const linksByStudent = {};
-    (family?.studentLinks || []).forEach((link) => {
+    preschoolStudentLinks.forEach((link) => {
       if (!linksByStudent[link.studentId]) linksByStudent[link.studentId] = [];
       linksByStudent[link.studentId].push(link);
     });
@@ -9224,7 +9231,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     inFlightCheckInToggles.add(link.studentId);
     setCheckInBusy(new Set(inFlightCheckInToggles));
     try {
-      const allLinksForChild = (family?.studentLinks || []).filter((l) => l.studentId === link.studentId);
+      const allLinksForChild = preschoolStudentLinks.filter((l) => l.studentId === link.studentId);
       const byLabel = `Parent: ${family?.name || "Family"}`;
       const result = await toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel);
       await refreshCheckInStatus();
@@ -9405,7 +9412,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                   shows every linked class together on one card, and passes ALL of a child's links
                   through so toggleCheckInByFamily can always find and close whichever one is
                   actually open. */}
-              {[...new Map(family.studentLinks.map((l) => [l.studentId, l])).values()].map((link) => {
+              {[...new Map(preschoolStudentLinks.map((l) => [l.studentId, l])).values()].map((link) => {
                 const status = checkInStatus[link.studentId];
                 const isIn = status?.isIn;
                 const entries = status?.entries || [];
