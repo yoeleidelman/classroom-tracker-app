@@ -24666,66 +24666,75 @@ class ErrorBoundary extends Component {
 export default function App() {
   return (
     <ErrorBoundary>
-      <UpdateAvailableBanner />
+      <AutoUpdateOnResume />
       <AppInner />
     </ErrorBoundary>
   );
 }
 
-// Detects when a newer version has been deployed while this exact session stayed open, and
-// prompts a refresh — the likely real explanation behind "it works on my phone but not on this
-// iPad" for something that's already fixed in the code: a classroom tablet that's rarely, if
-// ever, fully closed can keep running the exact JS bundle it loaded weeks ago indefinitely, with
-// nothing to ever prompt it to check for a newer one on its own, while a phone that gets closed
-// and reopened more often naturally picks up the current version without anyone noticing there
-// was ever a difference. Compares the actual script bundle THIS page loaded against what a fresh
-// fetch of the page right now would load — the real, current truth each time, not a version
-// number that has to be remembered and kept in sync by hand.
-function UpdateAvailableBanner() {
-  const [updateAvailable, setUpdateAvailable] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
+// Silently, automatically brings a stale session up to date instead of asking someone to notice
+// and act on a banner — confirmed live, directly, as the actual explanation behind two separate
+// features both under-reporting real activity for over 24 straight hours: no matter how many
+// times the person checking reloaded their OWN screen, the real gap was other people's devices
+// never even attempting the new work at all, since whatever old version they were still quietly
+// running simply didn't contain that code yet. A classroom tablet that's rarely, if ever, fully
+// closed can otherwise keep running the exact bundle it loaded weeks ago indefinitely, with
+// nothing to ever prompt it to check for a newer one on its own.
+function AutoUpdateOnResume() {
   const currentScriptSrc = useRef(null);
 
   useEffect(() => {
     currentScriptSrc.current = document.querySelector('script[type="module"][src]')?.getAttribute("src") || null;
     if (!currentScriptSrc.current) return; // nothing to compare against — dev mode, or unexpected markup
 
-    const checkForUpdate = async () => {
+    // Compares the actual script bundle THIS page loaded against what a fresh fetch of the page
+    // right now would load — the real, current truth each time, not a version number that has to
+    // be remembered and kept in sync by hand.
+    const isUpdateAvailable = async () => {
       try {
         const res = await fetch(`${window.location.origin}/?_check=${Date.now()}`, { cache: "no-store" });
         const html = await res.text();
         const latestScriptSrc = new DOMParser().parseFromString(html, "text/html")
           .querySelector('script[type="module"][src]')?.getAttribute("src");
-        if (latestScriptSrc && latestScriptSrc !== currentScriptSrc.current) setUpdateAvailable(true);
+        return Boolean(latestScriptSrc && latestScriptSrc !== currentScriptSrc.current);
       } catch {
         // A failed check (offline, a network hiccup) just means try again next time — never
         // treated as "an update is available," since that would be a false alarm from bad
         // information rather than an actual, confirmed difference.
+        return false;
       }
     };
 
-    // Checks whenever the app becomes visible again after being backgrounded — the natural moment
-    // someone actually picks the device back up, and a far more meaningful trigger for a
-    // classroom tablet than any fixed timer alone, since it lines up with when a stale session
-    // would actually matter to the person holding it.
-    const onVisible = () => { if (document.visibilityState === "visible") checkForUpdate(); };
+    // The one thing an automatic, unannounced reload genuinely can't be allowed to do is wipe out
+    // something someone's actually in the middle of typing — a message half-written, an incident
+    // report half-filled. Stepping fully away and back still counts as safe even with a draft
+    // sitting there, but the cursor actually being in a real field, right now, does not.
+    const isSafeRightNow = () => {
+      const active = document.activeElement;
+      if (!active) return true;
+      if (active.tagName === "INPUT" || active.tagName === "TEXTAREA") return false;
+      if (active.isContentEditable) return false;
+      return true;
+    };
+
+    const tryApplyUpdate = async () => {
+      if (document.visibilityState !== "visible" || !isSafeRightNow()) return;
+      if (await isUpdateAvailable()) window.location.reload();
+    };
+
+    // The natural moment someone actually picks a device back up after it's been away — by far
+    // the most common real path to a stale session actually catching up, and the reason this
+    // never needs its own banner or button: the person doing this was never going to be the one
+    // to notice or act on a prompt in the first place.
+    const onVisible = () => { if (document.visibilityState === "visible") tryApplyUpdate(); };
     document.addEventListener("visibilitychange", onVisible);
-    checkForUpdate(); // also check once immediately, in case this session was already stale before this code even ran
-    const interval = setInterval(checkForUpdate, 20 * 60 * 1000); // and periodically regardless, for a tab simply left open and visible for hours at a stretch
+    tryApplyUpdate(); // also checks once immediately, in case this session was already stale before this code even ran
+    // Also covers a screen that's simply left open and visible continuously for hours (a
+    // classroom tablet mounted somewhere, say) and might genuinely never go through a
+    // hidden-then-visible cycle at all on its own.
+    const interval = setInterval(tryApplyUpdate, 20 * 60 * 1000);
     return () => { document.removeEventListener("visibilitychange", onVisible); clearInterval(interval); };
   }, []);
 
-  if (!updateAvailable || dismissed) return null;
-  return (
-    <div className="fixed bottom-0 inset-x-0 z-50 bg-teal-800 text-white px-4 py-3 flex items-center justify-between gap-3 shadow-lg"
-      style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}>
-      <p className="text-sm font-semibold">A newer version is ready.</p>
-      <div className="flex items-center gap-2 shrink-0">
-        <button onClick={() => setDismissed(true)} className="text-xs font-semibold text-teal-100 hover:text-white px-2">Later</button>
-        <button onClick={() => window.location.reload()} className="text-sm font-bold bg-white text-teal-800 rounded-lg px-3 py-1.5">
-          Refresh
-        </button>
-      </div>
-    </div>
-  );
+  return null;
 }
