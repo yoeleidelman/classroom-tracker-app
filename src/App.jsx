@@ -14030,7 +14030,7 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
     return <MoodScreen date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} setMood={setMood} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "diapers") {
-    return <DiaperBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} onBack={() => navigateScreen(null)} />;
+    return <DiaperBulkScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} logDiaperBulkWithDefaults={logDiaperBulkWithDefaults} removeDiaperLog={removeDiaperLog} onBack={() => navigateScreen(null)} />;
   }
   if (screen === "bathroom") {
     return <TapLogScreen tile={tile} date={date} roster={roster} studentData={studentData} checkedInIds={checkedInIds} dataKey="bathroom" typeOptions={BATHROOM_TRIP_TYPES}
@@ -14274,7 +14274,7 @@ function MealBulkScreen({ tile, date, roster, studentData, checkedInIds, setMeal
 }
 
 
-function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDiaperBulkWithDefaults, onBack }) {
+function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDiaperBulkWithDefaults, removeDiaperLog, onBack }) {
   const st = TILE_STYLES[tile.color];
   const checkedInRoster = roster.filter((s) => checkedInIds.has(s.id));
   const notInRoster = roster.filter((s) => !checkedInIds.has(s.id));
@@ -14289,6 +14289,15 @@ function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDi
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
+
+  // Diapers, unlike mood/meals/naps elsewhere on this same dashboard, is genuinely append-only —
+  // a student can have several real changes in one day, so logging again was never meant to
+  // correct a previous entry the way re-picking a mood or a meal amount already does. That also
+  // means an accidental double-tap here creates a real, separate, unwanted second entry that
+  // re-submitting correctly can't undo — removeDiaperLog already existed for exactly this, it just
+  // was never actually reachable from here.
+  const todaysEntries = roster.flatMap((s) => (studentData[s.id]?.diapers || []).filter((e) => e.date === date).map((e) => ({ ...e, studentId: s.id, studentName: s.name })))
+    .sort((a, b) => (a.time < b.time ? 1 : -1));
 
   return (
     <div className="app-page">
@@ -14329,9 +14338,25 @@ function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDi
           </div>
         ))}
       </div>
-      <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 ${st.solid} ${st.solidHover}`}>
+      <button onClick={submit} disabled={checkedInRoster.length === 0} className={`w-full text-white rounded-xl py-4 text-base font-bold disabled:opacity-40 mb-5 ${st.solid} ${st.solidHover}`}>
         {saved ? "Logged ✓" : `Log ${tile.label} for ${checkedInRoster.length} students`}
       </button>
+      {todaysEntries.length > 0 && (
+        <>
+          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-1.5">Today so far</p>
+          <ul className="space-y-1.5">
+            {todaysEntries.map((e) => (
+              <li key={e.id} className="flex items-center justify-between text-sm bg-white border border-stone-200 rounded-lg px-3 py-2">
+                <span className="text-stone-700">
+                  {formatTime12h(e.time)} — {e.studentName} — {DIAPER_TYPES.find((d) => d.id === e.type)?.label || e.type}
+                  {e.note && <span className="block text-xs text-stone-400 mt-0.5">{e.note}</span>}
+                </span>
+                <button onClick={() => removeDiaperLog(e.studentId, e.id)} className="text-stone-400 hover:text-rose-600 shrink-0"><X size={14} /></button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }
