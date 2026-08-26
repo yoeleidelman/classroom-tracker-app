@@ -8098,6 +8098,7 @@ function ChildDailyLogView({ link, onBack }) {
 
   const { rawData, hasLoadedOnce } = useLiveChildDailyLog(link.classId, link.studentId);
   const classIncidents = useLiveJSON(`class:${link.classId}:incidents`, []);
+  const classReminders = useLiveJSON(`class:${link.classId}:reminders`, []);
   const classPhotos = useLiveJSON(`class:${link.classId}:photos`, []);
   const loading = !hasLoadedOnce;
 
@@ -8121,6 +8122,7 @@ function ChildDailyLogView({ link, onBack }) {
     .filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId))
     .map((i) => ({ ...i, ...resolveIncidentForStudent(i, link.studentId) }))
     .filter((i) => i.notifyFamily !== false);
+  const reminders = (classReminders || []).filter((r) => r.date === date && (r.studentIds || []).includes(link.studentId));
   const photos = (classPhotos || []).filter((p) => p.date === date && (p.studentIds || []).includes(link.studentId));
 
   const shiftDate = (deltaDays) => {
@@ -8136,7 +8138,7 @@ function ChildDailyLogView({ link, onBack }) {
   const bathroomTrips = (data?.bathroom || []).filter((b) => b.date === date).sort((a, b) => (a.time < b.time ? -1 : 1));
   const checkIns = (data?.checkIns || []).filter((c) => c.date === date).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
 
-  const hasAnything = Boolean(mood) || meals.length > 0 || naps.length > 0 || diapers.length > 0 || bathroomTrips.length > 0 || checkIns.length > 0 || incidents.length > 0 || photos.length > 0;
+  const hasAnything = Boolean(mood) || meals.length > 0 || naps.length > 0 || diapers.length > 0 || bathroomTrips.length > 0 || checkIns.length > 0 || incidents.length > 0 || reminders.length > 0 || photos.length > 0;
 
   const Card = ({ color, title, icon: Icon, children }) => {
     const st = TILE_STYLES[color];
@@ -8249,6 +8251,11 @@ function ChildDailyLogView({ link, onBack }) {
                   ))}
                 </div>
               )}
+            </Card>
+          ))}
+          {reminders.map((rem) => (
+            <Card key={rem.id} color="sky" title="Reminder" icon={Bell}>
+              {(rem.types || []).map((t) => (t === "other" ? rem.otherText : REMINDER_TYPES.find((r) => r.id === t)?.label) || t).join(", ")}
             </Card>
           ))}
           {photos.length > 0 && (
@@ -10483,6 +10490,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [schoolTools, setSchoolToolsInClass] = useState([]);
   const [programsInClass, setProgramsInClass] = useState([]);
   const [incidents, setIncidents] = useState([]);
+  const [reminders, setReminders] = useState([]);
   const [photos, setPhotos] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
   // Which existing post is currently open in the full compose screen for editing, or null when
@@ -10620,6 +10628,25 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
               const title = resolved.kind === "health" ? `Health note — ${name || "your child"}` : `New note — ${name || "your child"}`;
               const body = resolved.categoryLabel || "Check the app for details.";
               sendPushNotification(uids, title, body, `/?portal=parent`);
+            }
+          }}
+          onSendReminder={async (entry) => {
+            addReminder(entry);
+            const families = await fetchClassFamilies(classId);
+            // Same reasoning as onLogPreschoolIncident just above: every student here shares the
+            // same reminder types, but each family is still only ever told about their own child —
+            // notified individually, never bundled into one message naming every selected student.
+            const typeLabels = entry.types.map((t) => (t === "other" ? entry.otherText : REMINDER_TYPES.find((r) => r.id === t)?.label) || t);
+            for (const sid of entry.studentIds) {
+              const uids = [...new Set(
+                families
+                  .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && l.studentId === sid))
+                  .map((f) => f.uid)
+              )];
+              if (uids.length === 0) continue; // eslint-disable-line no-continue
+              const name = roster.find((s) => s.id === sid)?.name;
+              const title = `Reminder — ${name || "your child"}`;
+              sendPushNotification(uids, title, typeLabels.join(", "), `/?portal=parent`);
             }
           }}
           classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily} navigate={navigateView} />
@@ -10881,6 +10908,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const r = await loadC("roster", []);
       const c = await loadC("config", DEFAULT_CONFIG);
       const inc = await loadC("incidents", []);
+      const rem = await loadC("reminders", []);
       const ph = await loadC("photos", []);
       const bp = await loadC("blogPosts", []);
       const hw = await loadC("homework", []);
@@ -10906,7 +10934,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const progs = await loadJSON("programs", [], true);
       setProgramsInClass(progs.filter((p) => (p.memberClassIds || []).includes(classId)));
 
-      let finalRoster = r, finalConfig = c, finalIncidents = inc, finalCA = ca, finalCP = cp, finalPD = pd, finalPE = pe, finalBS = bs;
+      let finalRoster = r, finalConfig = c, finalIncidents = inc, finalReminders = rem, finalCA = ca, finalCP = cp, finalPD = pd, finalPE = pe, finalBS = bs;
       let sampleStudentData = null;
       // New classes now start completely empty by default — no more automatic sample data.
       // Teachers who want a sample roster/config to explore the app can still load one
@@ -10991,6 +11019,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       }
       setConfig({ ...DEFAULT_CONFIG, ...finalConfig, points: mergedPoints, monthlyReports: finalConfig.monthlyReports || DEFAULT_CONFIG.monthlyReports, planner: mergedPlanner });
       setIncidents(finalIncidents);
+      setReminders(finalReminders);
       setPhotos(ph);
       setBlogPosts(bp);
       setHomeworkPosts(hw);
@@ -11056,6 +11085,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const persistConfig = (next) => { setConfig(next); saveC("config", next); };
   const persistStudent = (id, newData) => { setStudentData((prev) => ({ ...prev, [id]: newData })); saveC(`kriya:${id}`, newData); };
   const persistIncidents = (next) => { setIncidents(next); saveC("incidents", next); };
+  const persistReminders = (next) => { setReminders(next); saveC("reminders", next); };
   const persistPhotos = (next) => { setPhotos(next); saveC("photos", next); };
 
   // Live, instant, cross-device check-in status for this class's own roster — layered on top of
@@ -11794,6 +11824,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         upsertAlert(sid, "incident", `${studentName} — ${incFlag.label}`);
       }
     });
+  };
+  const addReminder = (entry) => {
+    const next = [withLogger({ id: uid(), ...entry }), ...reminders];
+    persistReminders(next);
   };
   const updateIncident = (incidentId, fields) => {
     persistIncidents(incidents.map((i) => (i.id === incidentId ? { ...i, ...fields } : i)));
@@ -13299,6 +13333,14 @@ const BATHROOM_TRIP_TYPES = [
   { id: "no-result", label: "No result" },
   { id: "accident", label: "Accident" },
 ];
+const REMINDER_TYPES = [
+  { id: "nap-mat", label: "Nap mat" },
+  { id: "water-bottle", label: "Water bottle" },
+  { id: "diapers", label: "Diapers" },
+  { id: "wipes", label: "Wipes" },
+  { id: "change-of-clothes", label: "Change of clothes" },
+  { id: "other", label: "Other" },
+];
 
 // Tailwind's compiler needs every class name to appear as a literal string somewhere in the
 // source — a template literal like `bg-${tile.color}-50` only works "by accident" for colors that
@@ -13451,6 +13493,11 @@ const PRESCHOOL_TILES = [
   // never each other's category list either.
   { id: "health-incident", label: "Health incident", icon: HeartPulse, color: "cyan", bulkDefault: "none" },
   { id: "incident", label: "Incident", icon: AlertTriangle, color: "amber", bulkDefault: "none" },
+  // Opens ReminderForm directly (via screen === "reminder" below) — a quiet, practical note for a
+  // family (bring a water bottle, send in wipes), never a behavioral or health concern the way an
+  // incident is, so it deliberately doesn't share incidents' category list or its flag-for-admin
+  // option.
+  { id: "reminder", label: "Reminder", icon: Bell, color: "sky", bulkDefault: "none" },
   { id: "photos", label: "Photos", icon: Camera, color: "amber", bulkDefault: "none", special: "camera" },
   // Opens PreschoolStudentListView → PreschoolStudentDetailView (via screen === "students" below),
   // not a bulk-logging screen at all — no bulkDefault, no mealType, none of the shared "select
@@ -14282,7 +14329,7 @@ function PreschoolStudentListView({ roster, onSelectStudent, onBack }) {
   );
 }
 
-function PreschoolDashboardView({ roster, studentData, incidents, photos, config, persistConfig, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, startNapBulk, endNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, classId, submitBlogPost, sendMessageToFamily, navigate }) {
+function PreschoolDashboardView({ roster, studentData, incidents, photos, config, persistConfig, plannerDays, plannerEvents, setMood, setMealBulk, setNapBulk, startNapBulk, endNapBulk, logDiaperBulk, logDiaperBulkWithDefaults, removeDiaperLog, logBathroomBulk, removeBathroomLog, uploadClassPhoto, openDetail, openIncidentForm, onLogPreschoolIncident, onSendReminder, classId, submitBlogPost, sendMessageToFamily, navigate }) {
   const [screen, setScreenRaw] = useState(null); // null = dashboard grid
   const [selectedStudentId, setSelectedStudentId] = useState(null); // for screen === "students" only
   // Pushes a real history entry for every preschool sub-screen — Diapers, Snack, a health
@@ -14392,6 +14439,16 @@ function PreschoolDashboardView({ roster, studentData, incidents, photos, config
         onCancel={() => navigateScreen(null)}
         onSave={async (entry) => {
           await onLogPreschoolIncident(entry);
+          navigateScreen(null);
+        }} />
+    );
+  }
+  if (screen === "reminder") {
+    return (
+      <ReminderForm roster={roster}
+        onCancel={() => navigateScreen(null)}
+        onSave={async (entry) => {
+          await onSendReminder(entry);
           navigateScreen(null);
         }} />
     );
@@ -22530,6 +22587,82 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
         {!allComplete && (
           <p className="text-xs text-stone-400 text-center mt-2">
             {studentIds.length === 0 ? "Select at least one child" : "Select what happened for each child"}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A quiet, day-scoped note asking a family to bring or send in something specific — never a
+// behavioral or health concern the way an incident is, just a practical heads-up. Shared across
+// however many students are selected at once, deliberately: the realistic case for picking more
+// than one child here is a handful of kids all needing the exact same thing that day (the room ran
+// out of diapers, say), not several different requests bundled together — a teacher with a genuine
+// mix of different reminders for different children just does this once per distinct combination,
+// which stays quick since nothing else about this form asks for much.
+function ReminderForm({ roster, presetId, onCancel, onSave }) {
+  const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
+  const [types, setTypes] = useState([]);
+  const [otherText, setOtherText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const toggleStudent = (id) => setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const toggleType = (id) => setTypes((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const hasOther = types.includes("other");
+  const canSave = studentIds.length > 0 && types.length > 0 && (!hasOther || otherText.trim().length > 0);
+
+  const save = () => {
+    setSaving(true);
+    onSave({
+      id: uid(), date: todayISO(), time: new Date().toTimeString().slice(0, 5),
+      studentIds, types, otherText: hasOther ? otherText.trim() : "",
+    });
+  };
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Send a reminder</h1>
+      <p className="text-xs text-stone-400 mb-5">Shows up in the family's own daily log, and notifies them right away.</p>
+      <div className="md:w-96">
+        <label className="block text-sm font-semibold text-stone-700 mb-1">Child{roster.length > 1 ? "ren" : ""}</label>
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {roster.map((s) => {
+            const selected = studentIds.includes(s.id);
+            return (
+              <button key={s.id} onClick={() => toggleStudent(s.id)}
+                className={`text-sm font-semibold px-3 py-2 rounded-full border ${selected ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                {s.name}
+              </button>
+            );
+          })}
+        </div>
+
+        <label className="block text-sm font-semibold text-stone-700 mb-1">What to remind them about</label>
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {REMINDER_TYPES.map((t) => {
+            const selected = types.includes(t.id);
+            return (
+              <button key={t.id} onClick={() => toggleType(t.id)}
+                className={`text-sm font-semibold px-3 py-2 rounded-full border ${selected ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+        {hasOther && (
+          <input value={otherText} onChange={(e) => setOtherText(e.target.value)} placeholder="What should they bring or send in?"
+            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
+        )}
+
+        <button disabled={!canSave || saving} onClick={save}
+          className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40 mt-2">
+          {saving ? "Sending…" : "Send reminder"}
+        </button>
+        {!canSave && (
+          <p className="text-xs text-stone-400 text-center mt-2">
+            {studentIds.length === 0 ? "Select at least one child" : types.length === 0 ? "Select at least one thing to remind them about" : "Describe what \"other\" means"}
           </p>
         )}
       </div>
