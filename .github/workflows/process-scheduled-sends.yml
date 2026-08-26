@@ -11,7 +11,8 @@ jobs:
     steps:
       - name: Ask the app to send anything that's due
         run: |
-          curl -sf -X POST "${{ secrets.APP_URL }}/api/blog-react" \
+          curl -s -X POST "${{ secrets.APP_URL }}/api/blog-react" \
             -H "Content-Type: application/json" \
             -H "x-scheduled-send-secret: ${{ secrets.SCHEDULED_SEND_SECRET }}" \
-            -d '{"action":"processScheduledSends"}'
+            -d '{"action":"processScheduledSends"}' \
+            -w "\nHTTP status: %{http_code}\n"
