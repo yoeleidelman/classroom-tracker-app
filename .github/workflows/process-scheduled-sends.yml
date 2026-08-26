@@ -1,0 +1,17 @@
+name: Process scheduled sends
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask the app to send anything that's due
+        run: |
+          curl -sf -X POST "${{ secrets.APP_URL }}/api/blog-react" \
+            -H "Content-Type: application/json" \
+            -H "x-scheduled-send-secret: ${{ secrets.SCHEDULED_SEND_SECRET }}" \
+            -d '{"action":"processScheduledSends"}'
