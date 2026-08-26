@@ -1125,10 +1125,16 @@ function computeUnifiedStatusFromCheckIns(classLinks, checkInsByClassId) {
 async function getUnifiedCheckInStatus(studentId, classLinks) {
   const perClassData = await Promise.all((classLinks || []).map(async (link) => {
     const data = await loadJSON(`class:${link.classId}:kriya:${studentId}`, null, true);
-    return [link.classId, data?.checkIns || []];
+    return [link.classId, data];
   }));
-  const checkInsByClassId = Object.fromEntries(perClassData);
-  return computeUnifiedStatusFromCheckIns(classLinks, checkInsByClassId);
+  // Keeps the FULL document per class, not just checkIns — specifically so toggleUnifiedCheckIn
+  // below can reuse this exact same read for its own write, instead of a second, separate one.
+  // That second read used to be necessary reasoning; it no longer is, now that this function keeps
+  // everything it already fetched instead of throwing most of it away.
+  const fullDataByClassId = Object.fromEntries(perClassData);
+  const checkInsByClassId = Object.fromEntries(perClassData.map(([classId, data]) => [classId, data?.checkIns || []]));
+  const status = computeUnifiedStatusFromCheckIns(classLinks, checkInsByClassId);
+  return { ...status, fullDataByClassId };
 }
 // Toggles a student's TRUE, unified check-in status. Checking out always closes whichever class's
 // record is actually open, regardless of which class or screen the action came from — a parent or
@@ -1152,18 +1158,15 @@ function withTimeout(promise, ms, message) {
 async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLabel) {
   const status = await getUnifiedCheckInStatus(studentId, classLinks);
   const targetClassId = status.openEntry ? status.openEntry.classId : defaultClassId;
-  // Fetches the FULL, fresh document right here, right before writing — NOT reusing `status`
-  // above. getUnifiedCheckInStatus's own read, just above, deliberately keeps only checkIns from
-  // each class (that's all overall attendance status itself needs) and discards everything else
-  // it read right there — so status.perClass never actually had mood/meals/naps/diapers/bathroom
-  // to preserve in the first place. Writing based on that stripped-down version was the real,
-  // confirmed, active bug: for any student who already had a record for this class, this silently
-  // saved a document containing checkIns and NOTHING else — a real, reported loss of an entire
-  // day's, and every PRIOR day's too (it's all one document, not split by date), mood, meals,
-  // naps, diapers, and bathroom history, the instant a check-in or check-out touched that student,
-  // from either the parent's own check-in or the teacher's own attendance toggle — both share this
-  // exact same function.
-  const freshData = await loadJSON(`class:${targetClassId}:kriya:${studentId}`, null, true);
+  // Reuses the FULL data the read just above already fetched for this exact class, rather than a
+  // second, separate network round trip to fetch it again — genuinely removes a full step from
+  // every check-in/out, not just a way of handling a stall better after the fact. defaultClassId
+  // is always one of classLinks in every real caller, so this reused data is always actually
+  // there; the fallback read below only exists for the unexpected case where it somehow isn't,
+  // rather than trusting that assumption blindly.
+  const freshData = targetClassId in status.fullDataByClassId
+    ? status.fullDataByClassId[targetClassId]
+    : await loadJSON(`class:${targetClassId}:kriya:${studentId}`, null, true);
   const currentCheckIns = freshData?.checkIns || [];
   const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel);
   await saveJSON(`class:${targetClassId}:kriya:${studentId}`, { ...(freshData || emptyStudentData()), checkIns: result.checkIns }, true);
