@@ -237,6 +237,11 @@ const DEFAULT_CONFIG = {
       ],
       summaryMode: "daily", // 'daily' | 'weekly' | 'both'
     },
+    // Off by default — a teacher opts into this specifically rather than it appearing for every
+    // elementary class. Purely a per-student, per-day yes/no record ("did this child daven
+    // today"), not a scored or point-earning category the way the rest of Points is — kept
+    // separate from categories above for exactly that reason.
+    davening: { enabled: false },
   },
   monthlyReports: {
     dayOfMonth: 25,
@@ -10509,6 +10514,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
   const [segmentCelebrationDismissals, setSegmentCelebrationDismissals] = useState({}); // segmentId -> true, once dismissed
   const [behaviorLogData, setBehaviorLogData] = useState({});
+  const [daveningLog, setDaveningLog] = useState({});
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -10706,6 +10712,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           addPoints={addPoints} addClassPoints={addClassPointsFn} resetClassPoints={resetClassPointsFn}
           onAddCategory={addPointsCategory} navigate={navigateView}
           plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark}
+          daveningLog={daveningLog} toggleDavening={toggleDavening}
           programs={programsInClass} onOpenProgram={openProgram} />
         );
       case "planner":
@@ -10923,6 +10930,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const bs = await loadC("benchmarkSubjects", []);
       const scd = await loadC("segmentCelebrationDismissals", {});
       const bl = await loadC("behaviorLogData", {});
+      const dl = await loadC("daveningLog", {});
       const rp = await loadC("randomPickerData", { bag: [], lastPickedId: null });
       const al = await loadC("alerts", []);
       const gs = await loadJSON("globalStudents", [], true);
@@ -11034,6 +11042,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setBenchmarkSubjects(finalBS);
       setSegmentCelebrationDismissals(scd);
       setBehaviorLogData(bl);
+      setDaveningLog(dl);
       setRandomPickerData(rp);
       setAlerts(al);
       const dataMap = {};
@@ -11442,6 +11451,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       ...behaviorLogData,
       [date]: { ...dayEntry, [periodId]: { ...periodEntry, [markId]: next } },
     });
+  };
+
+  const persistDaveningLog = (next) => { setDaveningLog(next); saveC("daveningLog", next); };
+  const toggleDavening = (date, studentId) => {
+    const dayEntry = { ...(daveningLog[date] || {}) };
+    if (dayEntry[studentId]) delete dayEntry[studentId];
+    else dayEntry[studentId] = true;
+    persistDaveningLog({ ...daveningLog, [date]: dayEntry });
   };
 
   // Links the teacher's OWN existing login to one sample student as a family account too —
@@ -16370,7 +16387,7 @@ function RaffleView({ roster }) {
   );
 }
 
-function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, programMode, programName, onBackFromProgram, backLabel, programs, onOpenProgram }) {
+function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, daveningLog, toggleDavening, programMode, programName, onBackFromProgram, backLabel, programs, onOpenProgram }) {
   const [subTab, setSubTab] = useState("rewards");
   const cats = config.points?.categories || [];
   const [activeId, setActiveId] = useState(cats[0]?.id || null);
@@ -16380,6 +16397,8 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
 
   useEffect(() => { if (!activeId && cats[0]) setActiveId(cats[0].id); }, [cats, activeId]);
   useEffect(() => { if (programMode && subTab === "classlog") setSubTab("rewards"); }, [programMode, subTab]);
+  useEffect(() => { if (programMode && subTab === "davening") setSubTab("rewards"); }, [programMode, subTab]);
+  const daveningEnabled = config.points?.davening?.enabled;
 
   // Only shared programs carry sourceClassName (a regular class's own roster doesn't need
   // grouping, since every student is already in that one class) — grouped list of
@@ -16437,11 +16456,16 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
         {!programMode && (
           <button onClick={() => setSubTab("classlog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "classlog" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Class Log</button>
         )}
+        {!programMode && daveningEnabled && (
+          <button onClick={() => setSubTab("davening")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "davening" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Davening</button>
+        )}
         <button onClick={() => setSubTab("raffle")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "raffle" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Raffle</button>
       </div>
 
       {subTab === "classlog" && !programMode ? (
         <ClassLogView config={config} plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark} />
+      ) : subTab === "davening" && !programMode && daveningEnabled ? (
+        <DaveningLogView roster={roster} daveningLog={daveningLog} toggleDavening={toggleDavening} />
       ) : subTab === "raffle" ? (
         <RaffleView roster={roster} />
       ) : (
@@ -16791,6 +16815,43 @@ function ClassLogView({ config, plannerDays, behaviorLogData, adjustBehaviorMark
             </div>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+// A simple, per-student, per-day yes/no record — never scored, never a category alongside
+// Rewards. Deliberately kept this plain: a date picker and a list of names to tap, nothing else,
+// since the entire point (confirmed directly) is quick, quiet data for the teacher's own use, not
+// something a family or admin needs a rich view into.
+function DaveningLogView({ roster, daveningLog, toggleDavening }) {
+  const [date, setDate] = useState(todayISO());
+  const dayEntry = daveningLog?.[date] || {};
+  const davenedCount = roster.filter((s) => dayEntry[s.id]).length;
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-5 flex-wrap">
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+        <span className="text-xs text-stone-400 ml-auto">{davenedCount} of {roster.length} today</span>
+      </div>
+      {roster.length === 0 ? (
+        <p className="text-sm text-stone-400 text-center py-8">No students in this class yet.</p>
+      ) : (
+        <div className="space-y-2">
+          {roster.map((s) => {
+            const davened = Boolean(dayEntry[s.id]);
+            return (
+              <button key={s.id} onClick={() => toggleDavening(date, s.id)}
+                className={`w-full flex items-center justify-between rounded-xl border-2 px-4 py-3 text-left ${davened ? "bg-teal-50 border-teal-300" : "bg-white border-stone-200"}`}>
+                <span className="font-semibold text-stone-900">{s.name}</span>
+                <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${davened ? "bg-teal-600 text-white" : "border border-stone-300 text-stone-400"}`}>
+                  {davened ? "Davened ✓" : "Not yet"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -24348,6 +24409,19 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             <option value="weekly">End of week</option>
             <option value="both">Both</option>
           </select>
+        </Section>
+        )}
+
+        {!isPreschool && (
+        <Section title="Davening tracker">
+          <p className="text-xs text-stone-400 mb-3">A simple, per-student daily record of whether a child davened — not a scored points category, just data for you to have. Off unless you turn it on. Shows up as its own tab in Points once enabled.</p>
+          <button onClick={() => update((c) => { c.points.davening = { enabled: !c.points.davening?.enabled }; return c; })}
+            className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left ${config.points?.davening?.enabled ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+            <span className={`text-sm font-semibold ${config.points?.davening?.enabled ? "text-teal-700" : "text-stone-600"}`}>
+              {config.points?.davening?.enabled ? "Davening tracker is on" : "Davening tracker is off"}
+            </span>
+            <span className="text-xs text-stone-400 ml-auto">Tap to {config.points?.davening?.enabled ? "turn off" : "turn on"}</span>
+          </button>
         </Section>
         )}
 
