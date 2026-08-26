@@ -1065,8 +1065,18 @@ function dedupeDailyLogData(data) {
 // which family is signed in when they scan it, not by anything encoded in the code itself.
 const SCHOOLWIDE_CHECKIN_CODE = "checkin:schoolwide";
 
-function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime) {
+function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, actionId) {
   const list = existingCheckIns || [];
+  // Idempotency guard: once two independent paths can both eventually complete the exact same
+  // tap — a client-side retry that finally lands, and a server-side fallback attempting the same
+  // action through a completely different route — one of them landing first has to make the
+  // other one a safe no-op, not a second toggle that would flip a real check-in right back into a
+  // check-out nobody actually asked for. actionId is generated once, at the instant of the tap,
+  // and carried through every attempt at completing THAT specific tap, however many there end up
+  // being or however they get there.
+  if (actionId && list.some((c) => c.actionId === actionId || c.checkOutActionId === actionId)) {
+    return { checkIns: list, action: "already-done" };
+  }
   const todaysEntries = list.filter((c) => c.date === date);
   const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
   // explicitTime, when given, is the moment the action actually happened — the instant it was
@@ -1077,10 +1087,10 @@ function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime) {
   // parent watched happen the moment they tapped it.
   const nowTime = explicitTime || new Date().toTimeString().slice(0, 5);
   if (openEntry) {
-    const updated = list.map((c) => (c.id === openEntry.id ? { ...c, checkOutTime: nowTime, checkOutBy: byLabel } : c));
+    const updated = list.map((c) => (c.id === openEntry.id ? { ...c, checkOutTime: nowTime, checkOutBy: byLabel, checkOutActionId: actionId } : c));
     return { checkIns: updated, action: "checked-out", entry: { ...openEntry, checkOutTime: nowTime, checkOutBy: byLabel } };
   }
-  const entry = { id: uid(), date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null };
+  const entry = { id: uid(), date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null, actionId };
   return { checkIns: [...list, entry], action: "checked-in", entry };
 }
 function isCheckedInNow(checkIns, date) {
@@ -1169,22 +1179,46 @@ const checkInIntentGeneration = {};
 // matches the moment actually tapped — confirmed live, directly, as something that mattered: a
 // save that only lands after a couple of minutes of retrying still has to record the original
 // tap time, not whenever the retry finally succeeded.
-function startOptimisticCheckInToggle({ studentId, currentEntries, byLabel, applyOptimistic, performRealToggle }) {
+function startOptimisticCheckInToggle({ studentId, currentEntries, byLabel, applyOptimistic, performRealToggle, requestFallback }) {
   const atDate = todayISO();
   const atTime = new Date().toTimeString().slice(0, 5);
+  // Generated once, right here, and carried through every attempt at completing this exact tap —
+  // the client's own ongoing retries AND the server-side fallback below, if it ever gets used.
+  // This is what makes it genuinely safe for both to be trying at once: whichever one actually
+  // lands first tags the real entry with this id, and computeToggledCheckIn's own idempotency
+  // check (see its own reasoning) recognizes that and refuses to toggle a second time — so this
+  // can never end up flipping a real check-in right back into a check-out nobody asked for.
+  const actionId = uid();
   const optimisticEntries = computeOptimisticCheckInEntries(currentEntries, byLabel, atDate, atTime);
   const myGeneration = (checkInIntentGeneration[studentId] || 0) + 1;
   checkInIntentGeneration[studentId] = myGeneration;
   applyOptimistic(studentId, optimisticEntries);
 
   (async () => {
-    const delaysMs = [1000, 2000, 4000, 8000, 15000, 30000, 30000, 30000]; // ~2 minutes of retrying total
+    // Extended well past the original couple of minutes — a save that's still quietly trying
+    // shouldn't give up just because someone put their phone away for a bit. Roughly 6 minutes of
+    // total retrying here.
+    const delaysMs = [1000, 2000, 4000, 8000, 15000, 20000, 30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000];
+    // Once the normal path has been failing for a real while (roughly a minute), also reach for
+    // the backup path — not instead of continuing to retry normally, alongside it. If a device
+    // genuinely can't complete this on its own persistent connection to the database but still
+    // has a working connection to the internet generally, this different, simpler kind of request
+    // is what gets it there anyway. requestFallback is only ever provided on the parent's own
+    // check-in for now — see its own reasoning for why this stays scoped there.
+    const fallbackAfterAttempt = 5;
+    let fallbackAttempted = false;
     for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
       if (checkInIntentGeneration[studentId] !== myGeneration) return; // superseded by a newer tap
       try {
-        await withTimeout(performRealToggle(atTime), 12000);
+        await withTimeout(performRealToggle(atTime, actionId), 12000);
         return;
       } catch (err) {
+        if (attempt >= fallbackAfterAttempt && !fallbackAttempted && requestFallback) {
+          fallbackAttempted = true;
+          requestFallback(atDate, atTime, actionId).catch((fallbackErr) => {
+            console.error(`Fallback check-in for ${studentId} also failed`, fallbackErr);
+          });
+        }
         if (attempt === delaysMs.length) {
           console.error(`Check-in/out for ${studentId} could not be saved after repeated attempts`, err);
           return;
@@ -1197,7 +1231,14 @@ function startOptimisticCheckInToggle({ studentId, currentEntries, byLabel, appl
 
 async function getUnifiedCheckInStatus(studentId, classLinks) {
   const perClassData = await Promise.all((classLinks || []).map(async (link) => {
-    const data = await loadJSON(`class:${link.classId}:kriya:${studentId}`, null, true);
+    // throwOnFailure: true — this function's only caller, toggleUnifiedCheckIn, needs a real
+    // failure to actually surface as one, since that's the only way its own retry-and-fallback
+    // logic can ever notice something didn't go through. A read that silently fell back to "no
+    // data" here would look identical to a genuinely new student with no prior records at all —
+    // and toggleUnifiedCheckIn would then "succeed" at writing a fresh check-in against that
+    // wrongly-empty view, silently discarding whatever mood, meals, naps, diapers, or bathroom
+    // data that student's real record actually had.
+    const data = await loadJSON(`class:${link.classId}:kriya:${studentId}`, null, true, 2, true);
     return [link.classId, data];
   }));
   // Keeps the FULL document per class, not just checkIns — specifically so toggleUnifiedCheckIn
@@ -1228,7 +1269,7 @@ function withTimeout(promise, ms, message) {
     new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message || "This took too long — check your connection and try again.")), ms); }),
   ]);
 }
-async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLabel, explicitTime) {
+async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLabel, explicitTime, actionId) {
   const status = await getUnifiedCheckInStatus(studentId, classLinks);
   const targetClassId = status.openEntry ? status.openEntry.classId : defaultClassId;
   // Reuses the FULL data the read just above already fetched for this exact class, rather than a
@@ -1239,10 +1280,15 @@ async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLab
   // rather than trusting that assumption blindly.
   const freshData = targetClassId in status.fullDataByClassId
     ? status.fullDataByClassId[targetClassId]
-    : await loadJSON(`class:${targetClassId}:kriya:${studentId}`, null, true);
+    : await loadJSON(`class:${targetClassId}:kriya:${studentId}`, null, true, 2, true);
   const currentCheckIns = freshData?.checkIns || [];
-  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime);
-  await saveJSON(`class:${targetClassId}:kriya:${studentId}`, { ...(freshData || emptyStudentData()), checkIns: result.checkIns }, true);
+  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime, actionId);
+  // throwOnFailure: true — the actual save genuinely failing is the one thing this entire
+  // retry-and-fallback design exists to notice and react to; a write that quietly gave up while
+  // reporting success would leave the tapping device's own screen permanently disagreeing with
+  // the real record, with nothing — not the retry, not the fallback — ever finding out there was
+  // anything to react to in the first place.
+  await saveJSON(`class:${targetClassId}:kriya:${studentId}`, { ...(freshData || emptyStudentData()), checkIns: result.checkIns }, true, 2, true);
   return { ...result, classId: targetClassId };
 }
 // Reuses the exact same day-type resolution Planner already uses to decide whether to hide
@@ -1552,7 +1598,14 @@ function buildSampleData() {
 // during a bad moment on the network. Retries a couple of times with a short, increasing delay
 // before actually giving up, so a load only returns the fallback once a failure has genuinely
 // persisted rather than on the very first transient hiccup.
-async function loadJSON(key, fallback, shared = false, retries = 2) {
+// throwOnFailure defaults to false so every existing caller — nearly everything else in this app
+// — keeps behaving exactly as it always has: log the problem, quietly fall back, never interrupt
+// whatever the person was doing. Only a caller that explicitly needs to KNOW a save genuinely
+// didn't happen — so it can retry, or reach for a different way entirely — passes true. Check-in
+// is the one place that does: a retry-and-fallback system is only as good as its ability to
+// notice a real failure, and silently returning as if nothing went wrong is exactly what would
+// have kept it from ever noticing one.
+async function loadJSON(key, fallback, shared = false, retries = 2, throwOnFailure = false) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const ref = doc(db, "data", key);
@@ -1561,6 +1614,7 @@ async function loadJSON(key, fallback, shared = false, retries = 2) {
     } catch (e) {
       if (attempt === retries) {
         console.error("Load failed after retries", key, e);
+        if (throwOnFailure) throw e;
         return fallback;
       }
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
@@ -1571,7 +1625,7 @@ async function loadJSON(key, fallback, shared = false, retries = 2) {
 
 // Same reasoning as loadJSON's own retry logic just above — a save that silently fails on a
 // transient network blip loses real data with nothing to show for it, not just a display glitch.
-async function saveJSON(key, value, shared = false, retries = 2) {
+async function saveJSON(key, value, shared = false, retries = 2, throwOnFailure = false) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const ref = doc(db, "data", key);
@@ -1580,6 +1634,7 @@ async function saveJSON(key, value, shared = false, retries = 2) {
     } catch (e) {
       if (attempt === retries) {
         console.error("Save failed after retries", key, e);
+        if (throwOnFailure) throw e;
         return;
       }
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
@@ -9462,7 +9517,25 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     startOptimisticCheckInToggle({
       studentId: link.studentId, byLabel, currentEntries: currentStatus?.entries || [],
       applyOptimistic: (studentId, entries) => setOptimisticCheckIn((prev) => ({ ...prev, [studentId]: { entries, baselineLinks: allLinksForChild, baselineSnapshot } })),
-      performRealToggle: (atTime) => toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel, atTime),
+      performRealToggle: (atTime, actionId) => toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel, atTime, actionId),
+      // Reached only once the normal path above has been failing for a real while — a separate,
+      // simpler request to the server itself, which can complete this directly on its own,
+      // reliable connection to the database rather than needing THIS device's own, separate,
+      // persistent connection (the one actually struggling) to cooperate at all. Only ever needs
+      // to get this one request out, once, which a phone with any general internet connection at
+      // all very likely still can, even while whatever's specifically wrong with the app's own
+      // connection continues.
+      requestFallback: async (atDate, atTime, actionId) => {
+        const headers = await authHeaders();
+        const res = await fetch("/api/blog-react", {
+          method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "fallbackCheckIn", studentId: link.studentId, actionId, atDate, atTime }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || "Fallback check-in request failed");
+        }
+      },
     });
   };
 
@@ -11924,10 +11997,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     startOptimisticCheckInToggle({
       studentId, byLabel, currentEntries,
       applyOptimistic: (sid, entries) => setOptimisticAttendance((prev) => ({ ...prev, [sid]: { entries, baselineSnapshot } })),
-      performRealToggle: async (atTime) => {
-        const data = (await loadC(`kriya:${studentId}`, null)) || studentData[studentId] || emptyStudentData();
-        const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, atTime);
-        persistStudent(studentId, { ...data, checkIns: result.checkIns });
+      // Reads and writes directly here, with throwOnFailure requested on both, rather than going
+      // through loadC/persistStudent — persistStudent deliberately never waits for its own save
+      // to finish or fail (that's the right choice for the ordinary, optimistic screen updates it
+      // exists for elsewhere), which meant this retry loop had no way to ever find out this
+      // specific save had failed, or even that it had finished at all. This awaits the real write
+      // and only updates studentData once it has genuinely succeeded — not before.
+      performRealToggle: async (atTime, actionId) => {
+        const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true, 2, true)) || studentData[studentId] || emptyStudentData();
+        const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, atTime, actionId);
+        const fullData = { ...data, checkIns: result.checkIns };
+        await saveJSON(`class:${classId}:kriya:${studentId}`, fullData, true, 2, true);
+        setStudentData((prev) => ({ ...prev, [studentId]: fullData }));
         return result;
       },
     });
@@ -13569,7 +13650,7 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
     startOptimisticCheckInToggle({
       studentId: student.id, byLabel, currentEntries: student.checkIns,
       applyOptimistic: (sid, entries) => setOptimisticCheckIn((prev) => ({ ...prev, [sid]: { entries, baselineLinks: student.links, baselineSnapshot } })),
-      performRealToggle: (atTime) => toggleUnifiedCheckIn(student.id, student.links, student.classId, byLabel, atTime),
+      performRealToggle: (atTime, actionId) => toggleUnifiedCheckIn(student.id, student.links, student.classId, byLabel, atTime, actionId),
     });
     setConfirmingRepeatFor(null);
   };

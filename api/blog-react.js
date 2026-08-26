@@ -28,6 +28,7 @@ const require = createRequire(import.meta.url);
 const { initializeApp, getApps, cert } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
 const { getFirestore, FieldPath } = require("firebase-admin/firestore");
+const { getMessaging } = require("firebase-admin/messaging");
 
 if (!getApps().length) {
   initializeApp({
@@ -269,12 +270,147 @@ async function handleBackfillMessageRead(req, res, storageKey, familyUid, readSt
   return res.status(200).json({ ok: true, backfilled: true });
 }
 
+// Ported from the client's own computeToggledCheckIn — same reasoning as computeSingleChoiceReactions
+// just above for why this is a hand-kept copy rather than a shared import: this runs in a
+// completely separate execution environment from the app itself. Needs to match the client's own
+// version exactly, including the actionId idempotency guard — this is the one thing that makes it
+// genuinely safe for the client's own retry and this server-side fallback to both be trying to
+// complete the exact same tap at once, without one of them undoing what the other already did.
+function computeToggledCheckInServerSide(existingCheckIns, date, byLabel, explicitTime, actionId) {
+  const list = existingCheckIns || [];
+  if (actionId && list.some((c) => c.actionId === actionId || c.checkOutActionId === actionId)) {
+    return { checkIns: list, action: "already-done" };
+  }
+  const todaysEntries = list.filter((c) => c.date === date);
+  const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
+  const nowTime = explicitTime || new Date().toTimeString().slice(0, 5);
+  if (openEntry) {
+    const updated = list.map((c) => (c.id === openEntry.id ? { ...c, checkOutTime: nowTime, checkOutBy: byLabel, checkOutActionId: actionId } : c));
+    return { checkIns: updated, action: "checked-out", entry: { ...openEntry, checkOutTime: nowTime, checkOutBy: byLabel } };
+  }
+  const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null, actionId };
+  return { checkIns: [...list, entry], action: "checked-in", entry };
+}
+
+// The genuinely new piece: when a parent's own device has been trying, and retrying, to complete
+// a check-in or check-out for a real while and it still hasn't gone through, this is the backup
+// path — reported live, directly, as a real gap worth closing: a phone with a perfectly good,
+// general internet connection (every other app and every text message working fine) can still
+// have trouble specifically with this app's own, separate, persistent connection to its database.
+// A plain, one-shot request like this one doesn't depend on that same connection being healthy —
+// it only needs to get out once, which a working phone very likely still can, even while whatever
+// is specifically wrong with the other connection continues. Deliberately scoped to a parent's own
+// check-in for now, not a teacher's — this is the one, specific, reported case this exists for.
+// Never trusts anything the client claims about which classes this student is actually enrolled
+// in or linked to — independently re-derives that from this account's own real, stored record,
+// the same as every other identity check in this file already does, specifically so a spoofed
+// request can't claim access to a student this account was never actually linked to.
+async function handleFallbackCheckIn(req, res, decoded) {
+  const { studentId, actionId, atDate, atTime } = req.body || {};
+  if (!studentId || !actionId || !atDate || !atTime) {
+    return res.status(400).json({ error: "studentId, actionId, atDate, and atTime are required." });
+  }
+
+  const db = getFirestore();
+  const familyDoc = await db.collection("data").doc(`family:${decoded.uid}`).get();
+  const family = familyDoc.exists ? familyDoc.data().value : null;
+  if (!family || family.active === false) return res.status(403).json({ error: "Account not recognized." });
+
+  const classLinks = (family.studentLinks || []).filter((l) => l.studentId === studentId);
+  if (classLinks.length === 0) return res.status(403).json({ error: "Not linked to this student." });
+
+  const byLabel = `Parent: ${family.name || "Family"}`;
+  const refs = classLinks.map((l) => db.collection("data").doc(`class:${l.classId}:kriya:${studentId}`));
+
+  // A transaction here for the same reason every other write in this file already uses one where
+  // it matters: this student's real, current data has to be read and written as one atomic step,
+  // never as two separate calls with a gap in between something else could land in.
+  const result = await db.runTransaction(async (tx) => {
+    const snaps = await Promise.all(refs.map((ref) => tx.get(ref)));
+    const dataByClassId = {};
+    classLinks.forEach((l, i) => { dataByClassId[l.classId] = snaps[i].exists ? snaps[i].data().value : null; });
+
+    // The same "whichever class is actually open, if any" reasoning the client's own toggle
+    // already uses — checked here across every class this account's own record actually links
+    // this student to, not whatever the client might have claimed.
+    let openClassId = null;
+    for (const l of classLinks) {
+      const checkIns = dataByClassId[l.classId]?.checkIns || [];
+      if (checkIns.some((c) => c.date === atDate && c.checkInTime && !c.checkOutTime)) { openClassId = l.classId; break; }
+    }
+    const targetClassId = openClassId || classLinks[0].classId;
+    const targetData = dataByClassId[targetClassId] || { checkIns: [] };
+    const toggled = computeToggledCheckInServerSide(targetData.checkIns, atDate, byLabel, atTime, actionId);
+    tx.set(refs[classLinks.findIndex((l) => l.classId === targetClassId)], { ...targetData, checkIns: toggled.checkIns });
+    return { ...toggled, classId: targetClassId };
+  });
+
+  // Best-effort, quiet notice to the class's own teachers that this happened through the backup
+  // path — not urgent, not shown to the family at all, just visibility for whoever's actually in
+  // the room in case they want to double check anything. Calls the messaging SDK directly rather
+  // than going through send-push.js's own HTTP endpoint — that endpoint requires a real, signed-in
+  // user's own auth token, which a server-to-server call like this one has no such thing to
+  // provide; this is the same underlying send, just made directly from inside this same function.
+  if (result.action !== "already-done") {
+    try {
+      const classRosterDoc = await db.collection("data").doc(`class:${result.classId}:roster`).get();
+      const teachersSnap = await db.collection("data")
+        .where(FieldPath.documentId(), ">=", "teacher:").where(FieldPath.documentId(), "<", "teacher;").get();
+      const relevantTeacherUids = [];
+      teachersSnap.forEach((doc) => {
+        const t = doc.data().value;
+        if (t?.active !== false && ((t.assignedClassIds || []).includes(result.classId) || t.role === "admin")) {
+          relevantTeacherUids.push(doc.id.replace("teacher:", ""));
+        }
+      });
+      if (relevantTeacherUids.length > 0) {
+        const tokenDocs = await Promise.all(relevantTeacherUids.map((uid) => db.collection("data").doc(`push-tokens:${uid}`).get()));
+        const allTokens = [];
+        tokenDocs.forEach((doc) => { (doc.exists ? doc.data().value?.tokens || [] : []).forEach((t) => allTokens.push(t.token)); });
+        if (allTokens.length > 0) {
+          const studentName = (classRosterDoc.exists ? classRosterDoc.data().value : []).find((s) => s.id === studentId)?.name || "A student";
+          const title = result.action === "checked-in" ? `${studentName} checked in` : `${studentName} checked out`;
+          const body = "Completed automatically after a connection issue on the family's device.";
+          await getMessaging().sendEachForMulticast({
+            tokens: allTokens,
+            data: { title, body, url: "/", icon: "/icons-teacher/icon-192.png" },
+            webpush: { headers: { Urgency: "high" } },
+          });
+        }
+      }
+    } catch {
+      // Never lets a notification failure undo or fail the actual check-in/out above — the real
+      // action already succeeded by this point regardless of whether anyone gets told about it.
+    }
+  }
+
+  return res.status(200).json({ ok: true, ...result });
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   // Defaults to "react" — every reaction request already in production, before this action field
   // existed at all, has no such field and must keep working exactly as it always has.
   const { classId, postId, action = "react", storageKey, familyUid, readStateKey, actingAs, collection = "blogPosts" } = req.body || {};
+
+  if (action === "fallbackCheckIn") {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Sign-in required." });
+    let decoded;
+    try {
+      decoded = await getAuth().verifyIdToken(token);
+    } catch {
+      return res.status(401).json({ error: "Sign-in session is invalid or expired." });
+    }
+    try {
+      return await handleFallbackCheckIn(req, res, decoded);
+    } catch (err) {
+      if (err.status) return res.status(err.status).json({ error: err.message });
+      return res.status(500).json({ error: err.message || "Something went wrong." });
+    }
+  }
 
   if (action === "backfillMessageRead") {
     if (!classId || !storageKey || !familyUid || !readStateKey) {
