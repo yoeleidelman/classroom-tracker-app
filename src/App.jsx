@@ -1102,24 +1102,53 @@ async function toggleCheckInForStudent(classId, studentId, byLabel) {
 // looks at ALL of their check-in records together and returns the one true, unified answer —
 // which class (if any) is actually open right now — so a check-out, wherever it's triggered from,
 // always finds and closes the right one.
-async function getUnifiedCheckInStatus(studentId, classLinks) {
+// The pure half of getUnifiedCheckInStatus just below — given each linked class's checkIns
+// array already in hand (however it got there: a fresh read, or a live subscription's current
+// value), computes the exact same {isIn, openEntry, allTodaysEntries, perClass} shape with no
+// network access of its own. Exists specifically so a live, instant, cross-device view of check-in
+// status can be built directly from already-live-subscribed data, reusing this exact same
+// reasoning, rather than needing its own separate copy of it that could quietly drift out of sync
+// with this one over time.
+function computeUnifiedStatusFromCheckIns(classLinks, checkInsByClassId) {
   const date = todayISO();
-  const perClass = await Promise.all((classLinks || []).map(async (link) => {
-    const data = await loadJSON(`class:${link.classId}:kriya:${studentId}`, null, true);
-    const todaysEntries = (data?.checkIns || []).filter((c) => c.date === date);
-    return { classId: link.classId, className: link.className, checkIns: data?.checkIns || [], todaysEntries };
-  }));
+  const perClass = (classLinks || []).map((link) => {
+    const checkIns = checkInsByClassId[link.classId] || [];
+    const todaysEntries = checkIns.filter((c) => c.date === date);
+    return { classId: link.classId, className: link.className, checkIns, todaysEntries };
+  });
   const allTodaysEntries = perClass
     .flatMap((c) => c.todaysEntries.map((e) => ({ ...e, classId: c.classId, className: c.className })))
     .sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
   const openEntry = allTodaysEntries.find((e) => e.checkInTime && !e.checkOutTime);
   return { isIn: Boolean(openEntry), openEntry, allTodaysEntries, perClass };
 }
+async function getUnifiedCheckInStatus(studentId, classLinks) {
+  const perClassData = await Promise.all((classLinks || []).map(async (link) => {
+    const data = await loadJSON(`class:${link.classId}:kriya:${studentId}`, null, true);
+    return [link.classId, data?.checkIns || []];
+  }));
+  const checkInsByClassId = Object.fromEntries(perClassData);
+  return computeUnifiedStatusFromCheckIns(classLinks, checkInsByClassId);
+}
 // Toggles a student's TRUE, unified check-in status. Checking out always closes whichever class's
 // record is actually open, regardless of which class or screen the action came from — a parent or
 // teacher tapping "check out" means "this child is leaving," not "close this specific class's own
 // entry." Checking in (when nothing is open anywhere) writes the new entry to defaultClassId, the
 // class this particular action is being taken for.
+// Bounds a promise to a hard deadline — a check-in/out toggle that never resolves or rejects on
+// its own (a genuinely stalled connection, not an error either side would ever hear about) would
+// otherwise leave its button showing "…" indefinitely, with no way for the person tapping it to
+// know anything's wrong or to try again. Reported live, exactly this: sometimes it resolves,
+// sometimes the three dots just never go away. After this many seconds with no real answer either
+// way, this treats it as a failure and lets the UI recover, rather than trusting a request that
+// may simply never come back.
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message || "This took too long — check your connection and try again.")), ms); }),
+  ]);
+}
 async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLabel) {
   const status = await getUnifiedCheckInStatus(studentId, classLinks);
   const targetClassId = status.openEntry ? status.openEntry.classId : defaultClassId;
@@ -8853,13 +8882,18 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => { cancelled = true; };
   }, [family]);
 
-  const [checkInStatus, setCheckInStatus] = useState({}); // studentId -> { isIn, sinceTime }
   // Which children currently have a check-in/out request actually in flight — a Set, not a single
   // flag, since checking in two different kids at once should never block each other; this only
   // ever guards a SPECIFIC child against a second tap on THEM specifically landing before their
   // own first one has actually finished. See inFlightCheckInToggles' own, more detailed reasoning
   // for why the actual guard lives at module level rather than as component state or a ref.
   const [checkInBusy, setCheckInBusy] = useState(new Set()); // mirrors the module-level set, purely for the UI below to react to
+  // Keyed by studentId — a brief, visible reason when a toggle didn't go through, instead of the
+  // button just silently returning to normal with no explanation. A stalled connection or a
+  // genuine failure both used to look identical to a plain, quiet non-event; this is what actually
+  // tells the person tapping it to try again, rather than leaving them guessing why nothing seemed
+  // to happen.
+  const [checkInError, setCheckInError] = useState({});
   // A scan doesn't perform anything by itself — it only unlocks the ability to act, which then
   // has to be used deliberately per child. Locks again the moment they leave this screen, so
   // getting back to it always means scanning again, not something that stays open in the
@@ -9255,35 +9289,62 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // who was already in, creating a second, independent open check-in with no warning at all. Now
   // groups every link by student FIRST, then asks getUnifiedCheckInStatus for the one true answer
   // across all of that student's classes together, so nothing gets silently dropped.
-  const refreshCheckInStatus = useCallback(async () => {
-    const today = todayISO();
-    const next = {};
-    const classSchoolDayCache = {}; // classId -> boolean, deduped so shared classes aren't fetched twice
+  // Live, instant, cross-device check-in status — replaces a computation that only ever refreshed
+  // itself once on load and again right after THIS device's own toggle, the actual, confirmed
+  // cause behind "the teacher's screen didn't show it until they closed and reopened the app":
+  // nothing here ever watched for a check-in or check-out that happened somewhere else — another
+  // guardian, a teacher, even this same account open on a second device — until the whole screen
+  // was torn down and rebuilt from scratch. A live subscription on each linked class's own
+  // check-in record, reusing computeUnifiedStatusFromCheckIns' exact same reasoning
+  // getUnifiedCheckInStatus itself relies on, is what actually closes that gap — the same instant
+  // it happens, on every device watching at once.
+  const kriyaKeys = preschoolStudentLinks.map((l) => `class:${l.classId}:kriya:${l.studentId}`);
+  const liveKriyaData = useLiveJSONMap(kriyaKeys);
+
+  // Whether today counts as a school day at all doesn't need this same instant treatment — a
+  // class's own calendar isn't something that changes mid-morning — so this stays a plain, direct
+  // read rather than another live subscription.
+  const [schoolDayByClass, setSchoolDayByClass] = useState({});
+  const linkedClassIdsSignature = [...new Set(preschoolStudentLinks.map((l) => l.classId))].join(",");
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const today = todayISO();
+      const classIds = linkedClassIdsSignature ? linkedClassIdsSignature.split(",") : [];
+      const entries = await Promise.all(classIds.map(async (classId) => {
+        const [classConfig, classPlannerDays] = await Promise.all([
+          loadJSON(`class:${classId}:config`, null, true),
+          loadJSON(`class:${classId}:plannerDays`, {}, true),
+        ]);
+        return [classId, isSchoolDay(today, classConfig, classPlannerDays)];
+      }));
+      if (!cancelled) setSchoolDayByClass(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [linkedClassIdsSignature]);
+
+  const checkInStatus = useMemo(() => {
     const linksByStudent = {};
     preschoolStudentLinks.forEach((link) => {
       if (!linksByStudent[link.studentId]) linksByStudent[link.studentId] = [];
       linksByStudent[link.studentId].push(link);
     });
+    const next = {};
     for (const [studentId, links] of Object.entries(linksByStudent)) {
-      const status = await getUnifiedCheckInStatus(studentId, links);
-      for (const link of links) {
-        if (!(link.classId in classSchoolDayCache)) {
-          const [classConfig, classPlannerDays] = await Promise.all([
-            loadJSON(`class:${link.classId}:config`, null, true),
-            loadJSON(`class:${link.classId}:plannerDays`, {}, true),
-          ]);
-          classSchoolDayCache[link.classId] = isSchoolDay(today, classConfig, classPlannerDays);
-        }
-      }
-      // "Today's a school day" only matters for the class the check-in would actually land on —
-      // the open one if there is one, otherwise the first linked class — not every linked class.
+      const checkInsByClassId = {};
+      links.forEach((link) => {
+        checkInsByClassId[link.classId] = liveKriyaData[`class:${link.classId}:kriya:${studentId}`]?.checkIns || [];
+      });
+      const status = computeUnifiedStatusFromCheckIns(links, checkInsByClassId);
       const relevantClassId = status.openEntry ? status.openEntry.classId : links[0]?.classId;
-      next[studentId] = { isIn: status.isIn, entries: status.allTodaysEntries, schoolDayToday: classSchoolDayCache[relevantClassId], links };
+      next[studentId] = { isIn: status.isIn, entries: status.allTodaysEntries, schoolDayToday: schoolDayByClass[relevantClassId], links };
     }
-    setCheckInStatus(next);
-  }, [family, fullTimeStudentLinks]);
-
-  useEffect(() => { refreshCheckInStatus(); }, [refreshCheckInStatus]);
+    return next;
+    // preschoolStudentLinks deliberately excluded — it's a fresh array reference every render
+    // (derived, not memoized), and its actual contents are already what liveKriyaData's own keys
+    // are built from, so liveKriyaData changing is what should drive this recomputing, not a
+    // reference change alone.
+  }, [liveKriyaData, schoolDayByClass]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Toggles this child's ONE true check-in status — closing whichever class's record is actually
   // open (which might not even be the class this specific link belongs to), or opening a new one
@@ -9291,17 +9352,21 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // toggleUnifiedCheckIn for the full reasoning on why this can't just look at one class alone.
   // Guards against the exact race a repeated tap could otherwise cause: skips outright if this
   // specific child already has a request in flight, rather than starting a second read-modify-
-  // write cycle against data the first one hasn't finished changing yet.
+  // write cycle against data the first one hasn't finished changing yet. No longer manually
+  // refreshes status afterward — checkInStatus is live now, and picks up this exact write itself,
+  // the same way it picks up anyone else's.
   const toggleCheckInByFamily = async (link) => {
     if (inFlightCheckInToggles.has(link.studentId)) return;
     inFlightCheckInToggles.add(link.studentId);
     setCheckInBusy(new Set(inFlightCheckInToggles));
+    setCheckInError((prev) => { const next = { ...prev }; delete next[link.studentId]; return next; });
     try {
       const allLinksForChild = preschoolStudentLinks.filter((l) => l.studentId === link.studentId);
       const byLabel = `Parent: ${family?.name || "Family"}`;
-      const result = await toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel);
-      await refreshCheckInStatus();
+      const result = await withTimeout(toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel), 12000);
       return result;
+    } catch (err) {
+      setCheckInError((prev) => ({ ...prev, [link.studentId]: err.message || "Something went wrong — try again." }));
     } finally {
       inFlightCheckInToggles.delete(link.studentId);
       setCheckInBusy(new Set(inFlightCheckInToggles));
@@ -9486,6 +9551,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 const confirming = confirmingRepeatChild === link.studentId;
                 const allClassNames = (status?.links || [link]).map((l) => l.className).join(", ");
                 const isBusy = checkInBusy.has(link.studentId);
+                const toggleError = checkInError[link.studentId];
                 return (
                   <div key={link.studentId} className={`rounded-xl p-4 border-2 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
                     <div className="flex items-center justify-between gap-3">
@@ -9527,6 +9593,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                         </button>
                       )}
                     </div>
+                    {toggleError && <p className="text-xs font-semibold text-rose-600 mt-2">{toggleError}</p>}
                   </div>
                 );
               })}
@@ -13191,12 +13258,16 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
   // side of this same action — see inFlightCheckInToggles' own, more detailed reasoning for why
   // this lives at module level rather than as component state or a ref.
   const [checkInBusy, setCheckInBusy] = useState(new Set()); // mirrors the module-level set, purely for the UI below to react to
+  const [checkInError, setCheckInError] = useState({});
   const toggleGuarded = async (studentId) => {
     if (inFlightCheckInToggles.has(studentId)) return;
     inFlightCheckInToggles.add(studentId);
     setCheckInBusy(new Set(inFlightCheckInToggles));
+    setCheckInError((prev) => { const next = { ...prev }; delete next[studentId]; return next; });
     try {
-      await toggleCheckInByTeacher(studentId);
+      await withTimeout(toggleCheckInByTeacher(studentId), 12000);
+    } catch (err) {
+      setCheckInError((prev) => ({ ...prev, [studentId]: err.message || "Something went wrong — try again." }));
     } finally {
       inFlightCheckInToggles.delete(studentId);
       setCheckInBusy(new Set(inFlightCheckInToggles));
@@ -13235,6 +13306,7 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
           const isIn = Boolean(openEntry);
           const confirming = confirmingRepeatFor === s.id;
           const isBusy = checkInBusy.has(s.id);
+          const toggleError = checkInError[s.id];
           return (
             <div key={s.id} className={`rounded-xl border-2 p-4 flex flex-wrap items-center justify-between gap-3 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
               <div>
@@ -13251,6 +13323,7 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
                     ))}
                   </div>
                 )}
+                {toggleError && <p className="text-xs font-semibold text-rose-600 mt-1">{toggleError}</p>}
               </div>
               {confirming ? (
                 <div className="flex items-center gap-2">
@@ -13281,12 +13354,13 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
 // there's no hard family ID on a student record, so this is a heuristic, not a guarantee.
 function AllPreschoolAttendanceView({ loggedByName, navigate }) {
   const [loading, setLoading] = useState(true);
-  const [families, setFamilies] = useState([]); // [{ key, students: [{ id, name, classId, className, links, checkIns }] }]
+  const [byStudentId, setByStudentId] = useState({}); // id -> { id, name, parentEmail, parentPhone, links }
   const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
   // Guards the exact same race a repeated tap could otherwise cause here as on every other
   // version of this same check-in action — see inFlightCheckInToggles' own, more detailed
   // reasoning for why this lives at module level rather than as component state or a ref.
   const [checkInBusy, setCheckInBusy] = useState(new Set()); // mirrors the module-level set, purely for the UI below to react to
+  const [checkInError, setCheckInError] = useState({});
   const date = todayISO();
 
   // Was previously one entry PER CLASS a student was enrolled in — a student genuinely enrolled
@@ -13297,27 +13371,48 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
   // class's teacher couldn't find them on their own roster to know where they actually were. Now
   // groups by unique student FIRST, gathering every class link a student has, then asks
   // getUnifiedCheckInStatus for the one true status across all of them together.
-  const refresh = useCallback(async () => {
+  const loadRoster = useCallback(async () => {
     setLoading(true);
     const allClasses = await loadJSON("schoolClasses", [], true);
     const preschoolClasses = (allClasses || []).filter((c) => c.classType === "preschool" && !c.archived);
     const perClassRosters = await Promise.all(preschoolClasses.map(async (c) => ({
       classId: c.id, className: c.name, roster: await loadJSON(`class:${c.id}:roster`, [], true),
     })));
-
-    const byStudentId = {};
+    const next = {};
     perClassRosters.forEach(({ classId, className, roster }) => {
       roster.forEach((s) => {
-        if (!byStudentId[s.id]) byStudentId[s.id] = { id: s.id, name: s.name, parentEmail: s.parentEmail, parentPhone: s.parentPhone, links: [] };
-        byStudentId[s.id].links.push({ classId, className });
+        if (!next[s.id]) next[s.id] = { id: s.id, name: s.name, parentEmail: s.parentEmail, parentPhone: s.parentPhone, links: [] };
+        next[s.id].links.push({ classId, className });
       });
     });
+    setByStudentId(next);
+    setLoading(false);
+  }, []);
 
-    const uniqueStudents = await Promise.all(Object.values(byStudentId).map(async (s) => {
-      const status = await getUnifiedCheckInStatus(s.id, s.links);
-      return { ...s, classId: status.openEntry ? status.openEntry.classId : s.links[0].classId, className: s.links.map((l) => l.className).join(", "), checkIns: status.perClass.flatMap((c) => c.checkIns) };
-    }));
+  useEffect(() => { loadRoster(); }, [loadRoster]);
 
+  // Live, instant, cross-device check-in status for every student on this page at once — replaces
+  // a computation that only ever ran once on load and again right after THIS device's own toggle,
+  // the actual, confirmed cause behind a teacher's own list not reflecting a check-out a parent had
+  // already done minutes earlier, until the teacher closed and reopened the screen. This is
+  // dismissal itself, checking out an entire building at once — the exact situation where that gap
+  // matters most. A live subscription on every student's own check-in record, reusing
+  // computeUnifiedStatusFromCheckIns' exact same reasoning getUnifiedCheckInStatus itself relies
+  // on, is what actually closes it — the same instant it happens, on every device watching at once.
+  const allKriyaKeys = Object.values(byStudentId).flatMap((s) => s.links.map((l) => `class:${l.classId}:kriya:${s.id}`));
+  const liveKriyaData = useLiveJSONMap(allKriyaKeys);
+
+  const families = useMemo(() => {
+    const uniqueStudents = Object.values(byStudentId).map((s) => {
+      const checkInsByClassId = {};
+      s.links.forEach((link) => { checkInsByClassId[link.classId] = liveKriyaData[`class:${link.classId}:kriya:${s.id}`]?.checkIns || []; });
+      const status = computeUnifiedStatusFromCheckIns(s.links, checkInsByClassId);
+      return {
+        ...s, classId: status.openEntry ? status.openEntry.classId : s.links[0].classId,
+        className: s.links.map((l) => l.className).join(", "),
+        checkIns: status.perClass.flatMap((c) => c.checkIns),
+      };
+    });
     // Groups by shared parent email first, then phone, for students without an email on file —
     // anyone matching neither becomes their own single-student group.
     const groups = {};
@@ -13328,11 +13423,8 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
     });
     const grouped = Object.entries(groups).map(([key, students]) => ({ key, students: students.sort((a, b) => a.name.localeCompare(b.name)) }));
     grouped.sort((a, b) => a.students[0].name.localeCompare(b.students[0].name));
-    setFamilies(grouped);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
+    return grouped;
+  }, [byStudentId, liveKriyaData]);
 
   const handleTap = async (student, isIn) => {
     if (!isIn && wouldBeRepeatCheckIn(student.checkIns, date)) {
@@ -13342,14 +13434,17 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
     if (inFlightCheckInToggles.has(student.id)) return;
     inFlightCheckInToggles.add(student.id);
     setCheckInBusy(new Set(inFlightCheckInToggles));
+    setCheckInError((prev) => { const next = { ...prev }; delete next[student.id]; return next; });
     try {
       const byLabel = loggedByName ? `Teacher: ${loggedByName}` : "Teacher";
       // student.classId here is already "whichever class is actually open, or the first one if
       // none is" — toggleUnifiedCheckIn re-derives the true open class itself regardless, this
-      // is just the fallback for a brand new check-in.
-      await toggleUnifiedCheckIn(student.id, student.links, student.classId, byLabel);
-      await refresh();
+      // is just the fallback for a brand new check-in. No manual refresh afterward — families is
+      // live now, and picks up this exact write itself, the same way it picks up anyone else's.
+      await withTimeout(toggleUnifiedCheckIn(student.id, student.links, student.classId, byLabel), 12000);
       setConfirmingRepeatFor(null);
+    } catch (err) {
+      setCheckInError((prev) => ({ ...prev, [student.id]: err.message || "Something went wrong — try again." }));
     } finally {
       inFlightCheckInToggles.delete(student.id);
       setCheckInBusy(new Set(inFlightCheckInToggles));
@@ -13374,6 +13469,7 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
               const isIn = Boolean(openEntry);
               const confirming = confirmingRepeatFor === s.id;
               const isBusy = checkInBusy.has(s.id);
+              const toggleError = checkInError[s.id];
               return (
                 <div key={s.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${isIn ? "text-emerald-800" : ""}`}>
                   <div>
@@ -13390,6 +13486,7 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
                         ))}
                       </div>
                     )}
+                    {toggleError && <p className="text-xs font-semibold text-rose-600 mt-1">{toggleError}</p>}
                   </div>
                   {confirming ? (
                     <div className="flex items-center gap-2">
