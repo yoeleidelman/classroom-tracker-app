@@ -31,7 +31,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload, Clock
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -237,11 +237,6 @@ const DEFAULT_CONFIG = {
       ],
       summaryMode: "daily", // 'daily' | 'weekly' | 'both'
     },
-    // Off by default — a teacher opts into this specifically rather than it appearing for every
-    // elementary class. Purely a per-student, per-day yes/no record ("did this child daven
-    // today"), not a scored or point-earning category the way the rest of Points is — kept
-    // separate from categories above for exactly that reason.
-    davening: { enabled: false },
   },
   monthlyReports: {
     dayOfMonth: 25,
@@ -1109,6 +1104,21 @@ async function toggleCheckInForStudent(classId, studentId, byLabel) {
   const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel);
   await saveJSON(`class:${classId}:kriya:${studentId}`, { ...data, checkIns: result.checkIns }, true);
   return result;
+}
+
+// One document per scheduled item, not a shared list every schedule attempt would have to
+// read-modify-write — several teachers scheduling something around the same moment, in different
+// classes, never risk one attempt silently overwriting another's. Reused for a scheduled blog
+// post and every kind of scheduled message (a class family thread, a teacher's own personal
+// thread, the school office's own thread) — payload carries everything the processor needs to
+// actually deliver it (which document to append to, the already-built entry, who to notify and
+// with what) so the processor itself never needs to know the different storage patterns behind
+// each kind, only how to follow this one shared shape.
+async function queueScheduledSend({ kind, classId, className, scheduledFor, payload }) {
+  const id = uid();
+  const entry = { id, kind, classId, className, scheduledFor, status: "pending", createdAt: new Date().toISOString(), payload };
+  await saveJSON(`scheduledSend:${id}`, entry, true);
+  return entry;
 }
 // A student legitimately enrolled in more than one class (part-time, or specific periods only —
 // both real, supported enrollment types) can still only actually be in one physical place at a
@@ -7538,6 +7548,12 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
     onBackfillRead();
   }, [threadKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [sending, setSending] = useState(false);
+  // Teacher and admin only — a family composing to a teacher never gets this option. A plain
+  // toggle plus a datetime input, matching the exact same shape as blog scheduling, so the two
+  // never diverge.
+  const canSchedule = myRole === "teacher" || myRole === "admin";
+  const [scheduledFor, setScheduledFor] = useState("");
+  const [showSchedule, setShowSchedule] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
   const [roughNote, setRoughNote] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -7628,6 +7644,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
 
   const send = async () => {
     if ((!text.trim() && attachItems.length === 0) || sending) return;
+    if (scheduledFor && new Date(scheduledFor).getTime() <= Date.now()) { setAttachError("Pick a time in the future."); return; }
     setSending(true);
     try {
       const attachments = [];
@@ -7646,9 +7663,11 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
         }
         attachments.push({ url, type: item.type, name: (item.type === "file" || item.type === "audio") ? item.name : null });
       }
-      await onSend(text.trim(), attachments);
+      await onSend(text.trim(), attachments, scheduledFor ? new Date(scheduledFor).toISOString() : null);
       setText("");
       clearAttachments();
+      setScheduledFor("");
+      setShowSchedule(false);
     } catch (err) {
       setAttachError(describeUploadError(err));
     }
@@ -7957,19 +7976,33 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           </div>
         )}
         {attachError && <p className="text-xs text-rose-600 mb-1.5 ml-11">{attachError}</p>}
+        {canSchedule && showSchedule && (
+          <div className="flex items-center gap-1.5 mb-1.5 ml-11">
+            <input type="datetime-local" value={scheduledFor} onChange={(e) => setScheduledFor(e.target.value)}
+              min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+              className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+            <button onClick={() => { setShowSchedule(false); setScheduledFor(""); }} className="text-xs text-stone-400 hover:text-stone-600">Cancel</button>
+          </div>
+        )}
         <div className="flex items-end gap-2">
           <button onClick={() => setShowGenerate((v) => !v)} title="Generate with AI"
             className={`shrink-0 rounded-full p-2.5 mb-0.5 border ${showGenerate ? "bg-teal-50 border-teal-300 text-teal-700" : "bg-stone-50 border-stone-200 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
             <Sparkles size={17} />
           </button>
+          {canSchedule && (
+            <button onClick={() => setShowSchedule((v) => !v)} title="Schedule for later"
+              className={`shrink-0 rounded-full p-2.5 mb-0.5 border ${showSchedule ? "bg-teal-50 border-teal-300 text-teal-700" : "bg-stone-50 border-stone-200 text-stone-400 hover:text-teal-700 hover:border-teal-300"}`}>
+              <Clock size={17} />
+            </button>
+          )}
           <div className="flex-1 flex items-end gap-1 bg-white border border-stone-300 rounded-3xl pl-1 py-1 pr-2">
             <AttachmentMenuButton onPickFiles={pickAttachments} />
             <textarea ref={composerRef} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               className="flex-1 bg-transparent border-none px-1.5 py-2 text-sm resize-none overflow-y-auto outline-none" style={{ maxHeight: MAX_COMPOSER_HEIGHT }} />
-            <button onClick={send} disabled={(!text.trim() && attachItems.length === 0) || sending} title="Send"
+            <button onClick={send} disabled={(!text.trim() && attachItems.length === 0) || sending || (showSchedule && !scheduledFor)} title={scheduledFor ? "Schedule" : "Send"}
               className="text-teal-700 hover:text-teal-800 disabled:opacity-30 shrink-0 flex items-center justify-center mb-1.5 p-1">
-              {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={19} />}
+              {sending ? <Loader2 size={18} className="animate-spin" /> : scheduledFor ? <Clock size={19} /> : <Send size={19} />}
             </button>
           </div>
         </div>
@@ -10293,10 +10326,21 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   // guardian's own uid (see sendDirectMessageToFamily's own comment for the full reasoning) —
   // sendPushNotification with an explicit single-uid list, not notifyFamilyGroup, is what keeps
   // this notification as private as the thread itself.
-  const sendMessage = async (guardianUid, text, attachments) => {
+  const sendMessage = async (guardianUid, text, attachments, scheduledFor) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedInTeacher?.name || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    if (scheduledFor) {
+      await queueScheduledSend({
+        kind: "message", scheduledFor,
+        payload: {
+          storageKey: key, entry, notifyUids: [guardianUid],
+          notifyTitle: `Direct message from ${loggedInTeacher?.name || "your teacher"}`, notifyBody: text?.trim() || describeAttachmentsForNotification(attachments),
+          notifyUrl: `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`,
+        },
+      });
+      return { messages: [entry] };
+    }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedInTeacher?.name || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([guardianUid], `Direct message from ${loggedInTeacher?.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
@@ -10314,7 +10358,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" teacher={loggedInTeacher} threadKey={`teacher-direct-${openGroup.groupId}`}
           lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
           onBack={() => { setOpenGroup(null); refresh(); }}
-          onSend={async (text, attachments) => { await sendMessage(openGroup.groupId, text, attachments); await refresh(); }}
+          onSend={async (text, attachments, scheduledFor) => { await sendMessage(openGroup.groupId, text, attachments, scheduledFor); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
       </>
@@ -10514,7 +10558,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
   const [segmentCelebrationDismissals, setSegmentCelebrationDismissals] = useState({}); // segmentId -> true, once dismissed
   const [behaviorLogData, setBehaviorLogData] = useState({});
-  const [daveningLog, setDaveningLog] = useState({});
+  // Keyed by category id, then by date, then by student id — every "tracker"-type points category
+  // shares this same one store, since each such category is its own simple, independent per-day
+  // record with nothing else to distinguish them structurally.
+  const [trackerLog, setTrackerLog] = useState({});
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -10712,7 +10759,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           addPoints={addPoints} addClassPoints={addClassPointsFn} resetClassPoints={resetClassPointsFn}
           onAddCategory={addPointsCategory} navigate={navigateView}
           plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark}
-          daveningLog={daveningLog} toggleDavening={toggleDavening}
+          trackerLog={trackerLog} toggleTracker={toggleTracker}
           programs={programsInClass} onOpenProgram={openProgram} />
         );
       case "planner":
@@ -10930,7 +10977,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const bs = await loadC("benchmarkSubjects", []);
       const scd = await loadC("segmentCelebrationDismissals", {});
       const bl = await loadC("behaviorLogData", {});
-      const dl = await loadC("daveningLog", {});
+      const dl = await loadC("trackerLog", {});
       const rp = await loadC("randomPickerData", { bag: [], lastPickedId: null });
       const al = await loadC("alerts", []);
       const gs = await loadJSON("globalStudents", [], true);
@@ -11042,7 +11089,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setBenchmarkSubjects(finalBS);
       setSegmentCelebrationDismissals(scd);
       setBehaviorLogData(bl);
-      setDaveningLog(dl);
+      setTrackerLog(dl);
       setRandomPickerData(rp);
       setAlerts(al);
       const dataMap = {};
@@ -11142,7 +11189,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // Each part holds one freely mixed batch — any combination of photos and videos together, not
   // artificially split by type, since there's no real reason a recap of ten photos and one video
   // needs to be broken into separate parts just because of what kind of file each one is.
-  const submitBlogPost = async (title, blocksInput, onProgress) => {
+  const submitBlogPost = async (title, blocksInput, onProgress, scheduledFor) => {
     const postId = uid();
     const totalItems = blocksInput.reduce((sum, b) => sum + (b.mediaItems?.length || 0), 0);
     let uploadedCount = 0;
@@ -11166,6 +11213,28 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
       }
       uploadedBlocks.push({ id: uid(), media, text: (block.text || "").trim() });
+    }
+    // Media uploads happen here, right now, regardless of whether this posts immediately or is
+    // scheduled for later — the original files only exist in this teacher's own browser session,
+    // so this is the only moment they can ever be uploaded. What gets queued for later is the
+    // fully-finished entry itself, with its real, already-uploaded urls; nothing about the actual
+    // sending, when the scheduled time comes, needs to touch a file at all.
+    if (scheduledFor) {
+      const entry = withLogger({
+        id: postId, timestamp: scheduledFor, authorType: "teacher",
+        title: (title || "").trim() || null, blocks: uploadedBlocks, reactions: {}, comments: [],
+      });
+      const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
+      await queueScheduledSend({
+        kind: "blogPost", classId, className,
+        scheduledFor,
+        payload: {
+          entry,
+          notifyTitle: `New post in ${className}`,
+          notifyBody: (title || "").trim() || firstCaption || "Check out the new post",
+        },
+      });
+      return entry;
     }
     const entry = withLogger({
       id: postId, timestamp: new Date().toISOString(), authorType: "teacher",
@@ -11453,12 +11522,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     });
   };
 
-  const persistDaveningLog = (next) => { setDaveningLog(next); saveC("daveningLog", next); };
-  const toggleDavening = (date, studentId) => {
-    const dayEntry = { ...(daveningLog[date] || {}) };
+  const persistTrackerLog = (next) => { setTrackerLog(next); saveC("trackerLog", next); };
+  const toggleTracker = (catId, date, studentId) => {
+    const catLog = trackerLog[catId] || {};
+    const dayEntry = { ...(catLog[date] || {}) };
     if (dayEntry[studentId]) delete dayEntry[studentId];
     else dayEntry[studentId] = true;
-    persistDaveningLog({ ...daveningLog, [date]: dayEntry });
+    persistTrackerLog({ ...trackerLog, [catId]: { ...catLog, [date]: dayEntry } });
   };
 
   // Links the teacher's OWN existing login to one sample student as a family account too —
@@ -12070,10 +12140,21 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // part of this thread (a direct, single-uid notification) rather than notifyFamilyGroup, which
   // would fan out to every guardian sharing this family's group regardless of which one the
   // message was actually for.
-  const sendMessageToFamily = async (familyUid, text, attachments) => {
+  const sendMessageToFamily = async (familyUid, text, attachments, scheduledFor) => {
     const key = `class:${classId}:messages:${familyUid}`;
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    if (scheduledFor) {
+      await queueScheduledSend({
+        kind: "message", classId, className, scheduledFor,
+        payload: {
+          storageKey: key, entry, notifyUids: [familyUid],
+          notifyTitle: `Message from ${className}`, notifyBody: text?.trim() || describeAttachmentsForNotification(attachments),
+          notifyUrl: `/?portal=parent&open=messages&classId=${classId}`,
+        },
+      });
+      return { messages: [entry] };
+    }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([familyUid], `Message from ${className}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=messages&classId=${classId}`);
@@ -12092,10 +12173,21 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // specifically to fan a notification out to every login sharing a group. sendPushNotification
   // with an explicit single-element list is what actually keeps this notification as private as
   // the thread itself.
-  const sendDirectMessageToFamily = async (guardianUid, text, attachments) => {
+  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    if (scheduledFor) {
+      await queueScheduledSend({
+        kind: "message", scheduledFor,
+        payload: {
+          storageKey: key, entry, notifyUids: [guardianUid],
+          notifyTitle: `Direct message from ${loggedByName || "your teacher"}`, notifyBody: text?.trim() || describeAttachmentsForNotification(attachments),
+          notifyUrl: `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`,
+        },
+      });
+      return { messages: [entry] };
+    }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([guardianUid], `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
@@ -15606,6 +15698,10 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
   const [genState, setGenState] = useState({}); // blockId -> { open, roughNote, generating, error }
+  // Only offered for a genuinely new post — scheduling an edit to something already published
+  // doesn't mean anything. A plain local datetime input, not a separate date-then-time pair,
+  // since this needs to be one single moment picked in one step.
+  const [scheduledFor, setScheduledFor] = useState("");
 
   const addBlock = () => setBlocks((prev) => [...prev, { id: uid(), text: "", mediaItems: [] }]);
   const removeBlock = (id) => setBlocks((prev) => prev.filter((b) => b.id !== id));
@@ -15659,6 +15755,7 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
 
   const submit = async () => {
     if (!hasContent) { setError("Add at least a photo, a video, or some text first."); return; }
+    if (scheduledFor && new Date(scheduledFor).getTime() <= Date.now()) { setError("Pick a time in the future."); return; }
     setError(null);
     setPosting(true);
     setProgress(0);
@@ -15667,7 +15764,7 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
       // (m.existing) — dropping only a rejected video that never had a usable file to begin with.
       const cleanBlocks = blocks.map((b) => ({ ...b, mediaItems: b.mediaItems.filter((m) => m.file || m.existing) }));
       if (editingPost) await onSubmitEdit(editingPost.id, title, cleanBlocks, setProgress);
-      else await onSubmit(title, cleanBlocks, setProgress);
+      else await onSubmit(title, cleanBlocks, setProgress, scheduledFor ? new Date(scheduledFor).toISOString() : null);
       onBack();
     } catch (err) {
       setError(describeUploadError(err));
@@ -15747,11 +15844,28 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
           );
         })}
         <button onClick={addBlock} className="text-xs font-semibold text-teal-700">+ Add another part to this post</button>
+        {!editingPost && (
+          <div className="border border-stone-200 rounded-xl p-3">
+            <div className="flex gap-1 bg-stone-100 rounded-lg p-1 mb-2">
+              <button onClick={() => setScheduledFor("")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${!scheduledFor ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Post now</button>
+              <button onClick={() => setScheduledFor((v) => v || new Date(Date.now() + 3600000).toISOString().slice(0, 16))}
+                className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${scheduledFor ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Schedule for later</button>
+            </div>
+            {scheduledFor && (
+              <>
+                <input type="datetime-local" value={scheduledFor} onChange={(e) => setScheduledFor(e.target.value)}
+                  min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+                  className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+                <p className="text-[11px] text-stone-400 mt-1.5">Sent automatically around this time — usually within a few minutes, occasionally a little later.</p>
+              </>
+            )}
+          </div>
+        )}
         {error && <p className="text-xs text-rose-600">{error}</p>}
         <button onClick={submit} disabled={posting} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">
           {posting
-            ? (editingPost ? `Saving… ${progress}%` : `Posting… ${progress}%`)
-            : editingPost ? "Save changes" : activeBlockCount > 1 ? "Post all parts together" : "Post"}
+            ? (editingPost ? `Saving… ${progress}%` : scheduledFor ? `Preparing… ${progress}%` : `Posting… ${progress}%`)
+            : editingPost ? "Save changes" : scheduledFor ? "Schedule post" : activeBlockCount > 1 ? "Post all parts together" : "Post"}
         </button>
       </div>
     </div>
@@ -16387,18 +16501,22 @@ function RaffleView({ roster }) {
   );
 }
 
-function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, daveningLog, toggleDavening, programMode, programName, onBackFromProgram, backLabel, programs, onOpenProgram }) {
+function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, trackerLog, toggleTracker, programMode, programName, onBackFromProgram, backLabel, programs, onOpenProgram }) {
   const [subTab, setSubTab] = useState("rewards");
   const cats = config.points?.categories || [];
   const [activeId, setActiveId] = useState(cats[0]?.id || null);
   const active = cats.find((c) => c.id === activeId) || cats[0];
   const [showForm, setShowForm] = useState(cats.length === 0);
-  const [form, setForm] = useState({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
+  // type: "reward" (builds toward a threshold, the original behavior) or "tracker" (a plain,
+  // per-day yes/no record with nothing to build toward — no increment, no threshold, no reward
+  // message, none of that applies). Both live as one kind of category now, chosen right here at
+  // creation, rather than a tracker being a separate, hidden thing behind its own settings toggle
+  // — confirmed directly that this was the wrong shape: it should just be another option
+  // alongside every other way of setting up a category.
+  const [form, setForm] = useState({ type: "reward", label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
 
   useEffect(() => { if (!activeId && cats[0]) setActiveId(cats[0].id); }, [cats, activeId]);
   useEffect(() => { if (programMode && subTab === "classlog") setSubTab("rewards"); }, [programMode, subTab]);
-  useEffect(() => { if (programMode && subTab === "davening") setSubTab("rewards"); }, [programMode, subTab]);
-  const daveningEnabled = config.points?.davening?.enabled;
 
   // Only shared programs carry sourceClassName (a regular class's own roster doesn't need
   // grouping, since every student is already in that one class) — grouped list of
@@ -16418,7 +16536,7 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
     onAddCategory(newCat);
     setActiveId(newCat.id);
     setShowForm(false);
-    setForm({ label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
+    setForm({ type: "reward", label: "", color: "indigo", scope: "individual", displayMode: "bar", increment: 1, threshold: 10, rewardMessage: "", indefinite: false });
   };
 
   return (
@@ -16456,16 +16574,11 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
         {!programMode && (
           <button onClick={() => setSubTab("classlog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "classlog" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Class Log</button>
         )}
-        {!programMode && daveningEnabled && (
-          <button onClick={() => setSubTab("davening")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "davening" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Davening</button>
-        )}
         <button onClick={() => setSubTab("raffle")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${subTab === "raffle" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Raffle</button>
       </div>
 
       {subTab === "classlog" && !programMode ? (
         <ClassLogView config={config} plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark} />
-      ) : subTab === "davening" && !programMode && daveningEnabled ? (
-        <DaveningLogView roster={roster} daveningLog={daveningLog} toggleDavening={toggleDavening} />
       ) : subTab === "raffle" ? (
         <RaffleView roster={roster} />
       ) : (
@@ -16486,55 +16599,79 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
       {showForm && (
         <div className="bg-white border border-stone-200 rounded-xl p-4 mb-5 md:w-96">
           <p className="text-sm font-semibold text-stone-800 mb-3">New points category</p>
+
+          <div className="flex gap-1 bg-stone-100 rounded-lg p-1 mb-3">
+            <button onClick={() => setForm((f) => ({ ...f, type: "reward" }))}
+              className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${form.type === "reward" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Reward</button>
+            <button onClick={() => setForm((f) => ({ ...f, type: "tracker" }))}
+              className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${form.type === "tracker" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Tracker</button>
+          </div>
+          <p className="text-[11px] text-stone-400 mb-3">
+            {form.type === "tracker"
+              ? "A plain, per-day yes/no record — did this happen today, for each student. Nothing to build toward, no reward at the end."
+              : "Points build up toward a reward as a teacher adds them."}
+          </p>
+
           <label className="block text-xs font-medium text-stone-500 mb-1">Name</label>
           <input value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
-            placeholder="e.g. Diligence Points" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+            placeholder={form.type === "tracker" ? "e.g. Davening, Homework turned in" : "e.g. Diligence Points"} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
 
-          <div className="flex gap-2 mb-3">
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-stone-500 mb-1">Tracked</label>
-              <select value={form.scope} onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
-                <option value="individual">Per-student</option>
-                <option value="class">Whole class</option>
-              </select>
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-stone-500 mb-1">Display</label>
-              <select value={form.displayMode} onChange={(e) => setForm((f) => ({ ...f, displayMode: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
-                <option value="bar">Fill-up visual</option>
-                <option value="counter">Simple counter</option>
-                <option value="checkx">Check / X tally</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="flex gap-2 mb-3">
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-stone-500 mb-1">Add amount</label>
-              <input type="number" min={1} value={form.increment} onChange={(e) => setForm((f) => ({ ...f, increment: Math.max(1, Number(e.target.value) || 1) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-            </div>
-            {!form.indefinite && (
-              <div className="flex-1">
-                <label className="block text-xs font-medium text-stone-500 mb-1">Reward at</label>
-                <input type="number" min={0} value={form.threshold} onChange={(e) => setForm((f) => ({ ...f, threshold: Math.max(0, Number(e.target.value) || 0) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-              </div>
-            )}
-            <div className="flex-1">
+          {form.type === "tracker" ? (
+            <div className="mb-4">
               <label className="block text-xs font-medium text-stone-500 mb-1">Color</label>
               <select value={form.color} onChange={(e) => setForm((f) => ({ ...f, color: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
                 {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="flex gap-2 mb-3">
+                <div className="flex-1">
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Tracked</label>
+                  <select value={form.scope} onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                    <option value="individual">Per-student</option>
+                    <option value="class">Whole class</option>
+                  </select>
+                </div>
+                <div className="flex-1">
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Display</label>
+                  <select value={form.displayMode} onChange={(e) => setForm((f) => ({ ...f, displayMode: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                    <option value="bar">Fill-up visual</option>
+                    <option value="counter">Simple counter</option>
+                    <option value="checkx">Check / X tally</option>
+                  </select>
+                </div>
+              </div>
 
-          <label className="flex items-center gap-2 mb-3 text-xs text-stone-600">
-            <input type="checkbox" checked={form.indefinite} onChange={(e) => setForm((f) => ({ ...f, indefinite: e.target.checked, threshold: e.target.checked ? 0 : (f.threshold || 10) }))} />
-            No cap — just count up indefinitely (good for lines memorized, books read, and other ongoing totals)
-          </label>
+              <div className="flex gap-2 mb-3">
+                <div className="flex-1">
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Add amount</label>
+                  <input type="number" min={1} value={form.increment} onChange={(e) => setForm((f) => ({ ...f, increment: Math.max(1, Number(e.target.value) || 1) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                </div>
+                {!form.indefinite && (
+                  <div className="flex-1">
+                    <label className="block text-xs font-medium text-stone-500 mb-1">Reward at</label>
+                    <input type="number" min={0} value={form.threshold} onChange={(e) => setForm((f) => ({ ...f, threshold: Math.max(0, Number(e.target.value) || 0) }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  </div>
+                )}
+                <div className="flex-1">
+                  <label className="block text-xs font-medium text-stone-500 mb-1">Color</label>
+                  <select value={form.color} onChange={(e) => setForm((f) => ({ ...f, color: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                    {COLOR_CHOICES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              </div>
 
-          <label className="block text-xs font-medium text-stone-500 mb-1">Reward description</label>
-          <input value={form.rewardMessage} onChange={(e) => setForm((f) => ({ ...f, rewardMessage: e.target.value }))}
-            placeholder="e.g. Pizza party" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
+              <label className="flex items-center gap-2 mb-3 text-xs text-stone-600">
+                <input type="checkbox" checked={form.indefinite} onChange={(e) => setForm((f) => ({ ...f, indefinite: e.target.checked, threshold: e.target.checked ? 0 : (f.threshold || 10) }))} />
+                No cap — just count up indefinitely (good for lines memorized, books read, and other ongoing totals)
+              </label>
+
+              <label className="block text-xs font-medium text-stone-500 mb-1">Reward description</label>
+              <input value={form.rewardMessage} onChange={(e) => setForm((f) => ({ ...f, rewardMessage: e.target.value }))}
+                placeholder="e.g. Pizza party" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
+            </>
+          )}
 
           <div className="flex gap-2">
             <button onClick={submitForm} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Create category</button>
@@ -16544,6 +16681,9 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
       )}
 
       {!showForm && active && (
+        active.type === "tracker" ? (
+          <WeeklyTrackerGrid roster={roster} cat={active} trackerLog={trackerLog} toggleTracker={toggleTracker} />
+        ) :
         active.displayMode === "checkx" ? (
           active.scope === "class" ? (
             <ClassCheckXCard cat={active}
@@ -16820,37 +16960,63 @@ function ClassLogView({ config, plannerDays, behaviorLogData, adjustBehaviorMark
   );
 }
 
-// A simple, per-student, per-day yes/no record — never scored, never a category alongside
-// Rewards. Deliberately kept this plain: a date picker and a list of names to tap, nothing else,
-// since the entire point (confirmed directly) is quick, quiet data for the teacher's own use, not
-// something a family or admin needs a rich view into.
-function DaveningLogView({ roster, daveningLog, toggleDavening }) {
-  const [date, setDate] = useState(todayISO());
-  const dayEntry = daveningLog?.[date] || {};
-  const davenedCount = roster.filter((s) => dayEntry[s.id]).length;
+// A per-day, per-student yes/no record shown as a genuine week-at-a-glance grid — confirmed
+// directly this is what "read the data easily and clearly" actually meant: being able to look
+// back and see, in one place, which days a specific student got the mark this week and which they
+// didn't, not a single day at a time with no visible history around it. Every tracker-type
+// category shares this exact same view; nothing about it is specific to any one category's name.
+function WeeklyTrackerGrid({ roster, cat, trackerLog, toggleTracker }) {
+  const [weekOf, setWeekOf] = useState(todayISO());
+  const weekDates = weekRange(weekOf);
+  const catLog = trackerLog?.[cat.id] || {};
+  const shiftWeek = (deltaWeeks) => setWeekOf(addDaysISO(weekOf, deltaWeeks * 7));
+  const todayStr = todayISO();
 
   return (
     <div>
-      <div className="flex items-center gap-2 mb-5 flex-wrap">
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} max={todayISO()} className="rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-        <span className="text-xs text-stone-400 ml-auto">{davenedCount} of {roster.length} today</span>
+      <div className="flex items-center gap-2 mb-4">
+        <button onClick={() => shiftWeek(-1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous week"><ChevronLeft size={16} /></button>
+        <span className="text-sm font-semibold text-stone-800">{new Date(`${weekDates[0]}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })} – {new Date(`${weekDates[6]}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+        <button onClick={() => shiftWeek(1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Next week"><ChevronRight size={16} /></button>
+        {weekDates[0] !== weekRange(todayStr)[0] && (
+          <button onClick={() => setWeekOf(todayStr)} className="text-xs font-semibold text-teal-700 ml-1">Today</button>
+        )}
       </div>
       {roster.length === 0 ? (
         <p className="text-sm text-stone-400 text-center py-8">No students in this class yet.</p>
       ) : (
-        <div className="space-y-2">
-          {roster.map((s) => {
-            const davened = Boolean(dayEntry[s.id]);
-            return (
-              <button key={s.id} onClick={() => toggleDavening(date, s.id)}
-                className={`w-full flex items-center justify-between rounded-xl border-2 px-4 py-3 text-left ${davened ? "bg-teal-50 border-teal-300" : "bg-white border-stone-200"}`}>
-                <span className="font-semibold text-stone-900">{s.name}</span>
-                <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${davened ? "bg-teal-600 text-white" : "border border-stone-300 text-stone-400"}`}>
-                  {davened ? "Davened ✓" : "Not yet"}
-                </span>
-              </button>
-            );
-          })}
+        <div className="overflow-x-auto -mx-4 px-4">
+          <table className="w-full text-sm border-separate" style={{ borderSpacing: 0 }}>
+            <thead>
+              <tr>
+                <th className="text-left pb-2 pr-2 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec]">Student</th>
+                {weekDates.map((d) => (
+                  <th key={d} className={`pb-2 px-1 text-center font-semibold ${d === todayStr ? "text-teal-700" : "text-stone-500"}`}>
+                    <div className="text-[10px] uppercase">{new Date(`${d}T00:00:00`).toLocaleDateString(undefined, { weekday: "short" })}</div>
+                    <div>{new Date(`${d}T00:00:00`).getDate()}</div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {roster.map((s) => (
+                <tr key={s.id} className="border-t border-stone-200">
+                  <td className="py-2 pr-2 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec]">{s.name}</td>
+                  {weekDates.map((d) => {
+                    const marked = Boolean(catLog[d]?.[s.id]);
+                    return (
+                      <td key={d} className="text-center py-1.5 px-1">
+                        <button onClick={() => toggleTracker(cat.id, d, s.id)}
+                          className={`w-8 h-8 rounded-full border-2 flex items-center justify-center mx-auto ${marked ? `bg-${cat.color}-500 border-${cat.color}-500 text-white` : "border-stone-300 text-transparent hover:border-stone-400"}`}>
+                          ✓
+                        </button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -18119,10 +18285,17 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const sendToFamily = async (groupId, text, attachments) => {
+  const sendToFamily = async (groupId, text, attachments, scheduledFor) => {
     const key = `admin-messages:${groupId}`;
+    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    if (scheduledFor) {
+      await queueScheduledSend({
+        kind: "message", scheduledFor,
+        payload: { storageKey: key, entry, notifyUids: [groupId], notifyTitle: "Message from the School Office", notifyBody: text?.trim() || describeAttachmentsForNotification(attachments), notifyUrl: "/?portal=parent&open=admin" },
+      });
+      return { messages: [entry] };
+    }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
     const next = { messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([groupId], "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin");
@@ -18172,7 +18345,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
           onBack={() => { safeGoBack("thread", () => setOpenGroup(null)); refresh(); }}
-          onSend={async (text, attachments) => { await sendToFamily(openGroup.groupId, text, attachments); await refresh(); }}
+          onSend={async (text, attachments, scheduledFor) => { await sendToFamily(openGroup.groupId, text, attachments, scheduledFor); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
       </>
@@ -18459,7 +18632,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
           lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
           onBackfillRead={() => backfillMessageReadIfNeeded(classId, storageKey, openGroup.groupId, `class-${classId}`)}
           onBack={() => { safeGoBack("thread", () => setOpenGroup(null)); refresh(); }}
-          onSend={async (text, attachments) => { await sendMessageToFamily(openGroup.groupId, text, attachments); }}
+          onSend={async (text, attachments, scheduledFor) => { await sendMessageToFamily(openGroup.groupId, text, attachments, scheduledFor); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }} />
       </>
@@ -18478,7 +18651,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
           lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
           onBackfillRead={() => backfillMessageReadIfNeeded(classId, storageKey, openDirectGroup.groupId, `teacher-${loggedInTeacher.uid}`)}
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
-          onSend={async (text, attachments) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments); }}
+          onSend={async (text, attachments, scheduledFor) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments, scheduledFor); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }} />
       </>
@@ -24409,19 +24582,6 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
             <option value="weekly">End of week</option>
             <option value="both">Both</option>
           </select>
-        </Section>
-        )}
-
-        {!isPreschool && (
-        <Section title="Davening tracker">
-          <p className="text-xs text-stone-400 mb-3">A simple, per-student daily record of whether a child davened — not a scored points category, just data for you to have. Off unless you turn it on. Shows up as its own tab in Points once enabled.</p>
-          <button onClick={() => update((c) => { c.points.davening = { enabled: !c.points.davening?.enabled }; return c; })}
-            className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left ${config.points?.davening?.enabled ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
-            <span className={`text-sm font-semibold ${config.points?.davening?.enabled ? "text-teal-700" : "text-stone-600"}`}>
-              {config.points?.davening?.enabled ? "Davening tracker is on" : "Davening tracker is off"}
-            </span>
-            <span className="text-xs text-stone-400 ml-auto">Tap to {config.points?.davening?.enabled ? "turn off" : "turn on"}</span>
-          </button>
         </Section>
         )}
 

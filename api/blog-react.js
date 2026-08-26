@@ -387,8 +387,112 @@ async function handleFallbackCheckIn(req, res, decoded) {
   return res.status(200).json({ ok: true, ...result });
 }
 
+// Runs on GitHub Actions' own schedule, roughly every 5 minutes, completely independent of
+// Vercel's own cron (whose Hobby-plan limit — once a day, imprecise within the hour — is the
+// exact gap this exists to close). Authenticated by a shared secret rather than a signed-in
+// user's own token, since nobody is actually signed in when this runs — a scheduled job, not a
+// person. Finds every scheduled item whose time has come, delivers it through the same storage
+// shape the client already prepared it in, and marks it done — a failure on one item is recorded
+// and skipped, never allowed to block every other item due in the same run.
+async function handleProcessScheduledSends(req, res) {
+  const providedSecret = req.headers["x-scheduled-send-secret"];
+  if (!providedSecret || providedSecret !== process.env.SCHEDULED_SEND_SECRET) {
+    return res.status(401).json({ error: "Not authorized." });
+  }
+
+  const db = getFirestore();
+  const nowIso = new Date().toISOString();
+  const snap = await db.collection("data")
+    .orderBy(FieldPath.documentId())
+    .startAt("scheduledSend:")
+    .endAt("scheduledSend:\uf8ff")
+    .get();
+
+  const due = [];
+  snap.forEach((doc) => {
+    const value = doc.data().value;
+    if (value && value.status === "pending" && value.scheduledFor <= nowIso) due.push({ key: doc.id, value });
+  });
+
+  let sent = 0;
+  let failed = 0;
+  for (const { key, value } of due) {
+    try {
+      if (value.kind === "blogPost") {
+        const blogKey = `class:${value.classId}:blogPosts`;
+        const blogDoc = await db.collection("data").doc(blogKey).get();
+        const existingPosts = blogDoc.exists ? blogDoc.data().value || [] : [];
+        await db.collection("data").doc(blogKey).set({ value: [...existingPosts, value.payload.entry] });
+
+        // Same family-lookup logic as api/class-families.js — reading studentLinks directly as
+        // the authoritative source, the same real, reported gap that endpoint itself was fixed
+        // for: a guardian whose linkedClassIds hadn't backfilled yet would otherwise be invisible
+        // to this query and silently never notified.
+        const familiesSnap = await db.collection("data").orderBy(FieldPath.documentId()).startAt("family:").endAt("family:\uf8ff").get();
+        const rosterDoc = await db.collection("data").doc(`class:${value.classId}:roster`).get();
+        const roster = rosterDoc.exists ? rosterDoc.data().value || [] : [];
+        const fullTimeIds = new Set(roster.filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time").map((s) => s.id));
+        const uids = [];
+        familiesSnap.forEach((doc) => {
+          const f = doc.data().value;
+          if (!f) return;
+          const linked = Array.isArray(f.studentLinks) && f.studentLinks.some((l) => l?.classId === value.classId && fullTimeIds.has(l.studentId));
+          if (linked) uids.push(f.uid);
+        });
+        if (uids.length > 0) {
+          const tokenDocs = await Promise.all(uids.map((uid) => db.collection("data").doc(`push-tokens:${uid}`).get()));
+          const allTokens = [];
+          tokenDocs.forEach((doc) => { (doc.exists ? doc.data().value?.tokens || [] : []).forEach((t) => allTokens.push(t.token)); });
+          if (allTokens.length > 0) {
+            await getMessaging().sendEachForMulticast({
+              tokens: allTokens,
+              data: { title: value.payload.notifyTitle, body: value.payload.notifyBody, url: `/?portal=parent&open=blog&classId=${value.classId}`, icon: "/icons-parent/icon-192.png" },
+              webpush: { headers: { Urgency: "high" } },
+            });
+          }
+        }
+      } else if (value.kind === "message") {
+        const msgDoc = await db.collection("data").doc(value.payload.storageKey).get();
+        const existingThread = msgDoc.exists ? msgDoc.data().value || { messages: [] } : { messages: [] };
+        await db.collection("data").doc(value.payload.storageKey).set({ value: { messages: [...(existingThread.messages || []), value.payload.entry] } });
+
+        const notifyUids = value.payload.notifyUids || [];
+        if (notifyUids.length > 0) {
+          const tokenDocs = await Promise.all(notifyUids.map((uid) => db.collection("data").doc(`push-tokens:${uid}`).get()));
+          const allTokens = [];
+          tokenDocs.forEach((doc) => { (doc.exists ? doc.data().value?.tokens || [] : []).forEach((t) => allTokens.push(t.token)); });
+          if (allTokens.length > 0) {
+            await getMessaging().sendEachForMulticast({
+              tokens: allTokens,
+              data: { title: value.payload.notifyTitle, body: value.payload.notifyBody, url: value.payload.notifyUrl || "/", icon: "/icons-parent/icon-192.png" },
+              webpush: { headers: { Urgency: "high" } },
+            });
+          }
+        }
+      }
+      await db.collection("data").doc(key).set({ value: { ...value, status: "sent", sentAt: new Date().toISOString() } });
+      sent++;
+    } catch (err) {
+      console.error("Failed to process scheduled send", key, err);
+      try {
+        await db.collection("data").doc(key).set({ value: { ...value, status: "failed", error: err.message || "Unknown error" } });
+      } catch {
+        // If even marking it failed doesn't succeed, the next run will simply see it as still
+        // pending and try again — not silently lost either way.
+      }
+      failed++;
+    }
+  }
+
+  return res.status(200).json({ ok: true, checked: due.length, sent, failed });
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  if (req.body?.action === "processScheduledSends") {
+    return await handleProcessScheduledSends(req, res);
+  }
 
   // Defaults to "react" — every reaction request already in production, before this action field
   // existed at all, has no such field and must keep working exactly as it always has.
