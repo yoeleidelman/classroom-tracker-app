@@ -1020,6 +1020,23 @@ function emptyStudentData() { return { skills: {}, fluency: [], attendance: [], 
 // immediately, with no admin action involved at all. An entry with no loggedAt at all (only
 // possible from before this field existed) is treated as older than any timestamped one, since a
 // real timestamp is strictly better information than none.
+// What one specific student's own view of a (possibly multi-student) incident actually is — their
+// own category, message, and notify choice if this incident has a perStudent breakdown, or the
+// plain top-level fields otherwise (which covers the ordinary single-student case, and any
+// incident logged before this ever existed). This is the ONLY correct way for anything
+// parent-facing to read an incident: reading the top-level fields directly for a multi-student
+// incident would show a combined summary meant for teacher/admin eyes, including another family's
+// child by name — exactly what this exists to prevent.
+function resolveIncidentForStudent(incident, studentId) {
+  const perStudent = incident.perStudent?.[studentId];
+  if (perStudent) return perStudent;
+  return {
+    kind: incident.kind, category: incident.category, categoryLabel: incident.categoryLabel,
+    categoryColor: incident.categoryColor, description: incident.description,
+    notifyFamily: incident.notifyFamily !== false,
+  };
+}
+
 function dedupeDailyLogData(data) {
   const dedupeByKey = (list, keyFn) => {
     const seen = {};
@@ -3139,7 +3156,7 @@ function AppInner() {
       // school-wide happening, so admin's cross-class overview excludes them.
       clsEvents.filter((e) => e.date === dateStr && e.category !== "siyum").forEach((e) => results.events.push({ ...e, sourceClassName: cls.name }));
 
-      const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
+      const clsIncidents = (await loadJSON(`class:${cls.id}:incidents`, [], true)).filter((i) => i.flaggedForAdmin);
       const relevant = clsIncidents.filter((i) => i.date === dateStr);
       if (relevant.length > 0) {
         const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
@@ -3155,7 +3172,7 @@ function AppInner() {
     const schoolEventsList = await loadJSON("schoolEvents", [], true);
     schoolEventsList.filter((e) => e.date === dateStr).forEach((e) => results.events.push({ ...e, sourceClassName: "School-wide" }));
     results.events.sort((a, b) => (a.sourceClassName < b.sourceClassName ? -1 : 1));
-    results.incidents.sort((a, b) => (a.flaggedForAdmin === b.flaggedForAdmin ? 0 : a.flaggedForAdmin ? -1 : 1)); // flagged incidents surface first — that's the whole point
+    results.incidents.sort((a, b) => (a.date < b.date ? 1 : -1));
     return results;
   };
 
@@ -3170,7 +3187,7 @@ function AppInner() {
       const enrolled = clsRoster.find((s) => s.id === studentId);
       if (!enrolled) continue;
       results.classes.push({ classId: cls.id, className: cls.name });
-      const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
+      const clsIncidents = (await loadJSON(`class:${cls.id}:incidents`, [], true)).filter((i) => i.flaggedForAdmin);
       const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
       const catMap = {};
       (clsConfig.incidents?.categories || []).forEach((c) => (catMap[c.id] = c.label));
@@ -3197,7 +3214,7 @@ function AppInner() {
       if (!rosterEntry) continue;
       enrolledClassIds.push(cls.id);
       const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
-      const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
+      const clsIncidents = (await loadJSON(`class:${cls.id}:incidents`, [], true)).filter((i) => i.flaggedForAdmin);
       const studentData = await loadJSON(`class:${cls.id}:kriya:${studentId}`, emptyStudentData(), true);
       const incCatMap = {};
       (clsConfig.incidents?.categories || []).forEach((c) => (incCatMap[c.id] = c.label));
@@ -7934,7 +7951,16 @@ function ChildDailyLogView({ link, onBack }) {
   // touches the actual stored data — it only stops being destructive.
   const { data } = useMemo(() => dedupeDailyLogData(rawData || {}), [rawData]);
 
-  const incidents = (classIncidents || []).filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId));
+  // Resolves each incident down to THIS specific student's own view before it's ever shown here —
+  // their own category and message if this was a multi-student incident with a per-student
+  // breakdown, and never another family's child by name. Also the only thing that actually enforces
+  // "internal only" for a parent: an incident whose resolved notifyFamily is false is filtered out
+  // completely here, not just missing its push notification — reported live as a real, missing
+  // distinction between the two.
+  const incidents = (classIncidents || [])
+    .filter((i) => i.date === date && (i.studentIds || []).includes(link.studentId))
+    .map((i) => ({ ...i, ...resolveIncidentForStudent(i, link.studentId) }))
+    .filter((i) => i.notifyFamily !== false);
   const photos = (classPhotos || []).filter((p) => p.date === date && (p.studentIds || []).includes(link.studentId));
 
   const shiftDate = (deltaDays) => {
@@ -10334,27 +10360,36 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           openIncidentForm={(studentId, returnTo, categoryId) => openIncidentForm(studentId, returnTo || "daily-log", categoryId)}
           onLogPreschoolIncident={async (entry) => {
             addIncident(entry);
-            if (entry.notifyFamily) {
-              const families = await fetchClassFamilies(classId);
-              // Notifies every matching guardian's own account directly, rather than mapping to
-              // familyGroupId first and resolving that server-side — a real, reported case (one
-              // guardian got a health notification, the other didn't) traced back to exactly that
-              // indirection: two guardians of the same family can end up with a mismatched or
-              // stale familyGroupId (that field is only backfilled when each individual account
-              // signs in, so one guardian's copy can genuinely drift from the other's), and
-              // deduplicating by that field before sending is what let one of them silently drop
-              // out, even though both were already correctly found here as directly-linked
-              // guardians a line earlier. Every guardian actually linked to the affected student
-              // gets notified now, using each one's own real account — nothing left that depends
-              // on the two guardians' familyGroupId values agreeing with each other.
+            const families = await fetchClassFamilies(classId);
+            // For each involved student, independently: resolve THEIR OWN notify choice and
+            // message — the whole reason a multi-student incident can say different things to
+            // different families — and reach only the family(ies) actually linked to THAT
+            // student. Never bundles multiple students into one shared notification, even when
+            // several are being notified, since a combined notification would have to name every
+            // student for it to make sense — exactly what separate messages exist to avoid.
+            // Notifies every matching guardian's own account directly, rather than mapping to
+            // familyGroupId first and resolving that server-side — a real, reported case (one
+            // guardian got a health notification, the other didn't) traced back to exactly that
+            // indirection: two guardians of the same family can end up with a mismatched or
+            // stale familyGroupId (that field is only backfilled when each individual account
+            // signs in, so one guardian's copy can genuinely drift from the other's), and
+            // deduplicating by that field before sending is what let one of them silently drop
+            // out, even though both were already correctly found here as directly-linked
+            // guardians a line earlier. Every guardian actually linked to the affected student
+            // gets notified now, using each one's own real account — nothing left that depends
+            // on the two guardians' familyGroupId values agreeing with each other.
+            for (const sid of entry.studentIds) {
+              const resolved = resolveIncidentForStudent(entry, sid);
+              if (!resolved.notifyFamily) continue; // eslint-disable-line no-continue
               const uids = [...new Set(
                 families
-                  .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && entry.studentIds.includes(l.studentId)))
+                  .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && l.studentId === sid))
                   .map((f) => f.uid)
               )];
-              const names = entry.studentIds.map((sid) => roster.find((s) => s.id === sid)?.name).filter(Boolean).join(", ");
-              const title = entry.kind === "health" ? `Health note — ${names || "your child"}` : `New note — ${names || "your child"}`;
-              const body = entry.categoryLabel || "Check the app for details.";
+              if (uids.length === 0) continue; // eslint-disable-line no-continue
+              const name = roster.find((s) => s.id === sid)?.name;
+              const title = resolved.kind === "health" ? `Health note — ${name || "your child"}` : `New note — ${name || "your child"}`;
+              const body = resolved.categoryLabel || "Check the app for details.";
               sendPushNotification(uids, title, body, `/?portal=parent`);
             }
           }}
@@ -21715,10 +21750,8 @@ function SubstituteModeView({ className, roster, studentData, config, plannerDay
 }
 
 function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSave }) {
-  const [category, setCategory] = useState(categoryPreset || "");
   const [date, setDate] = useState(todayISO());
   const [time] = useState(() => new Date().toTimeString().slice(0, 5));
-  const [description, setDescription] = useState("");
   const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
   const [showDetails, setShowDetails] = useState(Boolean(categoryPreset));
   const [flaggedForAdmin, setFlaggedForAdmin] = useState(false);
@@ -21726,7 +21759,22 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [incidentId] = useState(() => uid()); // generated up front so attachment paths are stable even before saving
-  const toggleStudent = (id) => setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  // Keyed by studentId — each student's own category and description. Populated even for a
+  // single student, so nothing is lost switching between one and several selected partway
+  // through. No notify or log-visibility choice here at all: elementary has neither an automatic
+  // notification nor a live daily log for an incident to ever reach a parent through in the first
+  // place — a family only ever learns about one through a message the teacher sends by hand, or a
+  // monthly/custom-range report the teacher builds and sends — so there's nothing here for a
+  // per-student toggle to actually gate.
+  const [perStudent, setPerStudent] = useState(() =>
+    Object.fromEntries((presetId ? [presetId] : []).map((sid) => [sid, { category: categoryPreset || "", description: "" }]))
+  );
+  const updateStudent = (sid, fields) => setPerStudent((prev) => ({ ...prev, [sid]: { ...(prev[sid] || { category: "", description: "" }), ...fields } }));
+  const toggleStudent = (id) => {
+    setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setPerStudent((prev) => (prev[id] ? prev : { ...prev, [id]: { category: "", description: "" } }));
+  };
 
   const addMedia = async (fileList) => {
     const files = Array.from(fileList || []);
@@ -21753,11 +21801,57 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
           : await uploadOneImage(item.file, `incident-attachments/${incidentId}/${uid()}.jpg`);
         media.push({ url, type: item.type });
       }
-      onSave({ id: incidentId, category, date, time, description, studentIds, flaggedForAdmin, media });
+      if (studentIds.length <= 1) {
+        // Exactly today's existing shape for a single student — the common case, and every
+        // current reader of an elementary incident already expects these fields flat, at the top
+        // level. No perStudent object is even created here.
+        const sid = studentIds[0];
+        const s = perStudent[sid] || { category: "", description: "" };
+        onSave({ id: incidentId, category: s.category, date, time, description: s.description, studentIds, flaggedForAdmin, media });
+      } else {
+        // Two or more students, each with their own category and message — the actual point of
+        // this form supporting multiple students at all: the student who got hurt and the one
+        // who caused it need two genuinely separate write-ups, and reading about only their own
+        // child (once that's shown to a family — a message or report the teacher chooses to send)
+        // shouldn't include the other student's name. perStudent carries each one's own real
+        // values; the flat, top-level category/description are a combined, readable summary for
+        // every existing teacher and admin view that shows the whole incident at once — none of
+        // those needed to change to understand this, they simply see a fuller picture now.
+        const perStudentSaved = {};
+        const summaryParts = [];
+        studentIds.forEach((sid) => {
+          const s = perStudent[sid] || { category: "", description: "" };
+          perStudentSaved[sid] = { category: s.category, description: s.description };
+          const name = roster.find((r) => r.id === sid)?.name || "Student";
+          const categoryLabel = config.incidents.categories.find((c) => c.id === s.category)?.label;
+          summaryParts.push(`${name}${categoryLabel ? ` (${categoryLabel})` : ""}${s.description ? `: ${s.description}` : ""}`);
+        });
+        onSave({
+          id: incidentId, category: "", date, time, description: summaryParts.join("  •  "),
+          studentIds, flaggedForAdmin, media, perStudent: perStudentSaved,
+        });
+      }
     } catch (err) {
       setSaveError(describeUploadError(err));
       setSaving(false);
     }
+  };
+
+  const StudentCard = ({ sid }) => {
+    const s = perStudent[sid] || { category: "", description: "" };
+    const name = roster.find((r) => r.id === sid)?.name || "Student";
+    return (
+      <div className="rounded-xl border border-stone-200 bg-white p-3 mb-3">
+        <p className="text-sm font-bold text-stone-800 mb-2">{name}</p>
+        <label className="block text-xs font-semibold text-stone-600 mb-1">Category <span className="text-stone-400 font-normal">(optional)</span></label>
+        <select value={s.category} onChange={(e) => updateStudent(sid, { category: e.target.value })} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2 bg-white">
+          <option value="">Not set yet</option>
+          {config.incidents.categories.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+        </select>
+        <textarea value={s.description} onChange={(e) => updateStudent(sid, { description: e.target.value })} rows={3}
+          placeholder={`What happened, from ${name}'s side`} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+      </div>
+    );
   };
 
   return (
@@ -21785,7 +21879,7 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
           <span className={`text-sm font-semibold ${flaggedForAdmin ? "text-rose-700" : "text-stone-600"}`}>
             {flaggedForAdmin ? "Flagged for admin" : "Flag for admin"}
           </span>
-          <span className="text-xs text-stone-400 ml-auto">{flaggedForAdmin ? "Shows on the admin overview" : "Tap to flag"}</span>
+          <span className="text-xs text-stone-400 ml-auto">{flaggedForAdmin ? "Shows on the admin overview" : "Won't show on the admin overview"}</span>
         </button>
 
         <label className="block text-sm font-semibold text-stone-700 mb-1">Photo or video <span className="text-stone-400 font-normal">(optional)</span></label>
@@ -21826,18 +21920,33 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
           </button>
         ) : (
           <div className="mt-3 pt-3 border-t border-stone-200">
-            <label className="block text-sm font-semibold text-stone-700 mb-1">Category <span className="text-stone-400 font-normal">(optional)</span></label>
-            <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4 bg-white">
-              <option value="">Not set yet</option>
-              {config.incidents.categories.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-            </select>
             <label className="block text-sm font-semibold text-stone-700 mb-1">Date</label>
             <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
-            <label className="block text-sm font-semibold text-stone-700 mb-1">What happened <span className="text-stone-400 font-normal">(optional)</span></label>
-            <div className="flex items-start gap-1.5 mb-5">
-              <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" placeholder="Type, or use the mic" />
-              <MicButton onResult={(spoken) => setDescription((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-            </div>
+
+            {studentIds.length >= 2 && (
+              <p className="text-xs text-stone-400 mb-3">
+                Locked together as one event, but each student below gets their own category and write-up — reading about only one of them, later, won't include the other's name.
+              </p>
+            )}
+
+            {studentIds.length === 1 ? (
+              <>
+                <label className="block text-sm font-semibold text-stone-700 mb-1">Category <span className="text-stone-400 font-normal">(optional)</span></label>
+                <select value={perStudent[studentIds[0]]?.category || ""} onChange={(e) => updateStudent(studentIds[0], { category: e.target.value })} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4 bg-white">
+                  <option value="">Not set yet</option>
+                  {config.incidents.categories.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                </select>
+                <label className="block text-sm font-semibold text-stone-700 mb-1">What happened <span className="text-stone-400 font-normal">(optional)</span></label>
+                <div className="flex items-start gap-1.5 mb-5">
+                  <textarea value={perStudent[studentIds[0]]?.description || ""} onChange={(e) => updateStudent(studentIds[0], { description: e.target.value })} rows={4} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" placeholder="Type, or use the mic" />
+                  <MicButton onResult={(spoken) => updateStudent(studentIds[0], { description: `${perStudent[studentIds[0]]?.description ? perStudent[studentIds[0]].description + " " : ""}${spoken}` })} />
+                </div>
+              </>
+            ) : (
+              <div className="mb-2">
+                {studentIds.map((sid) => <StudentCard key={sid} sid={sid} />)}
+              </div>
+            )}
             <button disabled={studentIds.length === 0 || saving} onClick={save}
               className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
               {saving ? "Saving…" : "Save with these details"}
@@ -21864,18 +21973,29 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
 // already selected coming in, and everything below the fold is optional, addable later.
 function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, onSave }) {
   const isHealth = variant === "health";
-  const categories = (isHealth ? config.preschoolHealthIncidents : config.preschoolIncidents)?.categories || [];
-  const [category, setCategory] = useState("");
-  const [otherText, setOtherText] = useState("");
+  const healthCategories = config.preschoolHealthIncidents?.categories || [];
+  const incidentCategories = config.preschoolIncidents?.categories || [];
   const [studentIds, setStudentIds] = useState(presetId ? [presetId] : []);
-  const [description, setDescription] = useState("");
-  const [notifyFamily, setNotifyFamily] = useState(true);
   const [flaggedForAdmin, setFlaggedForAdmin] = useState(false);
   const [mediaItems, setMediaItems] = useState([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [incidentId] = useState(() => uid());
-  const toggleStudent = (id) => setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  // Keyed by studentId, holds this student's OWN kind/category/description/notify choice —
+  // always used internally, even for a single student, so nothing is lost if a second child gets
+  // added or removed partway through filling this out. Entries persist even after a student is
+  // deselected, in case they get reselected, but only whichever students are in studentIds right
+  // now are ever actually saved.
+  const [perStudent, setPerStudent] = useState(() =>
+    Object.fromEntries((presetId ? [presetId] : []).map((sid) => [sid, { kind: variant, category: "", otherText: "", description: "", notifyFamily: true }]))
+  );
+  const updateStudent = (sid, fields) => setPerStudent((prev) => ({ ...prev, [sid]: { ...(prev[sid] || { kind: variant, category: "", otherText: "", description: "", notifyFamily: true }), ...fields } }));
+
+  const toggleStudent = (id) => {
+    setStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+    setPerStudent((prev) => (prev[id] ? prev : { ...prev, [id]: { kind: variant, category: "", otherText: "", description: "", notifyFamily: true } }));
+  };
 
   const addMedia = async (fileList) => {
     const files = Array.from(fileList || []);
@@ -21891,6 +22011,15 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
   };
   const removeMedia = (itemId) => setMediaItems((prev) => prev.filter((m) => m.id !== itemId));
 
+  const categoriesForKind = (kind) => (kind === "health" ? healthCategories : incidentCategories);
+  const resolveCategoryLabel = (kind, category, otherText) => {
+    const list = categoriesForKind(kind);
+    if (category === "other") return otherText.trim() || "Other";
+    return list.find((c) => c.id === category)?.label || "";
+  };
+  const isComplete = (sid) => Boolean((perStudent[sid]?.category));
+  const allComplete = studentIds.length > 0 && studentIds.every(isComplete);
+
   const save = async () => {
     setSaving(true);
     setSaveError(null);
@@ -21902,17 +22031,95 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
           : await uploadOneImage(item.file, `incident-attachments/${incidentId}/${uid()}.jpg`);
         media.push({ url, type: item.type });
       }
-      const categoryLabel = category === "other" ? (otherText.trim() || "Other") : (categories.find((c) => c.id === category)?.label || "");
-      const categoryColor = categories.find((c) => c.id === category)?.color || "cyan";
-      onSave({
-        id: incidentId, kind: isHealth ? "health" : "incident", category, categoryLabel, categoryColor,
-        date: todayISO(), time: new Date().toTimeString().slice(0, 5),
-        description, studentIds, media, notifyFamily, flaggedForAdmin,
-      });
+      const date = todayISO();
+      const time = new Date().toTimeString().slice(0, 5);
+
+      if (studentIds.length === 1) {
+        // Exactly today's existing shape — every current reader of a preschool incident (teacher
+        // views, admin views, exports, the parent-facing daily log) already expects these fields
+        // flat, at the top level, and this is still by far the common case. No perStudent object
+        // is even created here, so nothing downstream needs to change to keep working for it.
+        const sid = studentIds[0];
+        const s = perStudent[sid];
+        const categoryLabel = resolveCategoryLabel(s.kind, s.category, s.otherText);
+        const categoryColor = categoriesForKind(s.kind).find((c) => c.id === s.category)?.color || "cyan";
+        onSave({
+          id: incidentId, kind: s.kind, category: s.category, categoryLabel, categoryColor,
+          date, time, description: s.description, studentIds, media, notifyFamily: s.notifyFamily, flaggedForAdmin,
+        });
+      } else {
+        // Two or more children, each getting their own message, category, and notify choice —
+        // the actual point of this form existing at all: the child who got hurt and the child who
+        // caused it need two genuinely separate messages home, and neither family needs to hear
+        // the other child's name. perStudent carries each one's own, real values; the flat,
+        // top-level fields alongside it are a readable, combined summary for teacher and admin
+        // views that show the whole incident at once — those views never needed to change to
+        // understand this, they just now see a fuller picture than a single student's incident
+        // would have.
+        const perStudentSaved = {};
+        const summaryParts = [];
+        let anyNotified = false;
+        studentIds.forEach((sid) => {
+          const s = perStudent[sid];
+          const categoryLabel = resolveCategoryLabel(s.kind, s.category, s.otherText);
+          const categoryColor = categoriesForKind(s.kind).find((c) => c.id === s.category)?.color || "cyan";
+          perStudentSaved[sid] = { kind: s.kind, category: s.category, categoryLabel, categoryColor, description: s.description, notifyFamily: s.notifyFamily };
+          const name = roster.find((r) => r.id === sid)?.name || "Student";
+          summaryParts.push(`${name} (${s.kind === "health" ? "Health" : "Incident"} — ${categoryLabel}${s.description ? `: ${s.description}` : ""})`);
+          if (s.notifyFamily) anyNotified = true;
+        });
+        onSave({
+          id: incidentId, kind: variant, category: "", categoryLabel: "Multiple — see details", categoryColor: "stone",
+          date, time, description: summaryParts.join("  •  "), studentIds, media,
+          notifyFamily: anyNotified, flaggedForAdmin, perStudent: perStudentSaved,
+        });
+      }
     } catch (err) {
       setSaveError(describeUploadError(err));
       setSaving(false);
     }
+  };
+
+  const StudentCard = ({ sid }) => {
+    const s = perStudent[sid] || { kind: variant, category: "", otherText: "", description: "", notifyFamily: true };
+    const name = roster.find((r) => r.id === sid)?.name || "Student";
+    const categories = categoriesForKind(s.kind);
+    return (
+      <div className="rounded-xl border border-stone-200 bg-white p-3 mb-3">
+        <p className="text-sm font-bold text-stone-800 mb-2">{name}</p>
+        <div className="flex gap-1.5 mb-3">
+          {["health", "incident"].map((k) => (
+            <button key={k} onClick={() => updateStudent(sid, { kind: k, category: "", otherText: "" })}
+              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${s.kind === k ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+              {k === "health" ? "Health incident" : "Incident"}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs font-semibold text-stone-600 mb-1">What happened</p>
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {categories.map((c) => (
+            <button key={c.id} onClick={() => updateStudent(sid, { category: c.id })}
+              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${s.category === c.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+        {s.category === "other" && (
+          <input value={s.otherText} onChange={(e) => updateStudent(sid, { otherText: e.target.value })} placeholder="Briefly describe what happened"
+            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+        )}
+        <textarea value={s.description} onChange={(e) => updateStudent(sid, { description: e.target.value })} rows={2}
+          placeholder={`Message for ${name}'s family — this child's family only sees this`}
+          className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+        <button onClick={() => updateStudent(sid, { notifyFamily: !s.notifyFamily })}
+          className={`w-full flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left ${s.notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+          <Bell size={15} className={s.notifyFamily ? "text-teal-600" : "text-stone-400"} />
+          <span className={`text-xs font-semibold ${s.notifyFamily ? "text-teal-700" : "text-stone-600"}`}>
+            {s.notifyFamily ? "This family will be notified" : "Internal only — not shown to this family"}
+          </span>
+        </button>
+      </div>
+    );
   };
 
   return (
@@ -21934,27 +22141,39 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
           })}
         </div>
 
-        <label className="block text-sm font-semibold text-stone-700 mb-1">What happened</label>
-        <div className="flex flex-wrap gap-1.5 mb-4">
-          {categories.map((c) => (
-            <button key={c.id} onClick={() => setCategory(c.id)}
-              className={`text-sm font-semibold px-3 py-2 rounded-full border ${category === c.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
-              {c.label}
-            </button>
-          ))}
-        </div>
-        {category === "other" && (
-          <input value={otherText} onChange={(e) => setOtherText(e.target.value)} placeholder="Briefly describe what happened"
-            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
+        {studentIds.length >= 2 && (
+          <p className="text-xs text-stone-400 mb-3">
+            Locked together as one event, but each child below gets their own message, category, and notify choice — neither family sees the other's.
+          </p>
         )}
 
-        <label className="block text-sm font-semibold text-stone-700 mb-1">Notes <span className="text-stone-400 font-normal">(optional)</span></label>
-        <div className="flex items-start gap-1.5 mb-4">
-          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" placeholder="Type, or use the mic" />
-          <MicButton onResult={(spoken) => setDescription((prev) => (prev ? `${prev} ${spoken}` : spoken))} />
-        </div>
+        {studentIds.length === 1 ? (
+          <>
+            <label className="block text-sm font-semibold text-stone-700 mb-1">What happened</label>
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {categoriesForKind(perStudent[studentIds[0]]?.kind || variant).map((c) => (
+                <button key={c.id} onClick={() => updateStudent(studentIds[0], { category: c.id })}
+                  className={`text-sm font-semibold px-3 py-2 rounded-full border ${perStudent[studentIds[0]]?.category === c.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+            {perStudent[studentIds[0]]?.category === "other" && (
+              <input value={perStudent[studentIds[0]]?.otherText || ""} onChange={(e) => updateStudent(studentIds[0], { otherText: e.target.value })} placeholder="Briefly describe what happened"
+                className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
+            )}
 
-        <label className="block text-sm font-semibold text-stone-700 mb-1">Photo or video <span className="text-stone-400 font-normal">(optional)</span></label>
+            <label className="block text-sm font-semibold text-stone-700 mb-1">Notes <span className="text-stone-400 font-normal">(optional)</span></label>
+            <div className="flex items-start gap-1.5 mb-4">
+              <textarea value={perStudent[studentIds[0]]?.description || ""} onChange={(e) => updateStudent(studentIds[0], { description: e.target.value })} rows={3} className="flex-1 rounded-lg border border-stone-300 px-3 py-2 text-sm" placeholder="Type, or use the mic" />
+              <MicButton onResult={(spoken) => updateStudent(studentIds[0], { description: `${perStudent[studentIds[0]]?.description ? perStudent[studentIds[0]].description + " " : ""}${spoken}` })} />
+            </div>
+          </>
+        ) : studentIds.length >= 2 ? (
+          studentIds.map((sid) => <StudentCard key={sid} sid={sid} />)
+        ) : null}
+
+        <label className="block text-sm font-semibold text-stone-700 mb-1 mt-1">Photo or video <span className="text-stone-400 font-normal">(optional)</span></label>
         {mediaItems.length > 0 && (
           <div className={`grid gap-1 mb-1.5 ${mediaItems.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
             {mediaItems.map((m) => (
@@ -21978,14 +22197,16 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
           <input type="file" accept="image/*,video/*" multiple onChange={(e) => { addMedia(e.target.files); e.target.value = ""; }} className="hidden" />
         </label>
 
-        <button onClick={() => setNotifyFamily((v) => !v)}
-          className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 mb-2.5 text-left ${notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
-          <Bell size={18} className={notifyFamily ? "text-teal-600" : "text-stone-400"} />
-          <span className={`text-sm font-semibold ${notifyFamily ? "text-teal-700" : "text-stone-600"}`}>
-            {notifyFamily ? "Family will be notified" : "Family will not be notified"}
-          </span>
-          <span className="text-xs text-stone-400 ml-auto">Tap to change</span>
-        </button>
+        {studentIds.length === 1 && (
+          <button onClick={() => updateStudent(studentIds[0], { notifyFamily: !perStudent[studentIds[0]]?.notifyFamily })}
+            className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 mb-2.5 text-left ${perStudent[studentIds[0]]?.notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+            <Bell size={18} className={perStudent[studentIds[0]]?.notifyFamily ? "text-teal-600" : "text-stone-400"} />
+            <span className={`text-sm font-semibold ${perStudent[studentIds[0]]?.notifyFamily ? "text-teal-700" : "text-stone-600"}`}>
+              {perStudent[studentIds[0]]?.notifyFamily ? "Family will be notified" : "Internal only — not shown to this family"}
+            </span>
+            <span className="text-xs text-stone-400 ml-auto">Tap to change</span>
+          </button>
+        )}
 
         {/* Separate from — not a replacement for — notifying the family above. That happens as
             part of logging the incident either way; this is an additional, optional escalation
@@ -21996,18 +22217,18 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
           <span className={`text-sm font-semibold ${flaggedForAdmin ? "text-rose-700" : "text-stone-600"}`}>
             {flaggedForAdmin ? "Flagged for admin" : "Flag for admin"}
           </span>
-          <span className="text-xs text-stone-400 ml-auto">{flaggedForAdmin ? "Shows on the admin overview" : "Tap to flag"}</span>
+          <span className="text-xs text-stone-400 ml-auto">{flaggedForAdmin ? "Shows on the admin overview" : "Won't show on the admin overview"}</span>
         </button>
 
         {saveError && <p className="text-xs text-rose-600 mb-3">{saveError}</p>}
 
-        <button disabled={studentIds.length === 0 || !category || saving} onClick={save}
+        <button disabled={!allComplete || saving} onClick={save}
           className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
           {saving ? "Saving…" : "Save"}
         </button>
-        {(studentIds.length === 0 || !category) && (
+        {!allComplete && (
           <p className="text-xs text-stone-400 text-center mt-2">
-            {studentIds.length === 0 ? "Select at least one child" : "Select what happened"}
+            {studentIds.length === 0 ? "Select at least one child" : "Select what happened for each child"}
           </p>
         )}
       </div>
