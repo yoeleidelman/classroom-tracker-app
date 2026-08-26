@@ -395,9 +395,23 @@ async function handleFallbackCheckIn(req, res, decoded) {
 // shape the client already prepared it in, and marks it done — a failure on one item is recorded
 // and skipped, never allowed to block every other item due in the same run.
 async function handleProcessScheduledSends(req, res) {
-  const providedSecret = req.headers["x-scheduled-send-secret"];
-  if (!providedSecret || providedSecret !== process.env.SCHEDULED_SEND_SECRET) {
-    return res.status(401).json({ error: "Not authorized." });
+  // Trimmed on both sides before comparing — a secret pasted from a code block (in a chat, a
+  // doc, anywhere) can carry an invisible trailing newline that survives copy-paste completely
+  // undetected, and GitHub's own secret storage doesn't strip it either. Two values that look
+  // completely identical to a person checking them by eye can still fail a strict, untrimmed
+  // comparison for exactly that reason — reported live as precisely this: re-copied, re-pasted,
+  // re-checked, still failing. Trimming whitespace off both sides here doesn't weaken the secret
+  // itself in any real sense; it just stops an invisible, accidental character from being able to
+  // break the match at all.
+  const providedSecret = (req.headers["x-scheduled-send-secret"] || "").trim();
+  const expectedSecret = (process.env.SCHEDULED_SEND_SECRET || "").trim();
+  if (!providedSecret || !expectedSecret || providedSecret !== expectedSecret) {
+    // Lengths only, never the actual values — enough to tell a genuine mismatch apart from the
+    // Vercel variable simply not being set at all, without ever exposing either real secret.
+    return res.status(401).json({
+      error: "Not authorized.",
+      debug: { providedLength: providedSecret.length, expectedLength: expectedSecret.length, vercelVariableIsSet: Boolean(process.env.SCHEDULED_SEND_SECRET) },
+    });
   }
 
   const db = getFirestore();
