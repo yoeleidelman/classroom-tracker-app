@@ -123,6 +123,11 @@ const DEFAULT_CONFIG = {
     finished: false, // did they reach the end of the wizard (vs. paused partway through)
     completedSteps: [], // step keys already gone through (filled in or explicitly skipped) — drives where "Continue setup" resumes
   },
+  // Preschool only — a checkout after this time is highlighted distinctly on the check-in/out
+  // history chart, since that's specifically the moment a late-pickup fee applies. Empty means no
+  // highlighting at all; a teacher sets this deliberately, since the actual cutoff genuinely
+  // differs by school.
+  checkInOut: { latePickupTime: "" },
   flagThreshold: 2,
   masteryThreshold: 2,
   tierMessages: {
@@ -3441,6 +3446,35 @@ function AppInner() {
     return results;
   };
 
+  // Every preschool student across the whole school, with their own class's own check-in
+  // history — the actual gap reported directly: an admin currently has no way to see this at all,
+  // in any single place, only a teacher's own class one student and one day at a time. Reuses
+  // CheckInOutHistoryChart exactly as a single class's own attendance screen does; the only real
+  // difference here is that the roster being handed to it spans every preschool class at once
+  // instead of just one.
+  const fetchAllPreschoolCheckInHistory = async () => {
+    const allClasses = (await loadJSON("schoolClasses", [], true)).filter((c) => !c.archived && c.classType === "preschool");
+    const roster = [];
+    const studentData = {};
+    let latePickupTime = "";
+    for (const cls of allClasses) {
+      const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
+      const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
+      // First non-empty value found wins — the late-pickup cutoff is almost always one shared,
+      // school-wide policy rather than something that genuinely differs class by class, so this
+      // stays a single, simple setting for the combined view rather than needing its own separate
+      // configuration on top of what each class already has.
+      if (!latePickupTime && clsConfig.checkInOut?.latePickupTime) latePickupTime = clsConfig.checkInOut.latePickupTime;
+      for (const s of clsRoster) {
+        const key = `${cls.id}:${s.id}`; // same student possibly enrolled in more than one class — kept as separate rows, one per actual enrollment, rather than merged into one that could only show one class's own check-ins
+        roster.push({ id: key, name: s.name, className: cls.name });
+        studentData[key] = await loadJSON(`class:${cls.id}:kriya:${s.id}`, emptyStudentData(), true);
+      }
+    }
+    roster.sort((a, b) => a.name.localeCompare(b.name));
+    return { roster, studentData, latePickupTime };
+  };
+
   // Builds the full set of export rows, one array per requested data type, for whatever scope
   // was chosen (whole school, specific classes, or specific students). Two passes: first
   // gathers exactly which students are in scope and which classes each is in, then generates
@@ -4187,7 +4221,7 @@ function AppInner() {
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
           families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
-          onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
+          onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData} onFetchCheckInHistory={fetchAllPreschoolCheckInHistory}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin}
           canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />;
       }
@@ -4242,7 +4276,7 @@ function AppInner() {
           schoolTools={schoolTools} onRefreshTools={refreshSchoolTools} onAddTool={addSchoolTool} onUpdateTool={updateSchoolTool} onRemoveTool={removeSchoolTool}
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
         families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
-        onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData}
+        onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData} onFetchCheckInHistory={fetchAllPreschoolCheckInHistory}
         programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
     }
     return <ClassGateScreen registry={registry} onSelect={selectClass} onCreate={createClass} onRefresh={refreshRegistry} onLoginAdmin={loginAdmin} />;
@@ -5445,6 +5479,7 @@ function AdminMainTabs({ active, navigate }) {
     { id: "students", label: "Students", icon: Users },
     { id: "teachers", label: "Teachers", icon: BookOpen },
     { id: "families", label: "Families", icon: MessageCircle },
+    { id: "preschool", label: "Preschool", icon: Baby },
     { id: "more", label: "More", icon: SettingsIcon },
   ];
   return (
@@ -5825,7 +5860,7 @@ function TeacherAccountChecker({ onCheck }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -5910,6 +5945,13 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showMessagesLookup, setShowMessagesLookup] = useState(false);
   const [showLabelsEditor, setShowLabelsEditor] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
+  // null = not loaded yet — loads the first time the Preschool tab is actually opened, not on
+  // every admin sign-in regardless of whether they ever look at it.
+  const [checkInHistoryData, setCheckInHistoryData] = useState(null);
+  useEffect(() => {
+    if (adminTab !== "preschool" || checkInHistoryData !== null) return;
+    onFetchCheckInHistory().then(setCheckInHistoryData);
+  }, [adminTab, checkInHistoryData, onFetchCheckInHistory]);
   const handleExport = async (params) => {
     const sheets = await onBuildExportData(params);
     const sheetNames = Object.keys(sheets);
@@ -6816,6 +6858,20 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                 </ul>
               )}
             </div>
+          )}
+        </div>
+        </>
+        )}
+
+        {adminTab === "preschool" && (
+        <>
+        <div className="pt-1 mb-6">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Check-in/out history</p>
+          <p className="text-xs text-stone-400 mb-3">Every preschool student, every class, one month at a time — the same chart a teacher sees for their own class, just spanning all of them together.</p>
+          {checkInHistoryData === null ? (
+            <p className="text-xs text-stone-400">Loading…</p>
+          ) : (
+            <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} config={{ checkInOut: { latePickupTime: checkInHistoryData.latePickupTime } }} />
           )}
         </div>
         </>
@@ -12422,6 +12478,15 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         <AllPreschoolAttendanceView loggedByName={loggedByName} navigate={navigateView} />
       )}
 
+      {view === "checkin-history" && (
+        <div className="app-page-wide">
+          <button onClick={() => navigateView("attendance")} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+          <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Check-in/out history</h1>
+          <p className="text-xs text-stone-400 mb-5">{className}</p>
+          <CheckInOutHistoryChart roster={roster} studentData={studentData} config={config} />
+        </div>
+      )}
+
 
       {view === "segment-celebration-message" && celebratingSegment && (
         <SegmentCelebrationMessageView subjectLabel={celebratingSegment.subjectLabel} segmentLabel={celebratingSegment.segment.label}
@@ -13725,6 +13790,9 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
       <MainTabs active="attendance" navigate={navigate} />
       <button onClick={() => navigate("all-preschool-attendance")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
         <Users size={16} /> All preschool students — dismissal view
+      </button>
+      <button onClick={() => navigate("checkin-history")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+        <Calendar size={16} /> Check-in/out history
       </button>
       <p className="text-xs text-stone-400 mb-3">Who's actually here right now — not a daily record of late or excused, just in or not. Families can also check their own child in or out from their end.</p>
       {!schoolDay && (
@@ -17111,6 +17179,93 @@ function WeeklyTrackerGrid({ roster, cat, trackerLog, toggleTracker }) {
   );
 }
 
+// A genuine month-at-a-glance history of every check-in and check-out, in one place — the exact
+// gap reported directly: seeing this before meant opening one student at a time, one day at a
+// time, with no way to look back over a real stretch of days at all. Works off whatever roster +
+// per-student data it's handed, so the exact same component serves both a single teacher's own
+// class and, separately, an admin's view spanning every preschool class at once — neither one
+// needs its own, separately-maintained copy of this same rendering logic.
+function CheckInOutHistoryChart({ roster, studentData, config }) {
+  const [monthStart, setMonthStart] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  });
+  const shiftMonth = (delta) => {
+    const d = new Date(`${monthStart}T00:00:00`);
+    d.setMonth(d.getMonth() + delta);
+    setMonthStart(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`);
+  };
+  const monthDate = new Date(`${monthStart}T00:00:00`);
+  const monthLabel = monthDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
+  const monthDates = Array.from({ length: daysInMonth }, (_, i) => addDaysISO(monthStart, i));
+  const latePickupTime = config.checkInOut?.latePickupTime;
+  const todayStr = todayISO();
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <button onClick={() => shiftMonth(-1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous month"><ChevronLeft size={16} /></button>
+        <span className="text-sm font-semibold text-stone-800">{monthLabel}</span>
+        <button onClick={() => shiftMonth(1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Next month"><ChevronRight size={16} /></button>
+        {latePickupTime && (
+          <span className="text-[11px] text-stone-500 ml-2 flex items-center gap-1">
+            <span className="w-2.5 h-2.5 rounded-sm bg-rose-200 inline-block shrink-0" /> Checked out after {formatTime12h(latePickupTime)}
+          </span>
+        )}
+      </div>
+      {roster.length === 0 ? (
+        <p className="text-sm text-stone-400 text-center py-8">No students to show.</p>
+      ) : (
+        <div className="overflow-x-auto -mx-4 px-4">
+          <table className="text-xs border-separate" style={{ borderSpacing: 0 }}>
+            <thead>
+              <tr>
+                <th className="text-left pb-2 pr-3 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec] z-10">Student</th>
+                {monthDates.map((d) => (
+                  <th key={d} className={`pb-2 px-1.5 text-center font-semibold whitespace-nowrap ${d === todayStr ? "text-teal-700" : "text-stone-500"}`}>
+                    {new Date(`${d}T00:00:00`).getDate()}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {roster.map((s) => {
+                const checkIns = studentData[s.id]?.checkIns || [];
+                return (
+                  <tr key={s.id} className="border-t border-stone-200">
+                    <td className="py-1.5 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10">
+                      {s.name}
+                      {s.className && <span className="block text-[10px] text-stone-400 font-normal">{s.className}</span>}
+                    </td>
+                    {monthDates.map((d) => {
+                      const entries = checkIns.filter((c) => c.date === d).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
+                      const isLate = Boolean(latePickupTime) && entries.some((e) => e.checkOutTime && e.checkOutTime > latePickupTime);
+                      return (
+                        <td key={d} className={`text-center py-1.5 px-1.5 whitespace-nowrap ${isLate ? "bg-rose-100" : ""}`}>
+                          {entries.length === 0 ? (
+                            <span className="text-stone-300">–</span>
+                          ) : (
+                            entries.map((e) => (
+                              <div key={e.id} className={isLate ? "text-rose-700 font-semibold" : "text-stone-600"}>
+                                {formatTimeCompact(e.checkInTime)}{e.checkOutTime ? `–${formatTimeCompact(e.checkOutTime)}` : ""}
+                              </div>
+                            ))
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ClassCheckXCard({ cat, checkValue, xValue, onCheck, onX, onReset }) {
   return (
     <div className="bg-white rounded-2xl border border-stone-200 p-6 md:w-96">
@@ -19266,6 +19421,17 @@ function formatTime12h(hhmm) {
   const period = h >= 12 ? "PM" : "AM";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+}
+
+// A tighter version of formatTime12h for a small grid cell — "8:00a" rather than "8:00 AM",
+// specifically so a check-in and check-out time can both fit on one line without wrapping.
+function formatTimeCompact(hhmm) {
+  if (!hhmm || !hhmm.includes(":")) return hhmm || "";
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "p" : "a";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, "0")}${period}`;
 }
 
 // The single earliest-starting period across the class's schedule(s) — used to decide
