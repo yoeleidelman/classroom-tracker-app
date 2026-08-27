@@ -171,6 +171,13 @@ const DEFAULT_CONFIG = {
       { id: "returned-appointment", label: "Returned from appointment", color: "sky" },
     ],
   },
+  // A standing (if not necessarily daily) arrangement where another class's roster joins this
+  // one for part of specific days — set up by the receiving teacher themselves, entirely
+  // independent of, and never touching, either class's own roster. Tied to either a specific
+  // period (moves with the schedule automatically if a day's periods ever shift) or a fixed clock
+  // time (unaffected by the schedule either way) — a teacher's own choice per entry, since neither
+  // is right for every situation.
+  combinedClasses: [],
   homework: {
     enabled: false,
     frequency: "daily", // "daily" | "weekly"
@@ -13063,6 +13070,9 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                 ))}
               </div>
             )}
+            {getTodaysCombinedClasses(config, date).map((entry) => (
+              <CombinedClassSection key={entry.id} entry={entry} config={config} />
+            ))}
           </div>
         </div>
       </div>
@@ -19275,6 +19285,58 @@ function homeworkAppliesToday(config, dateStr) {
   return d.getDay() === (config.homework.collectionDay ?? 1);
 }
 
+// Which combined-class arrangements are actually relevant for a given date — day-of-week is all
+// that's checked here, deliberately not the exact current time: a teacher looking at today's
+// attendance any time that day should see this, not just during the exact window it's happening.
+function getTodaysCombinedClasses(config, date) {
+  const dayAbbrevs = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  const dayAbbrev = dayAbbrevs[new Date(`${date}T00:00:00`).getDay()];
+  return (config.combinedClasses || []).filter((cc) => (cc.daysOfWeek || []).includes(dayAbbrev));
+}
+
+// The visiting class's own roster, read live and shown as its own clearly separate section —
+// never merged into, and never able to affect, the receiving class's own roster or attendance in
+// any way. A live subscription specifically so an add or remove on the visiting class's own
+// roster is reflected here without needing anyone to reload anything.
+function CombinedClassSection({ entry, config }) {
+  const roster = useLiveJSON(`class:${entry.visitingClassId}:roster`, []);
+  const [visitingClassName, setVisitingClassName] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const all = await loadJSON("schoolClasses", [], true);
+      if (!cancelled) setVisitingClassName((all || []).find((c) => c.id === entry.visitingClassId)?.name || "Another class");
+    })();
+    return () => { cancelled = true; };
+  }, [entry.visitingClassId]);
+
+  const allPeriods = getAllPeriodsEverywhere(config);
+  const whenLabel = entry.scheduleType === "period"
+    ? (allPeriods.find((p) => p.id === entry.periodId)?.label || "a period")
+    : `${formatTime12h(entry.startTime)}–${formatTime12h(entry.endTime)}`;
+
+  return (
+    <div className="mt-4 pt-4 border-t-2 border-dashed border-violet-200">
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
+        <Users size={16} className="text-violet-600 shrink-0" />
+        <p className="text-sm font-bold text-stone-800">{entry.label || `Visiting: ${visitingClassName || "another class"}`}</p>
+        <span className="text-xs text-stone-400">{visitingClassName ? `${visitingClassName} — ` : ""}{whenLabel}</span>
+      </div>
+      {roster.length === 0 ? (
+        <p className="text-xs text-stone-400">No students on that class's roster.</p>
+      ) : (
+        <ul className="flex flex-wrap gap-1.5">
+          {roster.map((s) => (
+            <li key={s.id} className="bg-violet-50 border border-violet-200 rounded-full px-3 py-1.5 text-sm font-medium text-stone-700">
+              {s.name}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function morningAttendanceApplies(student, date, dayType, config, plannerDays) {
   const scope = student.enrollmentScope;
   if (!scope || scope === "full-time") return true;
@@ -23617,6 +23679,117 @@ function StudentContactFields({ student, onUpdateField }) {
   );
 }
 
+const COMBINED_CLASS_DAYS = [
+  { id: "sun", label: "Sun" }, { id: "mon", label: "Mon" }, { id: "tue", label: "Tue" },
+  { id: "wed", label: "Wed" }, { id: "thu", label: "Thu" }, { id: "fri", label: "Fri" }, { id: "sat", label: "Sat" },
+];
+
+// Set up entirely by the receiving teacher, in their own class's own Settings — never touches
+// the visiting class's own roster, config, or attendance in any way; this only ever reads that
+// class's roster, live, for display (see CombinedClassSection below). Tied to either a specific
+// period (moves automatically if that day's actual schedule ever shifts) or a fixed clock time
+// (unaffected by the schedule either way) — confirmed directly that either one genuinely comes up
+// depending on the day, so both are real options here, not just one with a manual workaround.
+function CombinedClassesSettings({ config, update, classId }) {
+  const [otherClasses, setOtherClasses] = useState(null); // null = still loading
+  const [showForm, setShowForm] = useState(false);
+  const emptyForm = { visitingClassId: "", label: "", daysOfWeek: [], scheduleType: "period", periodId: "", startTime: "", endTime: "" };
+  const [form, setForm] = useState(emptyForm);
+
+  useEffect(() => {
+    (async () => {
+      const all = await loadJSON("schoolClasses", [], true);
+      setOtherClasses((all || []).filter((c) => !c.archived && c.classType !== "preschool" && c.id !== classId));
+    })();
+  }, [classId]);
+
+  const allPeriods = getAllPeriodsEverywhere(config);
+  const combined = config.combinedClasses || [];
+  const toggleDay = (day) => setForm((f) => ({ ...f, daysOfWeek: f.daysOfWeek.includes(day) ? f.daysOfWeek.filter((d) => d !== day) : [...f.daysOfWeek, day] }));
+  const canSave = form.visitingClassId && form.daysOfWeek.length > 0 && (form.scheduleType === "period" ? form.periodId : (form.startTime && form.endTime));
+
+  const save = () => {
+    const entry = { id: uid(), ...form };
+    update((c) => { c.combinedClasses = [...(c.combinedClasses || []), entry]; return c; });
+    setForm(emptyForm);
+    setShowForm(false);
+  };
+  const remove = (id) => update((c) => { c.combinedClasses = (c.combinedClasses || []).filter((cc) => cc.id !== id); return c; });
+
+  return (
+    <div>
+      {combined.map((cc) => {
+        const cls = (otherClasses || []).find((oc) => oc.id === cc.visitingClassId);
+        const whenLabel = cc.scheduleType === "period"
+          ? (allPeriods.find((p) => p.id === cc.periodId)?.label || "a period")
+          : `${formatTime12h(cc.startTime)}–${formatTime12h(cc.endTime)}`;
+        const daysLabel = cc.daysOfWeek.map((d) => COMBINED_CLASS_DAYS.find((cd) => cd.id === d)?.label).join(", ");
+        return (
+          <div key={cc.id} className="flex items-center justify-between gap-2 bg-white border border-stone-200 rounded-lg px-3 py-2 mb-2">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-stone-800 truncate">{cc.label || cls?.name || "Another class"}</p>
+              <p className="text-xs text-stone-400 truncate">{cls?.name ? `${cls.name} — ` : ""}{daysLabel}, {whenLabel}</p>
+            </div>
+            <ConfirmDelete onConfirm={() => remove(cc.id)} size={14} label="Remove" />
+          </div>
+        );
+      })}
+
+      {!showForm ? (
+        <button onClick={() => setShowForm(true)} className="text-xs font-semibold text-teal-700">+ Add combined class</button>
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-xl p-3 mt-2">
+          <label className="block text-xs font-medium text-stone-500 mb-1">Which class</label>
+          <select value={form.visitingClassId} onChange={(e) => setForm((f) => ({ ...f, visitingClassId: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-3">
+            <option value="">Choose a class…</option>
+            {(otherClasses || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+
+          <label className="block text-xs font-medium text-stone-500 mb-1">Which days</label>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {COMBINED_CLASS_DAYS.map((d) => (
+              <button key={d.id} onClick={() => toggleDay(d.id)}
+                className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${form.daysOfWeek.includes(d.id) ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                {d.label}
+              </button>
+            ))}
+          </div>
+
+          <label className="block text-xs font-medium text-stone-500 mb-1">When</label>
+          <div className="flex gap-1 bg-stone-100 rounded-lg p-1 mb-3">
+            <button onClick={() => setForm((f) => ({ ...f, scheduleType: "period" }))} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${form.scheduleType === "period" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>By period</button>
+            <button onClick={() => setForm((f) => ({ ...f, scheduleType: "time" }))} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${form.scheduleType === "time" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>By clock time</button>
+          </div>
+
+          {form.scheduleType === "period" ? (
+            allPeriods.length === 0 ? (
+              <p className="text-xs text-stone-400 mb-3">No periods set up yet in your Planner schedule — add them there first, or choose "By clock time" instead.</p>
+            ) : (
+              <select value={form.periodId} onChange={(e) => setForm((f) => ({ ...f, periodId: e.target.value }))} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white mb-3">
+                <option value="">Choose a period…</option>
+                {allPeriods.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+              </select>
+            )
+          ) : (
+            <div className="flex gap-2 mb-3">
+              <input type="time" value={form.startTime} onChange={(e) => setForm((f) => ({ ...f, startTime: e.target.value }))} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+              <input type="time" value={form.endTime} onChange={(e) => setForm((f) => ({ ...f, endTime: e.target.value }))} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            </div>
+          )}
+
+          <label className="block text-xs font-medium text-stone-500 mb-1">Label (optional)</label>
+          <input value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} placeholder="e.g. Combined art time" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+
+          <div className="flex gap-2">
+            <button onClick={save} disabled={!canSave} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">Add</button>
+            <button onClick={() => setShowForm(false)} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddExistingStudentPanel({ globalStudents, roster, config, onAdd, onCancel, onCheckEnrollments }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
@@ -24811,6 +24984,13 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
           ))}
         </Section>
         </>
+        )}
+
+        {!isPreschool && (
+        <Section title="Combined classes">
+          <p className="text-xs text-stone-400 mb-3">Another class's own roster joins yours for part of specific days — set up here, entirely separate from either class's actual roster. Set by you, the receiving teacher; the other class's own roster and attendance are never touched by this.</p>
+          <CombinedClassesSettings config={config} update={update} classId={classId} />
+        </Section>
         )}
 
         {!isPreschool && (
