@@ -1691,8 +1691,29 @@ async function saveJSON(key, value, shared = false, retries = 2, throwOnFailure 
 // receiving any further updates for the rest of the session, with nothing auto-reconnecting it on
 // its own. Every caller of this shared hook was silently exposed to that same gap. A short delay
 // before reconnecting avoids hammering a genuinely, persistently denied subscription in a loop.
+// Increments each time the tab becomes visible again after being hidden, or the window regains
+// focus — included in a live subscription's own effect dependencies specifically to force a fresh
+// resubscribe at that exact moment. Firestore's own onSnapshot listener can go silently stale
+// after a device sleeps or a browser tab sits backgrounded for a while, without ever firing
+// anything that would otherwise trigger a reconnect on its own — a real, reported gap traced
+// directly to exactly this: a parent's own check-in sometimes not reaching a teacher's screen for
+// up to an hour, specifically the kind of delay a dead, never-erroring connection would produce.
+// The person picking the device back up is by far the most common real path back to a live
+// connection, and also the one moment nothing else here would otherwise ever notice.
+function useVisibilityGeneration() {
+  const [gen, setGen] = useState(0);
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === "visible") setGen((g) => g + 1); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => { document.removeEventListener("visibilitychange", onVisible); window.removeEventListener("focus", onVisible); };
+  }, []);
+  return gen;
+}
+
 function useLiveJSON(key, fallback) {
   const [value, setValue] = useState(fallback);
+  const visibilityGen = useVisibilityGeneration();
   useEffect(() => {
     if (!key) { setValue(fallback); return; }
     let unsubscribe = () => {};
@@ -1715,7 +1736,7 @@ function useLiveJSON(key, fallback) {
     // fallback deliberately excluded — callers often pass a fresh object/array literal
     // (e.g. { messages: [] }) on every render, and re-subscribing every time that happens would
     // defeat the point of a standing subscription without ever actually changing what it does.
-  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [key, visibilityGen]); // eslint-disable-line react-hooks/exhaustive-deps
   return value;
 }
 
@@ -1728,6 +1749,7 @@ function useLiveJSON(key, fallback) {
 function useLiveJSONLoaded(key, fallback) {
   const [value, setValue] = useState(fallback);
   const [loaded, setLoaded] = useState(false);
+  const visibilityGen = useVisibilityGeneration();
   useEffect(() => {
     if (!key) { setValue(fallback); setLoaded(true); return; }
     let unsubscribe = () => {};
@@ -1748,7 +1770,7 @@ function useLiveJSONLoaded(key, fallback) {
     subscribe();
 
     return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
-  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [key, visibilityGen]); // eslint-disable-line react-hooks/exhaustive-deps
   return { value, loaded };
 }
 
@@ -1767,6 +1789,7 @@ function useLiveJSONLoaded(key, fallback) {
 function useLiveJSONMap(keys) {
   const [values, setValues] = useState({});
   const keysSignature = (keys || []).join("|");
+  const visibilityGen = useVisibilityGeneration();
   useEffect(() => {
     const activeKeys = keys || [];
     if (activeKeys.length === 0) { setValues({}); return; }
@@ -1790,7 +1813,7 @@ function useLiveJSONMap(keys) {
     // keys itself deliberately excluded in favor of keysSignature — an array literal is a new
     // reference every render even when its contents haven't actually changed, and re-subscribing
     // every render would mean never keeping a subscription open long enough to be live at all.
-  }, [keysSignature]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [keysSignature, visibilityGen]); // eslint-disable-line react-hooks/exhaustive-deps
   return values;
 }
 
@@ -1809,6 +1832,7 @@ function useLiveJSONMap(keys) {
 // could still happen — just from a dropped listener instead of a one-time-only load.
 function useLiveJSONPrefix(prefix) {
   const [values, setValues] = useState([]);
+  const visibilityGen = useVisibilityGeneration();
   useEffect(() => {
     if (!prefix) { setValues([]); return; }
     let unsubscribe = () => {};
@@ -1829,7 +1853,7 @@ function useLiveJSONPrefix(prefix) {
     subscribe();
 
     return () => { cancelled = true; clearTimeout(reconnectTimer); unsubscribe(); };
-  }, [prefix]);
+  }, [prefix, visibilityGen]); // eslint-disable-line react-hooks/exhaustive-deps
   return values;
 }
 
@@ -3456,10 +3480,12 @@ function AppInner() {
     const allClasses = (await loadJSON("schoolClasses", [], true)).filter((c) => !c.archived && c.classType === "preschool");
     const roster = [];
     const studentData = {};
+    const incidentsByKey = {};
     let latePickupTime = "";
     for (const cls of allClasses) {
       const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
       const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
+      const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
       // First non-empty value found wins — the late-pickup cutoff is almost always one shared,
       // school-wide policy rather than something that genuinely differs class by class, so this
       // stays a single, simple setting for the combined view rather than needing its own separate
@@ -3467,12 +3493,13 @@ function AppInner() {
       if (!latePickupTime && clsConfig.checkInOut?.latePickupTime) latePickupTime = clsConfig.checkInOut.latePickupTime;
       for (const s of clsRoster) {
         const key = `${cls.id}:${s.id}`; // same student possibly enrolled in more than one class — kept as separate rows, one per actual enrollment, rather than merged into one that could only show one class's own check-ins
-        roster.push({ id: key, name: s.name, className: cls.name });
+        roster.push({ id: key, studentId: s.id, name: s.name, className: cls.name });
         studentData[key] = await loadJSON(`class:${cls.id}:kriya:${s.id}`, emptyStudentData(), true);
+        incidentsByKey[key] = clsIncidents.filter((i) => (i.studentIds || []).includes(s.id));
       }
     }
     roster.sort((a, b) => a.name.localeCompare(b.name));
-    return { roster, studentData, latePickupTime };
+    return { roster, studentData, incidentsByKey, latePickupTime };
   };
 
   // Builds the full set of export rows, one array per requested data type, for whatever scope
@@ -6892,7 +6919,9 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               {preschoolHistoryStudentKey && (
                 <PreschoolStudentHistoryView
                   studentName={checkInHistoryData.roster.find((s) => s.id === preschoolHistoryStudentKey)?.name || "Student"}
-                  data={checkInHistoryData.studentData[preschoolHistoryStudentKey] || emptyStudentData()} />
+                  studentId={checkInHistoryData.roster.find((s) => s.id === preschoolHistoryStudentKey)?.studentId}
+                  data={checkInHistoryData.studentData[preschoolHistoryStudentKey] || emptyStudentData()}
+                  incidents={checkInHistoryData.incidentsByKey[preschoolHistoryStudentKey] || []} />
               )}
             </>
           )}
@@ -14493,7 +14522,7 @@ function PreschoolStudentDetailView({ student, studentData, incidents, photos, o
       </div>
 
       {showHistory ? (
-        <PreschoolStudentHistoryView studentName={student.name} data={data} />
+        <PreschoolStudentHistoryView studentName={student.name} studentId={student.id} data={data} incidents={incidents} />
       ) : (
       <>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-4">{student.name}</h1>
@@ -17221,6 +17250,39 @@ function WeeklyTrackerGrid({ roster, cat, trackerLog, toggleTracker }) {
 // per-student data it's handed, so the exact same component serves both a single teacher's own
 // class and, separately, an admin's view spanning every preschool class at once — neither one
 // needs its own, separately-maintained copy of this same rendering logic.
+// Collapses a checkout immediately followed by a check-in, within a short window, into one
+// continuous stay — reported directly, precisely: a parent's own check-in sometimes not reaching
+// a teacher's own screen for a real stretch of time (the actual root cause fixed separately,
+// above, in every live-data hook), followed by a teacher tapping to check the student in
+// themselves — since a toggle always reflects the real, current state rather than whatever a
+// stale screen still happened to be showing, that tap instead checked them OUT, followed moments
+// later by a second tap correcting it back in. The result was a technically-accurate but
+// genuinely misleading record: three events within a couple of minutes for a child who was, in
+// reality, there the entire time. Confirmed directly this should apply only within a short window
+// (ten minutes by default) and never to a real departure and return — a two-hour appointment is a
+// completely different, real event, not a glitch, and stays exactly as recorded. This only ever
+// changes how a check-in history is DISPLAYED; the actual stored entries are never rewritten, so
+// nothing about the real underlying record is ever touched.
+function collapseQuickReCheckIns(checkIns, thresholdMinutes = 10) {
+  const sorted = [...(checkIns || [])].sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    return (a.checkInTime || "") < (b.checkInTime || "") ? -1 : 1;
+  });
+  const result = [];
+  for (const entry of sorted) {
+    const prev = result[result.length - 1];
+    const gapMinutes = prev && prev.date === entry.date && prev.checkOutTime && entry.checkInTime
+      ? timeToMinutes(entry.checkInTime) - timeToMinutes(prev.checkOutTime)
+      : null;
+    if (gapMinutes !== null && gapMinutes >= 0 && gapMinutes <= thresholdMinutes) {
+      result[result.length - 1] = { ...prev, checkOutTime: entry.checkOutTime, checkOutBy: entry.checkOutBy };
+    } else {
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
 function CheckInOutHistoryChart({ roster, studentData, config }) {
   const [monthStart, setMonthStart] = useState(() => {
     const d = new Date();
@@ -17244,11 +17306,11 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
         <button onClick={() => shiftMonth(-1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous month"><ChevronLeft size={16} /></button>
         <span className="text-sm font-semibold text-stone-800">{monthLabel}</span>
         <button onClick={() => shiftMonth(1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Next month"><ChevronRight size={16} /></button>
-        <div className="flex items-center gap-3 ml-2 text-[11px] text-stone-500">
-          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block shrink-0" /> Signed in</span>
-          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-slate-400 inline-block shrink-0" /> Signed out</span>
+        <div className="flex items-center gap-3 ml-2 text-[11px] text-stone-600 font-medium">
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-emerald-500 inline-block shrink-0" /> Signed in</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-blue-500 inline-block shrink-0" /> Signed out</span>
           {latePickupTime && (
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block shrink-0" /> Signed out after {formatTime12h(latePickupTime)}</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-rose-600 inline-block shrink-0" /> Signed out after {formatTime12h(latePickupTime)}</span>
           )}
         </div>
       </div>
@@ -17269,7 +17331,7 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
             </thead>
             <tbody>
               {roster.map((s) => {
-                const checkIns = studentData[s.id]?.checkIns || [];
+                const checkIns = collapseQuickReCheckIns(studentData[s.id]?.checkIns || []);
                 return (
                   <tr key={s.id}>
                     <td className="py-2 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)] border-t border-stone-200">
@@ -17283,17 +17345,17 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
                           {entries.length === 0 ? (
                             <span className="text-stone-300">–</span>
                           ) : (
-                            <div className="flex flex-col gap-0.5 items-center">
+                            <div className="flex flex-col gap-1 items-center">
                               {entries.map((e) => {
                                 const isLate = Boolean(latePickupTime) && e.checkOutTime && e.checkOutTime > latePickupTime;
                                 return (
-                                  <div key={e.id} className={`rounded-md px-1.5 py-0.5 leading-tight ${isLate ? "bg-rose-100 border border-rose-300" : "bg-stone-100"}`}>
-                                    <div className="flex items-center gap-0.5 text-emerald-700 font-semibold">
-                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />{formatTimeCompact(e.checkInTime)}
+                                  <div key={e.id} className={`rounded-md overflow-hidden ${isLate ? "ring-2 ring-rose-600" : ""}`}>
+                                    <div className="bg-emerald-500 text-white font-bold px-1.5 py-0.5 leading-tight">
+                                      {formatTimeCompact(e.checkInTime)}
                                     </div>
                                     {e.checkOutTime && (
-                                      <div className={`flex items-center gap-0.5 font-semibold ${isLate ? "text-rose-700" : "text-slate-500"}`}>
-                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isLate ? "bg-rose-500" : "bg-slate-400"}`} />{formatTimeCompact(e.checkOutTime)}
+                                      <div className={`text-white font-bold px-1.5 py-0.5 leading-tight ${isLate ? "bg-rose-600" : "bg-blue-500"}`}>
+                                        {formatTimeCompact(e.checkOutTime)}
                                       </div>
                                     )}
                                   </div>
@@ -17347,11 +17409,11 @@ function PreschoolStudentHistorySection({ title, color, rows, emptyText }) {
   );
 }
 
-function PreschoolStudentHistoryView({ studentName, data, onBack }) {
+function PreschoolStudentHistoryView({ studentName, studentId, data, incidents, onBack }) {
   const byDateDesc = (a, b) => (a.date < b.date ? 1 : -1);
   const byDateTimeDesc = (a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1));
 
-  const checkInRows = [...(data.checkIns || [])].sort(byDateDesc)
+  const checkInRows = [...(collapseQuickReCheckIns(data.checkIns || []))].sort(byDateDesc)
     .map((c) => ({ key: c.id, date: c.date, cells: [c.checkInTime ? formatTime12h(c.checkInTime) : "–", c.checkOutTime ? formatTime12h(c.checkOutTime) : "still here"] }));
   const napRows = [...(data.naps || [])].sort(byDateDesc)
     .map((n, i) => ({ key: `${n.date}-${i}`, date: n.date, cells: [n.start ? formatTime12h(n.start) : "–", n.end ? formatTime12h(n.end) : "–"] }));
@@ -17366,6 +17428,18 @@ function PreschoolStudentHistoryView({ studentName, data, onBack }) {
     .map((d) => ({ key: d.id, date: d.date, cells: [formatTime12h(d.time), DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type] }));
   const bathroomRows = [...(data.bathroom || [])].sort(byDateTimeDesc)
     .map((b) => ({ key: b.id, date: b.date, cells: [formatTime12h(b.time), BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type] }));
+
+  // Both kinds live in the exact same underlying incidents array, distinguished only by kind —
+  // resolved per-student here since a multi-student incident can carry a different category and
+  // description for each child it names, via its own perStudent field, rather than one shared
+  // description assumed to apply equally to everyone involved.
+  const myIncidents = (incidents || [])
+    .filter((i) => (i.studentIds || []).includes(studentId))
+    .map((i) => ({ ...i, ...resolveIncidentForStudent(i, studentId) }));
+  const incidentRows = myIncidents.filter((i) => i.kind !== "health").sort(byDateTimeDesc)
+    .map((i) => ({ key: i.id, date: i.date, cells: [formatTime12h(i.time), i.categoryLabel || i.category, i.description].filter(Boolean) }));
+  const healthIncidentRows = myIncidents.filter((i) => i.kind === "health").sort(byDateTimeDesc)
+    .map((i) => ({ key: i.id, date: i.date, cells: [formatTime12h(i.time), i.categoryLabel || i.category, i.description].filter(Boolean) }));
 
   return (
     <div>
@@ -17382,6 +17456,8 @@ function PreschoolStudentHistoryView({ studentName, data, onBack }) {
         <PreschoolStudentHistorySection title="Mood" color="sky" rows={moodRows} emptyText="No mood logged yet." />
         <PreschoolStudentHistorySection title="Diapers" color="rose" rows={diaperRows} emptyText="Nothing logged yet." />
         <PreschoolStudentHistorySection title="Bathroom" color="cyan" rows={bathroomRows} emptyText="Nothing logged yet." />
+        <PreschoolStudentHistorySection title="Incidents" color="orange" rows={incidentRows} emptyText="No incidents logged." />
+        <PreschoolStudentHistorySection title="Health Incidents" color="fuchsia" rows={healthIncidentRows} emptyText="No health incidents logged." />
       </div>
     </div>
   );
