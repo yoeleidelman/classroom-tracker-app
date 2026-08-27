@@ -3519,15 +3519,17 @@ function AppInner() {
     const studentData = {};
     const incidentsByKey = {};
     let latePickupTime = "";
+    let schoolEndTime = "";
     for (const cls of allClasses) {
       const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
       const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
       const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
-      // First non-empty value found wins — the late-pickup cutoff is almost always one shared,
+      // First non-empty value found wins — both of these are almost always one shared,
       // school-wide policy rather than something that genuinely differs class by class, so this
       // stays a single, simple setting for the combined view rather than needing its own separate
       // configuration on top of what each class already has.
       if (!latePickupTime && clsConfig.checkInOut?.latePickupTime) latePickupTime = clsConfig.checkInOut.latePickupTime;
+      if (!schoolEndTime && clsConfig.checkInOut?.schoolEndTime) schoolEndTime = clsConfig.checkInOut.schoolEndTime;
       for (const s of clsRoster) {
         const key = `${cls.id}:${s.id}`; // same student possibly enrolled in more than one class — kept as separate rows, one per actual enrollment, rather than merged into one that could only show one class's own check-ins
         roster.push({ id: key, studentId: s.id, name: s.name, className: cls.name });
@@ -3536,7 +3538,7 @@ function AppInner() {
       }
     }
     roster.sort((a, b) => a.name.localeCompare(b.name));
-    return { roster, studentData, incidentsByKey, latePickupTime };
+    return { roster, studentData, incidentsByKey, latePickupTime, schoolEndTime };
   };
 
   // Builds the full set of export rows, one array per requested data type, for whatever scope
@@ -6936,7 +6938,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           {checkInHistoryData === null ? (
             <p className="text-xs text-stone-400">Loading…</p>
           ) : (
-            <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} config={{ checkInOut: { latePickupTime: checkInHistoryData.latePickupTime } }} />
+            <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} config={{ checkInOut: { latePickupTime: checkInHistoryData.latePickupTime, schoolEndTime: checkInHistoryData.schoolEndTime } }} />
           )}
         </div>
         <div className="pt-1 mb-6 border-t border-stone-100">
