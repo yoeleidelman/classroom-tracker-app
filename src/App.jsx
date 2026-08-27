@@ -25179,6 +25179,14 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
         </div>
 
         {isPreschool && (
+        <Section title="Check-in / check-out">
+          <label className="block text-xs font-medium text-stone-500 mb-1">Late pickup starts at (optional)</label>
+          <input type="time" value={config.checkInOut?.latePickupTime || ""} onChange={(e) => update((c) => { c.checkInOut = c.checkInOut || {}; c.checkInOut.latePickupTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
+          <p className="text-[11px] text-stone-400">A checkout at or after this time is highlighted in orange on the check-in/out history chart, so a late pickup is easy to spot for billing. Leave blank to turn this off.</p>
+        </Section>
+        )}
+
+        {isPreschool && (
         <div className="md:col-span-2">
           <Section title="Meal menus">
             <p className="text-xs text-stone-400 mb-3">Set what's served each weekday for lunch and each snack — teachers then pick which specific items a child ate, instead of a general amount. A day left blank just falls back to the general amount scale.</p>
