@@ -5948,6 +5948,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   // null = not loaded yet — loads the first time the Preschool tab is actually opened, not on
   // every admin sign-in regardless of whether they ever look at it.
   const [checkInHistoryData, setCheckInHistoryData] = useState(null);
+  const [preschoolHistoryStudentKey, setPreschoolHistoryStudentKey] = useState(null);
   useEffect(() => {
     if (adminTab !== "preschool" || checkInHistoryData !== null) return;
     onFetchCheckInHistory().then(setCheckInHistoryData);
@@ -6872,6 +6873,28 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             <p className="text-xs text-stone-400">Loading…</p>
           ) : (
             <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} config={{ checkInOut: { latePickupTime: checkInHistoryData.latePickupTime } }} />
+          )}
+        </div>
+        <div className="pt-1 mb-6 border-t border-stone-100">
+          <p className="text-sm font-semibold text-stone-800 mt-4 mb-1">Look up a student's daily log</p>
+          <p className="text-xs text-stone-400 mb-3">Every nap, meal, mood, diaper, and bathroom trip logged for one child, organized by type so a pattern over time is actually visible — not the same one-day-at-a-time view a family sees.</p>
+          {checkInHistoryData === null ? (
+            <p className="text-xs text-stone-400">Loading…</p>
+          ) : checkInHistoryData.roster.length === 0 ? (
+            <p className="text-xs text-stone-400">No preschool students yet.</p>
+          ) : (
+            <>
+              <select value={preschoolHistoryStudentKey || ""} onChange={(e) => setPreschoolHistoryStudentKey(e.target.value || null)}
+                className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm bg-white mb-4">
+                <option value="">Choose a student…</option>
+                {checkInHistoryData.roster.map((s) => <option key={s.id} value={s.id}>{s.name} — {s.className}</option>)}
+              </select>
+              {preschoolHistoryStudentKey && (
+                <PreschoolStudentHistoryView
+                  studentName={checkInHistoryData.roster.find((s) => s.id === preschoolHistoryStudentKey)?.name || "Student"}
+                  data={checkInHistoryData.studentData[preschoolHistoryStudentKey] || emptyStudentData()} />
+              )}
+            </>
           )}
         </div>
         </>
@@ -14416,6 +14439,7 @@ function CameraCaptureView({ roster, classId, submitBlogPost, sendMessageToFamil
 function PreschoolStudentDetailView({ student, studentData, incidents, photos, onBack, onLogIncident }) {
   const [date, setDate] = useState(todayISO());
   const [viewingPhoto, setViewingPhoto] = useState(null);
+  const [showHistory, setShowHistory] = useState(false);
   const data = studentData[student.id] || emptyStudentData();
 
   const shiftDate = (deltaDays) => {
@@ -14456,12 +14480,22 @@ function PreschoolStudentDetailView({ student, studentData, incidents, photos, o
     <div className="app-page">
       <div className="flex items-center justify-between mb-1">
         <button onClick={onBack} className="flex items-center text-stone-500 text-sm hover:text-stone-800"><ChevronLeft size={16} /> Students</button>
-        {onLogIncident && (
-          <button onClick={() => onLogIncident(student.id)} className="text-xs font-semibold text-teal-700 border border-teal-200 rounded-lg px-3 py-1.5 hover:bg-teal-50">
-            Log incident
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowHistory((v) => !v)} className="text-xs font-semibold text-teal-700 border border-teal-200 rounded-lg px-3 py-1.5 hover:bg-teal-50">
+            {showHistory ? "Day view" : "View full history"}
           </button>
-        )}
+          {onLogIncident && (
+            <button onClick={() => onLogIncident(student.id)} className="text-xs font-semibold text-teal-700 border border-teal-200 rounded-lg px-3 py-1.5 hover:bg-teal-50">
+              Log incident
+            </button>
+          )}
+        </div>
       </div>
+
+      {showHistory ? (
+        <PreschoolStudentHistoryView studentName={student.name} data={data} />
+      ) : (
+      <>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-4">{student.name}</h1>
 
       <div className="inline-flex items-center gap-0.5 mb-5">
@@ -14561,6 +14595,8 @@ function PreschoolStudentDetailView({ student, studentData, incidents, photos, o
             </Card>
           )}
         </div>
+      )}
+      </>
       )}
       {viewingPhoto && (
         <PhotoLightbox url={viewingPhoto.url} type={viewingPhoto.type || "photo"} caption={viewingPhoto.caption} onClose={() => setViewingPhoto(null)} />
@@ -17261,6 +17297,85 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
             </tbody>
           </table>
         </div>
+      )}
+    </div>
+  );
+}
+
+// Every one type of daily-log entry, for one student, organized so a genuine pattern over time is
+// actually visible — reported directly as the real gap: the existing view showed the exact same
+// one-day-at-a-time cards a parent sees, with no way to look at, say, every nap logged this month
+// side by side. Reused as-is by both a teacher's own student detail screen and admin's own
+// student lookup — the data handed in differs (one class's own kriya record vs. every class a
+// student is actually enrolled in, combined), but how it's organized and displayed is identical
+// either way, so this one component serves both rather than two separate copies of it.
+const PRESCHOOL_HISTORY_TYPES = [
+  { id: "checkIns", label: "Check-in/out" },
+  { id: "naps", label: "Naps" },
+  { id: "meals", label: "Meals" },
+  { id: "mood", label: "Mood" },
+  { id: "diapers", label: "Diapers" },
+  { id: "bathroom", label: "Bathroom" },
+];
+
+function PreschoolStudentHistoryView({ studentName, data, onBack }) {
+  const [activeType, setActiveType] = useState("checkIns");
+  const mealTypeLabel = (mt) => (mt === "snack-am" ? "Morning Snack" : mt === "snack-pm" ? "Afternoon Snack" : "Lunch");
+
+  const rows = (() => {
+    if (activeType === "checkIns") {
+      return [...(data.checkIns || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((c) => ({ key: c.id, date: c.date, cells: [c.checkInTime ? formatTime12h(c.checkInTime) : "–", c.checkOutTime ? formatTime12h(c.checkOutTime) : "–"] }));
+    }
+    if (activeType === "naps") {
+      return [...(data.naps || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((n, i) => ({ key: `${n.date}-${i}`, date: n.date, cells: [n.start ? formatTime12h(n.start) : "–", n.end ? formatTime12h(n.end) : "–"] }));
+    }
+    if (activeType === "meals") {
+      return [...(data.meals || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((m, i) => ({ key: `${m.date}-${i}`, date: m.date, cells: [mealTypeLabel(m.mealType), MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount] }));
+    }
+    if (activeType === "mood") {
+      return [...(data.mood || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
+        .map((m, i) => {
+          const opt = PRESCHOOL_MOOD_OPTIONS.find((o) => o.id === m.mood);
+          return { key: `${m.date}-${i}`, date: m.date, cells: [opt ? `${opt.emoji} ${opt.label}` : m.mood] };
+        });
+    }
+    if (activeType === "diapers") {
+      return [...(data.diapers || [])].sort((a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1)))
+        .map((d) => ({ key: d.id, date: d.date, cells: [formatTime12h(d.time), DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type] }));
+    }
+    // bathroom
+    return [...(data.bathroom || [])].sort((a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1)))
+      .map((b) => ({ key: b.id, date: b.date, cells: [formatTime12h(b.time), BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type] }));
+  })();
+
+  return (
+    <div>
+      {onBack && (
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      )}
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-4">{studentName} — History</h1>
+      <div className="flex gap-1 bg-stone-100 rounded-lg p-1 mb-4 overflow-x-auto no-scrollbar">
+        {PRESCHOOL_HISTORY_TYPES.map((t) => (
+          <button key={t.id} onClick={() => setActiveType(t.id)}
+            className={`shrink-0 rounded-md py-1.5 px-3 text-xs font-semibold ${activeType === t.id ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-sm text-stone-400 text-center py-8">Nothing logged yet.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {rows.map((r) => (
+            <li key={r.key} className="flex items-center justify-between gap-3 bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm">
+              <span className="text-stone-500 shrink-0">{r.date}</span>
+              <span className="text-stone-800 font-medium text-right">{r.cells.join(" — ")}</span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );
