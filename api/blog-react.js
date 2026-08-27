@@ -276,7 +276,7 @@ async function handleBackfillMessageRead(req, res, storageKey, familyUid, readSt
 // version exactly, including the actionId idempotency guard — this is the one thing that makes it
 // genuinely safe for the client's own retry and this server-side fallback to both be trying to
 // complete the exact same tap at once, without one of them undoing what the other already did.
-function computeToggledCheckInServerSide(existingCheckIns, date, byLabel, explicitTime, actionId) {
+function computeToggledCheckInServerSide(existingCheckIns, date, byLabel, explicitTime, actionId, schoolEndTime) {
   const list = existingCheckIns || [];
   if (actionId && list.some((c) => c.actionId === actionId || c.checkOutActionId === actionId)) {
     return { checkIns: list, action: "already-done" };
@@ -287,6 +287,12 @@ function computeToggledCheckInServerSide(existingCheckIns, date, byLabel, explic
   if (openEntry) {
     const updated = list.map((c) => (c.id === openEntry.id ? { ...c, checkOutTime: nowTime, checkOutBy: byLabel, checkOutActionId: actionId } : c));
     return { checkIns: updated, action: "checked-out", entry: { ...openEntry, checkOutTime: nowTime, checkOutBy: byLabel } };
+  }
+  // The same hard, no-exceptions rule as the client's own toggle — a genuinely new check-in never
+  // allowed once school has ended, kept in sync here on purpose since this fallback path is a
+  // completely separate copy of the same logic, not a call into the client's own version of it.
+  if (schoolEndTime && nowTime >= schoolEndTime) {
+    return { checkIns: list, action: "blocked-school-ended" };
   }
   const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null, actionId };
   return { checkIns: [...list, entry], action: "checked-in", entry };
@@ -340,7 +346,11 @@ async function handleFallbackCheckIn(req, res, decoded) {
     }
     const targetClassId = openClassId || classLinks[0].classId;
     const targetData = dataByClassId[targetClassId] || { checkIns: [] };
-    const toggled = computeToggledCheckInServerSide(targetData.checkIns, atDate, byLabel, atTime, actionId);
+    const targetConfigSnap = await tx.get(db.collection("data").doc(`class:${targetClassId}:config`));
+    const targetConfig = targetConfigSnap.exists ? targetConfigSnap.data().value : {};
+    const toggled = computeToggledCheckInServerSide(targetData.checkIns, atDate, byLabel, atTime, actionId, targetConfig?.checkInOut?.schoolEndTime);
+    // A blocked attempt writes nothing — the family's already-real, already-recorded state stands.
+    if (toggled.action === "blocked-school-ended") return { ...toggled, classId: targetClassId };
     tx.set(refs[classLinks.findIndex((l) => l.classId === targetClassId)], { ...targetData, checkIns: toggled.checkIns });
     return { ...toggled, classId: targetClassId };
   });
@@ -351,7 +361,7 @@ async function handleFallbackCheckIn(req, res, decoded) {
   // than going through send-push.js's own HTTP endpoint — that endpoint requires a real, signed-in
   // user's own auth token, which a server-to-server call like this one has no such thing to
   // provide; this is the same underlying send, just made directly from inside this same function.
-  if (result.action !== "already-done") {
+  if (result.action !== "already-done" && result.action !== "blocked-school-ended") {
     try {
       const classRosterDoc = await db.collection("data").doc(`class:${result.classId}:roster`).get();
       const teachersSnap = await db.collection("data")

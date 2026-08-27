@@ -127,7 +127,13 @@ const DEFAULT_CONFIG = {
   // history chart, since that's specifically the moment a late-pickup fee applies. Empty means no
   // highlighting at all; a teacher sets this deliberately, since the actual cutoff genuinely
   // differs by school.
-  checkInOut: { latePickupTime: "" },
+  // schoolEndTime is deliberately separate from latePickupTime above — school ending and a late
+  // fee starting are two different real moments (school itself might end at 3:30, with billing
+  // only starting five minutes later, at 3:35). Once set, no check-IN is allowed at or after this
+  // time, for anyone, staff included — confirmed directly this needs to be a hard, no-exceptions
+  // rule: the exact hole this closes is a family's own already-departed device somehow still being
+  // able to log a check-in after the child has genuinely already gone home for the day.
+  checkInOut: { latePickupTime: "", schoolEndTime: "" },
   flagThreshold: 2,
   masteryThreshold: 2,
   tierMessages: {
@@ -1081,7 +1087,7 @@ function dedupeDailyLogData(data) {
 // which family is signed in when they scan it, not by anything encoded in the code itself.
 const SCHOOLWIDE_CHECKIN_CODE = "checkin:schoolwide";
 
-function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, actionId) {
+function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, actionId, schoolEndTime) {
   const list = existingCheckIns || [];
   // Idempotency guard: once two independent paths can both eventually complete the exact same
   // tap — a client-side retry that finally lands, and a server-side fallback attempting the same
@@ -1106,6 +1112,16 @@ function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, ac
     const updated = list.map((c) => (c.id === openEntry.id ? { ...c, checkOutTime: nowTime, checkOutBy: byLabel, checkOutActionId: actionId } : c));
     return { checkIns: updated, action: "checked-out", entry: { ...openEntry, checkOutTime: nowTime, checkOutBy: byLabel } };
   }
+  // A genuinely new check-in, specifically — never a check-out, which always closes whatever's
+  // already open above and stays allowed at any time of day. Enforced here, at the one function
+  // every check-in path of any kind ultimately funnels through, as the final, authoritative
+  // no-exceptions rule regardless of which screen or device it was attempted from — a UI-level
+  // check earlier in the flow exists too, purely so the person tapping it never even sees a false
+  // "checked in" flash before it reverts, but this is the check that actually decides whether the
+  // record gets written at all.
+  if (schoolEndTime && nowTime >= schoolEndTime) {
+    return { checkIns: list, action: "blocked-school-ended" };
+  }
   const entry = { id: uid(), date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null, actionId };
   return { checkIns: [...list, entry], action: "checked-in", entry };
 }
@@ -1117,7 +1133,8 @@ function isCheckedInNow(checkIns, date) {
 // class at once rather than the one class a teacher happens to be logged into.
 async function toggleCheckInForStudent(classId, studentId, byLabel) {
   const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true)) || emptyStudentData();
-  const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel);
+  const classConfig = await loadJSON(`class:${classId}:config`, DEFAULT_CONFIG, true);
+  const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, null, null, classConfig.checkInOut?.schoolEndTime);
   await saveJSON(`class:${classId}:kriya:${studentId}`, { ...data, checkIns: result.checkIns }, true);
   return result;
 }
@@ -1210,7 +1227,7 @@ const checkInIntentGeneration = {};
 // matches the moment actually tapped — confirmed live, directly, as something that mattered: a
 // save that only lands after a couple of minutes of retrying still has to record the original
 // tap time, not whenever the retry finally succeeded.
-function startOptimisticCheckInToggle({ studentId, currentEntries, byLabel, applyOptimistic, performRealToggle, requestFallback }) {
+function startOptimisticCheckInToggle({ studentId, currentEntries, byLabel, applyOptimistic, performRealToggle, requestFallback, onBlocked }) {
   const atDate = todayISO();
   const atTime = new Date().toTimeString().slice(0, 5);
   // Generated once, right here, and carried through every attempt at completing this exact tap —
@@ -1244,6 +1261,16 @@ function startOptimisticCheckInToggle({ studentId, currentEntries, byLabel, appl
         await withTimeout(performRealToggle(atTime, actionId), 12000);
         return;
       } catch (err) {
+        // A deliberate, permanent block (school has already ended) is not a transient failure to
+        // retry past — retrying it would just fail the exact same way for the next six minutes.
+        // Reverts the optimistic tap back to what was actually, really true before it, immediately,
+        // rather than leaving the screen showing "checked in" for something that was never
+        // actually saved at all.
+        if (err.checkInBlocked) {
+          if (checkInIntentGeneration[studentId] === myGeneration) applyOptimistic(studentId, currentEntries);
+          if (onBlocked) onBlocked(err.message);
+          return;
+        }
         if (attempt >= fallbackAfterAttempt && !fallbackAttempted && requestFallback) {
           fallbackAttempted = true;
           requestFallback(atDate, atTime, actionId).catch((fallbackErr) => {
@@ -1313,7 +1340,17 @@ async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLab
     ? status.fullDataByClassId[targetClassId]
     : await loadJSON(`class:${targetClassId}:kriya:${studentId}`, null, true, 2, true);
   const currentCheckIns = freshData?.checkIns || [];
-  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime, actionId);
+  const targetConfig = await loadJSON(`class:${targetClassId}:config`, DEFAULT_CONFIG, true);
+  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime, actionId, targetConfig.checkInOut?.schoolEndTime);
+  // A blocked attempt writes nothing at all — thrown, not returned normally, specifically so the
+  // optimistic-toggle retry loop above can recognize this as a permanent block rather than a
+  // transient failure worth retrying for the next six minutes, and can revert what it optimistically
+  // showed back to the truth instead of leaving it stuck on something that was never really saved.
+  if (result.action === "blocked-school-ended") {
+    const err = new Error(`Check-in isn't available after ${formatTime12h(targetConfig.checkInOut.schoolEndTime)} — school has already ended for the day.`);
+    err.checkInBlocked = true;
+    throw err;
+  }
   // throwOnFailure: true — the actual save genuinely failing is the one thing this entire
   // retry-and-fallback design exists to notice and react to; a write that quietly gave up while
   // reporting success would leave the tapping device's own screen permanently disagreeing with
@@ -9222,10 +9259,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // where that guess lives so checkInStatus below can display it right away.
   const [optimisticCheckIn, setOptimisticCheckIn] = useState({});
   // A scan doesn't perform anything by itself — it only unlocks the ability to act, which then
-  // has to be used deliberately per child. Locks again the moment they leave this screen, so
-  // getting back to it always means scanning again, not something that stays open in the
-  // background after they've actually left the school.
+  // has to be used deliberately per child. Confirmed directly this needs to stay unlocked across
+  // every one of a family's own linked children in one scanned visit — check in three siblings, or
+  // check out three siblings, one after another, with no re-scan in between — and only lock again
+  // once every single one of them has actually had something done. actedOnStudentIds tracks which
+  // children have already had an action taken since the most recent scan; the moment that set
+  // covers every child this family has, the session locks itself and a fresh scan is required
+  // again, rather than staying open indefinitely on a page nobody closed.
   const [actionUnlocked, setActionUnlocked] = useState(false);
+  const [actedOnStudentIds, setActedOnStudentIds] = useState(() => new Set());
   const [confirmingRepeatChild, setConfirmingRepeatChild] = useState(null);
   const [messagingClassId, setMessagingClassId] = useState(null); // classId of the conversation currently open, or null
   const [messagingAdmin, setMessagingAdmin] = useState(false);
@@ -9717,10 +9759,26 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const allLinksForChild = preschoolStudentLinks.filter((l) => l.studentId === link.studentId);
     const byLabel = `Parent: ${family?.name || "Family"}`;
     const baselineSnapshot = JSON.stringify(allLinksForChild.map((l) => liveKriyaData[`class:${l.classId}:kriya:${link.studentId}`]?.checkIns || []));
+    // Records this child as acted-on immediately, synchronously, right at the tap — not waiting on
+    // the real save to actually finish first — and locks the whole scanned session the moment
+    // every one of this family's own linked children has had something done, whether that was
+    // checking them in or checking them out. Confirmed directly this needs to allow acting on
+    // every child in one scanned visit, in either direction (three siblings checked in one after
+    // another, or three checked out one after another, no re-scan needed in between) — only once
+    // there's genuinely nothing left to act on does staying unlocked start being a real risk rather
+    // than an ordinary part of dropping off or picking up more than one child at once.
+    const allStudentIds = [...new Set(preschoolStudentLinks.map((l) => l.studentId))];
+    setActedOnStudentIds((prev) => {
+      const next = new Set(prev);
+      next.add(link.studentId);
+      if (allStudentIds.every((id) => next.has(id))) setActionUnlocked(false);
+      return next;
+    });
     startOptimisticCheckInToggle({
       studentId: link.studentId, byLabel, currentEntries: currentStatus?.entries || [],
       applyOptimistic: (studentId, entries) => setOptimisticCheckIn((prev) => ({ ...prev, [studentId]: { entries, baselineLinks: allLinksForChild, baselineSnapshot } })),
       performRealToggle: (atTime, actionId) => toggleUnifiedCheckIn(link.studentId, allLinksForChild, link.classId, byLabel, atTime, actionId),
+      onBlocked: (message) => window.alert(message),
       // Reached only once the normal path above has been failing for a real while — a separate,
       // simpler request to the server itself, which can complete this directly on its own,
       // reliable connection to the database rather than needing THIS device's own, separate,
@@ -9784,6 +9842,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       return;
     }
     setActionUnlocked(true);
+    setActedOnStudentIds(new Set()); // a fresh scan always starts a fresh count of who's been acted on
     setShowScanner(false);
   };
 
@@ -9905,7 +9964,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           <>
             <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4">
               <p className="text-sm font-semibold text-emerald-800">Code scanned ✓</p>
-              <p className="text-xs text-emerald-700 mt-0.5">Tap each child you're checking in or out right now.</p>
+              <p className="text-xs text-emerald-700 mt-0.5">
+                Tap each child you're checking in or out right now.
+                {[...new Set(preschoolStudentLinks.map((l) => l.studentId))].length > 1 &&
+                  ` ${actedOnStudentIds.size} of ${[...new Set(preschoolStudentLinks.map((l) => l.studentId))].length} done — once every child's had something done, you'll need to scan again.`}
+              </p>
             </div>
             <div className="space-y-2 mb-4">
               {/* One card per unique CHILD, not per class link — a student in two classes used to
@@ -12319,12 +12382,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       // and only updates studentData once it has genuinely succeeded — not before.
       performRealToggle: async (atTime, actionId) => {
         const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true, 2, true)) || studentData[studentId] || emptyStudentData();
-        const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, atTime, actionId);
+        const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, atTime, actionId, config.checkInOut?.schoolEndTime);
+        if (result.action === "blocked-school-ended") {
+          const err = new Error(`Check-in isn't available after ${formatTime12h(config.checkInOut.schoolEndTime)} — school has already ended for the day.`);
+          err.checkInBlocked = true;
+          throw err;
+        }
         const fullData = { ...data, checkIns: result.checkIns };
         await saveJSON(`class:${classId}:kriya:${studentId}`, fullData, true, 2, true);
         setStudentData((prev) => ({ ...prev, [studentId]: fullData }));
         return result;
       },
+      onBlocked: (message) => window.alert(message),
     });
   };
 
@@ -17275,7 +17344,15 @@ function WeeklyTrackerGrid({ roster, cat, trackerLog, toggleTracker }) {
 // reopening that would newly turn an on-time pickup into a late one is discarded outright, exactly
 // the noise it almost certainly is, and the already-safe, already-recorded on-time checkout is
 // left standing rather than getting quietly overwritten by it.
-function collapseQuickReCheckIns(checkIns, latePickupTime, thresholdMinutes = 10, blipMaxMinutes = 20) {
+//
+// Once check-in itself became genuinely impossible after school ends (see computeToggledCheckIn's
+// own schoolEndTime rule), any check-in already sitting in OLDER data at or after that time —
+// logged before that rule existed to stop it — is no longer just a probable glitch guessed at by
+// how long it lasted. It's certain: it could never happen again under the current rules, so it
+// couldn't have been real then either. Confirmed directly this needed a fresh look specifically
+// because of that: a blip discarded here on duration alone might still, in principle, have been a
+// real, if brief, return visit; a blip at or after school's own end time never could have been.
+function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresholdMinutes = 10, blipMaxMinutes = 20) {
   const sorted = [...(checkIns || [])].sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1;
     return (a.checkInTime || "") < (b.checkInTime || "") ? -1 : 1;
@@ -17291,7 +17368,8 @@ function collapseQuickReCheckIns(checkIns, latePickupTime, thresholdMinutes = 10
       const prevWasLate = Boolean(latePickupTime) && prev.checkOutTime > latePickupTime;
       const thisWouldBeLate = Boolean(latePickupTime) && entry.checkOutTime && entry.checkOutTime > latePickupTime;
       const thisDuration = entry.checkOutTime && entry.checkInTime ? timeToMinutes(entry.checkOutTime) - timeToMinutes(entry.checkInTime) : null;
-      const isSuspiciousBlip = !prevWasLate && thisWouldBeLate && thisDuration !== null && thisDuration <= blipMaxMinutes;
+      const afterSchoolEnded = Boolean(schoolEndTime) && entry.checkInTime >= schoolEndTime;
+      const isSuspiciousBlip = !prevWasLate && thisWouldBeLate && (afterSchoolEnded || (thisDuration !== null && thisDuration <= blipMaxMinutes));
       if (isSuspiciousBlip) {
         continue; // eslint-disable-line no-continue -- discard the blip entirely; the safe, on-time checkout already recorded stands
       }
@@ -17318,6 +17396,7 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
   const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
   const monthDates = Array.from({ length: daysInMonth }, (_, i) => addDaysISO(monthStart, i));
   const latePickupTime = config.checkInOut?.latePickupTime;
+  const schoolEndTime = config.checkInOut?.schoolEndTime;
   const todayStr = todayISO();
 
   return (
@@ -17360,7 +17439,7 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
             </thead>
             <tbody>
               {roster.map((s) => {
-                const checkIns = collapseQuickReCheckIns(studentData[s.id]?.checkIns || [], latePickupTime);
+                const checkIns = collapseQuickReCheckIns(studentData[s.id]?.checkIns || [], latePickupTime, schoolEndTime);
                 return (
                   <tr key={s.id}>
                     <td className="py-2 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)] border-t border-stone-200 align-middle" style={{ height: "56px" }}>
@@ -17442,7 +17521,7 @@ function PreschoolStudentHistoryView({ studentName, studentId, data, incidents, 
   const byDateDesc = (a, b) => (a.date < b.date ? 1 : -1);
   const byDateTimeDesc = (a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1));
 
-  const checkInRows = [...(collapseQuickReCheckIns(data.checkIns || [], null))].sort(byDateDesc)
+  const checkInRows = [...(collapseQuickReCheckIns(data.checkIns || [], null, null))].sort(byDateDesc)
     .map((c) => ({ key: c.id, date: c.date, cells: [c.checkInTime ? formatTime12h(c.checkInTime) : "–", c.checkOutTime ? formatTime12h(c.checkOutTime) : "still here"] }));
   const napRows = [...(data.naps || [])].sort(byDateDesc)
     .map((n, i) => ({ key: `${n.date}-${i}`, date: n.date, cells: [n.start ? formatTime12h(n.start) : "–", n.end ? formatTime12h(n.end) : "–"] }));
@@ -25202,6 +25281,9 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
         {isPreschool && (
         <Section title="Check-in / check-out">
+          <label className="block text-xs font-medium text-stone-500 mb-1">School ends at (optional)</label>
+          <input type="time" value={config.checkInOut?.schoolEndTime || ""} onChange={(e) => update((c) => { c.checkInOut = c.checkInOut || {}; c.checkInOut.schoolEndTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
+          <p className="text-[11px] text-stone-400 mb-3">Once it's this time, checking a student IN is no longer possible — for anyone, staff included. Checking a student out always stays possible, any time. Leave blank to turn this off.</p>
           <label className="block text-xs font-medium text-stone-500 mb-1">Late pickup starts at (optional)</label>
           <input type="time" value={config.checkInOut?.latePickupTime || ""} onChange={(e) => update((c) => { c.checkInOut = c.checkInOut || {}; c.checkInOut.latePickupTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
           <p className="text-[11px] text-stone-400">A checkout at or after this time is highlighted in orange on the check-in/out history chart, so a late pickup is easy to spot for billing. Leave blank to turn this off.</p>
