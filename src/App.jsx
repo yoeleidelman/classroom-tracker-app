@@ -19660,11 +19660,18 @@ function validateVideoDuration(file, maxSeconds = MAX_VIDEO_SECONDS) {
 // with-timeout pipeline everywhere, so a fix or improvement made in one place benefits all of them.
 // Module-level rather than tucked inside one component, since both the teacher side and the parent
 // side need to upload images.
+// GIFs are never run through compression — canvas-based re-encoding only ever captures a single
+// static frame of whatever was drawn onto it, which would silently strip out the one thing that's
+// the entire reason someone chose a GIF over an ordinary photo in the first place: the animation.
+// Uploaded exactly as provided instead, with its own real content type set, rather than the
+// re-encoded JPEG every other image format still goes through.
 async function uploadOneImage(file, path, onProgress) {
   const fileRef = storageRef(storage, path);
-  const compressed = await compressImageFile(file);
+  const isGif = file.type === "image/gif" || (!file.type && /\.gif$/i.test(file.name || ""));
+  const uploadBlob = isGif ? file : await compressImageFile(file);
+  const contentType = isGif ? "image/gif" : "image/jpeg";
   return new Promise((resolve, reject) => {
-    const task = uploadBytesResumable(fileRef, compressed, { contentType: "image/jpeg" });
+    const task = uploadBytesResumable(fileRef, uploadBlob, { contentType });
     const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 45000);
     task.on("state_changed",
       (snapshot) => { if (onProgress) onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100)); },
