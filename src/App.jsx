@@ -156,6 +156,10 @@ const DEFAULT_CONFIG = {
     lateRule: { threshold: 3, windowDays: 30 },
     absentRule: { threshold: 3, windowDays: 30 },
     classStartTime: "",
+    // Empty means off — a teacher turns this on deliberately. Once set, a student with no
+    // attendance entry yet by this time on a real school day gets marked absent automatically,
+    // still fully changeable afterward the exact same way any attendance mark always has been.
+    autoAbsentTime: "",
     lateTierMessages: { 1: "Mention it to the student", 2: "Send a note home about lateness", 3: "Call the parent", 4: "Flag for admin" },
     absentTierMessages: { 1: "Note the pattern", 2: "Send a note home", 3: "Call the parent", 4: "Flag for admin" },
   },
@@ -11983,13 +11987,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     }));
   };
 
-  const setAttendance = (studentId, date, statusId) => {
+  const setAttendance = (studentId, date, statusId, auto) => {
     const data = studentData[studentId];
     const without = (data.attendance || []).filter((a) => a.date !== date);
     const prevEntry = (data.attendance || []).find((a) => a.date === date);
     const isLate = config.attendance.statuses.find((st) => st.id === statusId)?.flagType === "late";
     const defaultTime = isLate && !prevEntry?.time ? new Date().toTimeString().slice(0, 5) : (prevEntry?.time || "");
-    const newData = { ...data, attendance: [...without, withLogger({ date, status: statusId, time: defaultTime })] };
+    // auto is only ever true coming from the automatic backfill below — a teacher tapping a
+    // status directly always produces a normal, non-auto entry, the exact same as today. Marked
+    // this way purely so the collapsed view can show a quiet "(auto)" hint that this wasn't
+    // actually confirmed by anyone yet — tapping a different status the normal way replaces the
+    // whole entry regardless, the same as it always has, so overriding it needs nothing special.
+    const newData = { ...data, attendance: [...without, withLogger({ date, status: statusId, time: defaultTime, ...(auto ? { auto: true } : {}) })] };
     persistStudent(studentId, newData);
     const flags = getFlags(newData, studentId, incidents, config);
     const attFlag = flags.find((f) => f.type === "late" || f.type === "absent");
@@ -11998,6 +12007,33 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       upsertAlert(studentId, attFlag.type === "late" ? "attendance-late" : "attendance-absent", `${studentName} — ${attFlag.label}`);
     }
   };
+  // Checked right when the class's data loads, and every few minutes afterward while a teacher
+  // stays on this screen — so the exact moment autoAbsentTime passes during an actual, open
+  // session is caught quickly, not only whenever the app next happens to be opened.
+  useEffect(() => {
+    if (!config.attendance.autoAbsentTime) return;
+    const checkAndBackfill = () => {
+      const date = todayISO();
+      if (!isSchoolDay(date, config, plannerDays)) return;
+      const nowMinutes = new Date().getHours() * 60 + new Date().getMinutes();
+      if (nowMinutes < timeToMinutes(config.attendance.autoAbsentTime)) return;
+      const dayTypeMap = {};
+      (config.planner?.dayTypes || []).forEach((t) => (dayTypeMap[t.id] = t));
+      const selectedDayType = plannerDays?.[date]?.dayType ? dayTypeMap[plannerDays[date].dayType] : null;
+      if (selectedDayType?.hidesAttendance) return;
+      roster.forEach((s) => {
+        if (!morningAttendanceApplies(s, date, selectedDayType, config, plannerDays)) return;
+        const hasEntry = (studentData[s.id]?.attendance || []).some((a) => a.date === date);
+        if (!hasEntry) setAttendance(s.id, date, "absent", true);
+      });
+    };
+    checkAndBackfill();
+    const interval = setInterval(checkAndBackfill, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+    // roster/studentData/config/plannerDays deliberately excluded — this re-checks on its own
+    // timer regardless, and including them would mean re-running (and re-scheduling the timer)
+    // on every single unrelated data change throughout the whole day.
+  }, [config.attendance.autoAbsentTime]); // eslint-disable-line react-hooks/exhaustive-deps
   const setAttendanceTime = (studentId, date, time) => {
     const data = studentData[studentId];
     const attendance = (data.attendance || []).map((a) => (a.date === date ? { ...a, time } : a));
@@ -12957,9 +12993,9 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                             </div>
                           )}
                           {!attendanceHidden && studentAttendanceApplies && !showFullPicker && (
-                            <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title="Tap to change"
+                            <button onClick={() => setExpandedAttendance((prev) => [...prev, s.id])} title={entry.auto ? "Marked automatically — tap to change" : "Tap to change"}
                               className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${statusMap[entry.status]?.color || "stone"}-500 text-white`}>
-                              {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${formatTime12h(entry.time)}` : ""}
+                              {statusMap[entry.status]?.label}{isLateType && entry.time ? ` ${formatTime12h(entry.time)}` : ""}{entry.auto ? " (auto)" : ""}
                             </button>
                           )}
                           {attendanceHidden && <span className="text-xs text-stone-400 italic">No school</span>}
@@ -22364,7 +22400,8 @@ function SubstituteModeView({ className, roster, studentData, config, plannerDay
                 return (
                   <li key={s.id} className="bg-white border border-stone-200 rounded-xl px-3 py-2.5 flex items-center justify-between flex-wrap gap-2">
                     <span className="text-sm font-medium text-stone-800">{s.name}</span>
-                    <div className="flex gap-1.5 flex-wrap">
+                    <div className="flex gap-1.5 flex-wrap items-center">
+                      {todaysAttendance?.auto && <span className="text-[10px] text-stone-400 italic">auto</span>}
                       {statuses.map((st) => {
                         const active = todaysAttendance?.status === st.id;
                         return (
@@ -24726,6 +24763,9 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
         <Section title="Attendance statuses">
           <label className="block text-xs font-medium text-stone-500 mb-1">Class start time (optional — used to calculate minutes late in monthly reports)</label>
           <input type="time" value={config.attendance.classStartTime || ""} onChange={(e) => update((c) => { c.attendance.classStartTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+          <label className="block text-xs font-medium text-stone-500 mb-1">Automatically mark absent if not yet marked by (optional)</label>
+          <input type="time" value={config.attendance.autoAbsentTime || ""} onChange={(e) => update((c) => { c.attendance.autoAbsentTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
+          <p className="text-[11px] text-stone-400 mb-3">On a real school day, any student with no attendance entry yet by this time gets marked Absent by default — still just as easy to change afterward as any other attendance mark. Leave blank to turn this off.</p>
           <div className="border-t border-stone-100 pt-3">
           {config.attendance.statuses.map((st, i) => (
             <div key={st.id} className="flex items-center gap-2 mb-2">
