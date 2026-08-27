@@ -6934,7 +6934,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           {checkInHistoryData === null ? (
             <p className="text-xs text-stone-400">Loading…</p>
           ) : (
-            <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} latePickupTime={checkInHistoryData.latePickupTime} schoolEndTime={checkInHistoryData.schoolEndTime} />
+            <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} latePickupTime={checkInHistoryData.latePickupTime} schoolEndTime={checkInHistoryData.schoolEndTime}
+              resolveReview={async (rosterId, entryId, decision) => {
+                const [rClassId, rStudentId] = rosterId.split(":");
+                await resolveCheckInReview(rClassId, rStudentId, entryId, decision);
+                setCheckInHistoryData(await onFetchCheckInHistory());
+              }} />
           )}
         </div>
         <div className="pt-1 mb-6 border-t border-stone-100">
@@ -12607,7 +12612,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           <button onClick={() => navigateView("attendance")} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
           <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Check-in/out history</h1>
           <p className="text-xs text-stone-400 mb-5">{className}</p>
-          <CheckInOutHistoryChart roster={roster} studentData={studentData} latePickupTime={checkInOutSettings.latePickupTime} schoolEndTime={checkInOutSettings.schoolEndTime} />
+          <CheckInOutHistoryChart roster={roster} studentData={studentData} latePickupTime={checkInOutSettings.latePickupTime} schoolEndTime={checkInOutSettings.schoolEndTime}
+            resolveReview={async (rStudentId, entryId, decision) => {
+              const data = studentData[rStudentId] || emptyStudentData();
+              const updated = { ...data, checkIns: (data.checkIns || []).map((c) => (c.id === entryId ? { ...c, reviewDecision: decision } : c)) };
+              persistStudent(rStudentId, updated);
+            }} />
         </div>
       )}
 
@@ -17355,7 +17365,37 @@ function WeeklyTrackerGrid({ roster, cat, trackerLog, toggleTracker }) {
 // couldn't have been real then either. Confirmed directly this needed a fresh look specifically
 // because of that: a blip discarded here on duration alone might still, in principle, have been a
 // real, if brief, return visit; a blip at or after school's own end time never could have been.
-function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresholdMinutes = 10, blipMaxMinutes = 20) {
+//
+// That distinction matters again here: a blip discarded purely on duration is a genuine judgment
+// call, not a certainty, and is flagged as such on the kept entry — surfaced directly, precisely
+// as asked for, right on the chart cell itself rather than in some separate list elsewhere — so
+// admin can see it and, if they choose to, decide differently. A blip discarded because it's now
+// certain (after school's own end) needs no such flag; there's no real judgment being made there
+// to review. An admin's own, already-made decision on a specific entry (reviewDecision, written by
+// resolveCheckInReview once someone actually reviews a flagged one) always wins outright over the
+// heuristic below — that heuristic only ever runs at all for an entry nobody's looked at yet.
+//
+// Raised directly, precisely, as a real worry once this had actually shipped: the ten-minute
+// merge window itself has a real edge — a glitch landing just past it, at eleven or fifteen
+// minutes, isn't merged or protected at all; it shows up as its own fully separate, confidently-
+// late event. Rather than silently widening that window (which risks a different mistake — truly
+// merging together two things that really were separate) a second, wider check flags a standalone
+// session for review instead of ever deciding it silently either way, specifically when it fits
+// the same suspicious shape: short, following not too long after an already on-time day, and
+// itself the thing that would make the day count as late.
+//
+// A second, real gap raised directly right after that: within the merge window itself, judging
+// suspicion by how long the RE-ENTRY SESSION lasted, rather than how soon after an already-safe
+// checkout it began, misses exactly the case actually described — a parent not noticing their own
+// phone's accidental re-check-in for a real while (on the road, mid-errand) before catching it and
+// correcting it. That correction taking twenty-five minutes says nothing at all about whether the
+// original re-entry was ever legitimate; what matters is only that it began suspiciously soon
+// after a checkout that was already safe. So within the merge window, EVERY case where an already
+// on-time checkout is followed by a re-entry that would turn the day late is treated as needing a
+// decision — never silently confirmed as late on duration alone — with exactly one exception: once
+// check-in is certain to be impossible (at or after school's own end time), there's no real
+// judgment left to make, and no flag is needed for it.
+function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresholdMinutes = 10, blipMaxMinutes = 20, reviewWindowMinutes = 60) {
   const sorted = [...(checkIns || [])].sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1;
     return (a.checkInTime || "") < (b.checkInTime || "") ? -1 : 1;
@@ -17363,6 +17403,8 @@ function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresh
   const result = [];
   for (const entry of sorted) {
     const prev = result[result.length - 1];
+    if (entry.reviewDecision === "keep-separate") { result.push({ ...entry, flaggedReview: undefined }); continue; }
+    if (entry.reviewDecision === "discard") continue; // eslint-disable-line no-continue -- an admin already confirmed this one was noise
     const gapMinutes = prev && prev.date === entry.date && prev.checkOutTime && entry.checkInTime
       ? timeToMinutes(entry.checkInTime) - timeToMinutes(prev.checkOutTime)
       : null;
@@ -17370,21 +17412,38 @@ function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresh
     if (mergeable) {
       const prevWasLate = Boolean(latePickupTime) && prev.checkOutTime > latePickupTime;
       const thisWouldBeLate = Boolean(latePickupTime) && entry.checkOutTime && entry.checkOutTime > latePickupTime;
-      const thisDuration = entry.checkOutTime && entry.checkInTime ? timeToMinutes(entry.checkOutTime) - timeToMinutes(entry.checkInTime) : null;
       const afterSchoolEnded = Boolean(schoolEndTime) && entry.checkInTime >= schoolEndTime;
-      const isSuspiciousBlip = !prevWasLate && thisWouldBeLate && (afterSchoolEnded || (thisDuration !== null && thisDuration <= blipMaxMinutes));
+      const needsReview = !prevWasLate && thisWouldBeLate && !afterSchoolEnded;
+      const isSuspiciousBlip = !prevWasLate && thisWouldBeLate && (afterSchoolEnded || needsReview);
       if (isSuspiciousBlip) {
+        if (needsReview) result[result.length - 1] = { ...prev, flaggedReview: { kind: "merged-blip", discardedEntry: entry } };
         continue; // eslint-disable-line no-continue -- discard the blip entirely; the safe, on-time checkout already recorded stands
       }
       result[result.length - 1] = { ...prev, checkOutTime: entry.checkOutTime, checkOutBy: entry.checkOutBy };
     } else {
-      result.push(entry);
+      const prevWasLate = Boolean(latePickupTime) && prev && prev.date === entry.date && prev.checkOutTime && prev.checkOutTime > latePickupTime;
+      const thisWouldBeLate = Boolean(latePickupTime) && entry.checkOutTime && entry.checkOutTime > latePickupTime;
+      const thisDuration = entry.checkOutTime && entry.checkInTime ? timeToMinutes(entry.checkOutTime) - timeToMinutes(entry.checkInTime) : null;
+      const withinReviewWindow = gapMinutes !== null && gapMinutes > thresholdMinutes && gapMinutes <= reviewWindowMinutes;
+      const worthReviewing = withinReviewWindow && !prevWasLate && thisWouldBeLate && thisDuration !== null && thisDuration <= blipMaxMinutes;
+      result.push(worthReviewing ? { ...entry, flaggedReview: { kind: "standalone", prevCheckOut: prev.checkOutTime } } : entry);
     }
   }
   return result;
 }
 
-function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEndTime }) {
+// Writes an admin's own decision on one specific, previously-flagged entry back onto the real
+// underlying data — "keep-separate" (the discarded blip was actually real, treat it as its own
+// distinct visit) or "discard" (confirm it as noise, same as the default, but now settled rather
+// than an open guess). Once set, collapseQuickReCheckIns respects this directly and stops guessing
+// about this one entry at all, on every future render, for every viewer.
+async function resolveCheckInReview(classId, studentId, entryId, decision) {
+  const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true)) || emptyStudentData();
+  const updated = (data.checkIns || []).map((c) => (c.id === entryId ? { ...c, reviewDecision: decision } : c));
+  await saveJSON(`class:${classId}:kriya:${studentId}`, { ...data, checkIns: updated }, true);
+}
+
+function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEndTime, resolveReview }) {
   const [monthStart, setMonthStart] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
@@ -17399,6 +17458,21 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
   const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
   const monthDates = Array.from({ length: daysInMonth }, (_, i) => addDaysISO(monthStart, i));
   const todayStr = todayISO();
+  // Which flagged cell (if any) currently has its review panel open — at most one at a time,
+  // closed again the instant a decision is made or the person taps elsewhere.
+  const [openReview, setOpenReview] = useState(null);
+  const [resolving, setResolving] = useState(false);
+
+  const submitReview = async (rosterId, entry, decision) => {
+    if (!resolveReview) return;
+    setResolving(true);
+    try {
+      await resolveReview(rosterId, entry.flaggedReview.discardedEntry.id, decision);
+      setOpenReview(null);
+    } finally {
+      setResolving(false);
+    }
+  };
 
   return (
     <div>
@@ -17406,11 +17480,14 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
         <button onClick={() => shiftMonth(-1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous month"><ChevronLeft size={16} /></button>
         <span className="text-sm font-semibold text-stone-800">{monthLabel}</span>
         <button onClick={() => shiftMonth(1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Next month"><ChevronRight size={16} /></button>
-        <div className="flex items-center gap-3 ml-2 text-[11px] text-stone-600 font-medium">
+        <div className="flex items-center gap-3 ml-2 text-[11px] text-stone-600 font-medium flex-wrap">
           <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-emerald-600 inline-block shrink-0" /> Signed in</span>
           <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-rose-600 inline-block shrink-0" /> Signed out</span>
           {latePickupTime && (
             <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-orange-500 inline-block shrink-0" /> ⚠️ Signed out after {formatTime12h(latePickupTime)}</span>
+          )}
+          {resolveReview && (
+            <span className="flex items-center gap-1"><Flag size={11} className="text-amber-600 fill-amber-400" /> Needs a decision — tap it</span>
           )}
         </div>
       </div>
@@ -17450,7 +17527,7 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
                     {monthDates.map((d) => {
                       const entries = checkIns.filter((c) => c.date === d).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
                       return (
-                        <td key={d} className={`text-center border-t border-l border-stone-200 align-middle ${d === todayStr ? "bg-teal-50/40" : ""}`} style={{ height: "56px" }}>
+                        <td key={d} className={`relative text-center border-t border-l border-stone-200 align-middle ${d === todayStr ? "bg-teal-50/40" : ""}`} style={{ height: "56px" }}>
                           {entries.length === 0 ? (
                             <span className="text-stone-300">–</span>
                           ) : (
@@ -17458,15 +17535,23 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
                               {entries.map((e) => {
                                 const isLate = Boolean(latePickupTime) && e.checkOutTime && e.checkOutTime > latePickupTime;
                                 return (
-                                  <div key={e.id} className={`rounded-md overflow-hidden ${isLate ? "ring-2 ring-orange-500" : ""}`}>
-                                    <div className="bg-emerald-600 text-white font-bold px-1.5 py-0.5 leading-tight whitespace-nowrap">
-                                      {formatTimeCompact(e.checkInTime)}
-                                    </div>
-                                    {e.checkOutTime && (
-                                      <div className={`text-white font-bold px-1.5 py-0.5 leading-tight whitespace-nowrap ${isLate ? "bg-orange-500" : "bg-rose-600"}`}>
-                                        {isLate && "⚠️ "}{formatTimeCompact(e.checkOutTime)}
-                                      </div>
+                                  <div key={e.id} className="relative">
+                                    {e.flaggedReview && resolveReview && (
+                                      <button onClick={() => setOpenReview({ rosterId: s.id, entry: e })}
+                                        className="absolute -top-1.5 -right-1.5 z-10 bg-white rounded-full p-0.5 shadow" aria-label="Needs a decision">
+                                        <Flag size={11} className="text-amber-600 fill-amber-400" />
+                                      </button>
                                     )}
+                                    <div className={`rounded-md overflow-hidden ${isLate ? "ring-2 ring-orange-500" : ""}`}>
+                                      <div className="bg-emerald-600 text-white font-bold px-1.5 py-0.5 leading-tight whitespace-nowrap">
+                                        {formatTimeCompact(e.checkInTime)}
+                                      </div>
+                                      {e.checkOutTime && (
+                                        <div className={`text-white font-bold px-1.5 py-0.5 leading-tight whitespace-nowrap ${isLate ? "bg-orange-500" : "bg-rose-600"}`}>
+                                          {isLate && "⚠️ "}{formatTimeCompact(e.checkOutTime)}
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 );
                               })}
@@ -17480,6 +17565,30 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {openReview && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-end sm:items-center justify-center p-4" onClick={() => setOpenReview(null)}>
+          <div className="bg-white rounded-xl p-4 max-w-xs w-full border-2 border-amber-300" onClick={(e) => e.stopPropagation()}>
+            <p className="text-sm font-semibold text-amber-800 mb-1.5">Not sure this counts</p>
+            <p className="text-xs text-stone-600 mb-3">
+              Kept {formatTimeCompact(openReview.entry.checkOutTime)} as the real checkout. A short re-entry from {formatTimeCompact(openReview.entry.flaggedReview.discardedEntry.checkInTime)} to {formatTimeCompact(openReview.entry.flaggedReview.discardedEntry.checkOutTime)} was treated as noise and left out. What should count?
+            </p>
+            <div className="flex flex-col gap-1.5">
+              <button disabled={resolving} onClick={() => submitReview(openReview.rosterId, openReview.entry, "discard")}
+                className="text-xs font-semibold text-white bg-emerald-600 rounded-md py-2 hover:bg-emerald-700 disabled:opacity-50">
+                Confirm — it was noise
+              </button>
+              <button disabled={resolving} onClick={() => submitReview(openReview.rosterId, openReview.entry, "keep-separate")}
+                className="text-xs font-semibold text-white bg-orange-500 rounded-md py-2 hover:bg-orange-600 disabled:opacity-50">
+                No — it was real, count it
+              </button>
+              <button disabled={resolving} onClick={() => setOpenReview(null)}
+                className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-md py-2 hover:bg-stone-50 disabled:opacity-50">
+                Decide later
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
