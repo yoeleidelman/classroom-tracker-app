@@ -123,17 +123,6 @@ const DEFAULT_CONFIG = {
     finished: false, // did they reach the end of the wizard (vs. paused partway through)
     completedSteps: [], // step keys already gone through (filled in or explicitly skipped) — drives where "Continue setup" resumes
   },
-  // Preschool only — a checkout after this time is highlighted distinctly on the check-in/out
-  // history chart, since that's specifically the moment a late-pickup fee applies. Empty means no
-  // highlighting at all; a teacher sets this deliberately, since the actual cutoff genuinely
-  // differs by school.
-  // schoolEndTime is deliberately separate from latePickupTime above — school ending and a late
-  // fee starting are two different real moments (school itself might end at 3:30, with billing
-  // only starting five minutes later, at 3:35). Once set, no check-IN is allowed at or after this
-  // time, for anyone, staff included — confirmed directly this needs to be a hard, no-exceptions
-  // rule: the exact hole this closes is a family's own already-departed device somehow still being
-  // able to log a check-in after the child has genuinely already gone home for the day.
-  checkInOut: { latePickupTime: "", schoolEndTime: "" },
   flagThreshold: 2,
   masteryThreshold: 2,
   tierMessages: {
@@ -1087,6 +1076,17 @@ function dedupeDailyLogData(data) {
 // which family is signed in when they scan it, not by anything encoded in the code itself.
 const SCHOOLWIDE_CHECKIN_CODE = "checkin:schoolwide";
 
+// A genuinely school-wide setting, deliberately not part of any one class's own config — reported
+// directly, precisely, after the per-class version caused real confusion: these two times are the
+// same shared, real-world policy for the whole school, not a decision any one classroom's own
+// teacher should need to make (or repeat) on their own. Set once, in one place, in the Admin
+// Dashboard, next to the school's own QR check-in code — never something to go looking for inside
+// any individual class's own Settings screen.
+async function loadCheckInOutSettings() {
+  const settings = (await loadJSON("schoolSettings", {}, true)) || {};
+  return settings.checkInOut || {};
+}
+
 function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, actionId, schoolEndTime) {
   const list = existingCheckIns || [];
   // Idempotency guard: once two independent paths can both eventually complete the exact same
@@ -1133,8 +1133,8 @@ function isCheckedInNow(checkIns, date) {
 // class at once rather than the one class a teacher happens to be logged into.
 async function toggleCheckInForStudent(classId, studentId, byLabel) {
   const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true)) || emptyStudentData();
-  const classConfig = await loadJSON(`class:${classId}:config`, DEFAULT_CONFIG, true);
-  const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, null, null, classConfig.checkInOut?.schoolEndTime);
+  const checkInOutSettings = await loadCheckInOutSettings();
+  const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, null, null, checkInOutSettings.schoolEndTime);
   await saveJSON(`class:${classId}:kriya:${studentId}`, { ...data, checkIns: result.checkIns }, true);
   return result;
 }
@@ -1340,14 +1340,14 @@ async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLab
     ? status.fullDataByClassId[targetClassId]
     : await loadJSON(`class:${targetClassId}:kriya:${studentId}`, null, true, 2, true);
   const currentCheckIns = freshData?.checkIns || [];
-  const targetConfig = await loadJSON(`class:${targetClassId}:config`, DEFAULT_CONFIG, true);
-  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime, actionId, targetConfig.checkInOut?.schoolEndTime);
+  const checkInOutSettings = await loadCheckInOutSettings();
+  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime, actionId, checkInOutSettings.schoolEndTime);
   // A blocked attempt writes nothing at all — thrown, not returned normally, specifically so the
   // optimistic-toggle retry loop above can recognize this as a permanent block rather than a
   // transient failure worth retrying for the next six minutes, and can revert what it optimistically
   // showed back to the truth instead of leaving it stuck on something that was never really saved.
   if (result.action === "blocked-school-ended") {
-    const err = new Error(`Check-in isn't available after ${formatTime12h(targetConfig.checkInOut.schoolEndTime)} — school has already ended for the day.`);
+    const err = new Error(`Check-in isn't available after ${formatTime12h(checkInOutSettings.schoolEndTime)} — school has already ended for the day.`);
     err.checkInBlocked = true;
     throw err;
   }
@@ -3518,18 +3518,10 @@ function AppInner() {
     const roster = [];
     const studentData = {};
     const incidentsByKey = {};
-    let latePickupTime = "";
-    let schoolEndTime = "";
+    const checkInOutSettings = await loadCheckInOutSettings();
     for (const cls of allClasses) {
       const clsRoster = await loadJSON(`class:${cls.id}:roster`, [], true);
-      const clsConfig = await loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true);
       const clsIncidents = await loadJSON(`class:${cls.id}:incidents`, [], true);
-      // First non-empty value found wins — both of these are almost always one shared,
-      // school-wide policy rather than something that genuinely differs class by class, so this
-      // stays a single, simple setting for the combined view rather than needing its own separate
-      // configuration on top of what each class already has.
-      if (!latePickupTime && clsConfig.checkInOut?.latePickupTime) latePickupTime = clsConfig.checkInOut.latePickupTime;
-      if (!schoolEndTime && clsConfig.checkInOut?.schoolEndTime) schoolEndTime = clsConfig.checkInOut.schoolEndTime;
       for (const s of clsRoster) {
         const key = `${cls.id}:${s.id}`; // same student possibly enrolled in more than one class — kept as separate rows, one per actual enrollment, rather than merged into one that could only show one class's own check-ins
         roster.push({ id: key, studentId: s.id, name: s.name, className: cls.name });
@@ -3538,7 +3530,7 @@ function AppInner() {
       }
     }
     roster.sort((a, b) => a.name.localeCompare(b.name));
-    return { roster, studentData, incidentsByKey, latePickupTime, schoolEndTime };
+    return { roster, studentData, incidentsByKey, latePickupTime: checkInOutSettings.latePickupTime, schoolEndTime: checkInOutSettings.schoolEndTime };
   };
 
   // Builds the full set of export rows, one array per requested data type, for whatever scope
@@ -6382,6 +6374,10 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <p className="text-xs text-stone-400 mb-3">One shared code for the whole school — the same code works for every family, every day. Print it and post it wherever families actually walk in.</p>
           <SchoolwideQRCode />
         </div>
+
+        <div className="mt-6 pt-6 border-t border-stone-200">
+          <CheckInOutTimingSettings />
+        </div>
         </>
         )}
 
@@ -6938,7 +6934,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           {checkInHistoryData === null ? (
             <p className="text-xs text-stone-400">Loading…</p>
           ) : (
-            <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} config={{ checkInOut: { latePickupTime: checkInHistoryData.latePickupTime, schoolEndTime: checkInHistoryData.schoolEndTime } }} />
+            <CheckInOutHistoryChart roster={checkInHistoryData.roster} studentData={checkInHistoryData.studentData} latePickupTime={checkInHistoryData.latePickupTime} schoolEndTime={checkInHistoryData.schoolEndTime} />
           )}
         </div>
         <div className="pt-1 mb-6 border-t border-stone-100">
@@ -10791,6 +10787,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [randomPickerData, setRandomPickerData] = useState({ bag: [], lastPickedId: null });
   const [alerts, setAlerts] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
+  // A genuinely school-wide setting now, not part of this (or any) class's own config — loaded
+  // once here alongside it purely so the check-in/out history screen below has it on hand.
+  const [checkInOutSettings, setCheckInOutSettings] = useState({});
+  useEffect(() => { loadCheckInOutSettings().then(setCheckInOutSettings); }, []);
   const [view, setViewRaw] = useState(() => {
     if (deepLinkGroupId) return "messages";
     // Restores whichever screen was open if the class itself was just restored from the URL too
@@ -12384,9 +12384,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       // and only updates studentData once it has genuinely succeeded — not before.
       performRealToggle: async (atTime, actionId) => {
         const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true, 2, true)) || studentData[studentId] || emptyStudentData();
-        const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, atTime, actionId, config.checkInOut?.schoolEndTime);
+        const checkInOutSettings = await loadCheckInOutSettings();
+        const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, atTime, actionId, checkInOutSettings.schoolEndTime);
         if (result.action === "blocked-school-ended") {
-          const err = new Error(`Check-in isn't available after ${formatTime12h(config.checkInOut.schoolEndTime)} — school has already ended for the day.`);
+          const err = new Error(`Check-in isn't available after ${formatTime12h(checkInOutSettings.schoolEndTime)} — school has already ended for the day.`);
           err.checkInBlocked = true;
           throw err;
         }
@@ -12606,7 +12607,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           <button onClick={() => navigateView("attendance")} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
           <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Check-in/out history</h1>
           <p className="text-xs text-stone-400 mb-5">{className}</p>
-          <CheckInOutHistoryChart roster={roster} studentData={studentData} config={config} />
+          <CheckInOutHistoryChart roster={roster} studentData={studentData} latePickupTime={checkInOutSettings.latePickupTime} schoolEndTime={checkInOutSettings.schoolEndTime} />
         </div>
       )}
 
@@ -17383,7 +17384,7 @@ function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresh
   return result;
 }
 
-function CheckInOutHistoryChart({ roster, studentData, config }) {
+function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEndTime }) {
   const [monthStart, setMonthStart] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
@@ -17397,8 +17398,6 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
   const monthLabel = monthDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
   const daysInMonth = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate();
   const monthDates = Array.from({ length: daysInMonth }, (_, i) => addDaysISO(monthStart, i));
-  const latePickupTime = config.checkInOut?.latePickupTime;
-  const schoolEndTime = config.checkInOut?.schoolEndTime;
   const todayStr = todayISO();
 
   return (
@@ -24912,6 +24911,53 @@ function SchoolwideQRCode() {
   );
 }
 
+// Set once, here, school-wide — moved out of each individual class's own Settings screen after it
+// caused real, reported confusion: this is one shared, real-world policy for the whole school
+// (school itself ends at one time, a late-pickup fee starts at another, a few minutes later), not
+// a decision that should ever need making — or repeating — inside any one classroom's own
+// settings. Matches OfficeContactSettings's own pattern exactly, the same shared "schoolSettings"
+// document, since this is the exact same kind of setting.
+function CheckInOutTimingSettings() {
+  const [schoolEndTime, setSchoolEndTime] = useState("");
+  const [latePickupTime, setLatePickupTime] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    loadCheckInOutSettings().then((s) => {
+      setSchoolEndTime(s?.schoolEndTime || "");
+      setLatePickupTime(s?.latePickupTime || "");
+      setLoaded(true);
+    });
+  }, []);
+
+  const save = async (field, value) => {
+    const existing = (await loadJSON("schoolSettings", {}, true)) || {};
+    const nextCheckInOut = { ...(existing.checkInOut || {}), [field]: value };
+    await saveJSON("schoolSettings", { ...existing, checkInOut: nextCheckInOut }, true);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  if (!loaded) return null;
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-4 max-w-sm">
+      <p className="text-sm font-semibold text-stone-800 mb-1">Check-in / check-out times</p>
+      <p className="text-xs text-stone-400 mb-3">One shared setting for the whole school, not per class.</p>
+      <label className="block text-xs font-medium text-stone-500 mb-1">School ends at (optional)</label>
+      <input type="time" value={schoolEndTime} onChange={(e) => { setSchoolEndTime(e.target.value); save("schoolEndTime", e.target.value); }}
+        className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
+      <p className="text-[11px] text-stone-400 mb-3">Once it's this time, checking a student IN is no longer possible — for anyone, staff included. Checking a student out always stays possible, any time. Leave blank to turn this off.</p>
+      <label className="block text-xs font-medium text-stone-500 mb-1">Late pickup starts at (optional)</label>
+      <input type="time" value={latePickupTime} onChange={(e) => { setLatePickupTime(e.target.value); save("latePickupTime", e.target.value); }}
+        className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
+      <p className="text-[11px] text-stone-400">A checkout at or after this time is highlighted in orange on the check-in/out history chart, so a late pickup is easy to spot for billing. Leave blank to turn this off.</p>
+      {saved && <p className="text-xs font-semibold text-emerald-700 mt-2">Saved.</p>}
+    </div>
+  );
+}
+
 // Lets admin set up all five weekdays at once for any of the three preschool meal types, rather
 // than only being able to edit "today's" menu from the logging screen itself (which works fine
 // for a quick on-the-spot fix, but is the wrong tool for entering a whole week's worth of menus
@@ -25283,12 +25329,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
         {isPreschool && (
         <Section title="Check-in / check-out">
-          <label className="block text-xs font-medium text-stone-500 mb-1">School ends at (optional)</label>
-          <input type="time" value={config.checkInOut?.schoolEndTime || ""} onChange={(e) => update((c) => { c.checkInOut = c.checkInOut || {}; c.checkInOut.schoolEndTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
-          <p className="text-[11px] text-stone-400 mb-3">Once it's this time, checking a student IN is no longer possible — for anyone, staff included. Checking a student out always stays possible, any time. Leave blank to turn this off.</p>
-          <label className="block text-xs font-medium text-stone-500 mb-1">Late pickup starts at (optional)</label>
-          <input type="time" value={config.checkInOut?.latePickupTime || ""} onChange={(e) => update((c) => { c.checkInOut = c.checkInOut || {}; c.checkInOut.latePickupTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
-          <p className="text-[11px] text-stone-400">A checkout at or after this time is highlighted in orange on the check-in/out history chart, so a late pickup is easy to spot for billing. Leave blank to turn this off.</p>
+          <p className="text-xs text-stone-400">School's own end time and late-pickup cutoff are set once, school-wide, by admin — not here, per class. Find them in the Admin Dashboard, right alongside the school's own QR check-in code.</p>
         </Section>
         )}
 

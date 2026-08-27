@@ -346,9 +346,11 @@ async function handleFallbackCheckIn(req, res, decoded) {
     }
     const targetClassId = openClassId || classLinks[0].classId;
     const targetData = dataByClassId[targetClassId] || { checkIns: [] };
-    const targetConfigSnap = await tx.get(db.collection("data").doc(`class:${targetClassId}:config`));
-    const targetConfig = targetConfigSnap.exists ? targetConfigSnap.data().value : {};
-    const toggled = computeToggledCheckInServerSide(targetData.checkIns, atDate, byLabel, atTime, actionId, targetConfig?.checkInOut?.schoolEndTime);
+    // A genuinely school-wide setting, not part of any one class's own config — the same shared
+    // "schoolSettings" document the client's own settings screen reads and writes.
+    const schoolSettingsSnap = await tx.get(db.collection("data").doc("schoolSettings"));
+    const schoolSettings = schoolSettingsSnap.exists ? schoolSettingsSnap.data().value : {};
+    const toggled = computeToggledCheckInServerSide(targetData.checkIns, atDate, byLabel, atTime, actionId, schoolSettings?.checkInOut?.schoolEndTime);
     // A blocked attempt writes nothing — the family's already-real, already-recorded state stands.
     if (toggled.action === "blocked-school-ended") return { ...toggled, classId: targetClassId };
     tx.set(refs[classLinks.findIndex((l) => l.classId === targetClassId)], { ...targetData, checkIns: toggled.checkIns });
