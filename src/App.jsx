@@ -17263,7 +17263,19 @@ function WeeklyTrackerGrid({ roster, cat, trackerLog, toggleTracker }) {
 // completely different, real event, not a glitch, and stays exactly as recorded. This only ever
 // changes how a check-in history is DISPLAYED; the actual stored entries are never rewritten, so
 // nothing about the real underlying record is ever touched.
-function collapseQuickReCheckIns(checkIns, thresholdMinutes = 10) {
+//
+// A second, real risk was raised directly, precisely, right after the first fix shipped: the
+// exact same mechanism cuts the other way too. A family's real, genuinely on-time pickup,
+// followed minutes later by an accidental phone tap re-opening and then re-closing the check-in
+// (the child already gone, nobody actually there) would get merged forward to that meaningless,
+// brief re-closing — turning an already-safe, on-time pickup into a wrongly-billed late one. Since
+// this app's late flag is what a real, real-money billing decision gets made from, a merge is
+// only ever allowed to push a checkout time later, past the late cutoff, when the session
+// responsible for that later time was itself substantial — not a brief, few-minute blip. A short
+// reopening that would newly turn an on-time pickup into a late one is discarded outright, exactly
+// the noise it almost certainly is, and the already-safe, already-recorded on-time checkout is
+// left standing rather than getting quietly overwritten by it.
+function collapseQuickReCheckIns(checkIns, latePickupTime, thresholdMinutes = 10, blipMaxMinutes = 20) {
   const sorted = [...(checkIns || [])].sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1;
     return (a.checkInTime || "") < (b.checkInTime || "") ? -1 : 1;
@@ -17274,7 +17286,15 @@ function collapseQuickReCheckIns(checkIns, thresholdMinutes = 10) {
     const gapMinutes = prev && prev.date === entry.date && prev.checkOutTime && entry.checkInTime
       ? timeToMinutes(entry.checkInTime) - timeToMinutes(prev.checkOutTime)
       : null;
-    if (gapMinutes !== null && gapMinutes >= 0 && gapMinutes <= thresholdMinutes) {
+    const mergeable = gapMinutes !== null && gapMinutes >= 0 && gapMinutes <= thresholdMinutes;
+    if (mergeable) {
+      const prevWasLate = Boolean(latePickupTime) && prev.checkOutTime > latePickupTime;
+      const thisWouldBeLate = Boolean(latePickupTime) && entry.checkOutTime && entry.checkOutTime > latePickupTime;
+      const thisDuration = entry.checkOutTime && entry.checkInTime ? timeToMinutes(entry.checkOutTime) - timeToMinutes(entry.checkInTime) : null;
+      const isSuspiciousBlip = !prevWasLate && thisWouldBeLate && thisDuration !== null && thisDuration <= blipMaxMinutes;
+      if (isSuspiciousBlip) {
+        continue; // eslint-disable-line no-continue -- discard the blip entirely; the safe, on-time checkout already recorded stands
+      }
       result[result.length - 1] = { ...prev, checkOutTime: entry.checkOutTime, checkOutBy: entry.checkOutBy };
     } else {
       result.push(entry);
@@ -17323,14 +17343,16 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
         // the place" rather than a real, aligned grid. table-layout: fixed forces every column to
         // the same width; a fixed min-height on each cell (and vertically centered content) does
         // the same for row height, so an empty "–" cell and a cell with two check-in/out entries
-        // stacked in it take up the exact same footprint either way.
+        // stacked in it take up the exact same footprint either way. Real dividing lines, both
+        // directions, on every cell — confirmed directly this is what actually reads as a grid to
+        // the eye, not just uniform sizing on its own.
         <div className="overflow-x-auto -mx-4 px-4">
           <table className="text-xs border-separate" style={{ borderSpacing: 0, tableLayout: "fixed", width: `${110 + daysInMonth * 56}px` }}>
             <thead>
               <tr>
-                <th className="text-left pb-2 pr-3 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)]" style={{ width: "110px" }}>Student</th>
+                <th className="text-left pb-2 pr-3 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)] border-b-2 border-stone-300" style={{ width: "110px" }}>Student</th>
                 {monthDates.map((d) => (
-                  <th key={d} className={`pb-2 text-center font-semibold whitespace-nowrap ${d === todayStr ? "text-teal-700" : "text-stone-500"}`} style={{ width: "56px" }}>
+                  <th key={d} className={`pb-2 text-center font-semibold whitespace-nowrap border-b-2 border-l border-stone-300 ${d === todayStr ? "text-teal-700 bg-teal-50" : "text-stone-500"}`} style={{ width: "56px" }}>
                     {new Date(`${d}T00:00:00`).getDate()}
                   </th>
                 ))}
@@ -17338,7 +17360,7 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
             </thead>
             <tbody>
               {roster.map((s) => {
-                const checkIns = collapseQuickReCheckIns(studentData[s.id]?.checkIns || []);
+                const checkIns = collapseQuickReCheckIns(studentData[s.id]?.checkIns || [], latePickupTime);
                 return (
                   <tr key={s.id}>
                     <td className="py-2 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)] border-t border-stone-200 align-middle" style={{ height: "56px" }}>
@@ -17348,7 +17370,7 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
                     {monthDates.map((d) => {
                       const entries = checkIns.filter((c) => c.date === d).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
                       return (
-                        <td key={d} className="text-center border-t border-stone-200 align-middle" style={{ height: "56px" }}>
+                        <td key={d} className={`text-center border-t border-l border-stone-200 align-middle ${d === todayStr ? "bg-teal-50/40" : ""}`} style={{ height: "56px" }}>
                           {entries.length === 0 ? (
                             <span className="text-stone-300">–</span>
                           ) : (
@@ -17420,7 +17442,7 @@ function PreschoolStudentHistoryView({ studentName, studentId, data, incidents, 
   const byDateDesc = (a, b) => (a.date < b.date ? 1 : -1);
   const byDateTimeDesc = (a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1));
 
-  const checkInRows = [...(collapseQuickReCheckIns(data.checkIns || []))].sort(byDateDesc)
+  const checkInRows = [...(collapseQuickReCheckIns(data.checkIns || [], null))].sort(byDateDesc)
     .map((c) => ({ key: c.id, date: c.date, cells: [c.checkInTime ? formatTime12h(c.checkInTime) : "–", c.checkOutTime ? formatTime12h(c.checkOutTime) : "still here"] }));
   const napRows = [...(data.naps || [])].sort(byDateDesc)
     .map((n, i) => ({ key: `${n.date}-${i}`, date: n.date, cells: [n.start ? formatTime12h(n.start) : "–", n.end ? formatTime12h(n.end) : "–"] }));
