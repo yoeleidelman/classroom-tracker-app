@@ -2111,6 +2111,25 @@ async function deleteMessageInThread(storageKey, messageId) {
   await saveJSON(storageKey, next, true);
   return next;
 }
+
+// Reactions on a message, the same way a blog post or a specific block within one already
+// supports them — reuses that exact same computeSingleChoiceReactions logic (one reaction per
+// person, picking a new one replaces theirs, picking the same one again removes it), just applied
+// to one specific message inside a thread instead of a post. reactorId is deliberately each
+// individual account's own uid, never a shared family identity — the exact same lesson already
+// learned the hard way on blog posts, where two guardians sharing one identity meant one of them
+// silently overwrote the other's reaction; using each person's own real, individual account here
+// avoids that from ever happening on messages too.
+async function reactToMessageInThread(storageKey, messageId, emoji, reactorId, reactorName) {
+  const thread = (await loadJSON(storageKey, null, true)) || { messages: [] };
+  const next = {
+    messages: thread.messages.map((m) => (m.id === messageId
+      ? { ...m, reactions: computeSingleChoiceReactions(m.reactions, emoji, reactorId, reactorName) }
+      : m)),
+  };
+  await saveJSON(storageKey, next, true);
+  return next;
+}
 // Snoozing doesn't mark a thread read — it just quiets the indicator for a while, so an unread
 // reply still shows as unread once the snooze period passes, rather than being silently dismissed.
 async function snoozeThread(viewerId, threadKey, minutes) {
@@ -7529,7 +7548,12 @@ function AttachmentMenuButton({ onPickFile, onPickFiles }) {
   );
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, myRole, config, teacher, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead }) {
+  // Whichever one is actually present depends on which side of the conversation is viewing —
+  // never both at once, since a thread is only ever opened by one specific person at a time.
+  const currentUserId = teacher?.uid || family?.uid || null;
+  const currentUserName = teacher?.name || family?.name || "Someone";
+  const [openReactionsFor, setOpenReactionsFor] = useState(null); // messageId, while its WhoReactedSheet is open
   const [text, setText] = useState("");
   // The id of the LAST message from me that the family has actually read — matching the standard
   // "seen" placement in any messaging app, right under the newest one that qualifies, not
@@ -7687,6 +7711,10 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
     await onDelete(id);
     setOpenActionsFor(null);
   };
+  const handleReact = async (messageId, emoji) => {
+    if (!onReact || !currentUserId) return;
+    await onReact(messageId, emoji, currentUserId, currentUserName);
+  };
 
   const generate = async () => {
     if (!roughNote.trim() || generating) return;
@@ -7830,6 +7858,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
             <Fragment key={m.id}>
               {divider}
               <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+              <ReactableContent reactions={m.reactions} currentUserId={currentUserId} onReact={(emoji) => handleReact(m.id, emoji)}>
               <div className={`max-w-[80%] rounded-2xl overflow-hidden relative ${mine ? `${mineBubble.base} text-white` : "bg-white border border-stone-200 text-stone-800"}`}>
                 <div className="px-3.5 pt-2.5 flex items-start justify-between gap-2">
                   <p className={`text-[10px] font-semibold mb-0.5 ${mine ? mineBubble.lightText : "text-stone-400"}`}>{m.senderName}</p>
@@ -7930,7 +7959,17 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                   </>
                 )}
               </div>
+              </ReactableContent>
+              {m.reactions && Object.values(m.reactions).some((entries) => (entries || []).length > 0) && (
+                <ReactionBadge reactions={m.reactions} onOpen={() => setOpenReactionsFor(m.id)}
+                  className={`-mt-2.5 relative z-10 ${mine ? "mr-2" : "ml-2"}`} />
+              )}
               </div>
+              {openReactionsFor === m.id && (
+                <WhoReactedSheet
+                  summary={BLOG_REACTIONS.map((r) => ({ ...r, entries: m.reactions?.[r.key] || [] })).filter((r) => r.entries.length > 0)}
+                  onClose={() => setOpenReactionsFor(null)} />
+              )}
             </Fragment>
           );
         })}
@@ -9663,10 +9702,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
-        <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" threadKey={`class-${messagingClassId}`}
+        <ConversationThreadView title={className} messages={messagingThread.messages} myRole="family" family={family} threadKey={`class-${messagingClassId}`}
           lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => safeGoBack("thread", () => setMessagingClassId(null))}
-          onSend={async (text, attachments) => { await sendMessageToTeacher(messagingClassId, text, attachments); }} />
+          onSend={async (text, attachments) => { await sendMessageToTeacher(messagingClassId, text, attachments); }}
+          onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(`class:${messagingClassId}:messages:${family.uid}`, messageId, emoji, reactorId, reactorName); }} />
       </div>
     );
   }
@@ -9682,10 +9722,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             with them regardless of which child's context led here, so showing whichever label
             happened to be picked would read as contradicting whichever one the person actually
             tapped through from. */}
-        <ConversationThreadView title={teacherName} subtitle="Direct message" messages={teacherMessagingThread.messages} myRole="family" threadKey={`teacher-${messagingTeacherUid}`}
+        <ConversationThreadView title={teacherName} subtitle="Direct message" messages={teacherMessagingThread.messages} myRole="family" family={family} threadKey={`teacher-${messagingTeacherUid}`}
           lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => safeGoBack("thread", () => setMessagingTeacherUid(null))}
-          onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }} />
+          onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }}
+          onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(`teacher-messages:${messagingTeacherUid}:${family.uid}`, messageId, emoji, reactorId, reactorName); }} />
       </div>
     );
   }
@@ -10360,7 +10401,8 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
           onBack={() => { setOpenGroup(null); refresh(); }}
           onSend={async (text, attachments, scheduledFor) => { await sendMessage(openGroup.groupId, text, attachments, scheduledFor); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
-          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }}
+          onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(storageKey, messageId, emoji, reactorId, reactorName); await refresh(); }} />
       </>
     );
   }
@@ -18343,11 +18385,12 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
     return (
       <>
         <GlobalAppStyles />
-        <ConversationThreadView title={guardianNames} myRole="admin" messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
+        <ConversationThreadView title={guardianNames} myRole="admin" teacher={loggedInTeacher} messages={thread.messages} threadKey={`admin-${openGroup.groupId}`}
           onBack={() => { safeGoBack("thread", () => setOpenGroup(null)); refresh(); }}
           onSend={async (text, attachments, scheduledFor) => { await sendToFamily(openGroup.groupId, text, attachments, scheduledFor); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
-          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }} />
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }}
+          onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(storageKey, messageId, emoji, reactorId, reactorName); await refresh(); }} />
       </>
     );
   }
@@ -18634,7 +18677,8 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
           onBack={() => { safeGoBack("thread", () => setOpenGroup(null)); refresh(); }}
           onSend={async (text, attachments, scheduledFor) => { await sendMessageToFamily(openGroup.groupId, text, attachments, scheduledFor); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
-          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }} />
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }}
+          onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(storageKey, messageId, emoji, reactorId, reactorName); }} />
       </>
     );
   }
@@ -18653,7 +18697,8 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
           onSend={async (text, attachments, scheduledFor) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments, scheduledFor); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); }}
-          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }} />
+          onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); }}
+          onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(storageKey, messageId, emoji, reactorId, reactorName); }} />
       </>
     );
   }
