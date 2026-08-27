@@ -6142,7 +6142,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   return (
     <div className="min-h-screen bg-stone-50 px-4 py-10">
       <GlobalAppStyles />
-      <div className="max-w-lg mx-auto">
+      <div className="app-page-wide">
         <div className="flex items-center justify-between mb-1">
           <h1 className="display-font text-2xl font-bold text-stone-900">Admin Dashboard</h1>
           <div className="flex items-center gap-3">
@@ -17244,11 +17244,13 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
         <button onClick={() => shiftMonth(-1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Previous month"><ChevronLeft size={16} /></button>
         <span className="text-sm font-semibold text-stone-800">{monthLabel}</span>
         <button onClick={() => shiftMonth(1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Next month"><ChevronRight size={16} /></button>
-        {latePickupTime && (
-          <span className="text-[11px] text-stone-500 ml-2 flex items-center gap-1">
-            <span className="w-2.5 h-2.5 rounded-sm bg-rose-200 inline-block shrink-0" /> Checked out after {formatTime12h(latePickupTime)}
-          </span>
-        )}
+        <div className="flex items-center gap-3 ml-2 text-[11px] text-stone-500">
+          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block shrink-0" /> Signed in</span>
+          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-slate-400 inline-block shrink-0" /> Signed out</span>
+          {latePickupTime && (
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block shrink-0" /> Signed out after {formatTime12h(latePickupTime)}</span>
+          )}
+        </div>
       </div>
       {roster.length === 0 ? (
         <p className="text-sm text-stone-400 text-center py-8">No students to show.</p>
@@ -17257,9 +17259,9 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
           <table className="text-xs border-separate" style={{ borderSpacing: 0 }}>
             <thead>
               <tr>
-                <th className="text-left pb-2 pr-3 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec] z-10">Student</th>
+                <th className="text-left pb-2 pr-3 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)]">Student</th>
                 {monthDates.map((d) => (
-                  <th key={d} className={`pb-2 px-1.5 text-center font-semibold whitespace-nowrap ${d === todayStr ? "text-teal-700" : "text-stone-500"}`}>
+                  <th key={d} className={`pb-2 px-1 text-center font-semibold whitespace-nowrap ${d === todayStr ? "text-teal-700" : "text-stone-500"}`}>
                     {new Date(`${d}T00:00:00`).getDate()}
                   </th>
                 ))}
@@ -17269,24 +17271,35 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
               {roster.map((s) => {
                 const checkIns = studentData[s.id]?.checkIns || [];
                 return (
-                  <tr key={s.id} className="border-t border-stone-200">
-                    <td className="py-1.5 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10">
+                  <tr key={s.id}>
+                    <td className="py-2 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)] border-t border-stone-200">
                       {s.name}
                       {s.className && <span className="block text-[10px] text-stone-400 font-normal">{s.className}</span>}
                     </td>
                     {monthDates.map((d) => {
                       const entries = checkIns.filter((c) => c.date === d).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
-                      const isLate = Boolean(latePickupTime) && entries.some((e) => e.checkOutTime && e.checkOutTime > latePickupTime);
                       return (
-                        <td key={d} className={`text-center py-1.5 px-1.5 whitespace-nowrap ${isLate ? "bg-rose-100" : ""}`}>
+                        <td key={d} className="text-center py-2 px-1 whitespace-nowrap border-t border-stone-200">
                           {entries.length === 0 ? (
                             <span className="text-stone-300">–</span>
                           ) : (
-                            entries.map((e) => (
-                              <div key={e.id} className={isLate ? "text-rose-700 font-semibold" : "text-stone-600"}>
-                                {formatTimeCompact(e.checkInTime)}{e.checkOutTime ? `–${formatTimeCompact(e.checkOutTime)}` : ""}
-                              </div>
-                            ))
+                            <div className="flex flex-col gap-0.5 items-center">
+                              {entries.map((e) => {
+                                const isLate = Boolean(latePickupTime) && e.checkOutTime && e.checkOutTime > latePickupTime;
+                                return (
+                                  <div key={e.id} className={`rounded-md px-1.5 py-0.5 leading-tight ${isLate ? "bg-rose-100 border border-rose-300" : "bg-stone-100"}`}>
+                                    <div className="flex items-center gap-0.5 text-emerald-700 font-semibold">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />{formatTimeCompact(e.checkInTime)}
+                                    </div>
+                                    {e.checkOutTime && (
+                                      <div className={`flex items-center gap-0.5 font-semibold ${isLate ? "text-rose-700" : "text-slate-500"}`}>
+                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${isLate ? "bg-rose-500" : "bg-slate-400"}`} />{formatTimeCompact(e.checkOutTime)}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
                           )}
                         </td>
                       );
@@ -17309,47 +17322,50 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
 // student lookup — the data handed in differs (one class's own kriya record vs. every class a
 // student is actually enrolled in, combined), but how it's organized and displayed is identical
 // either way, so this one component serves both rather than two separate copies of it.
-const PRESCHOOL_HISTORY_TYPES = [
-  { id: "checkIns", label: "Check-in/out" },
-  { id: "naps", label: "Naps" },
-  { id: "meals", label: "Meals" },
-  { id: "mood", label: "Mood" },
-  { id: "diapers", label: "Diapers" },
-  { id: "bathroom", label: "Bathroom" },
-];
+// Shown as a genuine grid of its own separate sections rather than one tab at a time — confirmed
+// directly this matters once there's real width to use: "I wanna see everything... we could
+// actually see everything at once." Lunch and snacks get their own separate sections too, for the
+// same reason directly named: "break it up better, snack and lunch not be on the same thing."
+function PreschoolStudentHistorySection({ title, color, rows, emptyText }) {
+  const st = TILE_STYLES[color] || TILE_STYLES.indigo;
+  return (
+    <div className={`rounded-xl border-2 p-3 ${st.tileBg} ${st.tileBorder}`}>
+      <p className={`text-xs font-bold uppercase tracking-wide mb-2 ${st.labelText}`}>{title}</p>
+      {rows.length === 0 ? (
+        <p className="text-xs text-stone-400">{emptyText}</p>
+      ) : (
+        <ul className="space-y-1 max-h-52 overflow-y-auto pr-1">
+          {rows.map((r) => (
+            <li key={r.key} className="flex items-center justify-between gap-2 bg-white/70 rounded-md px-2 py-1 text-xs">
+              <span className="text-stone-500 shrink-0">{r.date}</span>
+              <span className="text-stone-800 font-semibold text-right">{r.cells.join(" — ")}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function PreschoolStudentHistoryView({ studentName, data, onBack }) {
-  const [activeType, setActiveType] = useState("checkIns");
-  const mealTypeLabel = (mt) => (mt === "snack-am" ? "Morning Snack" : mt === "snack-pm" ? "Afternoon Snack" : "Lunch");
+  const byDateDesc = (a, b) => (a.date < b.date ? 1 : -1);
+  const byDateTimeDesc = (a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1));
 
-  const rows = (() => {
-    if (activeType === "checkIns") {
-      return [...(data.checkIns || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
-        .map((c) => ({ key: c.id, date: c.date, cells: [c.checkInTime ? formatTime12h(c.checkInTime) : "–", c.checkOutTime ? formatTime12h(c.checkOutTime) : "–"] }));
-    }
-    if (activeType === "naps") {
-      return [...(data.naps || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
-        .map((n, i) => ({ key: `${n.date}-${i}`, date: n.date, cells: [n.start ? formatTime12h(n.start) : "–", n.end ? formatTime12h(n.end) : "–"] }));
-    }
-    if (activeType === "meals") {
-      return [...(data.meals || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
-        .map((m, i) => ({ key: `${m.date}-${i}`, date: m.date, cells: [mealTypeLabel(m.mealType), MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount] }));
-    }
-    if (activeType === "mood") {
-      return [...(data.mood || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
-        .map((m, i) => {
-          const opt = PRESCHOOL_MOOD_OPTIONS.find((o) => o.id === m.mood);
-          return { key: `${m.date}-${i}`, date: m.date, cells: [opt ? `${opt.emoji} ${opt.label}` : m.mood] };
-        });
-    }
-    if (activeType === "diapers") {
-      return [...(data.diapers || [])].sort((a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1)))
-        .map((d) => ({ key: d.id, date: d.date, cells: [formatTime12h(d.time), DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type] }));
-    }
-    // bathroom
-    return [...(data.bathroom || [])].sort((a, b) => (a.date === b.date ? (a.time < b.time ? 1 : -1) : (a.date < b.date ? 1 : -1)))
-      .map((b) => ({ key: b.id, date: b.date, cells: [formatTime12h(b.time), BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type] }));
-  })();
+  const checkInRows = [...(data.checkIns || [])].sort(byDateDesc)
+    .map((c) => ({ key: c.id, date: c.date, cells: [c.checkInTime ? formatTime12h(c.checkInTime) : "–", c.checkOutTime ? formatTime12h(c.checkOutTime) : "still here"] }));
+  const napRows = [...(data.naps || [])].sort(byDateDesc)
+    .map((n, i) => ({ key: `${n.date}-${i}`, date: n.date, cells: [n.start ? formatTime12h(n.start) : "–", n.end ? formatTime12h(n.end) : "–"] }));
+  const mealsByType = (mealType) => [...(data.meals || [])].filter((m) => m.mealType === mealType).sort(byDateDesc)
+    .map((m, i) => ({ key: `${m.date}-${i}`, date: m.date, cells: [MEAL_AMOUNTS.find((a) => a.id === m.amount)?.label || m.amount] }));
+  const moodRows = [...(data.mood || [])].sort(byDateDesc)
+    .map((m, i) => {
+      const opt = PRESCHOOL_MOOD_OPTIONS.find((o) => o.id === m.mood);
+      return { key: `${m.date}-${i}`, date: m.date, cells: [opt ? `${opt.emoji} ${opt.label}` : m.mood] };
+    });
+  const diaperRows = [...(data.diapers || [])].sort(byDateTimeDesc)
+    .map((d) => ({ key: d.id, date: d.date, cells: [formatTime12h(d.time), DIAPER_TYPES.find((t) => t.id === d.type)?.label || d.type] }));
+  const bathroomRows = [...(data.bathroom || [])].sort(byDateTimeDesc)
+    .map((b) => ({ key: b.id, date: b.date, cells: [formatTime12h(b.time), BATHROOM_TRIP_TYPES.find((t) => t.id === b.type)?.label || b.type] }));
 
   return (
     <div>
@@ -17357,26 +17373,16 @@ function PreschoolStudentHistoryView({ studentName, data, onBack }) {
         <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
       )}
       <h1 className="display-font text-xl font-bold text-stone-900 mb-4">{studentName} — History</h1>
-      <div className="flex gap-1 bg-stone-100 rounded-lg p-1 mb-4 overflow-x-auto no-scrollbar">
-        {PRESCHOOL_HISTORY_TYPES.map((t) => (
-          <button key={t.id} onClick={() => setActiveType(t.id)}
-            className={`shrink-0 rounded-md py-1.5 px-3 text-xs font-semibold ${activeType === t.id ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-            {t.label}
-          </button>
-        ))}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <PreschoolStudentHistorySection title="Check-in / Check-out" color="teal" rows={checkInRows} emptyText="Nothing logged yet." />
+        <PreschoolStudentHistorySection title="Naps" color="violet" rows={napRows} emptyText="No naps logged yet." />
+        <PreschoolStudentHistorySection title="Lunch" color="amber" rows={mealsByType("lunch")} emptyText="No lunches logged yet." />
+        <PreschoolStudentHistorySection title="Morning Snack" color="amber" rows={mealsByType("snack-am")} emptyText="No morning snacks logged yet." />
+        <PreschoolStudentHistorySection title="Afternoon Snack" color="amber" rows={mealsByType("snack-pm")} emptyText="No afternoon snacks logged yet." />
+        <PreschoolStudentHistorySection title="Mood" color="sky" rows={moodRows} emptyText="No mood logged yet." />
+        <PreschoolStudentHistorySection title="Diapers" color="rose" rows={diaperRows} emptyText="Nothing logged yet." />
+        <PreschoolStudentHistorySection title="Bathroom" color="cyan" rows={bathroomRows} emptyText="Nothing logged yet." />
       </div>
-      {rows.length === 0 ? (
-        <p className="text-sm text-stone-400 text-center py-8">Nothing logged yet.</p>
-      ) : (
-        <ul className="space-y-1.5">
-          {rows.map((r) => (
-            <li key={r.key} className="flex items-center justify-between gap-3 bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm">
-              <span className="text-stone-500 shrink-0">{r.date}</span>
-              <span className="text-stone-800 font-medium text-right">{r.cells.join(" — ")}</span>
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
