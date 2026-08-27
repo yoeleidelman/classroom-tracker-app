@@ -17307,23 +17307,30 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
         <span className="text-sm font-semibold text-stone-800">{monthLabel}</span>
         <button onClick={() => shiftMonth(1)} className="text-stone-400 hover:text-teal-700 p-2 -m-1 rounded-full hover:bg-stone-100" aria-label="Next month"><ChevronRight size={16} /></button>
         <div className="flex items-center gap-3 ml-2 text-[11px] text-stone-600 font-medium">
-          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-emerald-500 inline-block shrink-0" /> Signed in</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-blue-500 inline-block shrink-0" /> Signed out</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-emerald-600 inline-block shrink-0" /> Signed in</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-rose-600 inline-block shrink-0" /> Signed out</span>
           {latePickupTime && (
-            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-rose-600 inline-block shrink-0" /> Signed out after {formatTime12h(latePickupTime)}</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-full bg-orange-500 inline-block shrink-0" /> ⚠️ Signed out after {formatTime12h(latePickupTime)}</span>
           )}
         </div>
       </div>
       {roster.length === 0 ? (
         <p className="text-sm text-stone-400 text-center py-8">No students to show.</p>
       ) : (
+        // A genuine fixed grid, deliberately — every day column and every cell the same size
+        // regardless of what it holds, confirmed directly this matters: a day with an entry
+        // taking up more room than an empty one was exactly what made the chart "look all over
+        // the place" rather than a real, aligned grid. table-layout: fixed forces every column to
+        // the same width; a fixed min-height on each cell (and vertically centered content) does
+        // the same for row height, so an empty "–" cell and a cell with two check-in/out entries
+        // stacked in it take up the exact same footprint either way.
         <div className="overflow-x-auto -mx-4 px-4">
-          <table className="text-xs border-separate" style={{ borderSpacing: 0 }}>
+          <table className="text-xs border-separate" style={{ borderSpacing: 0, tableLayout: "fixed", width: `${110 + daysInMonth * 56}px` }}>
             <thead>
               <tr>
-                <th className="text-left pb-2 pr-3 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)]">Student</th>
+                <th className="text-left pb-2 pr-3 font-semibold text-stone-600 sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)]" style={{ width: "110px" }}>Student</th>
                 {monthDates.map((d) => (
-                  <th key={d} className={`pb-2 px-1 text-center font-semibold whitespace-nowrap ${d === todayStr ? "text-teal-700" : "text-stone-500"}`}>
+                  <th key={d} className={`pb-2 text-center font-semibold whitespace-nowrap ${d === todayStr ? "text-teal-700" : "text-stone-500"}`} style={{ width: "56px" }}>
                     {new Date(`${d}T00:00:00`).getDate()}
                   </th>
                 ))}
@@ -17334,14 +17341,14 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
                 const checkIns = collapseQuickReCheckIns(studentData[s.id]?.checkIns || []);
                 return (
                   <tr key={s.id}>
-                    <td className="py-2 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)] border-t border-stone-200">
+                    <td className="py-2 pr-3 font-medium text-stone-800 whitespace-nowrap sticky left-0 bg-[#f7f3ec] z-10 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.15)] border-t border-stone-200 align-middle" style={{ height: "56px" }}>
                       {s.name}
                       {s.className && <span className="block text-[10px] text-stone-400 font-normal">{s.className}</span>}
                     </td>
                     {monthDates.map((d) => {
                       const entries = checkIns.filter((c) => c.date === d).sort((a, b) => (a.checkInTime < b.checkInTime ? -1 : 1));
                       return (
-                        <td key={d} className="text-center py-2 px-1 whitespace-nowrap border-t border-stone-200">
+                        <td key={d} className="text-center border-t border-stone-200 align-middle" style={{ height: "56px" }}>
                           {entries.length === 0 ? (
                             <span className="text-stone-300">–</span>
                           ) : (
@@ -17349,13 +17356,13 @@ function CheckInOutHistoryChart({ roster, studentData, config }) {
                               {entries.map((e) => {
                                 const isLate = Boolean(latePickupTime) && e.checkOutTime && e.checkOutTime > latePickupTime;
                                 return (
-                                  <div key={e.id} className={`rounded-md overflow-hidden ${isLate ? "ring-2 ring-rose-600" : ""}`}>
-                                    <div className="bg-emerald-500 text-white font-bold px-1.5 py-0.5 leading-tight">
+                                  <div key={e.id} className={`rounded-md overflow-hidden ${isLate ? "ring-2 ring-orange-500" : ""}`}>
+                                    <div className="bg-emerald-600 text-white font-bold px-1.5 py-0.5 leading-tight whitespace-nowrap">
                                       {formatTimeCompact(e.checkInTime)}
                                     </div>
                                     {e.checkOutTime && (
-                                      <div className={`text-white font-bold px-1.5 py-0.5 leading-tight ${isLate ? "bg-rose-600" : "bg-blue-500"}`}>
-                                        {formatTimeCompact(e.checkOutTime)}
+                                      <div className={`text-white font-bold px-1.5 py-0.5 leading-tight whitespace-nowrap ${isLate ? "bg-orange-500" : "bg-rose-600"}`}>
+                                        {isLate && "⚠️ "}{formatTimeCompact(e.checkOutTime)}
                                       </div>
                                     )}
                                   </div>
