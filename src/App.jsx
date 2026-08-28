@@ -6745,6 +6745,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <p className="text-sm font-semibold text-stone-800 mb-1">Family accounts</p>
           <p className="text-xs text-stone-400 mb-3">A separate portal, not the class app — a family signs in on their own link and only ever sees their own linked child(ren).</p>
 
+          <div className="mb-3">
+            <p className="text-xs font-semibold text-stone-700 mb-1">Family link check</p>
+            <FamilySyncChecker families={families} onUpdateFamily={onUpdateFamily} registry={registry} />
+          </div>
+
           <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5 mb-3">
             <label className="block text-xs font-semibold text-stone-700 mb-1">Default password for auto-created parent accounts</label>
             <div className="flex gap-2 items-center">
@@ -26279,6 +26284,73 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
 // Loads the admin's saved template, fills in this specific family's real information, and hands
 // it to the same Gmail-link-plus-copy-fallback component every other email action in the app
 // already uses — rather than a separate, one-off "send an email" mechanism just for this.
+// Checks every family's own denormalized linkedClassIds/linkedClassTypes against what would be
+// freshly recomputed, right now, from their actual, current studentLinks — the two are supposed
+// to always match, kept in sync automatically by updateFamilyRecord every time studentLinks
+// itself changes, but a family created or modified through an older code path, or before these
+// fields existed at all, can end up with a stale copy that a later signed-in backfill only ever
+// fixes if the field is missing outright, not if it's merely wrong. That drift is invisible in the
+// app itself — a family's own read of their own class's blog posts or messages can be silently
+// refused by Firestore's security rules, which check this denormalized copy specifically because
+// they can't safely search inside studentLinks' own richer {classId, studentId} shape — while
+// everything reading studentLinks directly, like the daily log, keeps working normally. Reported
+// directly as exactly this pattern: notifications firing, the daily log visible, but messages and
+// blog posts both silently empty for one specific family and no one else.
+function FamilySyncChecker({ families, onUpdateFamily, registry }) {
+  const [fixingUid, setFixingUid] = useState(null);
+  const [fixedUids, setFixedUids] = useState(new Set());
+
+  const mismatches = (families || []).map((f) => {
+    const realClassIds = [...new Set((f.studentLinks || []).map((l) => l.classId))].sort();
+    const storedClassIds = [...new Set(f.linkedClassIds || [])].sort();
+    const classIdsMatch = JSON.stringify(realClassIds) === JSON.stringify(storedClassIds);
+    const realClassTypes = [...new Set(
+      realClassIds.map((id) => registry.find((c) => c.id === id)).filter(Boolean).map((c) => c.classType || "elementary")
+    )].sort();
+    const storedClassTypes = [...new Set(f.linkedClassTypes || [])].sort();
+    const classTypesMatch = JSON.stringify(realClassTypes) === JSON.stringify(storedClassTypes);
+    return { family: f, ok: classIdsMatch && classTypesMatch, realClassIds, storedClassIds };
+  }).filter((m) => !m.ok);
+
+  const fix = async (family) => {
+    setFixingUid(family.uid);
+    try {
+      await onUpdateFamily(family.uid, { studentLinks: family.studentLinks || [] });
+      setFixedUids((prev) => new Set(prev).add(family.uid));
+    } finally {
+      setFixingUid(null);
+    }
+  };
+
+  if (mismatches.length === 0) {
+    return <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">Every family's own class links check out — nothing out of sync.</p>;
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
+        {mismatches.length} famil{mismatches.length === 1 ? "y has" : "ies have"} an out-of-sync class link — this is exactly the kind of mismatch that can silently hide blog posts and messages from a family while their daily log keeps working normally.
+      </p>
+      {mismatches.map(({ family, realClassIds, storedClassIds }) => (
+        <div key={family.uid} className="border border-stone-200 rounded-lg p-2.5 flex items-center justify-between gap-2">
+          <div>
+            <p className="text-xs font-semibold text-stone-800">{family.name || family.email}</p>
+            <p className="text-[11px] text-stone-500">Should be linked to: {realClassIds.join(", ") || "none"} — currently stored as: {storedClassIds.join(", ") || "none"}</p>
+          </div>
+          {fixedUids.has(family.uid) ? (
+            <span className="text-xs font-semibold text-emerald-700 shrink-0">Fixed</span>
+          ) : (
+            <button disabled={fixingUid === family.uid} onClick={() => fix(family)}
+              className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800 disabled:opacity-50 shrink-0">
+              {fixingUid === family.uid ? "Fixing…" : "Fix now"}
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SendParentSetupEmailButton({ parentName, studentName, email, tempPassword }) {
   const [template, setTemplate] = useState(null);
 
