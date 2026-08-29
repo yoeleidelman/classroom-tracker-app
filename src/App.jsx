@@ -6745,9 +6745,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <p className="text-sm font-semibold text-stone-800 mb-1">Family accounts</p>
           <p className="text-xs text-stone-400 mb-3">A separate portal, not the class app — a family signs in on their own link and only ever sees their own linked child(ren).</p>
 
+          <FamilyLookupTool families={families} teachers={teachers} />
+
           <div className="mb-3">
             <p className="text-xs font-semibold text-stone-700 mb-1">Family link check</p>
-            <FamilySyncChecker families={families} onUpdateFamily={onUpdateFamily} registry={registry} />
+            <FamilySyncChecker families={families} onUpdateFamily={onUpdateFamily} />
           </div>
 
           <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5 mb-3">
@@ -26284,32 +26286,143 @@ function MyAccountPanel({ teacher, onUpdateName, onChangePassword, onClose }) {
 // Loads the admin's saved template, fills in this specific family's real information, and hands
 // it to the same Gmail-link-plus-copy-fallback component every other email action in the app
 // already uses — rather than a separate, one-off "send an email" mechanism just for this.
-// Checks every family's own denormalized linkedClassIds/linkedClassTypes against what would be
-// freshly recomputed, right now, from their actual, current studentLinks — the two are supposed
-// to always match, kept in sync automatically by updateFamilyRecord every time studentLinks
-// itself changes, but a family created or modified through an older code path, or before these
-// fields existed at all, can end up with a stale copy that a later signed-in backfill only ever
-// fixes if the field is missing outright, not if it's merely wrong. That drift is invisible in the
-// app itself — a family's own read of their own class's blog posts or messages can be silently
-// refused by Firestore's security rules, which check this denormalized copy specifically because
-// they can't safely search inside studentLinks' own richer {classId, studentId} shape — while
-// everything reading studentLinks directly, like the daily log, keeps working normally. Reported
-// directly as exactly this pattern: notifications firing, the daily log visible, but messages and
-// blog posts both silently empty for one specific family and no one else.
-function FamilySyncChecker({ families, onUpdateFamily, registry }) {
+// Checks every family's own denormalized linkedClassIds against what would be freshly recomputed,
+// right now, from their actual, current studentLinks — the two are supposed to always match, kept
+// in sync automatically by updateFamilyRecord every time studentLinks itself changes, but a family
+// created or modified through an older code path, or before this field existed at all, can end up
+// with a stale copy that a later signed-in backfill only ever fixes if the field is missing
+// outright, not if it's merely wrong. That drift is invisible in the app itself — a family's own
+// read of their own class's blog posts or messages can be silently refused by Firestore's security
+// rules, which check this denormalized copy specifically because they can't safely search inside
+// studentLinks' own richer {classId, studentId} shape — while everything reading studentLinks
+// directly, like the daily log, keeps working normally. Reported directly as exactly this pattern:
+// notifications firing, the daily log visible, but messages and blog posts both silently empty for
+// one specific family and no one else.
+//
+// For one specific guardian, looks directly at the real, stored message thread with each teacher
+// whose own assigned classes overlap this guardian's own linked children — never anything else,
+// never a write of any kind. Built specifically to answer one direct question a code read alone
+// couldn't: whether a message a teacher sent actually landed in the exact spot this guardian's own
+// app would read it back from, or never made it there at all — two very different problems that
+// look identical from the outside (both show up as "no message"), so the fix has to start with
+// knowing which one this actually is.
+function GuardianMessageThreads({ guardian, teachers }) {
+  const [threads, setThreads] = useState(null);
+
+  const classIds = [...new Set((guardian.studentLinks || []).map((l) => l.classId))];
+  const candidateTeachers = (teachers || []).filter((t) => (t.assignedClassIds || []).some((id) => classIds.includes(id)));
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(candidateTeachers.map(async (t) => {
+        const data = await loadJSON(`teacher-messages:${t.uid}:${guardian.uid}`, null, true);
+        return [t.uid, data];
+      }));
+      if (!cancelled) setThreads(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [guardian.uid, candidateTeachers.map((t) => t.uid).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (candidateTeachers.length === 0) {
+    return <p className="text-[11px] text-stone-400 mt-1">No teacher is assigned to any of this guardian's own linked classes.</p>;
+  }
+  if (threads === null) return <p className="text-[11px] text-stone-400 mt-1">Checking message threads…</p>;
+
+  return (
+    <div className="mt-1">
+      <p className="text-[11px] font-semibold text-stone-500">Direct message threads with this guardian's own teachers:</p>
+      {candidateTeachers.map((t) => {
+        const data = threads[t.uid];
+        const messages = data?.messages || [];
+        return (
+          <div key={t.uid} className="text-[11px] text-stone-500 pl-2 border-l-2 border-stone-200 mb-1">
+            <span className="font-semibold">{t.name}:</span>{" "}
+            {!data ? <span className="text-rose-600">no thread document exists at all</span>
+              : messages.length === 0 ? <span className="text-rose-600">thread exists but has 0 messages</span>
+              : <span className="text-emerald-700">{messages.length} message{messages.length === 1 ? "" : "s"} — last: "{messages[messages.length - 1].text?.slice(0, 60) || "(attachment)"}"</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// A plain, read-only lookup — never writes anything — for looking directly at what's actually
+// stored on a specific family's own account(s), rather than reasoning about it secondhand from
+// code alone. Searches by name or email and, since guardians sharing one family (same
+// familyGroupId) are still separate account documents in their own right, shows every guardian in
+// that same group side by side rather than just the one that matched the search — exactly what's
+// needed to directly compare two parents on the same family against each other, since a real
+// difference between them is often the actual point of looking in the first place.
+function FamilyLookupTool({ families, teachers }) {
+  const [query, setQuery] = useState("");
+
+  const matches = query.trim().length < 2 ? [] : (families || []).filter((f) =>
+    (f.name || "").toLowerCase().includes(query.trim().toLowerCase()) ||
+    (f.email || "").toLowerCase().includes(query.trim().toLowerCase())
+  );
+  const matchedGroupIds = [...new Set(matches.map((f) => f.familyGroupId || f.uid))];
+  const groups = matchedGroupIds.map((groupId) => ({
+    groupId,
+    guardians: (families || []).filter((f) => (f.familyGroupId || f.uid) === groupId),
+  }));
+
+  return (
+    <div className="mb-3">
+      <p className="text-xs font-semibold text-stone-700 mb-1">Look up a family's own account</p>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search by name or email…"
+        className="w-full max-w-sm rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      {query.trim().length >= 2 && groups.length === 0 && (
+        <p className="text-xs text-stone-400">No family matches that.</p>
+      )}
+      {groups.map(({ groupId, guardians }) => (
+        <div key={groupId} className="border border-stone-200 rounded-lg p-2.5 mb-2">
+          {guardians.length > 1 && <p className="text-[11px] font-semibold text-stone-400 mb-1.5">{guardians.length} guardians sharing this family:</p>}
+          <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${guardians.length}, minmax(0, 1fr))` }}>
+            {guardians.map((g) => (
+              <div key={g.uid} className="text-xs">
+                <p className="font-semibold text-stone-800">{g.name}</p>
+                <p className="text-stone-400 mb-1">{g.email}</p>
+                <p className="text-[11px] text-stone-500"><span className="font-semibold">uid:</span> {g.uid}</p>
+                <p className="text-[11px] text-stone-500"><span className="font-semibold">familyGroupId:</span> {g.familyGroupId || <span className="text-rose-600">(none — defaults to own uid)</span>}</p>
+                <p className="text-[11px] text-stone-500 mt-1"><span className="font-semibold">studentLinks:</span></p>
+                <ul className="text-[11px] text-stone-500 pl-3 list-disc">
+                  {(g.studentLinks || []).length === 0 && <li className="text-rose-600">none</li>}
+                  {(g.studentLinks || []).map((l, i) => <li key={i}>{l.studentName || l.studentId} — class {l.classId}</li>)}
+                </ul>
+                <p className="text-[11px] text-stone-500 mt-1"><span className="font-semibold">linkedClassIds:</span> {(g.linkedClassIds || []).join(", ") || <span className="text-rose-600">none</span>}</p>
+                <p className="text-[11px] text-stone-500"><span className="font-semibold">linkedClassTypes:</span> {(g.linkedClassTypes || []).join(", ") || <span className="text-rose-600">none</span>}</p>
+                <p className="text-[11px] text-stone-500"><span className="font-semibold">active:</span> {g.active === false ? <span className="text-rose-600">false</span> : "true"}</p>
+                <GuardianMessageThreads guardian={g} teachers={teachers} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Deliberately checks linkedClassIds alone, not linkedClassTypes alongside it — an earlier version
+// checked both together and flagged a family as "wrong" if either differed, which produced exactly
+// the confusing result reported directly: nearly every family flagged, many showing identical
+// values on both sides of the very field being displayed, because the actual difference was in the
+// OTHER field, never shown at all. linkedClassTypes serves a completely separate feature (letting
+// certain staff reach an entire grade level without being assigned to every one of its classes
+// individually) and has no bearing at all on whether a family can see their own class's own
+// messages or blog posts — the one thing actually reported broken. Narrowed to the one field that
+// actually causes that symptom, so what's flagged here is what's actually wrong.
+function FamilySyncChecker({ families, onUpdateFamily }) {
   const [fixingUid, setFixingUid] = useState(null);
   const [fixedUids, setFixedUids] = useState(new Set());
+
 
   const mismatches = (families || []).map((f) => {
     const realClassIds = [...new Set((f.studentLinks || []).map((l) => l.classId))].sort();
     const storedClassIds = [...new Set(f.linkedClassIds || [])].sort();
-    const classIdsMatch = JSON.stringify(realClassIds) === JSON.stringify(storedClassIds);
-    const realClassTypes = [...new Set(
-      realClassIds.map((id) => registry.find((c) => c.id === id)).filter(Boolean).map((c) => c.classType || "elementary")
-    )].sort();
-    const storedClassTypes = [...new Set(f.linkedClassTypes || [])].sort();
-    const classTypesMatch = JSON.stringify(realClassTypes) === JSON.stringify(storedClassTypes);
-    return { family: f, ok: classIdsMatch && classTypesMatch, realClassIds, storedClassIds };
+    const ok = JSON.stringify(realClassIds) === JSON.stringify(storedClassIds);
+    return { family: f, ok, realClassIds, storedClassIds };
   }).filter((m) => !m.ok);
 
   const fix = async (family) => {
