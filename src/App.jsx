@@ -26,6 +26,7 @@ import * as XLSX from "xlsx";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from "firebase/storage";
+import { Analytics } from "@vercel/analytics/react";
 import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
@@ -26684,6 +26685,7 @@ export default function App() {
     <ErrorBoundary>
       <AutoUpdateOnResume />
       <AppInner />
+      <Analytics />
     </ErrorBoundary>
   );
 }
