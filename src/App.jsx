@@ -23287,6 +23287,35 @@ function SubstituteModeView({ className, roster, studentData, config, plannerDay
   );
 }
 
+// A real, confirmed bug this fixes: this used to be defined as a component INSIDE IncidentForm's
+// own render body. Every keystroke into either field updates state, which re-renders IncidentForm
+// — and a component defined inside another component's body is a brand-new function, a genuinely
+// different component type, on every single one of those re-renders. React has no way to tell
+// that "new" StudentCard apart from an entirely different component, so it tore down and rebuilt
+// the real DOM input from scratch each time — destroying focus and cursor position after every
+// character. Directly reproduced and confirmed, not just theorized: typing a full sentence into
+// either field captured exactly one character before losing focus entirely. Selecting a single
+// student never hit this at all, since that path doesn't render this component — matching exactly
+// what was reported: works alone, breaks the moment a second student joins the same incident.
+// Moved to its own top-level, stable component with everything it needs passed in explicitly —
+// its identity now stays the same across every re-render, so React can update the existing input
+// in place instead of replacing it.
+function IncidentStudentCard({ sid, student, name, categories, onChange }) {
+  const s = student || { category: "", description: "" };
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white p-3 mb-3">
+      <p className="text-sm font-bold text-stone-800 mb-2">{name}</p>
+      <label className="block text-xs font-semibold text-stone-600 mb-1">Category <span className="text-stone-400 font-normal">(optional)</span></label>
+      <select value={s.category} onChange={(e) => onChange({ category: e.target.value })} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2 bg-white">
+        <option value="">Not set yet</option>
+        {categories.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+      </select>
+      <textarea value={s.description} onChange={(e) => onChange({ description: e.target.value })} rows={3}
+        placeholder={`What happened, from ${name}'s side`} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
+    </div>
+  );
+}
+
 function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSave }) {
   const [date, setDate] = useState(todayISO());
   const [time] = useState(() => new Date().toTimeString().slice(0, 5));
@@ -23373,23 +23402,6 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
       setSaveError(describeUploadError(err));
       setSaving(false);
     }
-  };
-
-  const StudentCard = ({ sid }) => {
-    const s = perStudent[sid] || { category: "", description: "" };
-    const name = roster.find((r) => r.id === sid)?.name || "Student";
-    return (
-      <div className="rounded-xl border border-stone-200 bg-white p-3 mb-3">
-        <p className="text-sm font-bold text-stone-800 mb-2">{name}</p>
-        <label className="block text-xs font-semibold text-stone-600 mb-1">Category <span className="text-stone-400 font-normal">(optional)</span></label>
-        <select value={s.category} onChange={(e) => updateStudent(sid, { category: e.target.value })} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2 bg-white">
-          <option value="">Not set yet</option>
-          {config.incidents.categories.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-        </select>
-        <textarea value={s.description} onChange={(e) => updateStudent(sid, { description: e.target.value })} rows={3}
-          placeholder={`What happened, from ${name}'s side`} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm" />
-      </div>
-    );
   };
 
   return (
@@ -23482,7 +23494,7 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
               </>
             ) : (
               <div className="mb-2">
-                {studentIds.map((sid) => <StudentCard key={sid} sid={sid} />)}
+                {studentIds.map((sid) => <IncidentStudentCard key={sid} sid={sid} student={perStudent[sid]} name={roster.find((r) => r.id === sid)?.name || "Student"} categories={config.incidents.categories} onChange={(fields) => updateStudent(sid, fields)} />)}
               </div>
             )}
             <button disabled={studentIds.length === 0 || saving} onClick={save}
@@ -23509,6 +23521,50 @@ function IncidentForm({ roster, config, presetId, categoryPreset, onCancel, onSa
 // toddlers mid-incident needs this to take seconds, not a multi-field form — so category is a row
 // of one-tap pills (never a dropdown, which costs an extra tap to open), a student is usually
 // already selected coming in, and everything below the fold is optional, addable later.
+// Same bug, same fix, same reasoning as IncidentStudentCard above — this form has its own,
+// separate multi-student card for the identical reason (a nested component definition re-created
+// on every keystroke, tearing down focus each time). Extracted the same way, for the same reason.
+function PreschoolIncidentStudentCard({ sid, student, name, variant, categoriesForKind, onChange }) {
+  const s = student || { kind: variant, category: "", otherText: "", description: "", notifyFamily: true };
+  const categories = categoriesForKind(s.kind);
+  return (
+    <div className="rounded-xl border border-stone-200 bg-white p-3 mb-3">
+      <p className="text-sm font-bold text-stone-800 mb-2">{name}</p>
+      <div className="flex gap-1.5 mb-3">
+        {["health", "incident"].map((k) => (
+          <button key={k} onClick={() => onChange({ kind: k, category: "", otherText: "" })}
+            className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${s.kind === k ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+            {k === "health" ? "Health incident" : "Incident"}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs font-semibold text-stone-600 mb-1">What happened</p>
+      <div className="flex flex-wrap gap-1.5 mb-2">
+        {categories.map((c) => (
+          <button key={c.id} onClick={() => onChange({ category: c.id })}
+            className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${s.category === c.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+            {c.label}
+          </button>
+        ))}
+      </div>
+      {s.category === "other" && (
+        <input value={s.otherText} onChange={(e) => onChange({ otherText: e.target.value })} placeholder="Briefly describe what happened"
+          className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+      )}
+      <textarea value={s.description} onChange={(e) => onChange({ description: e.target.value })} rows={2}
+        placeholder={`Message for ${name}'s family — this child's family only sees this`}
+        className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
+      <button onClick={() => onChange({ notifyFamily: !s.notifyFamily })}
+        className={`w-full flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left ${s.notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+        <Bell size={15} className={s.notifyFamily ? "text-teal-600" : "text-stone-400"} />
+        <span className={`text-xs font-semibold ${s.notifyFamily ? "text-teal-700" : "text-stone-600"}`}>
+          {s.notifyFamily ? "This family will be notified" : "Internal only — not shown to this family"}
+        </span>
+      </button>
+    </div>
+  );
+}
+
 function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, onSave }) {
   const isHealth = variant === "health";
   const healthCategories = config.preschoolHealthIncidents?.categories || [];
@@ -23618,48 +23674,6 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
     }
   };
 
-  const StudentCard = ({ sid }) => {
-    const s = perStudent[sid] || { kind: variant, category: "", otherText: "", description: "", notifyFamily: true };
-    const name = roster.find((r) => r.id === sid)?.name || "Student";
-    const categories = categoriesForKind(s.kind);
-    return (
-      <div className="rounded-xl border border-stone-200 bg-white p-3 mb-3">
-        <p className="text-sm font-bold text-stone-800 mb-2">{name}</p>
-        <div className="flex gap-1.5 mb-3">
-          {["health", "incident"].map((k) => (
-            <button key={k} onClick={() => updateStudent(sid, { kind: k, category: "", otherText: "" })}
-              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${s.kind === k ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
-              {k === "health" ? "Health incident" : "Incident"}
-            </button>
-          ))}
-        </div>
-        <p className="text-xs font-semibold text-stone-600 mb-1">What happened</p>
-        <div className="flex flex-wrap gap-1.5 mb-2">
-          {categories.map((c) => (
-            <button key={c.id} onClick={() => updateStudent(sid, { category: c.id })}
-              className={`text-xs font-semibold px-2.5 py-1.5 rounded-full border ${s.category === c.id ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
-              {c.label}
-            </button>
-          ))}
-        </div>
-        {s.category === "other" && (
-          <input value={s.otherText} onChange={(e) => updateStudent(sid, { otherText: e.target.value })} placeholder="Briefly describe what happened"
-            className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
-        )}
-        <textarea value={s.description} onChange={(e) => updateStudent(sid, { description: e.target.value })} rows={2}
-          placeholder={`Message for ${name}'s family — this child's family only sees this`}
-          className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-2" />
-        <button onClick={() => updateStudent(sid, { notifyFamily: !s.notifyFamily })}
-          className={`w-full flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left ${s.notifyFamily ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
-          <Bell size={15} className={s.notifyFamily ? "text-teal-600" : "text-stone-400"} />
-          <span className={`text-xs font-semibold ${s.notifyFamily ? "text-teal-700" : "text-stone-600"}`}>
-            {s.notifyFamily ? "This family will be notified" : "Internal only — not shown to this family"}
-          </span>
-        </button>
-      </div>
-    );
-  };
-
   return (
     <div className={PAGE}>
       <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
@@ -23708,7 +23722,7 @@ function PreschoolIncidentForm({ variant, roster, config, presetId, onCancel, on
             </div>
           </>
         ) : studentIds.length >= 2 ? (
-          studentIds.map((sid) => <StudentCard key={sid} sid={sid} />)
+          studentIds.map((sid) => <PreschoolIncidentStudentCard key={sid} sid={sid} student={perStudent[sid]} name={roster.find((r) => r.id === sid)?.name || "Student"} variant={variant} categoriesForKind={categoriesForKind} onChange={(fields) => updateStudent(sid, fields)} />)
         ) : null}
 
         <label className="block text-sm font-semibold text-stone-700 mb-1 mt-1">Photo or video <span className="text-stone-400 font-normal">(optional)</span></label>
