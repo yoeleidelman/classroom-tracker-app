@@ -2195,10 +2195,23 @@ const inFlightClassAssignmentToggles = new Set();
 async function getReadState(viewerId) {
   return (await loadJSON(`read-state:${viewerId}`, {}, true)) || {};
 }
+// A real, reported bug this fixes: markThreadRead used to read the whole read-state document,
+// change one thread's timestamp in that local copy, then write the entire document back — a
+// classic read-modify-write race. Two threads marked read within the same short window (two
+// devices the same family is signed into at once, or just navigating quickly between
+// conversations) could each read the same starting state, and whichever write landed second
+// would silently overwrite the first thread's read mark with the stale copy it had read before
+// the first write ever happened — reverting an already-read thread back to unread, with no error
+// and nothing to notice at the time. That's the exact shape of what was reported: many old
+// threads, read a while ago, suddenly showing unread again all together.
+// The fix removes the read entirely rather than trying to read more carefully or retry on
+// conflict: setDoc's own dot-notation field paths update just this one nested field directly,
+// atomically, without ever needing to read the rest of the document first — so there is no
+// window in which a concurrent write from anywhere else could be lost. {merge: true} also
+// creates the document on the very first call, when it doesn't exist yet at all.
 async function markThreadRead(viewerId, threadKey) {
-  const state = await getReadState(viewerId);
-  state[threadKey] = new Date().toISOString();
-  await saveJSON(`read-state:${viewerId}`, state, true);
+  const ref = doc(db, "data", `read-state:${viewerId}`);
+  await setDoc(ref, { [`value.${threadKey}`]: new Date().toISOString() }, { merge: true });
 }
 
 // Triggered by a TEACHER's own viewing of a specific thread, rather than waiting on the family to
@@ -2269,11 +2282,12 @@ async function reactToMessageInThread(storageKey, messageId, emoji, reactorId, r
 }
 // Snoozing doesn't mark a thread read — it just quiets the indicator for a while, so an unread
 // reply still shows as unread once the snooze period passes, rather than being silently dismissed.
+// Same atomic dot-notation fix as markThreadRead above, for the identical reason — this used to
+// read-modify-write the whole document too, with the same risk of a concurrent write elsewhere
+// silently wiping out an unrelated thread's own read mark or snooze.
 async function snoozeThread(viewerId, threadKey, minutes) {
-  const state = await getReadState(viewerId);
-  state.snoozed = state.snoozed || {};
-  state.snoozed[threadKey] = new Date(Date.now() + minutes * 60000).toISOString();
-  await saveJSON(`read-state:${viewerId}`, state, true);
+  const ref = doc(db, "data", `read-state:${viewerId}`);
+  await setDoc(ref, { [`value.snoozed.${threadKey}`]: new Date(Date.now() + minutes * 60000).toISOString() }, { merge: true });
 }
 // A thread counts as unread if its last message came from the other side and is newer than the
 // last time this viewer marked it read (or was never marked read at all) — and isn't currently
