@@ -17458,12 +17458,21 @@ function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresh
   const result = [];
   for (const entry of sorted) {
     const prev = result[result.length - 1];
-    if (entry.reviewDecision === "keep-separate") { result.push({ ...entry, flaggedReview: undefined }); continue; }
-    if (entry.reviewDecision === "discard") continue; // eslint-disable-line no-continue -- an admin already confirmed this one was noise
     const gapMinutes = prev && prev.date === entry.date && prev.checkOutTime && entry.checkInTime
       ? timeToMinutes(entry.checkInTime) - timeToMinutes(prev.checkOutTime)
       : null;
     const mergeable = gapMinutes !== null && gapMinutes >= 0 && gapMinutes <= thresholdMinutes;
+    // "keep-separate" is only ever honored for a gap that's actually long enough to represent a
+    // real, separate departure — a student genuinely out for an appointment, not back within
+    // minutes. For a short, mergeable gap, this decision could only ever have come from the one
+    // flag whose own wording made it easy to mean the opposite of what was intended — reported
+    // directly, exactly as that mix-up: choosing this meaning to say "the later checkout is the
+    // real one," not "these are two genuinely separate visits." So a short gap is never honored
+    // as "keep separate," including one already stored from before this was fixed — it reverts
+    // automatically, with no manual review needed, straight back to the corrected default of
+    // merging through to the later checkout, flagged the same as any other unreviewed case.
+    if (entry.reviewDecision === "keep-separate" && !mergeable) { result.push({ ...entry, flaggedReview: undefined }); continue; }
+    if (entry.reviewDecision === "discard") continue; // eslint-disable-line no-continue -- an admin already confirmed this one was noise
     if (mergeable) {
       const prevWasLate = Boolean(latePickupTime) && prev.checkOutTime > latePickupTime;
       const thisWouldBeLate = Boolean(latePickupTime) && entry.checkOutTime && entry.checkOutTime > latePickupTime;
@@ -17649,10 +17658,6 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
               <button disabled={resolving} onClick={() => submitReview(openReview.rosterId, openReview.entry, "discard")}
                 className="text-xs font-semibold text-white bg-emerald-600 rounded-md py-2 hover:bg-emerald-700 disabled:opacity-50">
                 No — {formatTimeCompact(openReview.entry.flaggedReview.priorCheckOutTime)} was the real one
-              </button>
-              <button disabled={resolving} onClick={() => submitReview(openReview.rosterId, openReview.entry, "keep-separate")}
-                className="text-xs font-semibold text-white bg-orange-500 rounded-md py-2 hover:bg-orange-600 disabled:opacity-50">
-                No — both were real, count separately
               </button>
               <button disabled={resolving} onClick={() => setOpenReview(null)}
                 className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-md py-2 hover:bg-stone-50 disabled:opacity-50">
