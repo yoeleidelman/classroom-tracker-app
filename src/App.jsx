@@ -869,6 +869,34 @@ function getAllPeriodsEverywhere(config) {
   return [...fromSchedules, ...fromHalfDay].filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
 }
 
+// Whether a student should be counted in by default wherever a tool assumes "everyone in this
+// class belongs here" — a raffle, a random pick, an assessment. A full-time student always does.
+// A student added for specific periods only belongs for the one subject (or subjects) those
+// periods actually cover — since that's the entire, deliberate reason they were added that way in
+// the first place, not full membership in the class at all. Reported directly, precisely: added
+// for math, showing up for every subject, having to be manually unchecked every single time —
+// this is what actually closes that gap, by checking the one real, existing link between a period
+// and the subject it's already tied to (see resolveSubjectForLabel) rather than treating every
+// non-full-time student the same regardless of what they were actually added for. A student added
+// as simply, generally part-time — no specific periods or subject at all — has nothing to match a
+// subject against, so falls back to their own explicit points/rewards participation toggle for a
+// points-related tool (raffle, points), or is left out by default for an academic one (an
+// assessment) where that toggle was never meant to apply in the first place.
+function isStudentIncludedByDefault(student, { subjectId = null, usePointsToggle = false } = {}, config) {
+  const scope = student.enrollmentScope;
+  if (!scope || scope === "full-time") return true;
+  if (scope === "periods") {
+    if (!subjectId) return false; // no subject context at all to check this student's own periods against
+    const allPeriods = getAllPeriodsEverywhere(config);
+    const mySubjectIds = (student.enrollmentPeriodIds || [])
+      .map((pid) => allPeriods.find((p) => p.id === pid)?.subjectId)
+      .filter(Boolean);
+    return mySubjectIds.includes(subjectId);
+  }
+  // Plain "part-time" — no specific periods or subject tied to it at all.
+  return usePointsToggle ? student.participatesInPoints !== false : false;
+}
+
 // Bulk student import — maps whatever column headers a real-world spreadsheet happens to use
 // onto the app's actual student fields. Keyword lists are deliberately generous (covers common
 // phrasings like "Guardian Email" or "Cell Phone") since we can't know in advance how any given
@@ -12656,7 +12684,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           </div>
           <TodaysPlanPanel config={config} plannerDays={plannerDays} setPlannerDay={setPlannerDay} navigate={navigateView} benchmarkSubjects={benchmarkSubjects} />
           <TimerWidget />
-          <RandomPickerWidget roster={roster} pickerData={randomPickerData} onPick={recordRandomPick} onReset={resetRandomPicker} />
+          <RandomPickerWidget roster={roster.filter((s) => isStudentIncludedByDefault(s, {}, config))} pickerData={randomPickerData} onPick={recordRandomPick} onReset={resetRandomPicker} />
           <ScratchpadWidget plannerDays={plannerDays} setPlannerDay={setPlannerDay} />
           <button onClick={() => navigateView("day-recap")} className="w-full flex items-center justify-center gap-2 bg-stone-800 text-white rounded-xl py-2.5 text-sm font-semibold hover:bg-stone-900">
             End of day recap <ArrowRight size={14} />
@@ -16669,8 +16697,8 @@ function RaffleLegend({ participants }) {
   );
 }
 
-function RaffleView({ roster }) {
-  const [selectedIds, setSelectedIds] = useState(roster.map((s) => s.id)); // starts with everyone in
+function RaffleView({ roster, config }) {
+  const [selectedIds, setSelectedIds] = useState(roster.filter((s) => isStudentIncludedByDefault(s, { usePointsToggle: true }, config)).map((s) => s.id)); // defaults to full-time students, plus any part-time student explicitly opted into points/rewards
   const [spinning, setSpinning] = useState(false);
   const [winner, setWinner] = useState(null);
   const [rotation, setRotation] = useState(0);
@@ -16890,7 +16918,7 @@ function PointsView({ roster, studentData, classPoints, config, addPoints, addCl
       {subTab === "classlog" && !programMode ? (
         <ClassLogView config={config} plannerDays={plannerDays} behaviorLogData={behaviorLogData} adjustBehaviorMark={adjustBehaviorMark} />
       ) : subTab === "raffle" ? (
-        <RaffleView roster={roster} />
+        <RaffleView roster={roster} config={config} />
       ) : (
       <>
       <div className="flex flex-wrap items-center gap-1.5 mb-5">
@@ -18149,7 +18177,13 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
   const [results, setResults] = useState({});
   const [notes, setNotes] = useState({});
   const [noteOpenFor, setNoteOpenFor] = useState({});
-  const [selectedIds, setSelectedIds] = useState(roster.map((s) => s.id)); // defaults to everyone, adjustable
+  const [selectedIds, setSelectedIds] = useState([]);
+  // Recomputed every time the chosen subject changes, not just once on mount — a student added
+  // for specific periods only belongs in this list for the one subject those periods actually
+  // cover, so switching the assessment's own subject genuinely changes who that even means.
+  useEffect(() => {
+    setSelectedIds(roster.filter((s) => isStudentIncludedByDefault(s, { subjectId }, config)).map((s) => s.id));
+  }, [subjectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const allSelected = selectedIds.length === roster.length;
   const toggleStudent = (id) => setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
