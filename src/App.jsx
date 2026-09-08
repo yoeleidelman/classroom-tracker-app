@@ -9494,6 +9494,33 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => clearInterval(interval);
   }, [refreshUnreadHomeworkCount]);
 
+  // Reported directly on iPads: the home-screen app icon badge kept showing a stale, already-read
+  // count, "building up" rather than clearing, even after actually opening the app. Traced to a
+  // real gap, not the badge-setting logic itself (see the effect below, which was already correct
+  // once it runs) — these three counts only ever refreshed on this screen's own mount plus a
+  // 45-second poll, and a background browser tab or a backgrounded PWA is exactly where a
+  // setInterval timer is routinely throttled or fully suspended by the OS to save battery. A
+  // parent backgrounding the app, reading a message in a push notification's preview or on another
+  // device, then returning here could land back on a poll that's overdue, paused, or about to
+  // restart its full 45 seconds from an arbitrary point — not the prompt, on-return correction this
+  // needed. This is the same class of gap useVisibilityGeneration (above) exists to close for live
+  // Firestore subscriptions, just for these three polled counts instead: force an immediate,
+  // uncached refresh of all three the moment the app actually becomes visible or focused again, so
+  // reopening the app is what corrects the badge, not however much of the next 45-second window
+  // happens to be left.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        refreshUnreadThreads();
+        refreshUnreadBlogCount();
+        refreshUnreadHomeworkCount();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => { document.removeEventListener("visibilitychange", onVisible); window.removeEventListener("focus", onVisible); };
+  }, [refreshUnreadThreads, refreshUnreadBlogCount, refreshUnreadHomeworkCount]);
+
   const markHomeworkRead = async (classId) => {
     const posts = await loadJSON(`class:${classId}:homework`, [], true);
     const latest = posts[posts.length - 1];
