@@ -17468,13 +17468,29 @@ function collapseQuickReCheckIns(checkIns, latePickupTime, schoolEndTime, thresh
       const prevWasLate = Boolean(latePickupTime) && prev.checkOutTime > latePickupTime;
       const thisWouldBeLate = Boolean(latePickupTime) && entry.checkOutTime && entry.checkOutTime > latePickupTime;
       const afterSchoolEnded = Boolean(schoolEndTime) && entry.checkInTime >= schoolEndTime;
-      const needsReview = !prevWasLate && thisWouldBeLate && !afterSchoolEnded;
-      const isSuspiciousBlip = !prevWasLate && thisWouldBeLate && (afterSchoolEnded || needsReview);
-      if (isSuspiciousBlip) {
-        if (needsReview) result[result.length - 1] = { ...prev, flaggedReview: { kind: "merged-blip", discardedEntry: entry } };
-        continue; // eslint-disable-line no-continue -- discard the blip entirely; the safe, on-time checkout already recorded stands
-      }
-      result[result.length - 1] = { ...prev, checkOutTime: entry.checkOutTime, checkOutBy: entry.checkOutBy };
+      // A re-entry logged after the school day has already fully ended is the one case that's
+      // certain rather than a guess: the building is closed, so nothing after that time can be a
+      // real return — the checkout already recorded correctly captured when this child actually
+      // left, and this stays discarded outright, not merged, not flagged.
+      if (afterSchoolEnded) continue; // eslint-disable-line no-continue -- certain, not a guess
+      // Merges forward by default now — a checkout immediately followed by a re-entry, within
+      // minutes, during the school day, is a phone or a scanner glitch on the CHECKOUT side far
+      // more often than it's a genuine departure and return, regardless of whether the resulting,
+      // later checkout would otherwise look "late." Reported directly, with a real, concrete
+      // example: a 9:09am checkout kept as "the real one" while an immediate re-entry through
+      // 3:47pm — plainly the actual, ordinary end of this child's day — was discarded outright,
+      // simply because 3:47pm happened to fall after this specific class's own cutoff. An
+      // implausibly early checkout being "not literally late" was never the same thing as it being
+      // an expected, genuine pickup. Still flagged whenever this default changes the visible
+      // outcome (an on-time-looking earlier checkout would otherwise have silently absorbed a
+      // would-be-late one) — a real, unusual case, a genuine early pickup genuinely followed by a
+      // genuine later return, still gets a human's own eyes on it and can be corrected either way,
+      // rather than being silently, permanently decided by a guess in either direction.
+      const changesOutcome = !prevWasLate && thisWouldBeLate;
+      result[result.length - 1] = {
+        ...prev, checkOutTime: entry.checkOutTime, checkOutBy: entry.checkOutBy,
+        ...(changesOutcome ? { flaggedReview: { kind: "merged-blip", discardedEntry: entry, priorCheckOutTime: prev.checkOutTime } } : {}),
+      };
     } else {
       const prevWasLate = Boolean(latePickupTime) && prev && prev.date === entry.date && prev.checkOutTime && prev.checkOutTime > latePickupTime;
       const thisWouldBeLate = Boolean(latePickupTime) && entry.checkOutTime && entry.checkOutTime > latePickupTime;
@@ -17627,16 +17643,16 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
           <div className="bg-white rounded-xl p-4 max-w-xs w-full border-2 border-amber-300" onClick={(e) => e.stopPropagation()}>
             <p className="text-sm font-semibold text-amber-800 mb-1.5">Not sure this counts</p>
             <p className="text-xs text-stone-600 mb-3">
-              Kept {formatTimeCompact(openReview.entry.checkOutTime)} as the real checkout. A short re-entry from {formatTimeCompact(openReview.entry.flaggedReview.discardedEntry.checkInTime)} to {formatTimeCompact(openReview.entry.flaggedReview.discardedEntry.checkOutTime)} was treated as noise and left out. What should count?
+              Used {formatTimeCompact(openReview.entry.checkOutTime)} as the real checkout. An earlier checkout at {formatTimeCompact(openReview.entry.flaggedReview.priorCheckOutTime)} was treated as an accidental tap, since a re-entry followed just minutes later. What should count?
             </p>
             <div className="flex flex-col gap-1.5">
               <button disabled={resolving} onClick={() => submitReview(openReview.rosterId, openReview.entry, "discard")}
                 className="text-xs font-semibold text-white bg-emerald-600 rounded-md py-2 hover:bg-emerald-700 disabled:opacity-50">
-                Confirm — it was noise
+                No — {formatTimeCompact(openReview.entry.flaggedReview.priorCheckOutTime)} was the real one
               </button>
               <button disabled={resolving} onClick={() => submitReview(openReview.rosterId, openReview.entry, "keep-separate")}
                 className="text-xs font-semibold text-white bg-orange-500 rounded-md py-2 hover:bg-orange-600 disabled:opacity-50">
-                No — it was real, count it
+                No — both were real, count separately
               </button>
               <button disabled={resolving} onClick={() => setOpenReview(null)}
                 className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-md py-2 hover:bg-stone-50 disabled:opacity-50">
