@@ -2125,18 +2125,36 @@ async function notifyClassFamilies(classId, title, body, url) {
 // person's own point of view, whether the history API cooperated this time or not. paramName can
 // be left null for a screen with no single param naming it (leaving a whole section entirely,
 // say) — success then falls back to simply asking "did the URL change at all."
+// Module-level, same reasoning and same proven pattern as inFlightCheckInToggles just below —
+// reported directly as needing several taps on iOS specifically, sometimes, for a Back button to
+// actually do anything. iOS Safari (including standalone/PWA mode) can be slow to reflect a
+// history.back() in window.location.href relative to the JS thread; if an impatient second tap
+// lands inside that same 250ms safety window, it fired a SECOND, fully independent
+// history.back() — which, if the first one was just slow rather than genuinely failed, skips an
+// extra step back rather than repeating the first one, landing somewhere unexpected rather than
+// simply "still not working." A second tap while the first is still being checked now goes
+// straight to closing immediately instead — the repeated tap is itself the clearest possible
+// signal the person wants out now, not a reason to risk a second, independently-timed
+// history.back() landing wherever it lands.
+let goBackInFlight = false;
 function safeGoBack(paramName, fallbackClose) {
-  const beforeHref = window.location.href;
-  window.history.back();
-  setTimeout(() => {
-    const stillOpen = paramName ? new URLSearchParams(window.location.search).has(paramName) : false;
-    if (window.location.href !== beforeHref && !stillOpen) return; // back() genuinely worked — nothing more to do
+  const closeNow = () => {
     fallbackClose();
     if (paramName) {
       const url = new URL(window.location.href);
       url.searchParams.delete(paramName);
       window.history.replaceState({}, "", url);
     }
+  };
+  if (goBackInFlight) { closeNow(); return; }
+  goBackInFlight = true;
+  const beforeHref = window.location.href;
+  window.history.back();
+  setTimeout(() => {
+    goBackInFlight = false;
+    const stillOpen = paramName ? new URLSearchParams(window.location.search).has(paramName) : false;
+    if (window.location.href !== beforeHref && !stillOpen) return; // back() genuinely worked — nothing more to do
+    closeNow();
   }, 250);
 }
 
