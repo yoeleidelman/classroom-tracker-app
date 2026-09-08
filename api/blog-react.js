@@ -18,7 +18,7 @@
 // record, as long as the shape of the change looked plausible.
 //
 // The fix is to never let the client supply who's acting at all. This endpoint reads the caller's
-// OWN identity from their own account record — a family's stored name and shared familyGroupId, or
+// OWN identity from their own account record — a family's stored name and own individual uid, or
 // a teacher's stored name and uid — using the same server-verified auth token every other secured
 // endpoint in this app relies on. The request body only ever carries WHAT action to take and WHERE
 // (which post, optionally which block, optionally which specific photo within it, or which message
@@ -86,12 +86,15 @@ async function requireIdentityAndClassAccess(req, classId, actingAs) {
   const asFamily = () => {
     if (!family || family.active === false) return null;
     if (!(family.linkedClassIds || []).includes(classId)) throw { status: 403, message: "You don't have access to this class." };
-    // actorId stays shared across every guardian in the household — read receipts and unread
-    // counts are meant to be one shared, family-level fact, the same as messages already treat
-    // it: if either parent has seen it, the family has seen it. individualActorId exists
-    // specifically for reactions, where the opposite is true — see handleReact's own reasoning
-    // for why a reaction needs each guardian kept genuinely separate instead.
-    return { actorId: family.familyGroupId || family.uid, individualActorId: family.uid, actorName: family.name || "Family" };
+    // actorId is now individual per guardian, matching individualActorId below and matching how
+    // messages already work — previously shared across the household (family.familyGroupId),
+    // which was the actual, confirmed source of a real, reported problem: a guardian could react
+    // to a post (correctly recorded under their own individual id) while the read-status list
+    // still checked this different, shared id, so their own name would never show up on it
+    // despite genuinely having seen and reacted to the exact post in question. Two guardians in
+    // one household now correctly get two separate, independently-tracked read statuses, the same
+    // way they already get two separate reactions.
+    return { actorId: family.uid, individualActorId: family.uid, actorName: family.name || "Family" };
   };
 
   // A single login can genuinely hold both roles at once — a teacher previewing their own class's
@@ -229,7 +232,7 @@ async function handleBackfillReads(req, res, classId, postId) {
   const alreadyRecorded = new Set(existingReadBy.map((r) => r.id));
   const inferredEntries = [];
   for (const f of linkedFamilies) {
-    const groupId = f.familyGroupId || f.uid;
+    const groupId = f.uid; // individual per guardian now — see asFamily's own comment for why
     if (alreadyRecorded.has(groupId)) continue; // eslint-disable-line no-continue
     const stateDoc = await db.collection("data").doc(`read-state:${f.uid}`).get(); // eslint-disable-line no-await-in-loop
     const state = stateDoc.exists ? stateDoc.data().value || {} : {};

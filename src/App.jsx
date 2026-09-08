@@ -7757,6 +7757,14 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   const lastReadOwnMessageId = myRole === "teacher" && lastReadByFamily
     ? [...messages].reverse().find((m) => m.senderType === myRole && new Date(lastReadByFamily) >= new Date(m.timestamp))?.id
     : null;
+  // The anchor point for "Not yet seen" — my own single most recent message, used only when
+  // lastReadByFamily doesn't exist at all yet. Reported directly: an empty space where a read
+  // receipt might be left the actual status ambiguous — did the family genuinely never open this,
+  // or did something just fail to record it? An explicit "Not yet seen" removes that doubt, the
+  // same way its "Seen at" sibling above already does for the read case.
+  const myLastMessageId = myRole === "teacher"
+    ? [...messages].reverse().find((m) => m.senderType === myRole)?.id
+    : null;
   // Backfills this specific thread's own read status the moment a teacher opens it, if it doesn't
   // already have a real value — see backfillMessageReadIfNeeded's own, more detailed reasoning for
   // why this exists at all. Runs once per thread actually opened, not on every render — threadKey
@@ -8025,8 +8033,11 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           // a stable, trustworthy record of what it told a family, not the reverse.
           const canModify = mine && myRole !== "family" && onEdit && onDelete && !m.deleted;
           // Shown only under the single newest message that qualifies (lastReadOwnMessageId,
-          // computed once above), not repeated under every earlier one it's equally true of.
-          const showReadReceipt = m.id === lastReadOwnMessageId;
+          // computed once above), not repeated under every earlier one it's equally true of. When
+          // lastReadByFamily doesn't exist at all yet, anchors "Not yet seen" to my own single
+          // most recent message instead, so the three-dot menu always gives a definite answer
+          // rather than empty space that could be mistaken for a display glitch.
+          const showReadReceipt = m.id === lastReadOwnMessageId || (!lastReadByFamily && m.id === myLastMessageId);
           const divider = m.id === firstUnreadId && (
             <div className="flex items-center gap-2 py-1">
               <div className="flex-1 h-px bg-rose-200" />
@@ -8072,7 +8083,9 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                     </div>
                     {showReadReceipt && (
                       <p className={`text-[10px] ${mine ? mineBubble.lightText : "text-stone-400"}`}>
-                        Seen at {new Date(lastReadByFamily).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                        {lastReadByFamily
+                          ? `Seen at ${new Date(lastReadByFamily).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+                          : "Not yet seen"}
                       </p>
                     )}
                   </div>
@@ -8569,16 +8582,14 @@ function ParentBlogView({ link, family, onBack, onRead, onOptimisticRead }) {
   // lets this land at the bottom with zero visible adjustment, during a swipe included, not just
   // on a direct tap.
   const viewportHeight = useRemainingViewportHeight(outerRef);
-  // reactorId stays the shared, family-wide identity — it's used below only for read status
-  // ("has this family seen this post"), which is genuinely meant to be one shared fact across
-  // every guardian. myReactionId is deliberately different: the server now keeps each guardian's
-  // OWN reaction genuinely separate (see api/blog-react.js's own reasoning for why), so telling
-  // the UI which reaction is "mine" has to match that same individual identity, not the shared
-  // one — using the shared id here was the other half of the actual bug: even once the server
-  // stopped merging two guardians' reactions together, the screen would have still shown either
-  // guardian's own reaction as highlighted for BOTH of them, since it was asking "does this match
-  // our shared family id" instead of "does this match ME specifically."
-  const reactorId = family.familyGroupId || family.uid; // shared per family, same identity messages already use
+  // Individual per guardian now, matching myReactionId below and matching how messages already
+  // work — previously shared across the whole family (family.familyGroupId), which was the actual,
+  // confirmed source of the reported unreliability: one guardian could react (recorded under their
+  // own individual id, correctly) while the "who's seen this" list still checked a completely
+  // different, shared id, so their own name would never show up on it despite genuinely having
+  // seen and reacted to the post. Two guardians in one household now correctly get two separate,
+  // independently-tracked read statuses, the same way they already get two separate reactions.
+  const reactorId = family.uid;
   const myReactionId = family.uid;
   const authorName = family.name || "A family";
 
@@ -9410,7 +9421,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const [unreadBlogByChild, setUnreadBlogByChild] = useState({}); // { [studentId]: count } — the per-child breakdown the switcher shows
   const refreshUnreadBlogCount = useCallback(async () => {
     if (!fullTimeStudentLinks) return;
-    const reactorId = family.familyGroupId || family.uid;
+    const reactorId = family.uid; // individual per guardian now — see the matching comment on ParentBlogView's own reactorId for why
     const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
     const unreadByClass = {};
     for (const l of uniqueClasses) {
@@ -9541,10 +9552,19 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // just "now" — that older value is real history, from before this feature ever existed, not
   // something invented after the fact. Every visit after that simply reflects "now," since the
   // thread already carries its own real value by then.
+  //
+  // Hardened with a longer retry window than loadJSON/saveJSON's own default (2 retries, under a
+  // second total) — this is the one, single write a teacher's own "Seen at" indicator depends on
+  // entirely, with no user-facing way to notice or retry it manually themselves the way a failed,
+  // visible send would prompt someone to just try again. A brief connection hiccup at the exact
+  // moment a thread is opened shouldn't be able to leave a teacher wrongly believing a message was
+  // never read at all. The teacher-side backfill (see onBackfillRead above) remains the second,
+  // independent layer of defense underneath this — this hardening is about needing that fallback
+  // as rarely as possible, not replacing it.
   const recordMessageReadByFamily = async (storageKey, previousReadTimestamp) => {
-    const existing = (await loadJSON(storageKey, null, true)) || { messages: [] };
+    const existing = (await loadJSON(storageKey, null, true, 5)) || { messages: [] };
     const newTimestamp = existing.lastReadByFamily ? new Date().toISOString() : (previousReadTimestamp || new Date().toISOString());
-    await saveJSON(storageKey, { ...existing, lastReadByFamily: newTimestamp }, true);
+    await saveJSON(storageKey, { ...existing, lastReadByFamily: newTimestamp }, true, 5, true);
   };
 
   const openMessagesFor = async (classId) => {
