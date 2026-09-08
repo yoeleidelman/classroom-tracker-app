@@ -10816,6 +10816,41 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [loading, setLoading] = useState(true);
   const [roster, setRoster] = useState([]);
   const [studentData, setStudentData] = useState({});
+  // Reported live, directly, and traced to an actual, confirmed root cause: a parent checking a
+  // child in on their own device never reached the teacher's own screen at all, no matter how long
+  // it stayed open — not a slow or flaky sync, but the simple fact that this data was never a live
+  // subscription in the first place. studentData above was always a one-time load, populated once
+  // when a class is opened and never touched again except by this teacher's own local actions —
+  // exactly the same shape of gap the earlier useVisibilityGeneration fix closed for things that
+  // WERE already live subscriptions, but that fix could never have reached this, since there was no
+  // subscription here to begin with for it to keep alive.
+  //
+  // This closes that gap directly: one live subscription per student's own daily-log document,
+  // merged into studentData the moment any of them actually changes — a parent's check-in, or
+  // anything else logged from another device or another tab, now reaches this screen the same way
+  // it always should have, with nothing for a teacher to notice or confirm. Deliberately additive,
+  // not a replacement for the one-time load or the optimistic local updates every check-in toggle,
+  // persistStudent, and similar already rely on: those still give this teacher's own taps their
+  // immediate, optimistic feedback exactly as before; this only ever reaches in when something
+  // OTHER than this teacher's own local action actually changed the real, stored value.
+  const kriyaKeys = roster.map((s) => `class:${classId}:kriya:${s.id}`);
+  const liveKriyaData = useLiveJSONMap(kriyaKeys);
+  useEffect(() => {
+    if (Object.keys(liveKriyaData).length === 0) return;
+    setStudentData((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const s of roster) {
+        const key = `class:${classId}:kriya:${s.id}`;
+        if (!(key in liveKriyaData)) continue; // eslint-disable-line no-continue -- no snapshot received yet for this student; keep whatever's already showing rather than guess
+        const raw = liveKriyaData[key] || emptyStudentData();
+        const { data: d } = dedupeDailyLogData(raw);
+        const merged = { ...emptyStudentData(), ...d };
+        if (JSON.stringify(merged) !== JSON.stringify(prev[s.id])) { next[s.id] = merged; changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [liveKriyaData, roster, classId]); // eslint-disable-line react-hooks/exhaustive-deps
   const [globalStudents, setGlobalStudentsInClass] = useState([]);
   const [schoolEvents, setSchoolEventsInClass] = useState([]);
   const [schoolTools, setSchoolToolsInClass] = useState([]);
@@ -13058,7 +13093,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         <Camera size={18} />
       </button>
 
-      {alerts.filter((a) => !a.dismissed).length > 0 && (
+      {!config.hideAttentionFlags && alerts.filter((a) => !a.dismissed).length > 0 && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 mb-3">
           <p className="text-sm font-semibold text-rose-900 mb-2">Needs attention</p>
           <ul className="space-y-1.5">
@@ -13225,7 +13260,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
                       )}
                       <button onClick={() => openDetail(s.id)} className="font-medium text-stone-800 text-sm hover:text-teal-700 flex items-center gap-1.5 shrink-0 text-left whitespace-nowrap w-36">
                         <span className="truncate">{s.name}</span>
-                        {flags.length > 0 && (
+                        {!config.hideAttentionFlags && flags.length > 0 && (
                           <span className="flex items-center gap-0.5 text-amber-700 bg-amber-50 text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0">
                             <AlertTriangle size={10} /> {flags.length}
                           </span>
@@ -25415,6 +25450,15 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
               <input type="checkbox" checked={config.blogCommentsEnabled !== false}
                 onChange={(e) => update((c) => { c.blogCommentsEnabled = e.target.checked; return c; })} />
               Allow parents to comment on blog posts
+            </label>
+          </Section>
+
+          <Section title="Home screen display">
+            <p className="text-xs text-stone-400 mb-3">Reported directly: a teacher who projects the Home screen for the class to see their own points doesn't want a caution icon or an attendance-lateness banner showing up right there next to a student's name, even for something as ordinary as an attendance pattern — it's still visible for that teacher on the student's own detail page either way, and neither the Points page nor Class Mode has ever shown this at all, with or without this setting.</p>
+            <label className="flex items-center gap-2 text-sm text-stone-700">
+              <input type="checkbox" checked={!config.hideAttentionFlags}
+                onChange={(e) => update((c) => { c.hideAttentionFlags = !e.target.checked; return c; })} />
+              Show attention flags and alerts on the Home screen
             </label>
           </Section>
 
