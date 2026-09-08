@@ -31,7 +31,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload, Clock
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload, Clock, Pin, ExternalLink
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -8936,12 +8936,22 @@ function ParentBlogTabContent({ links, selectedStudentId, family, onRead, onOpti
 // rather than one-time loaded.
 function ParentHomeworkView({ link }) {
   const { value: posts, loaded } = useLiveJSONLoaded(`class:${link.classId}:homework`, []);
+  const config = useLiveJSON(`class:${link.classId}:config`, {});
+  const pinnedLink = config?.homework?.pinnedLink;
 
   if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)); // newest first — homework is "what's due," not a scrollable history
 
   return (
     <div>
+      {pinnedLink?.title && pinnedLink?.url && (
+        <a href={pinnedLink.url} target="_blank" rel="noopener noreferrer"
+          className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3 hover:bg-amber-100">
+          <Pin size={14} className="text-amber-700 shrink-0" />
+          <span className="text-sm font-semibold text-amber-900 truncate flex-1">{pinnedLink.title}</span>
+          <ExternalLink size={13} className="text-amber-600 shrink-0" />
+        </a>
+      )}
       {sorted.length === 0 ? (
         <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">No homework posted yet.</p>
       ) : (
@@ -11043,7 +11053,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         );
       case "homework":
         return (
-        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} />
+        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} config={config} persistConfig={persistConfig} />
         );
       case "tools":
         return (
@@ -16267,18 +16277,60 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
 
 // Same reasoning as the blog feed's own compose button — placed at the bottom, right after the
 // newest post, so it's the next thing in view rather than requiring a scroll back to the top.
-function TeacherHomeworkView({ posts, navigate }) {
+function TeacherHomeworkView({ posts, navigate, config, persistConfig }) {
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
   // Which post's "Seen by" sheet is currently open, if any — holds the post itself (not just an
   // id) so the sheet has its own current readBy to show without needing a second lookup back into
   // sorted/posts.
   const [showReadByFor, setShowReadByFor] = useState(null);
+  // A single, standing link a teacher can pin above the day-to-day posts — reported directly: an
+  // ongoing resource (a review link, a recurring practice site) otherwise gets buried the moment
+  // the next day's homework is posted, forcing a parent to scroll back through history to find it
+  // again every single time. Stored on the class config, not as a homework post itself, since it
+  // isn't "today's homework" and shouldn't sort into or clutter that history at all.
+  const pinnedLink = config.homework?.pinnedLink;
+  const [editingPinned, setEditingPinned] = useState(false);
+  const [pinnedTitle, setPinnedTitle] = useState(pinnedLink?.title || "");
+  const [pinnedUrl, setPinnedUrl] = useState(pinnedLink?.url || "");
+  const savePinnedLink = () => {
+    const next = pinnedTitle.trim() && pinnedUrl.trim() ? { title: pinnedTitle.trim(), url: pinnedUrl.trim() } : null;
+    persistConfig({ ...config, homework: { ...config.homework, pinnedLink: next } });
+    setEditingPinned(false);
+  };
+  const removePinnedLink = () => {
+    persistConfig({ ...config, homework: { ...config.homework, pinnedLink: null } });
+    setPinnedTitle(""); setPinnedUrl(""); setEditingPinned(false);
+  };
   return (
     <div className={PAGE}>
       <Header navigate={navigate} />
       <MainTabs active="homework" navigate={navigate} />
       <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide mb-3">Homework</p>
       <div className="md:w-[28rem]">
+        {editingPinned ? (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3 space-y-2">
+            <input value={pinnedTitle} onChange={(e) => setPinnedTitle(e.target.value)} placeholder="Title, e.g. Flashcard review link"
+              className="w-full rounded-lg border border-stone-300 px-2.5 py-1.5 text-sm" />
+            <input value={pinnedUrl} onChange={(e) => setPinnedUrl(e.target.value)} placeholder="https://..."
+              className="w-full rounded-lg border border-stone-300 px-2.5 py-1.5 text-sm" />
+            <div className="flex items-center gap-2">
+              <button onClick={savePinnedLink} className="text-xs font-bold text-white bg-teal-700 rounded-lg px-3 py-1.5">Save</button>
+              <button onClick={() => { setEditingPinned(false); setPinnedTitle(pinnedLink?.title || ""); setPinnedUrl(pinnedLink?.url || ""); }}
+                className="text-xs font-semibold text-stone-500">Cancel</button>
+              {pinnedLink && <button onClick={removePinnedLink} className="text-xs font-semibold text-rose-600 ml-auto">Remove pinned link</button>}
+            </div>
+          </div>
+        ) : pinnedLink?.title && pinnedLink?.url ? (
+          <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+            <Pin size={14} className="text-amber-700 shrink-0" />
+            <a href={pinnedLink.url} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-amber-900 truncate flex-1 hover:underline">{pinnedLink.title}</a>
+            <button onClick={() => setEditingPinned(true)} className="text-xs font-semibold text-amber-700 shrink-0">Edit</button>
+          </div>
+        ) : (
+          <button onClick={() => setEditingPinned(true)} className="flex items-center gap-1.5 text-xs font-semibold text-stone-500 hover:text-teal-700 mb-3">
+            <Pin size={12} /> Pin a link to the top for parents (e.g. an ongoing review link)
+          </button>
+        )}
         {sorted.length === 0 ? (
           <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">Nothing posted here yet.</p>
         ) : (
