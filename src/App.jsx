@@ -548,6 +548,20 @@ function describeAttachmentsForNotification(attachments) {
   return `Sent ${attachments.length} attachments`;
 }
 
+// A real, reported bug this fixes: every one of these unread-message preview lines (teacher
+// threads, class threads, the School Office thread, and the office's own view of a family thread)
+// showed literally nothing whenever a message was attachment-only, since they all read a
+// message's own .text directly with no fallback for the genuinely common case of a message
+// that's just a photo or a file and no words at all. describeAttachmentsForNotification already
+// exists and already solves exactly this for push-notification bodies — reused here rather than
+// writing a second, slightly-different version of the same fallback text.
+function previewForMessage(msg) {
+  if (!msg) return "";
+  if (msg.text) return msg.text;
+  const atts = msg.attachments || (msg.attachmentUrl ? [{ url: msg.attachmentUrl, type: msg.attachmentType }] : []);
+  return describeAttachmentsForNotification(atts);
+}
+
 // Single-reaction-per-person logic, shared by every place a post or a specific block within one
 // can be reacted to — picking a new reaction replaces whichever one that person already had
 // there rather than adding alongside it; picking the same one again removes it (toggle-off).
@@ -7693,12 +7707,56 @@ function ContactOfficeView({ adminThread, onBack }) {
         <>
           <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">From the office</p>
           <div className="space-y-2">
-            {messages.map((m) => (
-              <div key={m.id} className="bg-white border border-stone-200 rounded-xl p-3.5">
-                <p className="text-sm text-stone-700 whitespace-pre-wrap"><LinkifiedText text={m.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>
-                <p className="text-[10px] text-stone-400 mt-1">{new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
-              </div>
-            ))}
+            {messages.map((m) => {
+              // Same normalization as the admin's own composer view (ConversationThreadView) —
+              // an older message saved before an attachments-array rewrite still carries
+              // attachmentUrl/attachmentType directly rather than an attachments array.
+              const atts = m.attachments || (m.attachmentUrl ? [{ url: m.attachmentUrl, type: m.attachmentType, name: m.attachmentName }] : []);
+              const mediaAtts = atts.filter((a) => a.type === "photo" || a.type === "video");
+              const otherAtts = atts.filter((a) => a.type === "audio" || a.type === "file");
+              return (
+                <div key={m.id} className="bg-white border border-stone-200 rounded-xl p-3.5 overflow-hidden">
+                  {mediaAtts.length === 1 && (
+                    mediaAtts[0].type === "photo" ? (
+                      <a href={mediaAtts[0].url} target="_blank" rel="noopener noreferrer">
+                        <img src={mediaAtts[0].url} alt="" className="w-full max-h-64 object-cover -mx-3.5 -mt-3.5 mb-2" style={{ width: "calc(100% + 1.75rem)" }} />
+                      </a>
+                    ) : (
+                      <video src={mediaAtts[0].url} controls playsInline className="w-full max-h-64 bg-black -mx-3.5 -mt-3.5 mb-2" style={{ width: "calc(100% + 1.75rem)" }} />
+                    )
+                  )}
+                  {mediaAtts.length > 1 && (
+                    <div className="grid grid-cols-2 gap-0.5 -mx-3.5 -mt-3.5 mb-2">
+                      {mediaAtts.map((a, i) => (
+                        <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" className="relative aspect-square">
+                          {a.type === "video" ? (
+                            <video src={a.url} muted playsInline className="w-full h-full object-cover" />
+                          ) : (
+                            <img src={a.url} alt="" className="w-full h-full object-cover" />
+                          )}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                  {otherAtts.map((a, i) => (
+                    a.type === "audio" ? (
+                      <div key={i} className="mb-2">
+                        {a.name && <p className="text-[11px] font-semibold text-stone-500 truncate mb-1">{a.name}</p>}
+                        <audio src={a.url} controls className="w-full" style={{ height: "36px" }} />
+                      </div>
+                    ) : (
+                      <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                        className="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-lg px-2.5 py-2 mb-2 hover:bg-stone-100">
+                        <FileText size={16} className="text-stone-500 shrink-0" />
+                        <span className="text-xs font-semibold text-stone-700 truncate">{a.name || "Attachment"}</span>
+                      </a>
+                    )
+                  ))}
+                  {m.text && <p className="text-sm text-stone-700 whitespace-pre-wrap"><LinkifiedText text={m.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
+                  <p className="text-[10px] text-stone-400 mt-1">{new Date(m.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</p>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
@@ -9409,14 +9467,14 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       const last = thread?.messages?.[thread.messages.length - 1];
       if (isThreadUnread(readState, `class-${l.classId}`, last, "family")) {
         const unreadCount = countUnreadInThread(readState, `class-${l.classId}`, thread.messages, "family");
-        results.push({ threadKey: `class-${l.classId}`, kind: "class", classId: l.classId, title: l.className, preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
+        results.push({ threadKey: `class-${l.classId}`, kind: "class", classId: l.classId, title: l.className, preview: previewForMessage(last), senderName: last.senderName, timestamp: last.timestamp, unreadCount });
       }
     }
     const adminThreadData = await loadJSON(`admin-messages:${family.uid}`, { messages: [] }, true);
     const lastAdmin = adminThreadData?.messages?.[adminThreadData.messages.length - 1];
     if (isThreadUnread(readState, `admin-${family.uid}`, lastAdmin, "family")) {
       const unreadCount = countUnreadInThread(readState, `admin-${family.uid}`, adminThreadData.messages, "family");
-      results.push({ threadKey: `admin-${family.uid}`, kind: "admin", title: "School Office", preview: lastAdmin.text, senderName: lastAdmin.senderName, timestamp: lastAdmin.timestamp, unreadCount });
+      results.push({ threadKey: `admin-${family.uid}`, kind: "admin", title: "School Office", preview: previewForMessage(lastAdmin), senderName: lastAdmin.senderName, timestamp: lastAdmin.timestamp, unreadCount });
     }
     // Individual teacher threads were never actually included here at all before, despite the
     // Messages list checking unreadThreads for a matching teacher-{uid} entry to decide whether to
@@ -9430,7 +9488,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         // classIds carried through here too, same as t's own shape — a grade-level coordinator's
         // thread naturally has none, which correctly means it won't attribute to any one specific
         // child's own count below, only a teacher genuinely tied to that child's own class does.
-        results.push({ threadKey: `teacher-${t.uid}`, kind: "teacher", classIds: t.classIds || [], title: t.name, preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
+        results.push({ threadKey: `teacher-${t.uid}`, kind: "teacher", classIds: t.classIds || [], title: t.name, preview: previewForMessage(last), senderName: last.senderName, timestamp: last.timestamp, unreadCount });
       }
     }
     setUnreadThreads(results);
@@ -10742,7 +10800,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
                 </div>
               </div>
               <p className="text-xs text-stone-400 mb-1">{childNames}</p>
-              <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+              <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${previewForMessage(last)}` : "No messages yet"}</p>
             </button>
           );
         })}
@@ -11306,7 +11364,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const threadKey = `classroom-${g.groupId}`;
       if (isThreadUnread(readState, threadKey, last, "teacher")) {
         const unreadCount = countUnreadInThread(readState, threadKey, thread.messages, "teacher");
-        results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: last.text, senderName: last.senderName, timestamp: last.timestamp, unreadCount });
+        results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: previewForMessage(last), senderName: last.senderName, timestamp: last.timestamp, unreadCount });
       }
     }
     setCommUnreadFamilies(results);
@@ -19580,7 +19638,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
                     </div>
                   </div>
                   <p className="text-xs text-stone-400 mb-1">{childNames}</p>
-                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${previewForMessage(last)}` : "No messages yet"}</p>
                 </button>
               );
             })}
@@ -19612,7 +19670,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
                     </div>
                   </div>
                   <p className="text-xs text-stone-400 mb-1">{childNames}</p>
-                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${last.text}` : "No messages yet"}</p>
+                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${previewForMessage(last)}` : "No messages yet"}</p>
                 </button>
               );
             })}
@@ -21087,7 +21145,7 @@ Write a short, warm caption — 1-2 sentences. Output only the caption text, not
 }
 async function generateReplyMessage(roughNote, recentMessages, config, senderRole, teacher) {
   const isSchoolSide = senderRole === "teacher" || senderRole === "admin";
-  const context = recentMessages.slice(-4).map((m) => `${m.senderName}: ${m.text}`).join("\n");
+  const context = recentMessages.slice(-4).map((m) => `${m.senderName}: ${previewForMessage(m)}`).join("\n");
   const styleBlock = isSchoolSide
     ? buildStyleInstructions(config, teacher?.name)
     : "Write in a warm, clear, everyday tone — a genuine message from a parent to their child's school.";
