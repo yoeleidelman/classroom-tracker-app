@@ -7668,6 +7668,7 @@ function ContactOfficePanel({ onViewUpdates }) {
 function ContactOfficeView({ adminThread, onBack }) {
   const [officePhone, setOfficePhone] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [lightboxPhoto, setLightboxPhoto] = useState(null);
 
   useEffect(() => {
     loadJSON("schoolSettings", {}, true).then((s) => { setOfficePhone(s?.officePhone || null); setLoading(false); });
@@ -7718,23 +7719,23 @@ function ContactOfficeView({ adminThread, onBack }) {
                 <div key={m.id} className="bg-white border border-stone-200 rounded-xl p-3.5 overflow-hidden">
                   {mediaAtts.length === 1 && (
                     mediaAtts[0].type === "photo" ? (
-                      <a href={mediaAtts[0].url} target="_blank" rel="noopener noreferrer">
-                        <img src={mediaAtts[0].url} alt="" className="w-full max-h-64 object-cover -mx-3.5 -mt-3.5 mb-2" style={{ width: "calc(100% + 1.75rem)" }} />
-                      </a>
+                      <img src={mediaAtts[0].url} alt="" onClick={() => setLightboxPhoto({ url: mediaAtts[0].url, type: "photo" })}
+                        className="w-full max-h-64 object-cover cursor-pointer -mx-3.5 -mt-3.5 mb-2" style={{ width: "calc(100% + 1.75rem)" }} />
                     ) : (
-                      <video src={mediaAtts[0].url} controls playsInline className="w-full max-h-64 bg-black -mx-3.5 -mt-3.5 mb-2" style={{ width: "calc(100% + 1.75rem)" }} />
+                      <video src={mediaAtts[0].url} onClick={() => setLightboxPhoto({ url: mediaAtts[0].url, type: "video" })}
+                        className="w-full max-h-64 bg-black cursor-pointer -mx-3.5 -mt-3.5 mb-2" style={{ width: "calc(100% + 1.75rem)" }} />
                     )
                   )}
                   {mediaAtts.length > 1 && (
                     <div className="grid grid-cols-2 gap-0.5 -mx-3.5 -mt-3.5 mb-2">
                       {mediaAtts.map((a, i) => (
-                        <a key={i} href={a.url} target="_blank" rel="noopener noreferrer" className="relative aspect-square">
+                        <div key={i} className="relative aspect-square cursor-pointer" onClick={() => setLightboxPhoto({ url: a.url, type: a.type })}>
                           {a.type === "video" ? (
-                            <video src={a.url} muted playsInline className="w-full h-full object-cover" />
+                            <video src={a.url} muted playsInline className="w-full h-full object-cover pointer-events-none" />
                           ) : (
                             <img src={a.url} alt="" className="w-full h-full object-cover" />
                           )}
-                        </a>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -7760,6 +7761,7 @@ function ContactOfficeView({ adminThread, onBack }) {
           </div>
         </>
       )}
+      {lightboxPhoto && <PhotoLightbox url={lightboxPhoto.url} type={lightboxPhoto.type} onClose={() => setLightboxPhoto(null)} />}
     </div>
   );
 }
