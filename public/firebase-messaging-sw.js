@@ -48,16 +48,28 @@ async function incrementBadgeCount() {
 
 // Fires when a push arrives while the app isn't the active tab (or isn't open at all) — this is
 // the actual "device buzzes with a notification" moment. If the app IS open and in the
-// foreground, this does NOT fire; that case is handled separately, in-app.
+// foreground, Firebase's own SDK is supposed to route the message to the app directly instead of
+// here — but that assumption doesn't always hold. Reported directly and confirmed: the app's own
+// badge count would correctly clear the moment a message was read, then get silently stomped back
+// up several seconds later — exactly the shape of a push notification that was already queued
+// (sent while the phone was offline or the app fully closed) finally arriving in that same narrow
+// window right as the app finishes opening, landing in THIS handler instead of being routed
+// in-app, with this code having no idea the message it's about was already read.
+// This checks for an actual visible window before ever touching the badge at all now, rather than
+// trusting that this handler only fires when none exists — if the app is genuinely open and
+// visible, its own logic is already computing the real, accurate count, and blindly incrementing
+// here on top of that can only ever make it wrong.
 //
 // Reads everything from payload.data, not payload.notification — the backend deliberately sends
 // a data-only payload. A "notification" payload gets auto-displayed by the browser on its own, in
 // addition to this handler's own showNotification() call below, which produced two separate
 // notifications for every single message. Data-only means this call is the only thing that ever
 // shows anything.
-messaging.onBackgroundMessage((payload) => {
+messaging.onBackgroundMessage(async (payload) => {
   const title = payload.data?.title || "New notification";
-  incrementBadgeCount();
+  const windowClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
+  const appIsVisible = windowClients.some((c) => c.visibilityState === "visible");
+  if (!appIsVisible) incrementBadgeCount();
   self.registration.showNotification(title, {
     body: payload.data?.body || "",
     // Both fields matter and serve genuinely different purposes, which is why removing one
