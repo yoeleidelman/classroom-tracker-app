@@ -19,7 +19,7 @@
       (function () {
         var isParent = new URLSearchParams(window.location.search).get("portal") === "parent";
         var manifestHref = isParent ? "/manifest-parent.json" : "/manifest.json";
-        var appleIconHref = isParent ? "/icons-parent/icon-192.png" : "/apple-touch-icon.png";
+        var appleIconHref = isParent ? "/apple-touch-icon-parent.png" : "/apple-touch-icon.png";
         var appleTitle = isParent ? "SJA Parent" : "Classroom";
         var themeColor = isParent ? "#1c3453" : "#2b2723";
         var pageTitle = isParent ? "SJA Parent Portal" : "Classroom Tracker";
