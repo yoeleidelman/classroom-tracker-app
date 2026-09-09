@@ -9474,7 +9474,23 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
 
   // Checked fresh each time the home screen loads — there's no live push here, so "new message"
   // means "new since I last opened this app," not an instant alert the moment it's sent.
+  // A real, reported bug this fixes: a parent tapped a push notification for a brand-new class
+  // message, the message correctly got marked read, but the unread badge — both the overall
+  // count and the specific class's own — kept showing it as unread anyway. Root cause: a fresh
+  // app load from a tapped notification runs TWO independent calls to this function nearly
+  // simultaneously — one plain "just refresh whatever's unread" on mount, and a second that
+  // marks the tapped thread read first and then refreshes. Both write directly to the same
+  // unreadThreads state with no coordination between them at all, and nothing guarantees network
+  // requests resolve in the order they were sent — if the plain refresh (which started reading
+  // BEFORE the mark-as-read even happened) happens to finish arriving after the other one, its
+  // stale "still unread" result silently overwrites the correct, just-updated one.
+  // refreshSeqRef fixes this the standard way for exactly this class of bug: each call gets its
+  // own sequence number, and a call only ever commits its result if no newer call has started
+  // since it began — so whichever call was started MOST RECENTLY always wins, regardless of
+  // which one's network request happens to come back first.
+  const refreshSeqRef = useRef(0);
   const refreshUnreadThreads = useCallback(async () => {
+    const mySeq = ++refreshSeqRef.current;
     const classLinks = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()];
     const readState = await getReadState(family.uid);
     const results = [];
@@ -9507,7 +9523,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         results.push({ threadKey: `teacher-${t.uid}`, kind: "teacher", classIds: t.classIds || [], title: t.name, preview: previewForMessage(last), senderName: last.senderName, timestamp: last.timestamp, unreadCount });
       }
     }
-    setUnreadThreads(results);
+    if (refreshSeqRef.current === mySeq) setUnreadThreads(results);
   }, [family, eligibleTeachers]);
 
   useEffect(() => { refreshUnreadThreads(); }, [refreshUnreadThreads]);
@@ -9521,8 +9537,14 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // whether it's been read: the same data this family's own read receipts already use, not a
   // separate per-class timestamp cutoff kept in sync alongside it.
   const [unreadBlogByChild, setUnreadBlogByChild] = useState({}); // { [studentId]: count } — the per-child breakdown the switcher shows
+  // Same refreshSeqRef guard as refreshUnreadThreads above, and for the identical reason — this
+  // is called from several independent triggers (mount, the 45-second poll, visibility change,
+  // and right after a post is confirmed read), with nothing guaranteeing an older call's network
+  // request can't resolve after a newer one's and silently overwrite it with stale data.
+  const blogRefreshSeqRef = useRef(0);
   const refreshUnreadBlogCount = useCallback(async () => {
     if (!fullTimeStudentLinks) return;
+    const mySeq = ++blogRefreshSeqRef.current;
     const reactorId = family.uid; // individual per guardian now — see the matching comment on ParentBlogView's own reactorId for why
     const uniqueClasses = [...new Map(fullTimeStudentLinks.map((l) => [l.classId, l])).values()];
     const unreadByClass = {};
@@ -9530,6 +9552,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       const posts = await loadJSON(`class:${l.classId}:blogPosts`, [], true); // eslint-disable-line no-await-in-loop
       unreadByClass[l.classId] = posts.filter((p) => !p.deleted && !(p.readBy || []).some((r) => r.id === reactorId)).length;
     }
+    if (blogRefreshSeqRef.current !== mySeq) return;
     // Top level: one distinct post counts once, even if it happens to reach two siblings sharing
     // a class — summing unreadByClass's own values already achieves exactly this, since it's
     // keyed per unique class, never per child, so a shared class's posts are never counted twice.
@@ -9567,8 +9590,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
 
 
   const [unreadHomeworkCount, setUnreadHomeworkCount] = useState(0);
+  // Same refreshSeqRef guard, same reasoning, as the two above.
+  const homeworkRefreshSeqRef = useRef(0);
   const refreshUnreadHomeworkCount = useCallback(async () => {
     if (!fullTimeStudentLinks) return;
+    const mySeq = ++homeworkRefreshSeqRef.current;
     const uniqueClasses = [...new Map(fullTimeStudentLinks.filter((l) => l.classType !== "preschool").map((l) => [l.classId, l])).values()];
     const readState = await getReadState(family.uid);
     let total = 0;
@@ -9577,7 +9603,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       const lastRead = readState[`homework-${l.classId}`];
       total += posts.filter((p) => !lastRead || new Date(p.timestamp) > new Date(lastRead)).length;
     }
-    setUnreadHomeworkCount(total);
+    if (homeworkRefreshSeqRef.current === mySeq) setUnreadHomeworkCount(total);
   }, [family, fullTimeStudentLinks]);
 
   useEffect(() => { refreshUnreadHomeworkCount(); }, [refreshUnreadHomeworkCount]);
