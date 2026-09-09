@@ -2087,13 +2087,23 @@ async function fetchStaffReachableFamilies() {
 // Fire-and-forget by design — a failed push send should never block the actual message or post,
 // which has already succeeded by the time this runs, and never surface an error over something
 // the person sending didn't ask about.
-async function sendPushNotification(uids, title, body, url) {
+//
+// readGuard is optional — { readStateKey, timestamp } — and exists specifically for the case a
+// broadcast to a whole class exposed: each family's own copy is sent one at a time in sequence
+// (see ClassBroadcastComposer's own sendInApp), so a specific family's own notification can end up
+// sent — and separately, actually delivered — several seconds after the message itself already
+// appeared in their own open app via its live connection, with no push involved at all. If they
+// read and moved on before this notification finally arrives, the service worker has no way to
+// know that on its own; passing exactly what markThreadRead already wrote locally the moment they
+// read it is what lets the service worker check for itself, without ever needing its own way to
+// authenticate and query Firestore directly.
+async function sendPushNotification(uids, title, body, url, readGuard) {
   if (!uids || uids.length === 0) return;
   try {
     await fetch("/api/send-push", {
       method: "POST",
       headers: await authHeaders(),
-      body: JSON.stringify({ uids, title, body, url }),
+      body: JSON.stringify({ uids, title, body, url, ...(readGuard ? { readGuard } : {}) }),
     });
   } catch {
     // best-effort only — nothing to recover here
@@ -2251,16 +2261,43 @@ async function getReadState(viewerId) {
 // any failure is both surfaced (so it's no longer invisible) and caught by an immediate,
 // unconditional fallback to the older but structurally simpler full-document write, so the
 // read-mark reliably lands through one path or the other rather than silently through neither.
+// Records that a thread was just read, in the same on-device "badge-store" database the service
+// worker itself already reads from the moment a push notification arrives (see its own
+// onBackgroundMessage comment) — this is what lets it tell a notification that's simply arriving
+// late apart from one that's genuinely new, without ever giving the service worker its own way to
+// authenticate and query Firestore directly, which would be a far larger, riskier thing to add.
+// Best-effort by design, same as the badge count it sits alongside — a miss here just means this
+// one specific race isn't caught for this one read, not that reading itself failed.
+async function recordLocalThreadRead(threadKey, readAt) {
+  try {
+    const idb = await new Promise((resolve, reject) => {
+      const req = indexedDB.open("badge-store", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    await new Promise((resolve, reject) => {
+      const req = idb.transaction("kv", "readwrite").objectStore("kv").put(readAt, `read:${threadKey}`);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    // IndexedDB unavailable, or some other local storage issue — best-effort only, see above
+  }
+}
+
 async function markThreadRead(viewerId, threadKey) {
   const ref = doc(db, "data", `read-state:${viewerId}`);
+  const readAt = new Date().toISOString();
   try {
-    await setDoc(ref, { [`value.${threadKey}`]: new Date().toISOString() }, { merge: true });
+    await setDoc(ref, { [`value.${threadKey}`]: readAt }, { merge: true });
   } catch (err) {
     console.error("markThreadRead: merge write failed, falling back to full-document write", err);
     const state = await getReadState(viewerId);
-    state[threadKey] = new Date().toISOString();
+    state[threadKey] = readAt;
     await saveJSON(`read-state:${viewerId}`, state, true);
   }
+  recordLocalThreadRead(threadKey, readAt); // best-effort, see its own comment — never awaited or allowed to block the read itself
 }
 
 // Triggered by a TEACHER's own viewing of a specific thread, rather than waiting on the family to
@@ -12877,7 +12914,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    sendPushNotification([familyUid], `Message from ${className}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=messages&classId=${classId}`);
+    sendPushNotification([familyUid], `Message from ${className}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=messages&classId=${classId}`, { readStateKey: `class-${classId}`, timestamp: entry.timestamp });
     return next;
   };
 

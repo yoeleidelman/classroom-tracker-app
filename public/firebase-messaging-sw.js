@@ -65,11 +65,47 @@ async function incrementBadgeCount() {
 // addition to this handler's own showNotification() call below, which produced two separate
 // notifications for every single message. Data-only means this call is the only thing that ever
 // shows anything.
+// Checks whether a thread has already been read as of at least the given message's own
+// timestamp, using the exact same on-device store markThreadRead writes to on the app side (see
+// its own comment there for the full reasoning). Returns false — "treat as unread" — for any
+// case this can't answer with confidence: no guard was included on this notification at all, the
+// thread was never marked read locally, or IndexedDB itself is unavailable. This only ever
+// suppresses the badge increment when it has real, positive evidence the thread was already read;
+// it never invents that evidence.
+async function threadAlreadyReadAsOf(readStateKey, messageTimestamp) {
+  if (!readStateKey || !messageTimestamp) return false;
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open("badge-store", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    const readAt = await new Promise((resolve) => {
+      const getReq = db.transaction("kv", "readonly").objectStore("kv").get(`read:${readStateKey}`);
+      getReq.onsuccess = () => resolve(getReq.result || null);
+      getReq.onerror = () => resolve(null);
+    });
+    return !!readAt && new Date(readAt) >= new Date(messageTimestamp);
+  } catch {
+    return false;
+  }
+}
+
 messaging.onBackgroundMessage(async (payload) => {
   const title = payload.data?.title || "New notification";
   const windowClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
   const appIsVisible = windowClients.some((c) => c.visibilityState === "visible");
-  if (!appIsVisible) incrementBadgeCount();
+  // A real, reported gap this closes: the check above only ever asked "is the app open right
+  // now" — but a broadcast to a whole class sends each family's own copy one at a time in
+  // sequence, so a specific family's own notification can genuinely be sent, and separately
+  // actually delivered, several seconds after that same message already appeared in their own
+  // open app through its live connection, with no push involved at all yet. If they'd already
+  // read it and moved on by the time this notification caught up, "is the app open right now"
+  // alone can't tell — it only knows about this exact instant, not the read that already
+  // happened earlier. This asks the one further, narrower question that actually can.
+  const alreadyRead = !appIsVisible && await threadAlreadyReadAsOf(payload.data?.readStateKey, payload.data?.readGuardTimestamp);
+  if (!appIsVisible && !alreadyRead) incrementBadgeCount();
   self.registration.showNotification(title, {
     body: payload.data?.body || "",
     // Both fields matter and serve genuinely different purposes, which is why removing one

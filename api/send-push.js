@@ -65,7 +65,7 @@ export default async function handler(req, res) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
 
-  const { uids: providedUids, resolve, title, body, url, icon } = req.body || {};
+  const { uids: providedUids, resolve, title, body, url, icon, readGuard } = req.body || {};
   if (!title || !body) return res.status(400).json({ error: "title and body are required." });
 
   const db = getFirestore();
@@ -126,6 +126,11 @@ export default async function handler(req, res) {
         body,
         url: url || "/",
         icon: icon || "/icons-parent/icon-192.png",
+        // Optional — { readStateKey, timestamp } — see sendPushNotification's own comment on the
+        // client side for what this exists to fix. Firebase's data payload only carries strings,
+        // so this is flattened into two separate fields rather than sent as a nested object; the
+        // service worker reads them back out individually.
+        ...(readGuard ? { readStateKey: readGuard.readStateKey, readGuardTimestamp: readGuard.timestamp } : {}),
       },
       // Every device this app registers is a Web Push token (obtained via the service worker and
       // a VAPID key), never a native Android or iOS app token — so this is the one delivery-speed
