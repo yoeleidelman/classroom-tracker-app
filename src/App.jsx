@@ -4510,6 +4510,22 @@ function AppInner() {
     <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
       onSwitchClass={isAdminSession ? () => safeGoBack("adminClass", backToAdminDashboard) : switchClass}
       switchLabel={isAdminSession ? "Admin \u00b7 Back to dashboard" : "Switch class"}
+      // A real, reported crash this fixes: this render path — reached by both an admin browsing a
+      // classroom and the legacy class-password flow, neither of which is a real, individually
+      // signed-in teacher account — never passed loggedInTeacher at all, leaving it undefined.
+      // TeacherMessagesView (reached from here through Comm → Classroom Messages) assumes it's
+      // always a real object with its own uid, using it to read and mark each conversation's own
+      // read-state — so the moment either kind of session actually opened a real conversation, that
+      // assumption failed with a genuine, uncaught error before the screen ever got to push its own
+      // history entry for the conversation at all. That's the real, complete explanation for "Back
+      // still skips the whole classroom even after the last fix" — the fix for how history itself
+      // behaved was correct, but nothing was going wrong with history in this specific case at all;
+      // the step that was supposed to create a new one to step back through never actually ran.
+      // A stand-in identity here is what an admin or legacy session genuinely is in this context —
+      // not one specific person's own private account the way a real teacher login is, but the
+      // office itself acting on the classroom's behalf, the same shared framing already used
+      // elsewhere for admin-sent messages.
+      loggedInTeacher={isAdminSession ? { uid: "admin-oversight", name: "School Office" } : { uid: "legacy-teacher", name: "Teacher" }}
       subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
       onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently} />
   );
