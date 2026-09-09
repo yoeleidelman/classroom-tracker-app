@@ -2209,9 +2209,29 @@ async function getReadState(viewerId) {
 // atomically, without ever needing to read the rest of the document first — so there is no
 // window in which a concurrent write from anywhere else could be lost. {merge: true} also
 // creates the document on the very first call, when it doesn't exist yet at all.
+// Reported STILL happening afterward, reliably, every time — including across a full close and
+// reopen of the app, which a stale in-memory refresh could never explain, since a fresh load
+// reads the real, current state directly from the server. That points at the write itself, not
+// at anything downstream of it: this dot-notation merge pattern was only ever verified against a
+// hand-written local simulation of Firestore, never the genuine production database and its
+// actual security rules, which very plausibly were written expecting a full-document write (the
+// old pattern) and may not recognize or permit a partial, dot-path field update the same way —
+// a rejection here would fail the read-mark silently, since nothing was previously watching for
+// it, and every fresh load would then correctly, accurately see the thread as genuinely still
+// unread on the server, matching exactly what was reported. Guards against exactly that now:
+// any failure is both surfaced (so it's no longer invisible) and caught by an immediate,
+// unconditional fallback to the older but structurally simpler full-document write, so the
+// read-mark reliably lands through one path or the other rather than silently through neither.
 async function markThreadRead(viewerId, threadKey) {
   const ref = doc(db, "data", `read-state:${viewerId}`);
-  await setDoc(ref, { [`value.${threadKey}`]: new Date().toISOString() }, { merge: true });
+  try {
+    await setDoc(ref, { [`value.${threadKey}`]: new Date().toISOString() }, { merge: true });
+  } catch (err) {
+    console.error("markThreadRead: merge write failed, falling back to full-document write", err);
+    const state = await getReadState(viewerId);
+    state[threadKey] = new Date().toISOString();
+    await saveJSON(`read-state:${viewerId}`, state, true);
+  }
 }
 
 // Triggered by a TEACHER's own viewing of a specific thread, rather than waiting on the family to
@@ -2284,10 +2304,20 @@ async function reactToMessageInThread(storageKey, messageId, emoji, reactorId, r
 // reply still shows as unread once the snooze period passes, rather than being silently dismissed.
 // Same atomic dot-notation fix as markThreadRead above, for the identical reason — this used to
 // read-modify-write the whole document too, with the same risk of a concurrent write elsewhere
-// silently wiping out an unrelated thread's own read mark or snooze.
+// silently wiping out an unrelated thread's own read mark or snooze. Same fallback too, for the
+// same reason — see markThreadRead's own comment above for the full explanation.
 async function snoozeThread(viewerId, threadKey, minutes) {
   const ref = doc(db, "data", `read-state:${viewerId}`);
-  await setDoc(ref, { [`value.snoozed.${threadKey}`]: new Date(Date.now() + minutes * 60000).toISOString() }, { merge: true });
+  const until = new Date(Date.now() + minutes * 60000).toISOString();
+  try {
+    await setDoc(ref, { [`value.snoozed.${threadKey}`]: until }, { merge: true });
+  } catch (err) {
+    console.error("snoozeThread: merge write failed, falling back to full-document write", err);
+    const state = await getReadState(viewerId);
+    state.snoozed = state.snoozed || {};
+    state.snoozed[threadKey] = until;
+    await saveJSON(`read-state:${viewerId}`, state, true);
+  }
 }
 // A thread counts as unread if its last message came from the other side and is newer than the
 // last time this viewer marked it read (or was never marked read at all) — and isn't currently
