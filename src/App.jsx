@@ -19626,13 +19626,28 @@ function BroadcastDetailView({ broadcast, groups, classId, onBack }) {
   // data at all, so checking the wrong one meant this could report "not yet seen" for families who
   // had genuinely already seen it, confirmed independently in their own conversation. Now reads the
   // same field, the same way, that the conversation view itself already does.
+  //
+  // Also checks getReadState(uid) again here — not as the primary answer this time, but as a
+  // recovery source alongside it. A real, separate bug (now fixed at its own root cause) used to
+  // let lastReadByFamily get silently wiped out by an unrelated later message, for any broadcast
+  // sent before that fix went in — there's no way to recover the exact original moment once that
+  // specific field is gone. But a family's own read-state was never touched by that bug at all,
+  // being a completely different, independently-maintained record — so for a broadcast affected by
+  // the old bug, it very likely still holds an accurate answer even where lastReadByFamily no
+  // longer does. Takes whichever of the two is more recent, so an already-sent broadcast gets the
+  // most accurate answer available from either source, not just whichever field happens to still
+  // be intact.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const entries = await Promise.all(broadcast.recipientUids.map(async (uid) => {
-        const thread = await loadJSON(`class:${classId}:messages:${uid}`, null, true);
-        const lastRead = thread?.lastReadByFamily;
-        return [uid, lastRead && new Date(lastRead) >= new Date(broadcast.timestamp) ? lastRead : null];
+        const [thread, readState] = await Promise.all([
+          loadJSON(`class:${classId}:messages:${uid}`, null, true),
+          getReadState(uid),
+        ]);
+        const candidates = [thread?.lastReadByFamily, readState[`class-${classId}`]].filter(Boolean);
+        const mostRecent = candidates.length ? candidates.reduce((a, b) => (new Date(a) > new Date(b) ? a : b)) : null;
+        return [uid, mostRecent && new Date(mostRecent) >= new Date(broadcast.timestamp) ? mostRecent : null];
       }));
       if (!cancelled) setReadStatusByUid(Object.fromEntries(entries));
     })();
