@@ -3465,7 +3465,20 @@ function AppInner() {
   // the URL now says (that's already been updated by the browser itself by the time this fires)
   // and syncs React state to match, rather than re-deriving a "previous" value — the URL is
   // already the source of truth at this point.
+  //
+  // A real, reported bug this fixes, and the actual reason the earlier admin-session fix didn't
+  // fully hold up on its own: this handler was never gated by isAdminSession at all, so it fired
+  // on every single popstate regardless of which session type was active — including while an
+  // admin was browsing a classroom, which uses a completely different URL parameter ("adminClass")
+  // for exactly that state, specifically so it wouldn't collide with this one. This handler only
+  // ever checked for "classId" — so from its own point of view, an admin's classroom session
+  // always looked like "classId is simply absent," and it would immediately reset classId to null
+  // itself, undoing the admin-specific handler's own correct decision the instant both handlers
+  // fired on the very same popstate event. Now steps aside entirely during an admin session, the
+  // same way the two URL parameters were always meant to stay non-overlapping — the dedicated
+  // admin handler already owns this decision completely on its own.
   useEffect(() => {
+    if (isAdminSession) return;
     const onPopState = () => {
       const params = new URLSearchParams(window.location.search);
       const urlClassId = params.get("classId");
@@ -3482,7 +3495,7 @@ function AppInner() {
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [registry, currentTeacher]);
+  }, [registry, currentTeacher, isAdminSession]);
 
   // Creating another person's login can't happen from the browser with normal client
   // credentials — it needs elevated, server-side access, so this calls a dedicated backend
@@ -3887,24 +3900,6 @@ function AppInner() {
     setClassId(null);
     setClassName("");
   };
-
-  // A real, separate gap this fixes: entering an assigned class already correctly pushes its own
-  // history entry (see enterAssignedClass's own comment) — but nothing was ever listening for the
-  // matching step back OUT of it. Pressing Back enough times to go past that point correctly
-  // changed the URL (classId genuinely disappears from it, since the push itself was real), but
-  // with no popstate listener watching for that, classId as actual React state never followed —
-  // leaving the classroom screen still showing, unresponsive to Back, while the URL underneath it
-  // had already quietly moved on. Reported directly as the Back button on the teacher side simply
-  // not always working — this is exactly that shape: not a wrong destination, but no visible
-  // response at all once history had nothing left to visibly change in the URL bar itself.
-  useEffect(() => {
-    if (isAdminSession) return; // the admin path already has its own separate, correct listener for "adminClass"
-    const onPopState = () => {
-      if (!new URLSearchParams(window.location.search).get("classId")) switchClass();
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, [isAdminSession]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const createClass = async (name, password, classType) => {
     const id = uid();
