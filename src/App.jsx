@@ -8205,11 +8205,17 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           // a stable, trustworthy record of what it told a family, not the reverse.
           const canModify = mine && myRole !== "family" && onEdit && onDelete && !m.deleted;
           // Shown only under the single newest message that qualifies (lastReadOwnMessageId,
-          // computed once above), not repeated under every earlier one it's equally true of. When
-          // lastReadByFamily doesn't exist at all yet, anchors "Not yet seen" to my own single
-          // most recent message instead, so the three-dot menu always gives a definite answer
-          // rather than empty space that could be mistaken for a display glitch.
-          const showReadReceipt = m.id === lastReadOwnMessageId || (!lastReadByFamily && m.id === myLastMessageId);
+          // computed once above), not repeated under every earlier one it's equally true of.
+          // Reported directly: some conversations showed "Not yet seen" while others showed
+          // nothing at all under the newest message, for no apparent reason. Found the actual gap —
+          // the old condition only ever anchored "Not yet seen" here when lastReadByFamily didn't
+          // exist AT ALL, meaning a family that had read some OLDER message a while back (so
+          // lastReadByFamily is genuinely set, just to an earlier point) got neither label at all
+          // for a newest message they truly hadn't seen yet — the empty space that read as a
+          // display glitch. This now anchors here whenever the message is my own latest, whether
+          // or not it's the specific one that's actually been read — the text below decides which
+          // of the two it actually is.
+          const showReadReceipt = m.id === lastReadOwnMessageId || m.id === myLastMessageId;
           const divider = m.id === firstUnreadId && (
             <div className="flex items-center gap-2 py-1">
               <div className="flex-1 h-px bg-rose-200" />
@@ -8255,7 +8261,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                     </div>
                     {showReadReceipt && (
                       <p className={`text-[10px] ${mine ? mineBubble.lightText : "text-stone-400"}`}>
-                        {lastReadByFamily
+                        {m.id === lastReadOwnMessageId
                           ? `Seen at ${new Date(lastReadByFamily).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
                           : "Not yet seen"}
                       </p>
