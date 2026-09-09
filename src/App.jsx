@@ -5620,6 +5620,18 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
     return next;
   };
 
+  // Called unconditionally, every render, regardless of whether openGroup is currently set — a
+  // hook called only inside that conditional would violate React's own rule that every hook runs
+  // in the same order on every render, since openGroup toggles true/false as conversations open
+  // and close. Safe with nulls when nothing is open right now; the hook itself skips its own fetch
+  // in that case.
+  const openGroupThreadForHook = openGroup ? (threads[openGroup.groupId] || { messages: [] }) : null;
+  const effectiveLastReadByFamily = useEffectiveLastReadByFamily(
+    openGroupThreadForHook?.lastReadByFamily,
+    section === "classroom" && openGroup ? openGroup.groupId : null,
+    section === "classroom" && openGroup ? `class-${selectedClassId}` : null,
+  );
+
   if (openGroup) {
     const thread = threads[openGroup.groupId] || { messages: [] };
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
@@ -5628,7 +5640,7 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
       <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages}
         myRole={section === "classroom" ? "teacher" : "admin"} readOnly={section !== "classroom"}
         threadKey={section === "classroom" ? `classroom-${openGroup.groupId}` : `teacher-direct-${openGroup.groupId}`}
-        lastReadByFamily={thread.lastReadByFamily}
+        lastReadByFamily={effectiveLastReadByFamily}
         onBack={() => { setOpenGroup(null); refresh(); }}
         onSend={section === "classroom" ? async (text) => { await sendAsAdminToClass(openGroup.groupId, text); await refresh(); } : undefined} />
     );
@@ -7912,6 +7924,31 @@ function AttachmentMenuButton({ onPickFile, onPickFiles }) {
       )}
     </div>
   );
+}
+
+// Combines a thread's own lastReadByFamily with the family's separate, independent read-state for
+// this same thread, taking whichever is more recent — see sendMessageToFamily's own reasoning for
+// why lastReadByFamily alone can be stale or missing for anything sent before that fix went in
+// (an unrelated later message could silently wipe it out), and BroadcastDetailView's identical
+// reasoning for using this same combined-source recovery there too. readStateKey is the same
+// per-thread key already used elsewhere for this exact family (see backfillMessageReadIfNeeded's
+// own callers for the established pattern: "class-{classId}" for a classroom thread,
+// "teacher-{teacherUid}" for a direct one, "admin-{familyUid}" for the office's own).
+// Returns the thread's own value immediately, upgrading to the combined answer once the recovery
+// source finishes loading, rather than showing nothing at all in the meantime.
+function useEffectiveLastReadByFamily(threadLastReadByFamily, familyUid, readStateKey) {
+  const [recovered, setRecovered] = useState(undefined); // undefined = not yet checked
+  useEffect(() => {
+    if (!familyUid || !readStateKey) { setRecovered(null); return; }
+    let cancelled = false;
+    getReadState(familyUid).then((readState) => {
+      if (!cancelled) setRecovered(readState[readStateKey] || null);
+    });
+    return () => { cancelled = true; };
+  }, [familyUid, readStateKey]);
+  if (recovered === undefined) return threadLastReadByFamily;
+  const candidates = [threadLastReadByFamily, recovered].filter(Boolean);
+  return candidates.length ? candidates.reduce((a, b) => (new Date(a) > new Date(b) ? a : b)) : null;
 }
 
 function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead }) {
@@ -10893,6 +10930,15 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     return next;
   };
 
+  // Called unconditionally, every render — see the matching comment on the admin oversight view's
+  // own identical hook call for why this can't live inside the conditional below.
+  const openGroupThreadForHook = openGroup ? (threads[openGroup.groupId] || { messages: [] }) : null;
+  const effectiveLastReadByFamily = useEffectiveLastReadByFamily(
+    openGroupThreadForHook?.lastReadByFamily,
+    openGroup?.groupId || null,
+    openGroup ? `teacher-${loggedInTeacher.uid}` : null,
+  );
+
   if (openGroup) {
     const thread = threads[openGroup.groupId] || { messages: [] };
     const childNames = (openGroup.studentLinks || []).map((l) => l.studentName).join(", ");
@@ -10902,7 +10948,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" teacher={loggedInTeacher} threadKey={`teacher-direct-${openGroup.groupId}`}
-          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
+          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={effectiveLastReadByFamily}
           onBack={() => { setOpenGroup(null); refresh(); }}
           onSend={async (text, attachments, scheduledFor) => { await sendMessage(openGroup.groupId, text, attachments, scheduledFor); await refresh(); }}
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
@@ -19883,6 +19929,21 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     if (match) openDirectGroupThread(match);
   }, [deepLinkGroupId, deepLinkIsDirect, directGroups]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Called unconditionally, every render — see the matching comment on the admin oversight view's
+  // own identical hook call for why these can't live inside the conditionals below. Safe to use
+  // liveOpenGroupThread/liveOpenDirectThread directly here since those are themselves already
+  // safely null-guarded live subscriptions, unconditionally called earlier in this same component.
+  const effectiveClassroomLastReadByFamily = useEffectiveLastReadByFamily(
+    liveOpenGroupThread.lastReadByFamily,
+    openGroup?.groupId || null,
+    openGroup ? `class-${classId}` : null,
+  );
+  const effectiveDirectLastReadByFamily = useEffectiveLastReadByFamily(
+    liveOpenDirectThread.lastReadByFamily,
+    openDirectGroup?.groupId || null,
+    openDirectGroup ? `teacher-${loggedInTeacher.uid}` : null,
+  );
+
   if (openGroup) {
     const thread = liveOpenGroupThread;
     const childNames = (openGroup.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
@@ -19892,7 +19953,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`classroom-${openGroup.groupId}`}
-          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
+          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={effectiveClassroomLastReadByFamily}
           onBackfillRead={() => backfillMessageReadIfNeeded(classId, storageKey, openGroup.groupId, `class-${classId}`)}
           onBack={() => { safeGoBack("thread", () => setOpenGroup(null)); refresh(); }}
           onSend={async (text, attachments, scheduledFor) => { await sendMessageToFamily(openGroup.groupId, text, attachments, scheduledFor); }}
@@ -19912,7 +19973,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <>
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" config={config} teacher={loggedInTeacher} threadKey={`teacher-direct-${openDirectGroup.groupId}`}
-          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={thread.lastReadByFamily}
+          lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={effectiveDirectLastReadByFamily}
           onBackfillRead={() => backfillMessageReadIfNeeded(classId, storageKey, openDirectGroup.groupId, `teacher-${loggedInTeacher.uid}`)}
           onBack={() => { setOpenDirectGroup(null); refreshDirect(); }}
           onSend={async (text, attachments, scheduledFor) => { await sendDirectMessageToFamily(openDirectGroup.groupId, text, attachments, scheduledFor); }}
