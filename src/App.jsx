@@ -4326,22 +4326,43 @@ function AppInner() {
     await saveJSON("adminSettings", { password: newPassword }, true);
   };
 
+  // A real, reported regression this fixes: entering a classroom as admin used replaceState here,
+  // which — unlike pushState — modifies the CURRENT history entry in place rather than recording a
+  // new step at all. That meant browser history never actually reflected "admin is now inside this
+  // classroom" as its own step in the first place — only whatever got pushed AFTER it (opening a
+  // specific message thread, say) ever did. So pressing Back from deep inside a classroom correctly
+  // popped that one real step, but the very next step back landed on whatever was there BEFORE the
+  // admin ever entered the classroom at all — the dashboard — skipping past the classroom itself
+  // entirely, exactly as reported: sending one message, backing out, and landing back at the admin
+  // dashboard instead of the classroom's own conversation list.
+  // pushState here — paired with the matching popstate listener below that restores classId to
+  // null once the URL no longer carries this classroom — is what makes "admin entered a classroom"
+  // its own real, steppable point in history, the same way opening a specific message thread
+  // already correctly is.
   const enterClassAsAdmin = (cls) => {
     setClassId(cls.id);
     setClassName(cls.name);
     // deliberately not saved as selectedClassId — admin browsing shouldn't hijack this device's normal teacher login
-    // Same fix as enterAssignedClass above, for the same reason — a ?view= param left over from a
-    // previously-viewed class (of a possibly different type) would otherwise carry straight into
-    // this one too.
     const url = new URL(window.location.href);
     url.searchParams.delete("view");
-    window.history.replaceState(window.history.state, "", url);
+    url.searchParams.set("adminClass", cls.id);
+    window.history.pushState({ adminClass: cls.id }, "", url);
   };
 
   const backToAdminDashboard = () => {
     setClassId(null);
     setClassName("");
   };
+
+  useEffect(() => {
+    if (!isAdminSession) return;
+    const onPopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      if (!params.get("adminClass")) backToAdminDashboard();
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [isAdminSession]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (checkingSession || !authChecked) {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-teal-700" size={28} /></div>;
@@ -4474,7 +4495,7 @@ function AppInner() {
   }
   return (
     <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
-      onSwitchClass={isAdminSession ? backToAdminDashboard : switchClass}
+      onSwitchClass={isAdminSession ? () => safeGoBack("adminClass", backToAdminDashboard) : switchClass}
       switchLabel={isAdminSession ? "Admin \u00b7 Back to dashboard" : "Switch class"}
       subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
       onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently} />
