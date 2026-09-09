@@ -14317,6 +14317,21 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
 // doing this, not the office. Family grouping is a best-effort match on parent email or phone —
 // there's no hard family ID on a student record, so this is a heuristic, not a guarantee.
 function AllPreschoolAttendanceView({ loggedByName, navigate }) {
+  // A real, confirmed crash this fixes: the per-student row below used to reference checkInBusy
+  // and checkInError, neither of which was ever actually declared anywhere in this
+  // component — not as state here, not passed in as a prop, nothing. That's a guaranteed
+  // ReferenceError the instant the very first student tries to render, which is exactly what was
+  // reported: opening this page (the one a single teacher uses to check the entire preschool
+  // building in or out at once, not just their own class) always failed with an error, with no way
+  // to reach anyone outside their own room from here.
+  // Checked against the working, single-class version of this same toggle (toggleCheckInByTeacher)
+  // to confirm the actual, correct pattern: startOptimisticCheckInToggle already updates the
+  // screen instantly the moment it's tapped and retries silently in the background on its own —
+  // by design, there's no real "busy" period for a button to ever reflect, and no ordinary,
+  // eventually-successful retry that should ever surface as a visible error either. These were
+  // leftover references to state that was never actually part of this function's own design,
+  // not something that used to work and broke — removed to match the same, correct pattern the
+  // working version already uses.
   const [loading, setLoading] = useState(true);
   const [byStudentId, setByStudentId] = useState({}); // id -> { id, name, parentEmail, parentPhone, links }
   const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
@@ -14446,8 +14461,6 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
               const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
               const isIn = Boolean(openEntry);
               const confirming = confirmingRepeatFor === s.id;
-              const isBusy = checkInBusy.has(s.id);
-              const toggleError = checkInError[s.id];
               return (
                 <div key={s.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${isIn ? "text-emerald-800" : ""}`}>
                   <div>
@@ -14464,18 +14477,17 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
                         ))}
                       </div>
                     )}
-                    {toggleError && <p className="text-xs font-semibold text-rose-600 mt-1">{toggleError}</p>}
                   </div>
                   {confirming ? (
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-stone-500">Log another visit today?</span>
-                      <button onClick={() => handleTap(s, false)} disabled={isBusy} className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">Yes, check in</button>
+                      <button onClick={() => handleTap(s, false)} className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes, check in</button>
                       <button onClick={() => setConfirmingRepeatFor(null)} className="text-xs font-semibold px-3 py-2 rounded-lg border border-stone-300 text-stone-500">Cancel</button>
                     </div>
                   ) : (
-                    <button onClick={() => handleTap(s, isIn)} disabled={isBusy}
-                      className={`text-sm font-bold px-4 py-2.5 rounded-xl disabled:opacity-50 ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
-                      {isBusy ? "…" : isIn ? "Check out" : "Check in"}
+                    <button onClick={() => handleTap(s, isIn)}
+                      className={`text-sm font-bold px-4 py-2.5 rounded-xl ${isIn ? "bg-rose-600 text-white hover:bg-rose-700" : "bg-emerald-600 text-white hover:bg-emerald-700"}`}>
+                      {isIn ? "Check out" : "Check in"}
                     </button>
                   )}
                 </div>
