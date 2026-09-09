@@ -838,10 +838,28 @@ function useRemainingViewportHeight(ref) {
 // whenever it changes (switching to a different conversation or class, say), so a person who
 // scrolled up while reading an old thread doesn't stay "unstuck" once they've moved to a new one
 // that deserves to open at its own bottom again.
+//
+// Reported directly, and confirmed as a real, pre-existing fragility rather than something new
+// added on purpose: this used to treat ANY scroll event on the container as "the person took
+// control," with no way to tell an actual touch or scroll-wheel action apart from the scroll
+// position simply shifting on its own — which a browser can do by itself mid-layout, with nobody
+// touching anything, when an image finishes loading a beat later than the rest of the content and
+// the surrounding layout resettles by a few pixels. On a slower device, where that kind of staggered
+// settling is more likely to still be happening while this hook is watching, that self-inflicted
+// shift was being read as "the person scrolled away," permanently turning off the very
+// auto-scroll-to-bottom this hook exists to provide, for the rest of that visit — landing
+// inconsistently short of the bottom depending on nothing more than how the content happened to
+// settle that particular time.
+// Now only ever treats a scroll as genuine, deliberate control when it's actually accompanied by a
+// real touch or wheel interaction on this container, tracked directly rather than inferred from
+// the scroll event alone — a scroll position changing on its own, with no such interaction behind
+// it, is understood as exactly what it is: layout settling, not a person taking over.
 function useStickToBottom(containerRef, contentRef, resetKey) {
   const stuckRef = useRef(true);
+  const userInteractingRef = useRef(false);
   useLayoutEffect(() => {
     stuckRef.current = true;
+    userInteractingRef.current = false;
     const container = containerRef.current;
     const content = contentRef.current;
     if (!container || !content) return;
@@ -850,13 +868,24 @@ function useStickToBottom(containerRef, contentRef, resetKey) {
     const observer = new ResizeObserver(jump);
     observer.observe(content);
     const onScroll = () => {
+      if (!userInteractingRef.current) return; // a scroll with no real interaction behind it is the page settling, not the person taking over
       const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
       stuckRef.current = distanceFromBottom < 40; // small tolerance for sub-pixel rounding
     };
+    const onInteractionStart = () => { userInteractingRef.current = true; };
+    const onInteractionEnd = () => { userInteractingRef.current = false; };
     container.addEventListener("scroll", onScroll, { passive: true });
+    container.addEventListener("touchstart", onInteractionStart, { passive: true });
+    container.addEventListener("touchend", onInteractionEnd, { passive: true });
+    container.addEventListener("touchcancel", onInteractionEnd, { passive: true });
+    container.addEventListener("wheel", onInteractionStart, { passive: true });
     return () => {
       observer.disconnect();
       container.removeEventListener("scroll", onScroll);
+      container.removeEventListener("touchstart", onInteractionStart);
+      container.removeEventListener("touchend", onInteractionEnd);
+      container.removeEventListener("touchcancel", onInteractionEnd);
+      container.removeEventListener("wheel", onInteractionStart);
     };
   }, [resetKey]); // eslint-disable-line react-hooks/exhaustive-deps
 }
