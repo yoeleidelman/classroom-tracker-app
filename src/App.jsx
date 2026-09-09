@@ -12765,9 +12765,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // part of this thread (a direct, single-uid notification) rather than notifyFamilyGroup, which
   // would fan out to every guardian sharing this family's group regardless of which one the
   // message was actually for.
-  const sendMessageToFamily = async (familyUid, text, attachments, scheduledFor) => {
+  // broadcastId — present only when this message is one copy of a broadcast sent to every family
+  // in the class at once, shared across every family's own copy of it. What lets the Broadcasts
+  // list (see BroadcastsListView) show one entry per broadcast with an accurate seen/not-seen
+  // breakdown per family, instead of the old way of checking each family's own conversation one at
+  // a time with no way to see them as the single broadcast they actually were.
+  const sendMessageToFamily = async (familyUid, text, attachments, scheduledFor, broadcastId) => {
     const key = `class:${classId}:messages:${familyUid}`;
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(broadcastId ? { broadcastId } : {}) };
     if (scheduledFor) {
       await queueScheduledSend({
         kind: "message", classId, className, scheduledFor,
@@ -19590,6 +19595,64 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
   );
 }
 
+// One broadcast's own recipient list, each family's name resolved from groups (the same list the
+// classroom inbox already has) and their seen status computed by checking their own read-marker
+// for this classroom thread against this broadcast's own timestamp — the identical comparison
+// isThreadUnread already uses everywhere else, just read directly here since this needs every
+// recipient's own answer at once, not just whichever thread happens to be open.
+function BroadcastDetailView({ broadcast, groups, classId, onBack }) {
+  const [readStatusByUid, setReadStatusByUid] = useState(null); // null = loading
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(broadcast.recipientUids.map(async (uid) => {
+        const readState = await getReadState(uid);
+        const lastRead = readState[`class-${classId}`];
+        return [uid, lastRead && new Date(lastRead) >= new Date(broadcast.timestamp) ? lastRead : null];
+      }));
+      if (!cancelled) setReadStatusByUid(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [broadcast, classId]);
+
+  const recipients = broadcast.recipientUids.map((uid) => {
+    const g = (groups || []).find((gr) => gr.groupId === uid);
+    return { uid, name: g ? g.guardians.map((gu) => gu.name).join(" & ") : "Former or unlinked family" };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+
+  const seenCount = readStatusByUid ? Object.values(readStatusByUid).filter(Boolean).length : null;
+
+  return (
+    <div>
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
+      <div className="bg-white border border-stone-200 rounded-xl p-4 mb-4">
+        <p className="text-[10px] text-stone-400 mb-1">{new Date(broadcast.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}{broadcast.detected && " · from before this list existed"}</p>
+        {broadcast.text && <p className="text-sm text-stone-800 whitespace-pre-wrap mb-1">{broadcast.text}</p>}
+        {(broadcast.attachments || []).length > 0 && <p className="text-xs text-stone-400">{describeAttachmentsForNotification(broadcast.attachments)}</p>}
+        <p className="text-xs font-semibold text-teal-700 mt-2">{seenCount === null ? "Checking who's seen it…" : `${seenCount} of ${recipients.length} seen`}</p>
+      </div>
+      <div className="space-y-1.5">
+        {recipients.map((r) => {
+          const readAt = readStatusByUid?.[r.uid];
+          return (
+            <div key={r.uid} className="flex items-center justify-between bg-white border border-stone-200 rounded-lg px-3 py-2.5">
+              <span className="text-sm font-semibold text-stone-800">{r.name}</span>
+              {readStatusByUid === null ? (
+                <span className="text-xs text-stone-300">…</span>
+              ) : readAt ? (
+                <span className="text-xs font-semibold text-emerald-700">Seen {new Date(readAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+              ) : (
+                <span className="text-xs font-semibold text-stone-400">Not yet seen</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // Conversation list — one row per family that actually has a child in this class, found by
 // scanning family records rather than keeping a separate index, since a small preschool's family
 // list is short enough that this is simpler and less to keep in sync than a denormalized list.
@@ -19602,6 +19665,11 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   const [mode, setMode] = useState(deepLinkIsDirect ? "direct" : "inbox"); // "inbox" | "direct" | "compose"
   const [directGroups, setDirectGroups] = useState(null); // families this teacher can message individually, across every class they teach
   const [openDirectGroup, setOpenDirectGroup] = useState(null);
+  const [openBroadcastId, setOpenBroadcastId] = useState(null);
+  // Explicitly-recorded broadcasts (every one sent going forward — see sendInApp's own reasoning)
+  // live-subscribed the same way everything else here already is, so a brand new broadcast shows
+  // up in this list the instant it's sent, not just after a manual refresh.
+  const recordedBroadcasts = useLiveJSON(`class:${classId}:broadcasts`, []);
   // Captured right before markThreadRead overwrites it — same reasoning as the parent side's own
   // lastReadBeforeOpen: opening a thread marks it read immediately, so without holding onto the
   // value from just before that happens, there'd be no way to know which messages were genuinely
@@ -19637,6 +19705,48 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   // reshaping every call site that reads from this object.
   const liveThreadsByStorageKey = useLiveJSONMap((groups || []).map((g) => `class:${classId}:messages:${g.groupId}`));
   const threads = Object.fromEntries((groups || []).map((g) => [g.groupId, liveThreadsByStorageKey[`class:${classId}:messages:${g.groupId}`] || { messages: [] }]));
+
+  // Broadcasts sent before this feature existed were never tagged with any shared id at all — each
+  // family's copy just sits in their own thread with no link back to the others. Detected here
+  // instead of requiring a one-time migration that would have to rewrite every family's own
+  // message history: any teacher message with no broadcastId that shares identical text (and
+  // attachments) with another family's own copy, sent within a short window of the same moment, is
+  // exactly what a broadcast sent the old way looks like from the data alone. Requires at least two
+  // families for the same text — a single family getting a message with the same wording as
+  // someone else, coincidentally, from an entirely different conversation, isn't itself unlikely,
+  // but two or more each getting the identical text within the same narrow window is.
+  const detectedBroadcasts = useMemo(() => {
+    const candidates = [];
+    (groups || []).forEach((g) => {
+      (threads[g.groupId]?.messages || []).forEach((m) => {
+        if (m.senderType === "teacher" && !m.broadcastId && !m.deleted) candidates.push({ ...m, familyUid: g.groupId });
+      });
+    });
+    const byText = {};
+    candidates.forEach((c) => {
+      const sig = `${c.text || ""}|${JSON.stringify(c.attachments || [])}`;
+      (byText[sig] = byText[sig] || []).push(c);
+    });
+    const clusters = [];
+    Object.values(byText).forEach((list) => {
+      list.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      let cluster = [list[0]];
+      for (let i = 1; i < list.length; i++) {
+        if (new Date(list[i].timestamp) - new Date(cluster[cluster.length - 1].timestamp) <= 60000) cluster.push(list[i]);
+        else { if (cluster.length >= 2) clusters.push(cluster); cluster = [list[i]]; }
+      }
+      if (cluster.length >= 2) clusters.push(cluster);
+    });
+    return clusters.map((cluster) => ({
+      id: `detected-${cluster[0].id}`, text: cluster[0].text, attachments: cluster[0].attachments,
+      timestamp: cluster[0].timestamp, senderName: cluster[0].senderName,
+      recipientUids: cluster.map((c) => c.familyUid), detected: true,
+    }));
+  }, [groups, threads]);
+
+  const allBroadcasts = useMemo(() =>
+    [...(recordedBroadcasts || []), ...detectedBroadcasts].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)),
+    [recordedBroadcasts, detectedBroadcasts]);
 
   const liveDirectThreadsByStorageKey = useLiveJSONMap((directGroups || []).map((g) => `teacher-messages:${loggedInTeacher.uid}:${g.groupId}`));
   const directThreads = Object.fromEntries((directGroups || []).map((g) => [g.groupId, liveDirectThreadsByStorageKey[`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`] || { messages: [] }]));
@@ -19775,6 +19885,17 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
     );
   }
 
+  if (openBroadcastId) {
+    const broadcast = allBroadcasts.find((b) => b.id === openBroadcastId);
+    return (
+      <div className={PAGE}>
+        <Header navigate={navigate} />
+        <MainTabs active="communication" navigate={navigate} />
+        <BroadcastDetailView broadcast={broadcast} groups={groups} classId={classId} onBack={() => setOpenBroadcastId(null)} />
+      </div>
+    );
+  }
+
   return (
     <div className={PAGE}>
       <Header navigate={navigate} />
@@ -19782,12 +19903,15 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <button onClick={() => safeGoBack(null, () => navigate("home"))} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-lg font-bold text-stone-900 mb-3">{mode === "direct" ? "My Direct Messages" : "Classroom Messages"}</h1>
 
-      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[28rem]">
+      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[34rem]">
         <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
           <Mail size={14} /> Classroom
         </button>
         <button onClick={() => setMode("direct")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "direct" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
           <MessageCircle size={14} /> Direct
+        </button>
+        <button onClick={() => setMode("broadcasts")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "broadcasts" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <Users size={14} /> Broadcasts
         </button>
         <button onClick={() => setMode("compose")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "compose" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
           <Plus size={14} /> New broadcast
@@ -19796,6 +19920,23 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
 
       {mode === "compose" ? (
         <ClassBroadcastComposer roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} />
+      ) : mode === "broadcasts" ? (
+        <>
+          <p className="text-xs text-stone-400 mb-3">Every message sent to this whole class at once, with who's seen each one.</p>
+          {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+          {groups !== null && allBroadcasts.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No broadcasts sent to this class yet.</p>}
+          <div className="space-y-2">
+            {allBroadcasts.map((b) => (
+              <button key={b.id} onClick={() => setOpenBroadcastId(b.id)} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-stone-400">{new Date(b.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })} · {b.recipientUids.length} {b.recipientUids.length === 1 ? "family" : "families"}</p>
+                  {b.detected && <span className="text-[10px] text-stone-300">before this list existed</span>}
+                </div>
+                <p className="text-sm text-stone-800 truncate mt-0.5">{b.text || describeAttachmentsForNotification(b.attachments)}</p>
+              </button>
+            ))}
+          </div>
+        </>
       ) : mode === "direct" ? (
         <>
           <p className="text-xs text-stone-400 mb-3">Only you see these — not any other teacher sharing a class with these families, and not admin (though admin can view for oversight).</p>
@@ -24456,9 +24597,19 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
       // guardian's own private thread never received this broadcast at all, not merely a
       // duplicate-avoidance step gone slightly too far.
       const uids = new Set(relevant.map((f) => f.uid));
+      // One shared id for every copy of this broadcast, and one record of the broadcast itself —
+      // see sendMessageToFamily's own reasoning for why, and BroadcastsListView for where this
+      // actually gets used.
+      const broadcastId = uid();
+      const sentAt = new Date().toISOString();
+      const attachments = attachmentUrl ? [{ url: attachmentUrl, type: attachType, name: attachType === "file" ? attachFile.name : null }] : [];
       for (const familyUid of uids) {
-        await sendMessageToFamily(familyUid, draft.trim(), attachmentUrl ? [{ url: attachmentUrl, type: attachType, name: attachType === "file" ? attachFile.name : null }] : []); // eslint-disable-line no-await-in-loop
+        await sendMessageToFamily(familyUid, draft.trim(), attachments, null, broadcastId); // eslint-disable-line no-await-in-loop
       }
+      const existingBroadcasts = (await loadJSON(`class:${classId}:broadcasts`, [], true)) || [];
+      await saveJSON(`class:${classId}:broadcasts`, [...existingBroadcasts, {
+        id: broadcastId, text: draft.trim(), attachments, timestamp: sentAt, senderName: loggedInTeacher?.name || "Teacher", recipientUids: [...uids],
+      }], true);
       setSentInAppTo(uids.size);
     } catch (err) {
       setAttachError(describeUploadError(err));
