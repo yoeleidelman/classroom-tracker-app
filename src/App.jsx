@@ -19603,12 +19603,20 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
 function BroadcastDetailView({ broadcast, groups, classId, onBack }) {
   const [readStatusByUid, setReadStatusByUid] = useState(null); // null = loading
 
+  // Reported directly and confirmed wrong: this originally checked getReadState(uid) — a family's
+  // own internal read-tracking, used for their own badge counts — which is a completely separate
+  // system from lastReadByFamily, the field actually stored on each family's own thread document
+  // (class:${classId}:messages:${uid}) that the working per-conversation "Seen at" / "Not yet seen"
+  // indicator elsewhere in this same file already correctly relies on. The two aren't the same
+  // data at all, so checking the wrong one meant this could report "not yet seen" for families who
+  // had genuinely already seen it, confirmed independently in their own conversation. Now reads the
+  // same field, the same way, that the conversation view itself already does.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const entries = await Promise.all(broadcast.recipientUids.map(async (uid) => {
-        const readState = await getReadState(uid);
-        const lastRead = readState[`class-${classId}`];
+        const thread = await loadJSON(`class:${classId}:messages:${uid}`, null, true);
+        const lastRead = thread?.lastReadByFamily;
         return [uid, lastRead && new Date(lastRead) >= new Date(broadcast.timestamp) ? lastRead : null];
       }));
       if (!cancelled) setReadStatusByUid(Object.fromEntries(entries));
