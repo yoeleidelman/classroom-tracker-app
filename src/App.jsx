@@ -15689,6 +15689,9 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
   const [pickerPos, setPickerPos] = useState({ top: 0, left: 0 });
   const pressTimer = useRef(null);
   const longPressFired = useRef(false);
+  // Where the touch started, so a subsequent move can be measured against it — see
+  // onTouchMoveDuringPress below for why.
+  const touchStartPos = useRef({ x: 0, y: 0 });
   const wrapperRef = useRef(null);
   // The picker itself is portaled straight to document.body (below) rather than left as a normal
   // DOM child of wrapperRef — a transform anywhere up the ancestor chain (even a harmless,
@@ -15727,8 +15730,10 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
   const safeReactions = reactions || {};
   const myReaction = BLOG_REACTIONS.find((r) => (safeReactions[r.key] || []).some((entry) => reactorIdOf(entry) === currentUserId));
 
-  const startPress = () => {
+  const startPress = (e) => {
     longPressFired.current = false;
+    const point = e.touches ? e.touches[0] : e;
+    touchStartPos.current = { x: point.clientX, y: point.clientY };
     pressTimer.current = setTimeout(() => {
       longPressFired.current = true;
       if (navigator.vibrate) navigator.vibrate(10); // a light haptic tick, matching the native long-press feel
@@ -15759,6 +15764,21 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
   };
   const endPress = () => clearTimeout(pressTimer.current);
   const cancelPress = () => clearTimeout(pressTimer.current);
+  // Reported directly: scrolling past a reactable photo, with a finger still down as it moves,
+  // was being read as a long-press — the reaction bar would pop open mid-scroll, when the actual
+  // intent was just to keep scrolling. A real long-press means held roughly still, not merely
+  // held for 450ms regardless of movement — this cancels the pending timer the moment a touch
+  // moves more than a small, deliberately generous threshold (10px, the same rough distance most
+  // native tap-vs-scroll heuristics use) from where it started, so an actual scroll is never
+  // mistaken for someone holding still to react. Touch-only: a mouse drag while held down isn't
+  // a real-world gesture this needs to guard against the same way.
+  const onTouchMoveDuringPress = (e) => {
+    const point = e.touches[0];
+    if (!point) return;
+    const dx = point.clientX - touchStartPos.current.x;
+    const dy = point.clientY - touchStartPos.current.y;
+    if (Math.sqrt(dx * dx + dy * dy) > 10) cancelPress();
+  };
   // A long-press that already opened the picker shouldn't ALSO let the release be read as a tap on
   // whatever's underneath (opening a photo's lightbox right as the picker appears, for instance) —
   // this runs in the capture phase specifically so it can intercept before that child's own onClick
@@ -15780,7 +15800,7 @@ function ReactableContent({ reactions, currentUserId, onReact, children }) {
     <div className="relative" ref={wrapperRef}>
       <div
         onMouseDown={startPress} onMouseUp={endPress} onMouseLeave={cancelPress}
-        onTouchStart={startPress} onTouchEnd={endPress} onTouchCancel={cancelPress}
+        onTouchStart={startPress} onTouchEnd={endPress} onTouchCancel={cancelPress} onTouchMove={onTouchMoveDuringPress}
         onClickCapture={onClickCapture}
         onContextMenu={(e) => e.preventDefault()} // suppress the browser's own long-press menu so it doesn't fight with ours
       >
