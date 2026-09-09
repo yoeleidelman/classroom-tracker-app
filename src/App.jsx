@@ -8403,12 +8403,23 @@ function PhotoLightbox({ url, type = "photo", caption, onClose, mediaList, curre
   return (
     <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4" onClick={onClose}
       onTouchStart={hasCarousel ? onTouchStart : undefined} onTouchEnd={hasCarousel ? onTouchEnd : undefined}>
-      <button onClick={onClose} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2"><X size={22} /></button>
+      {/* z-10 on the close/prev/next buttons is load-bearing, not decorative — reported directly
+          and confirmed directly: with reactions enabled (canReact below wraps the photo in its
+          own "relative" div, a positioned element same as these buttons), a realistically wide
+          photo rendered its wrapper AFTER these buttons in the DOM, and two positioned siblings
+          with no explicit z-index stack in DOM order — so the photo's wrapper sat on top of the
+          arrows anywhere the two happened to overlap, exactly where a wide photo's edge reaches.
+          Measured directly: clicking the next-arrow's own screen position hit the <img>
+          underneath it, not the button itself, on any photo wide enough to reach that edge. Never
+          reproduced with video specifically only because it happened to be tested through a
+          caller that doesn't pass onReact at all (messages, incidents, the daily log all skip
+          the wrapper entirely) — the actual cause was never the media type. */}
+      <button onClick={onClose} className="absolute top-4 right-4 z-10 text-white bg-black/50 rounded-full p-2"><X size={22} /></button>
       {hasCarousel && currentIndex > 0 && (
-        <button onClick={goPrev} className="absolute left-2 md:left-4 top-1/2 -translate-y-1/2 text-white bg-black/50 rounded-full p-2 hover:bg-black/70"><ChevronLeft size={24} /></button>
+        <button onClick={goPrev} className="absolute left-2 md:left-4 top-1/2 -translate-y-1/2 z-10 text-white bg-black/50 rounded-full p-2 hover:bg-black/70"><ChevronLeft size={24} /></button>
       )}
       {hasCarousel && currentIndex < mediaList.length - 1 && (
-        <button onClick={goNext} className="absolute right-2 md:right-4 top-1/2 -translate-y-1/2 text-white bg-black/50 rounded-full p-2 hover:bg-black/70"><ChevronRight size={24} /></button>
+        <button onClick={goNext} className="absolute right-2 md:right-4 top-1/2 -translate-y-1/2 z-10 text-white bg-black/50 rounded-full p-2 hover:bg-black/70"><ChevronRight size={24} /></button>
       )}
       {canReact ? (
         // Same long-press-to-react gesture as the feed, wrapping the photo itself here — with the
