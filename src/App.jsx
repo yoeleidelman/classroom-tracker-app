@@ -9722,11 +9722,22 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     await saveJSON(storageKey, { ...existing, lastReadByFamily: newTimestamp }, true, 5, true);
   };
 
+  // Each of these three now also removes its own thread from unreadThreads immediately and
+  // unconditionally, the moment it's opened — not waiting on any subsequent refresh at all. This
+  // is deliberately the same pattern blog already uses for its own badge
+  // (decrementUnreadBlogCountOptimistically) and messages never had: reported directly that a
+  // class message's badge sometimes stayed lit after being read while a blog post correctly
+  // cleared the same way. The earlier sequence-guard fix on refreshUnreadThreads closes one real
+  // race (an older, slower refresh call overwriting a newer one's correct result) but still
+  // depends on some async refresh eventually running and landing correctly — this removes that
+  // dependency for the specific thread just opened entirely, the same way blog's own immediate
+  // update never has to wait on anything to be correct.
   const openMessagesFor = async (classId) => {
     setMessagingClassId(classId);
     const url = new URL(window.location.href);
     url.searchParams.set("thread", `class:${classId}`);
     window.history.pushState({ thread: `class:${classId}` }, "", url);
+    setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== `class-${classId}`));
     const readState = await getReadState(family.uid);
     const previousReadTimestamp = readState[`class-${classId}`] || null;
     setLastReadBeforeOpen(previousReadTimestamp);
@@ -9742,6 +9753,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", "admin");
     window.history.pushState({ thread: "admin" }, "", url);
+    setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== `admin-${family.uid}`));
     const readState = await getReadState(family.uid);
     setLastReadBeforeOpen(readState[`admin-${family.uid}`] || null);
     await markThreadRead(family.uid, `admin-${family.uid}`);
@@ -9773,6 +9785,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const url = new URL(window.location.href);
     url.searchParams.set("thread", `teacher:${teacherUid}`);
     window.history.pushState({ thread: `teacher:${teacherUid}` }, "", url);
+    setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== `teacher-${teacherUid}`));
     const readState = await getReadState(family.uid);
     const previousReadTimestamp = readState[`teacher-${teacherUid}`] || null;
     setLastReadBeforeOpen(previousReadTimestamp);
