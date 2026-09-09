@@ -5614,7 +5614,7 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const className = activeClasses.find((c) => c.id === selectedClassId)?.name || "the class";
     const entry = { id: uid(), senderType: "teacher", senderName: currentTeacher?.name || "School Office", text, timestamp: new Date().toISOString() };
-    const next = { messages: [...existing.messages, entry] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([guardianUid], `Message from ${className}`, text?.trim() || "New message", `/?portal=parent&open=messages&classId=${selectedClassId}`);
     return next;
@@ -10130,7 +10130,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const key = `class:${classId}:messages:${family.uid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
-    const next = { messages: [...existing.messages, entry] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     notifyClassTeachers(classId, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=messages&classId=${classId}&groupId=${family.uid}`);
     return next;
@@ -10144,7 +10144,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     const key = `teacher-messages:${teacherUid}:${family.uid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
-    const next = { messages: [...existing.messages, entry] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     // deepLinkClassId lets the notification jump straight into this teacher's own app and open
     // this exact thread — omitted when the teacher has no assignedClassIds of their own (reachable
@@ -10887,7 +10887,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
       return { messages: [entry] };
     }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const next = { messages: [...existing.messages, entry] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([guardianUid], `Direct message from ${loggedInTeacher?.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
     return next;
@@ -12770,6 +12770,21 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // list (see BroadcastsListView) show one entry per broadcast with an accurate seen/not-seen
   // breakdown per family, instead of the old way of checking each family's own conversation one at
   // a time with no way to see them as the single broadcast they actually were.
+  // broadcastId — present only when this message is one copy of a broadcast sent to every family
+  // in the class at once, shared across every family's own copy of it. What lets the Broadcasts
+  // list (see BroadcastsListView) show one entry per broadcast with an accurate seen/not-seen
+  // breakdown per family, instead of the old way of checking each family's own conversation one at
+  // a time with no way to see them as the single broadcast they actually were.
+  //
+  // A real, reported bug this fixes, and the same fix repeated at every one of this file's other
+  // message-send functions: the line below used to rebuild this document as JUST { messages },
+  // discarding every other field the document had — lastReadByFamily included. That meant sending
+  // any new message to a family silently erased the record that they'd ever read an EARLIER one,
+  // even though they genuinely had — confirmed directly as the actual cause of "seen" showing
+  // wrong: a family who really had read a broadcast would show as never having seen it the moment
+  // any later message reached them, since that later send wiped out the record of the earlier read
+  // entirely. Now spreads the existing document first, so lastReadByFamily (and anything else
+  // already on it) survives every new message the same way it should have all along.
   const sendMessageToFamily = async (familyUid, text, attachments, scheduledFor, broadcastId) => {
     const key = `class:${classId}:messages:${familyUid}`;
     const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(broadcastId ? { broadcastId } : {}) };
@@ -12785,7 +12800,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       return { messages: [entry] };
     }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const next = { messages: [...existing.messages, entry] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([familyUid], `Message from ${className}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=messages&classId=${classId}`);
     return next;
@@ -12818,7 +12833,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       return { messages: [entry] };
     }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const next = { messages: [...existing.messages, entry] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([guardianUid], `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
     return next;
@@ -19415,7 +19430,7 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
       return { messages: [entry] };
     }
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const next = { messages: [...existing.messages, entry] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     sendPushNotification([groupId], "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin");
     return next;
