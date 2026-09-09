@@ -9689,10 +9689,33 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // since it began — so whichever call was started MOST RECENTLY always wins, regardless of
   // which one's network request happens to come back first.
   const refreshSeqRef = useRef(0);
+  // A real, reported gap this closes, on top of the sequence guard above: that guard protects
+  // against an OLDER refresh finishing after a newer one and overwriting its correct result — but
+  // it does nothing when the single most-recent refresh itself asks the server a question the
+  // server can't yet answer correctly, because the "mark this read" write it's asking about is
+  // still on its way there. Opening a thread clears its own optimistic entry from unreadThreads
+  // immediately, well before that write actually lands — and the visibility-triggered refresh
+  // below fires on the literal instant the app becomes visible again, with no way to know whether
+  // that write has actually landed by then. Reported directly and reproduced deterministically:
+  // briefly switching away and back while that write is still in flight lands exactly here, and
+  // the server's own truthful-at-that-instant "still unread" answer overwrites the correct,
+  // already-cleared state.
+  // Recording the instant a thread is read, locally, the moment it's decided rather than once its
+  // own write resolves, is what lets a refresh trust "I already know this is read" over "the
+  // server hasn't caught up yet" for exactly as long as that gap lasts, without needing to delay
+  // or block anything to close it.
+  const locallyReadAsOfRef = useRef({}); // threadKey -> ISO timestamp
   const refreshUnreadThreads = useCallback(async () => {
     const mySeq = ++refreshSeqRef.current;
     const classLinks = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()];
     const readState = await getReadState(family.uid);
+    // Takes the more recent of the server's own value and this device's own local record for
+    // each key — never the other way around — so a thread genuinely still unread per the server
+    // stays exactly that; this only ever pulls a thread's own effective read time forward to a
+    // moment this device already knows about, never backward past what the server itself says.
+    for (const [threadKey, localReadAt] of Object.entries(locallyReadAsOfRef.current)) {
+      if (!readState[threadKey] || new Date(localReadAt) > new Date(readState[threadKey])) readState[threadKey] = localReadAt;
+    }
     const results = [];
     for (const l of classLinks) {
       const thread = await loadJSON(`class:${l.classId}:messages:${family.uid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
@@ -9885,6 +9908,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   }, [unreadMessagesTotal, unreadBlogCount, unreadHomeworkCount]);
 
   const dismissUnread = async (item) => {
+    locallyReadAsOfRef.current[item.threadKey] = new Date().toISOString();
     await markThreadRead(family.uid, item.threadKey);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
   };
@@ -9938,6 +9962,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     url.searchParams.set("thread", `class:${classId}`);
     window.history.pushState({ thread: `class:${classId}` }, "", url);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== `class-${classId}`));
+    locallyReadAsOfRef.current[`class-${classId}`] = new Date().toISOString();
     const readState = await getReadState(family.uid);
     const previousReadTimestamp = readState[`class-${classId}`] || null;
     setLastReadBeforeOpen(previousReadTimestamp);
@@ -9954,6 +9979,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     url.searchParams.set("thread", "admin");
     window.history.pushState({ thread: "admin" }, "", url);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== `admin-${family.uid}`));
+    locallyReadAsOfRef.current[`admin-${family.uid}`] = new Date().toISOString();
     const readState = await getReadState(family.uid);
     setLastReadBeforeOpen(readState[`admin-${family.uid}`] || null);
     await markThreadRead(family.uid, `admin-${family.uid}`);
@@ -9986,6 +10012,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     url.searchParams.set("thread", `teacher:${teacherUid}`);
     window.history.pushState({ thread: `teacher:${teacherUid}` }, "", url);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== `teacher-${teacherUid}`));
+    locallyReadAsOfRef.current[`teacher-${teacherUid}`] = new Date().toISOString();
     const readState = await getReadState(family.uid);
     const previousReadTimestamp = readState[`teacher-${teacherUid}`] || null;
     setLastReadBeforeOpen(previousReadTimestamp);
