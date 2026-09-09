@@ -3888,6 +3888,24 @@ function AppInner() {
     setClassName("");
   };
 
+  // A real, separate gap this fixes: entering an assigned class already correctly pushes its own
+  // history entry (see enterAssignedClass's own comment) — but nothing was ever listening for the
+  // matching step back OUT of it. Pressing Back enough times to go past that point correctly
+  // changed the URL (classId genuinely disappears from it, since the push itself was real), but
+  // with no popstate listener watching for that, classId as actual React state never followed —
+  // leaving the classroom screen still showing, unresponsive to Back, while the URL underneath it
+  // had already quietly moved on. Reported directly as the Back button on the teacher side simply
+  // not always working — this is exactly that shape: not a wrong destination, but no visible
+  // response at all once history had nothing left to visibly change in the URL bar itself.
+  useEffect(() => {
+    if (isAdminSession) return; // the admin path already has its own separate, correct listener for "adminClass"
+    const onPopState = () => {
+      if (!new URLSearchParams(window.location.search).get("classId")) switchClass();
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [isAdminSession]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const createClass = async (name, password, classType) => {
     const id = uid();
     const cls = { id, name, password, classType: classType || "elementary" };
