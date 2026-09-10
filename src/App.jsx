@@ -16,7 +16,7 @@
 
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
-import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot, FieldPath } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, browserSessionPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithPopup, linkWithCredential } from "firebase/auth";
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
@@ -2252,15 +2252,21 @@ async function getReadState(viewerId) {
 // reopen of the app, which a stale in-memory refresh could never explain, since a fresh load
 // reads the real, current state directly from the server. That points at the write itself, not
 // at anything downstream of it: this dot-notation merge pattern was only ever verified against a
-// hand-written local simulation of Firestore, never the genuine production database and its
-// actual security rules, which very plausibly were written expecting a full-document write (the
-// old pattern) and may not recognize or permit a partial, dot-path field update the same way —
-// a rejection here would fail the read-mark silently, since nothing was previously watching for
-// it, and every fresh load would then correctly, accurately see the thread as genuinely still
-// unread on the server, matching exactly what was reported. Guards against exactly that now:
-// any failure is both surfaced (so it's no longer invisible) and caught by an immediate,
-// unconditional fallback to the older but structurally simpler full-document write, so the
-// read-mark reliably lands through one path or the other rather than silently through neither.
+// Reported directly, then actually reproduced and confirmed before touching this: pulling the raw
+// stored document straight from Firestore showed a field literally named "value.class-XYZ" — dot
+// included in the name itself — never an actual nested "value" map containing a "class-XYZ" key
+// inside it. setDoc(ref, { "value.x": y }, { merge: true }) does not treat a plain string key's
+// embedded dot as a nested field path the way this code assumed. The write itself always
+// succeeded — nothing here ever threw — so the earlier fallback below never ran and never could
+// have caught this: every fresh read then correctly, honestly reported that no field called
+// "value" existed at all, which is exactly the reported symptom, on every thread, every message
+// type, on every reload. A plain dotted STRING key has the same problem even with updateDoc,
+// confirmed directly: threadKey values here always contain hyphens (e.g. "class-17889...-of0mu"),
+// and Firestore's own dot-path parser rejects an unquoted segment with a hyphen in it outright.
+// FieldPath(...) sidesteps string parsing entirely — each argument is one literal path segment,
+// hyphens and all — which is what actually produced a real, correctly nested "value" map when
+// tested directly against the live document. The fallback stays in place for the one case this
+// still can't handle on its own: a document that doesn't exist yet.
 // Records that a thread was just read, in the same on-device "badge-store" database the service
 // worker itself already reads from the moment a push notification arrives (see its own
 // onBackgroundMessage comment) — this is what lets it tell a notification that's simply arriving
@@ -2290,9 +2296,11 @@ async function markThreadRead(viewerId, threadKey) {
   const ref = doc(db, "data", `read-state:${viewerId}`);
   const readAt = new Date().toISOString();
   try {
-    await setDoc(ref, { [`value.${threadKey}`]: readAt }, { merge: true });
+    await updateDoc(ref, new FieldPath("value", threadKey), readAt);
   } catch (err) {
-    console.error("markThreadRead: merge write failed, falling back to full-document write", err);
+    // updateDoc throws when the document doesn't exist yet (a family's very first-ever read
+    // mark) — this is the one case it genuinely can't handle on its own, not a sign of a deeper
+    // problem, so it isn't logged as an error the way an unexpected failure below would be.
     const state = await getReadState(viewerId);
     state[threadKey] = readAt;
     await saveJSON(`read-state:${viewerId}`, state, true);
@@ -2368,17 +2376,16 @@ async function reactToMessageInThread(storageKey, messageId, emoji, reactorId, r
 }
 // Snoozing doesn't mark a thread read — it just quiets the indicator for a while, so an unread
 // reply still shows as unread once the snooze period passes, rather than being silently dismissed.
-// Same atomic dot-notation fix as markThreadRead above, for the identical reason — this used to
-// read-modify-write the whole document too, with the same risk of a concurrent write elsewhere
-// silently wiping out an unrelated thread's own read mark or snooze. Same fallback too, for the
-// same reason — see markThreadRead's own comment above for the full explanation.
+// Same fix as markThreadRead above, for the identical reason — see its own comment for the full
+// explanation of what was actually wrong (a literal dotted field name, not a nested path, from
+// setDoc's merge option never treating a plain string key that way in the first place).
 async function snoozeThread(viewerId, threadKey, minutes) {
   const ref = doc(db, "data", `read-state:${viewerId}`);
   const until = new Date(Date.now() + minutes * 60000).toISOString();
   try {
-    await setDoc(ref, { [`value.snoozed.${threadKey}`]: until }, { merge: true });
+    await updateDoc(ref, new FieldPath("value", "snoozed", threadKey), until);
   } catch (err) {
-    console.error("snoozeThread: merge write failed, falling back to full-document write", err);
+    // updateDoc throws when the document doesn't exist yet — see markThreadRead's own comment
     const state = await getReadState(viewerId);
     state.snoozed = state.snoozed || {};
     state.snoozed[threadKey] = until;
