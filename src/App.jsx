@@ -14584,7 +14584,14 @@ function CarpoolPickupModal({ selectedStudents, onConfirm, onCancel }) {
     setSaveError(null);
     try {
       const groupId = uid();
-      const signatureUrl = await uploadOneImage(signatureBlob, `carpool-signatures/${groupId}.jpg`);
+      // Reported directly and confirmed live: a brand-new top-level storage path
+      // ("carpool-signatures/") isn't covered by the existing Firebase Storage security rules,
+      // which live outside this codebase and would need a separate, manual update elsewhere to
+      // allow it — confirmed by an actual "storage/unauthorized" error on a real upload attempt,
+      // not assumed. Nested under incident-attachments/ instead, a path already proven to accept
+      // uploads (every incident photo already goes through it), avoiding the need for any
+      // separate rules change at all.
+      const signatureUrl = await uploadOneImage(signatureBlob, `incident-attachments/carpool-signatures/${groupId}.jpg`);
       await saveSavedPickupName(personName);
       await onConfirm({ personName: personName.trim(), signature: signatureUrl, groupId });
     } catch (err) {
