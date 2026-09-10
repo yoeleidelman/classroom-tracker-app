@@ -31,7 +31,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload, Clock, Pin, ExternalLink
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload, Clock, Pin, ExternalLink, Car
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -1157,8 +1157,27 @@ async function loadCheckInOutSettings() {
   const settings = (await loadJSON("schoolSettings", {}, true)) || {};
   return settings.checkInOut || {};
 }
+// Names previously typed for a carpool/authorized pickup, school-wide — so a teacher can pick a
+// name from a short list on repeat pickups instead of retyping it every time. Deliberately just a
+// convenience list, not a roster of "authorized" people — see the carpool flow's own comment for
+// why that distinction matters. Stored under schoolSettings alongside the existing check-in/out
+// settings, rather than a new top-level key, since it's the same kind of small, school-wide
+// configuration.
+async function loadSavedPickupNames() {
+  const settings = (await loadJSON("schoolSettings", {}, true)) || {};
+  return settings.savedPickupNames || [];
+}
+async function saveSavedPickupName(name) {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return;
+  const settings = (await loadJSON("schoolSettings", {}, true)) || {};
+  const existing = settings.savedPickupNames || [];
+  if (existing.some((n) => n.toLowerCase() === trimmed.toLowerCase())) return; // already saved, nothing to add
+  const next = [...existing, trimmed].sort((a, b) => a.localeCompare(b));
+  await saveJSON("schoolSettings", { ...settings, savedPickupNames: next }, true);
+}
 
-function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, actionId, schoolEndTime) {
+function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, actionId, schoolEndTime, pickupInfo) {
   const list = existingCheckIns || [];
   // Idempotency guard: once two independent paths can both eventually complete the exact same
   // tap — a client-side retry that finally lands, and a server-side fallback attempting the same
@@ -1179,9 +1198,25 @@ function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, ac
   // up permanently recorded as 3:47 — genuinely wrong, and confusingly different from what the
   // parent watched happen the moment they tapped it.
   const nowTime = explicitTime || new Date().toTimeString().slice(0, 5);
+  // pickupInfo — { personName, signature, groupId } — is optional and only ever set by the
+  // carpool/authorized-pickup workflow. Recorded on whichever side of the entry this specific tap
+  // actually closes or opens (check-in and check-out kept fully separate, exactly like checkInBy
+  // and checkOutBy already are), since a single entry could in principle be dropped off by one
+  // carpool in the morning and picked up by a completely different one in the afternoon — each
+  // needs its own, independent record, never one shared field that the second tap would silently
+  // overwrite the first one's answer in.
+  const pickupFields = pickupInfo
+    ? { pickupType: "carpool", pickupPersonName: pickupInfo.personName, pickupSignature: pickupInfo.signature, pickupGroupId: pickupInfo.groupId }
+    : null;
   if (openEntry) {
-    const updated = list.map((c) => (c.id === openEntry.id ? { ...c, checkOutTime: nowTime, checkOutBy: byLabel, checkOutActionId: actionId } : c));
-    return { checkIns: updated, action: "checked-out", entry: { ...openEntry, checkOutTime: nowTime, checkOutBy: byLabel } };
+    const updated = list.map((c) => (c.id === openEntry.id ? {
+      ...c, checkOutTime: nowTime, checkOutBy: byLabel, checkOutActionId: actionId,
+      ...(pickupFields ? {
+        checkOutPickupType: pickupFields.pickupType, checkOutPickupPersonName: pickupFields.pickupPersonName,
+        checkOutPickupSignature: pickupFields.pickupSignature, checkOutPickupGroupId: pickupFields.pickupGroupId,
+      } : {}),
+    } : c));
+    return { checkIns: updated, action: "checked-out", entry: updated.find((c) => c.id === openEntry.id) };
   }
   // A genuinely new check-in, specifically — never a check-out, which always closes whatever's
   // already open above and stays allowed at any time of day. Enforced here, at the one function
@@ -1193,7 +1228,13 @@ function computeToggledCheckIn(existingCheckIns, date, byLabel, explicitTime, ac
   if (schoolEndTime && nowTime >= schoolEndTime) {
     return { checkIns: list, action: "blocked-school-ended" };
   }
-  const entry = { id: uid(), date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null, actionId };
+  const entry = {
+    id: uid(), date, checkInTime: nowTime, checkInBy: byLabel, checkOutTime: null, checkOutBy: null, actionId,
+    ...(pickupFields ? {
+      checkInPickupType: pickupFields.pickupType, checkInPickupPersonName: pickupFields.pickupPersonName,
+      checkInPickupSignature: pickupFields.pickupSignature, checkInPickupGroupId: pickupFields.pickupGroupId,
+    } : {}),
+  };
   return { checkIns: [...list, entry], action: "checked-in", entry };
 }
 function isCheckedInNow(checkIns, date) {
@@ -1202,10 +1243,10 @@ function isCheckedInNow(checkIns, date) {
 // Same check-in/out logic as the per-class teacher toggle, but standalone and parameterized by
 // classId — used by the school-wide preschool attendance view, which acts across every preschool
 // class at once rather than the one class a teacher happens to be logged into.
-async function toggleCheckInForStudent(classId, studentId, byLabel) {
+async function toggleCheckInForStudent(classId, studentId, byLabel, pickupInfo) {
   const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true)) || emptyStudentData();
   const checkInOutSettings = await loadCheckInOutSettings();
-  const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, null, null, checkInOutSettings.schoolEndTime);
+  const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, null, null, checkInOutSettings.schoolEndTime, pickupInfo);
   await saveJSON(`class:${classId}:kriya:${studentId}`, { ...data, checkIns: result.checkIns }, true);
   return result;
 }
@@ -1398,7 +1439,7 @@ function withTimeout(promise, ms, message) {
     new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message || "This took too long — check your connection and try again.")), ms); }),
   ]);
 }
-async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLabel, explicitTime, actionId) {
+async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLabel, explicitTime, actionId, pickupInfo) {
   const status = await getUnifiedCheckInStatus(studentId, classLinks);
   const targetClassId = status.openEntry ? status.openEntry.classId : defaultClassId;
   // Reuses the FULL data the read just above already fetched for this exact class, rather than a
@@ -1412,7 +1453,7 @@ async function toggleUnifiedCheckIn(studentId, classLinks, defaultClassId, byLab
     : await loadJSON(`class:${targetClassId}:kriya:${studentId}`, null, true, 2, true);
   const currentCheckIns = freshData?.checkIns || [];
   const checkInOutSettings = await loadCheckInOutSettings();
-  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime, actionId, checkInOutSettings.schoolEndTime);
+  const result = computeToggledCheckIn(currentCheckIns, todayISO(), byLabel, explicitTime, actionId, checkInOutSettings.schoolEndTime, pickupInfo);
   // A blocked attempt writes nothing at all — thrown, not returned normally, specifically so the
   // optimistic-toggle retry loop above can recognize this as a permanent block rather than a
   // transient failure worth retrying for the next six minutes, and can revert what it optimistically
@@ -8765,6 +8806,13 @@ function ChildDailyLogView({ link, onBack }) {
           {checkIns.map((c) => (
             <Card key={c.id} color="teal" title="Attendance" icon={Check}>
               In {formatTime12h(c.checkInTime)}{c.checkOutTime ? ` — Out ${formatTime12h(c.checkOutTime)}` : " — still here"}
+              {/* Only shown when it's genuinely useful — skipped entirely for a parent's own QR scan, since that's the normal, expected case and doesn't need calling out every day. */}
+              {c.checkInBy && !c.checkInBy.startsWith("Parent:") && (
+                <span className="block text-stone-500 text-xs mt-0.5">Signed in by: {c.checkInBy.replace(/^Carpool: /, "").replace(/^Teacher: /, "").replace(/^Teacher$/, "Teacher")}</span>
+              )}
+              {c.checkOutBy && !c.checkOutBy.startsWith("Parent:") && (
+                <span className="block text-stone-500 text-xs mt-0.5">Picked up by: {c.checkOutBy.replace(/^Carpool: /, "").replace(/^Teacher: /, "").replace(/^Teacher$/, "Teacher")}</span>
+              )}
             </Card>
           ))}
           {mood && (
@@ -9550,16 +9598,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // shared across a family group, since a newly-added second guardian should still get their own
   // first-time walkthrough even if the first guardian already saw and dismissed theirs.
   const [tourStep, setTourStep] = useState(() => (family?.onboardingSeen ? null : 0));
-  const TOUR_TOTAL_STEPS = 3;
+  const TOUR_TOTAL_STEPS = 2;
   const dismissTour = () => {
     setTourStep(null);
     saveJSON(`family:${family.uid}`, { ...family, onboardingSeen: true }, true);
   };
   const advanceTour = () => {
-    // Steps 2 and 3 (QR check-in, daily log) are both preschool-specific now — neither one has
-    // anything to attach to if the currently selected child isn't preschool, so this jumps
-    // straight to done from step 1 in that case, the same way it already did when there were no
-    // linked children at all to point at.
+    // Step 2 (QR check-in) is preschool-specific — it has nothing to attach to if the currently
+    // selected child isn't preschool, so this jumps straight to done from step 1 in that case,
+    // the same way it already did when there were no linked children at all to point at.
     const selectedLink = (fullTimeStudentLinks || [])[findChildIndex(fullTimeStudentLinks, selectedStudentId)] || (fullTimeStudentLinks || [])[0];
     const noPreschoolChild = !selectedLink || selectedLink.classType !== "preschool";
     if (tourStep === 0 && noPreschoolChild) { dismissTour(); return; }
@@ -10660,9 +10707,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                   if (!isPreschoolChild) {
                     return <HomeworkPreviewCard link={link} onSeeAll={() => navigateParentTab("homework")} />;
                   }
-                  const status = checkInStatus[link.studentId];
-                  const isIn = status?.isIn;
-                  const entries = status?.entries || [];
                   return (
                     <div>
                       <TourHint active={tourStep === 1} step={2} total={TOUR_TOTAL_STEPS} align="left"
@@ -10671,32 +10715,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                         <button onClick={() => setShowScanner(true)} className="w-full flex items-center justify-center gap-2 text-white rounded-xl py-3 text-sm font-bold mb-4 shadow-sm hover:opacity-90" style={{ background: "linear-gradient(120deg, #5F9F9E 0%, #7bb0af 100%)" }}>
                           Scan QR code to check in or out
                         </button>
-                      </TourHint>
-                      {/* Wraps only the short check-in box, not the full (potentially long)
-                          daily-log content below it — the tour bubble positions itself right after
-                          whatever it wraps, so wrapping the whole block (including
-                          ChildDailyLogView, which can run long with mood/meals/naps/incidents/etc.)
-                          pushed the bubble itself far down the page, past the end of the visible
-                          content, where it had nothing left to actually be inside and rendered
-                          cut off. This keeps the pointer anchored to the specific thing the text
-                          is about — "your child's day shows right here" — right at the top of that
-                          section, regardless of how much the section itself contains. */}
-                      <TourHint active={tourStep === 2} step={3} total={TOUR_TOTAL_STEPS} align="left"
-                        text={`Your child's day shows right here — mood, meals, naps, and more, as their teacher logs it.`}
-                        onNext={advanceTour} onSkip={dismissTour}>
-                        <div className={`rounded-xl p-4 border-2 mb-4 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
-                          {entries.length === 0 ? (
-                            <p className="text-xs font-semibold text-stone-400">Not checked in yet today — scan the QR code above to check in.</p>
-                          ) : (
-                            <div className="space-y-0.5">
-                              {entries.map((e) => (
-                                <p key={e.id} className={`text-xs font-semibold ${!e.checkOutTime ? "text-emerald-700" : "text-stone-500"}`}>
-                                  In {formatTime12h(e.checkInTime)}{e.checkOutTime ? ` — Out ${formatTime12h(e.checkOutTime)}` : " — still here"}
-                                </p>
-                              ))}
-                            </div>
-                          )}
-                        </div>
                       </TourHint>
                       <ChildDailyLogView link={link} />
                     </div>
@@ -11369,7 +11387,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       case "attendance":
         return (
         <PreschoolAttendanceView roster={roster} studentData={studentDataForAttendance}
-          toggleCheckInByTeacher={toggleCheckInByTeacher} config={config} plannerDays={plannerDays} navigate={navigateView} />
+          toggleCheckInByTeacher={toggleCheckInByTeacher} toggleCarpoolForStudents={toggleCarpoolForStudents} config={config} plannerDays={plannerDays} navigate={navigateView} />
         );
       case "daily-log":
         return (
@@ -12906,6 +12924,27 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     });
   };
 
+  // Applies one shared pickup (one name, one signature) across every selected student at once —
+  // the entire point of the carpool flow existing separately from the regular one-at-a-time
+  // toggle above. A deliberate, multi-step action (select students, then name, then sign, then
+  // confirm) rather than a single instant tap, so a plain sequential save here — with the
+  // signature pad's own "Saving…" state already covering the wait — is the right fit, unlike the
+  // regular toggle's own optimistic-update path built specifically for an instant single tap.
+  // A student blocked by the school-end-time cutoff is skipped rather than failing the whole
+  // group, so one student's own edge case never holds up everyone else in the same pickup.
+  const toggleCarpoolForStudents = async (studentIds, pickupInfo) => {
+    const byLabel = `Carpool: ${pickupInfo.personName}`;
+    const checkInOutSettings = await loadCheckInOutSettings();
+    for (const studentId of studentIds) {
+      const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true, 2, true)) || studentData[studentId] || emptyStudentData();
+      const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, null, null, checkInOutSettings.schoolEndTime, pickupInfo);
+      if (result.action === "blocked-school-ended") continue; // eslint-disable-line no-continue
+      const fullData = { ...data, checkIns: result.checkIns };
+      await saveJSON(`class:${classId}:kriya:${studentId}`, fullData, true, 2, true);
+      setStudentData((prev) => ({ ...prev, [studentId]: fullData }));
+    }
+  };
+
   // One conversation per guardian per class now, not per family — each guardian's message with
   // the classroom is private to them, so this notifies only the specific guardian who's actually
   // part of this thread (a direct, single-uid notification) rather than notifyFamilyGroup, which
@@ -14426,10 +14465,191 @@ const PRESCHOOL_TILES = [
 // elementary Home screen, but presented on its own, without the homework/points/flags clutter
 // that doesn't apply to a preschool room, and with bigger, simpler touch targets to match the
 // same fast-glance philosophy as the rest of the preschool screens.
-function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, config, plannerDays, navigate }) {
+// A plain, dedicated signature/initials pad — draws directly on a canvas via touch or mouse, with
+// a clear button. No dependency on anything beyond what's already used elsewhere in the app (the
+// existing in-app camera is the same kind of plain, self-contained approach). Exports the drawing
+// as a Blob on save, the same shape a photo file already comes in as, so it can go through the
+// exact same upload path (uploadOneImage) as every other image in the app already does — nothing
+// new to build or maintain just for how this one kind of image gets stored.
+function SignaturePad({ onSave, onCancel, saving }) {
+  const canvasRef = useRef(null);
+  const [isEmpty, setIsEmpty] = useState(true);
+  const drawingRef = useRef(false);
+  const lastPointRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#1c1917";
+  }, []);
+
+  // Maps a real screen coordinate (mouse or the first touch point) to the canvas's own internal
+  // pixel space — needed because the canvas is drawn at a fixed internal resolution but displayed
+  // at whatever width actually fits the screen, and those two are rarely the same number.
+  const getPoint = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches?.[0];
+    const clientX = touch ? touch.clientX : e.clientX;
+    const clientY = touch ? touch.clientY : e.clientY;
+    return {
+      x: (clientX - rect.left) * (canvas.width / rect.width),
+      y: (clientY - rect.top) * (canvas.height / rect.height),
+    };
+  };
+  const startDraw = (e) => {
+    e.preventDefault();
+    drawingRef.current = true;
+    lastPointRef.current = getPoint(e);
+  };
+  const draw = (e) => {
+    if (!drawingRef.current) return;
+    e.preventDefault();
+    const ctx = canvasRef.current.getContext("2d");
+    const point = getPoint(e);
+    ctx.beginPath();
+    ctx.moveTo(lastPointRef.current.x, lastPointRef.current.y);
+    ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+    lastPointRef.current = point;
+    setIsEmpty(false);
+  };
+  const endDraw = () => { drawingRef.current = false; };
+  const clear = () => {
+    const canvas = canvasRef.current;
+    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    setIsEmpty(true);
+  };
+  const confirm = () => {
+    if (isEmpty) return;
+    canvasRef.current.toBlob((blob) => onSave(blob), "image/png");
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl p-4 max-w-md w-full">
+        <p className="text-sm font-semibold text-stone-800 mb-1">Please sign or initial below</p>
+        <p className="text-xs text-stone-400 mb-3">One signature covers everyone selected in this pickup.</p>
+        <canvas ref={canvasRef} width={480} height={220}
+          className="w-full border-2 border-stone-300 rounded-xl bg-stone-50"
+          style={{ aspectRatio: "480 / 220", touchAction: "none" }}
+          onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
+          onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw} />
+        <div className="flex items-center justify-between mt-3">
+          <button onClick={clear} disabled={saving} className="text-xs font-semibold text-stone-500 px-3 py-2 rounded-lg border border-stone-300 hover:bg-stone-50 disabled:opacity-40">Clear</button>
+          <div className="flex gap-2">
+            <button onClick={onCancel} disabled={saving} className="text-xs font-semibold text-stone-500 px-4 py-2.5 rounded-lg border border-stone-300 hover:bg-stone-50 disabled:opacity-40">Cancel</button>
+            <button onClick={confirm} disabled={isEmpty || saving}
+              className="text-sm font-bold text-white px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed">
+              {saving ? "Saving…" : "Confirm"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The shared name-then-signature step of a carpool/authorized pickup, used identically whether it
+// was launched from one specific class's own attendance screen or the whole-school dismissal
+// screen — the list of students already chosen by whichever screen launched this is the only
+// thing that differs between the two, and is simply handed in, not decided here.
+//
+// Deliberately does NOT track or check any notion of who's "authorized" — reported directly: this
+// is a record of who actually took each child home, for later reference, not a system the teacher
+// is meant to lean on to decide whether a pickup is OK. That judgment call stays entirely with the
+// teacher, exactly as it already does today without this feature at all. A saved name here is
+// purely a convenience for not retyping someone teachers already know, never a claim that this
+// person is cleared to pick anyone up.
+function CarpoolPickupModal({ selectedStudents, onConfirm, onCancel }) {
+  const [step, setStep] = useState("name"); // "name" | "signature"
+  const [personName, setPersonName] = useState("");
+  const [savedNames, setSavedNames] = useState([]);
+  const [loadingNames, setLoadingNames] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadSavedPickupNames().then((names) => { if (!cancelled) { setSavedNames(names); setLoadingNames(false); } });
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSignatureSave = async (signatureBlob) => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const groupId = uid();
+      const signatureUrl = await uploadOneImage(signatureBlob, `carpool-signatures/${groupId}.jpg`);
+      await saveSavedPickupName(personName);
+      await onConfirm({ personName: personName.trim(), signature: signatureUrl, groupId });
+    } catch (err) {
+      setSaveError(describeUploadError(err));
+      setSaving(false);
+    }
+  };
+
+  if (step === "signature") {
+    return (
+      <>
+        {saveError && (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] bg-rose-50 border border-rose-200 rounded-lg p-2.5 max-w-md w-[90%]">
+            <p className="text-xs text-rose-700">{saveError}</p>
+          </div>
+        )}
+        <SignaturePad onSave={handleSignatureSave} onCancel={() => setStep("name")} saving={saving} />
+      </>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4">
+      <div className="bg-white rounded-2xl p-4 max-w-md w-full max-h-[85vh] overflow-y-auto">
+        <p className="text-sm font-semibold text-stone-800 mb-1">Who's picking up / dropping off?</p>
+        <p className="text-xs text-stone-400 mb-3">
+          {selectedStudents.length === 1
+            ? `For ${selectedStudents[0].name}.`
+            : `For ${selectedStudents.length} students: ${selectedStudents.map((s) => s.name).join(", ")}.`}
+        </p>
+        <input autoFocus value={personName} onChange={(e) => setPersonName(e.target.value)} placeholder="Type a name…"
+          className="w-full border border-stone-300 rounded-lg px-3 py-2.5 text-sm mb-3" />
+        {!loadingNames && savedNames.length > 0 && (
+          <div className="mb-3">
+            <p className="text-[11px] font-semibold text-stone-400 uppercase tracking-wide mb-1.5">Or pick a saved name</p>
+            <div className="flex flex-wrap gap-1.5">
+              {savedNames.map((n) => (
+                <button key={n} onClick={() => setPersonName(n)}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${personName === n ? "bg-teal-600 text-white border-teal-600" : "bg-white text-stone-600 border-stone-300 hover:bg-stone-50"}`}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="flex justify-end gap-2 mt-2">
+          <button onClick={onCancel} className="text-xs font-semibold text-stone-500 px-4 py-2.5 rounded-lg border border-stone-300 hover:bg-stone-50">Cancel</button>
+          <button onClick={() => setStep("signature")} disabled={!personName.trim()}
+            className="text-sm font-bold text-white px-5 py-2.5 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-40 disabled:cursor-not-allowed">
+            Next: Signature
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, toggleCarpoolForStudents, config, plannerDays, navigate }) {
   const date = todayISO();
   const schoolDay = isSchoolDay(date, config, plannerDays);
   const [confirmingRepeatFor, setConfirmingRepeatFor] = useState(null);
+  const [carpoolMode, setCarpoolMode] = useState(false);
+  const [carpoolSelected, setCarpoolSelected] = useState([]);
+  const [showCarpoolModal, setShowCarpoolModal] = useState(false);
 
   const handleTap = (studentId, isIn, checkIns) => {
     if (!isIn && wouldBeRepeatCheckIn(checkIns, date)) {
@@ -14439,16 +14659,44 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
     toggleCheckInByTeacher(studentId);
   };
 
+  const exitCarpoolMode = () => { setCarpoolMode(false); setCarpoolSelected([]); };
+  const toggleCarpoolStudent = (studentId) => {
+    setCarpoolSelected((prev) => (prev.includes(studentId) ? prev.filter((id) => id !== studentId) : [...prev, studentId]));
+  };
+  const handleCarpoolConfirm = async (pickupInfo) => {
+    await toggleCarpoolForStudents(carpoolSelected, pickupInfo);
+    setShowCarpoolModal(false);
+    exitCarpoolMode();
+  };
+
   return (
     <div className="app-page-wide">
       <Header navigate={navigate} />
       <MainTabs active="attendance" navigate={navigate} />
       <button onClick={() => navigate("all-preschool-attendance")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
-        <Users size={16} /> All preschool students — dismissal view
+        <Users size={16} /> All preschool students — sign in / sign out
       </button>
       <button onClick={() => navigate("checkin-history")} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
         <Calendar size={16} /> Check-in/out history
       </button>
+      {carpoolMode ? (
+        <div className="bg-teal-50 border-2 border-teal-300 rounded-xl p-3 mb-3 flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-xs font-semibold text-teal-800">
+            {carpoolSelected.length === 0 ? "Select every student in this pickup" : `${carpoolSelected.length} selected`}
+          </p>
+          <div className="flex gap-2">
+            <button onClick={exitCarpoolMode} className="text-xs font-semibold text-stone-500 px-3 py-2 rounded-lg border border-stone-300 hover:bg-white">Cancel</button>
+            <button onClick={() => setShowCarpoolModal(true)} disabled={carpoolSelected.length === 0}
+              className="text-xs font-bold text-white px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-40 disabled:cursor-not-allowed">
+              Continue
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setCarpoolMode(true)} className="w-full mb-3 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+          <Car size={16} /> Carpool Pickup
+        </button>
+      )}
       <p className="text-xs text-stone-400 mb-3">Who's actually here right now — not a daily record of late or excused, just in or not. Families can also check their own child in or out from their end.</p>
       {!schoolDay && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
@@ -14465,8 +14713,9 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
           const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
           const isIn = Boolean(openEntry);
           const confirming = confirmingRepeatFor === s.id;
+          const isSelected = carpoolSelected.includes(s.id);
           return (
-            <div key={s.id} className={`rounded-xl border-2 p-4 flex flex-wrap items-center justify-between gap-3 ${isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
+            <div key={s.id} className={`rounded-xl border-2 p-4 flex flex-wrap items-center justify-between gap-3 ${carpoolMode && isSelected ? "bg-teal-50 border-teal-400" : isIn ? "bg-emerald-50 border-emerald-300" : "bg-white border-stone-200"}`}>
               <div>
                 <span className="font-semibold text-stone-900 text-lg block">{s.name}</span>
                 {todaysEntries.length === 0 ? (
@@ -14482,7 +14731,13 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
                   </div>
                 )}
               </div>
-              {confirming ? (
+              {carpoolMode ? (
+                <button onClick={() => toggleCarpoolStudent(s.id)}
+                  className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center shrink-0 ${isSelected ? "bg-teal-600 border-teal-600" : "bg-white border-stone-300"}`}
+                  aria-label={isSelected ? `Remove ${s.name} from this pickup` : `Add ${s.name} to this pickup`}>
+                  {isSelected && <Check size={18} className="text-white" />}
+                </button>
+              ) : confirming ? (
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-stone-500">Log another visit today?</span>
                   <button onClick={() => { toggleCheckInByTeacher(s.id); setConfirmingRepeatFor(null); }}
@@ -14499,6 +14754,13 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
           );
         })}
       </div>
+      {showCarpoolModal && (
+        <CarpoolPickupModal
+          selectedStudents={roster.filter((s) => carpoolSelected.includes(s.id))}
+          onConfirm={handleCarpoolConfirm}
+          onCancel={() => setShowCarpoolModal(false)}
+        />
+      )}
     </div>
   );
 }
@@ -14532,6 +14794,9 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
   // immediately show here, before the real save has confirmed anything. See
   // startOptimisticCheckInToggle's own reasoning for the full design.
   const [optimisticCheckIn, setOptimisticCheckIn] = useState({});
+  const [carpoolMode, setCarpoolMode] = useState(false);
+  const [carpoolSelected, setCarpoolSelected] = useState([]);
+  const [showCarpoolModal, setShowCarpoolModal] = useState(false);
   const date = todayISO();
 
   // Was previously one entry PER CLASS a student was enrolled in — a student genuinely enrolled
@@ -14637,11 +14902,56 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
     setConfirmingRepeatFor(null);
   };
 
+  const exitCarpoolMode = () => { setCarpoolMode(false); setCarpoolSelected([]); };
+  const toggleCarpoolStudent = (studentId) => {
+    setCarpoolSelected((prev) => (prev.includes(studentId) ? prev.filter((id) => id !== studentId) : [...prev, studentId]));
+  };
+  // Same shared-pickup reasoning as the per-class version of this — one name, one signature,
+  // applied across every selected student, whichever action (sign in or sign out) each one
+  // individually needs right now. Deliberately a plain sequential save, not the optimistic-update
+  // path the single-tap toggle above uses — this is a slower, multi-step, deliberate action to
+  // begin with, and the signature pad's own "Saving…" state already covers the wait.
+  const allStudentsById = byStudentId;
+  const toggleCarpoolForStudents = async (studentIds, pickupInfo) => {
+    const byLabel = `Carpool: ${pickupInfo.personName}`;
+    for (const studentId of studentIds) {
+      const student = allStudentsById[studentId];
+      if (!student) continue; // eslint-disable-line no-continue
+      const status = await getUnifiedCheckInStatus(studentId, student.links);
+      const targetClassId = status.openEntry ? status.openEntry.classId : student.links[0].classId;
+      await toggleUnifiedCheckIn(studentId, student.links, targetClassId, byLabel, null, null, pickupInfo);
+    }
+  };
+  const handleCarpoolConfirm = async (pickupInfo) => {
+    await toggleCarpoolForStudents(carpoolSelected, pickupInfo);
+    setShowCarpoolModal(false);
+    exitCarpoolMode();
+  };
+
   return (
     <div className="app-page-wide">
       <button onClick={() => navigate("attendance")} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-1">All Preschool Students</h1>
-      <p className="text-xs text-stone-400 mb-4">Every preschool room on one page, grouped by family — built for dismissal, when one teacher is checking everyone out at once.</p>
+      <p className="text-xs text-stone-400 mb-4">Every preschool room on one page, grouped by family — built for sign-in and sign-out, when one teacher is checking everyone in or out at once.</p>
+
+      {carpoolMode ? (
+        <div className="bg-teal-50 border-2 border-teal-300 rounded-xl p-3 mb-4 flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-xs font-semibold text-teal-800">
+            {carpoolSelected.length === 0 ? "Select every student in this pickup — from any family shown below" : `${carpoolSelected.length} selected`}
+          </p>
+          <div className="flex gap-2">
+            <button onClick={exitCarpoolMode} className="text-xs font-semibold text-stone-500 px-3 py-2 rounded-lg border border-stone-300 hover:bg-white">Cancel</button>
+            <button onClick={() => setShowCarpoolModal(true)} disabled={carpoolSelected.length === 0}
+              className="text-xs font-bold text-white px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-40 disabled:cursor-not-allowed">
+              Continue
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setCarpoolMode(true)} className="w-full mb-4 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+          <Car size={16} /> Carpool Pickup
+        </button>
+      )}
 
       {loading && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
       {!loading && families.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No preschool students found.</p>}
@@ -14654,8 +14964,9 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
               const openEntry = todaysEntries.find((c) => c.checkInTime && !c.checkOutTime);
               const isIn = Boolean(openEntry);
               const confirming = confirmingRepeatFor === s.id;
+              const isSelected = carpoolSelected.includes(s.id);
               return (
-                <div key={s.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${isIn ? "text-emerald-800" : ""}`}>
+                <div key={s.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${carpoolMode && isSelected ? "text-teal-800" : isIn ? "text-emerald-800" : ""}`}>
                   <div>
                     <span className="font-semibold text-stone-900 text-base block">{s.name}</span>
                     <span className="text-[11px] text-stone-400">{s.className}</span>
@@ -14671,7 +14982,13 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
                       </div>
                     )}
                   </div>
-                  {confirming ? (
+                  {carpoolMode ? (
+                    <button onClick={() => toggleCarpoolStudent(s.id)}
+                      className={`w-8 h-8 rounded-lg border-2 flex items-center justify-center shrink-0 ${isSelected ? "bg-teal-600 border-teal-600" : "bg-white border-stone-300"}`}
+                      aria-label={isSelected ? `Remove ${s.name} from this pickup` : `Add ${s.name} to this pickup`}>
+                      {isSelected && <Check size={18} className="text-white" />}
+                    </button>
+                  ) : confirming ? (
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-stone-500">Log another visit today?</span>
                       <button onClick={() => handleTap(s, false)} className="text-xs font-bold px-3 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">Yes, check in</button>
@@ -14689,6 +15006,13 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
           </div>
         ))}
       </div>
+      {showCarpoolModal && (
+        <CarpoolPickupModal
+          selectedStudents={families.flatMap((fam) => fam.students).filter((s) => carpoolSelected.includes(s.id))}
+          onConfirm={handleCarpoolConfirm}
+          onCancel={() => setShowCarpoolModal(false)}
+        />
+      )}
     </div>
   );
 }
@@ -18082,6 +18406,10 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
   // closed again the instant a decision is made or the person taps elsewhere.
   const [openReview, setOpenReview] = useState(null);
   const [resolving, setResolving] = useState(false);
+  // Same one-at-a-time pattern as openReview above, for a tapped carpool/authorized-pickup marker
+  // — showing who actually dropped off or picked up, plus their signature, without needing its
+  // own permanent space in every cell (most days have no carpool pickup at all).
+  const [openCarpoolDetail, setOpenCarpoolDetail] = useState(null);
 
   const submitReview = async (rosterId, entry, decision) => {
     if (!resolveReview) return;
@@ -18109,6 +18437,7 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
           {resolveReview && (
             <span className="flex items-center gap-1"><Flag size={11} className="text-amber-600 fill-amber-400" /> Needs a decision — tap it</span>
           )}
+          <span className="flex items-center gap-1"><Car size={12} className="text-teal-700" /> Carpool/authorized pickup — tap for who</span>
         </div>
       </div>
       {roster.length === 0 ? (
@@ -18154,12 +18483,19 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
                             <div className="flex flex-col gap-1 items-center">
                               {entries.map((e) => {
                                 const isLate = Boolean(latePickupTime) && e.checkOutTime && e.checkOutTime > latePickupTime;
+                                const hasCarpool = e.checkInPickupType === "carpool" || e.checkOutPickupType === "carpool";
                                 return (
                                   <div key={e.id} className="relative">
                                     {e.flaggedReview && resolveReview && (
                                       <button onClick={() => setOpenReview({ rosterId: s.id, entry: e })}
                                         className="absolute -top-1.5 -right-1.5 z-10 bg-white rounded-full p-0.5 shadow" aria-label="Needs a decision">
                                         <Flag size={11} className="text-amber-600 fill-amber-400" />
+                                      </button>
+                                    )}
+                                    {hasCarpool && (
+                                      <button onClick={() => setOpenCarpoolDetail({ studentName: s.name, entry: e })}
+                                        className="absolute -bottom-1.5 -right-1.5 z-10 bg-white rounded-full p-0.5 shadow" aria-label="Carpool/authorized pickup — tap for who">
+                                        <Car size={11} className="text-teal-700" />
                                       </button>
                                     )}
                                     <div className={`rounded-md overflow-hidden ${isLate ? "ring-2 ring-orange-500" : ""}`}>
@@ -18204,6 +18540,30 @@ function CheckInOutHistoryChart({ roster, studentData, latePickupTime, schoolEnd
                 Decide later
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {openCarpoolDetail && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-end sm:items-center justify-center p-4" onClick={() => setOpenCarpoolDetail(null)}>
+          <div className="bg-white rounded-xl p-4 max-w-xs w-full border-2 border-teal-300" onClick={(e) => e.stopPropagation()}>
+            <p className="text-sm font-semibold text-teal-800 mb-2">{openCarpoolDetail.studentName} — Carpool/authorized pickup</p>
+            {openCarpoolDetail.entry.checkInPickupType === "carpool" && (
+              <div className="mb-3">
+                <p className="text-xs text-stone-600 mb-1">Dropped off by: <span className="font-semibold text-stone-800">{openCarpoolDetail.entry.checkInPickupPersonName}</span></p>
+                {openCarpoolDetail.entry.checkInPickupSignature && (
+                  <img src={openCarpoolDetail.entry.checkInPickupSignature} alt="Signature" className="w-full border border-stone-200 rounded-lg bg-stone-50" />
+                )}
+              </div>
+            )}
+            {openCarpoolDetail.entry.checkOutPickupType === "carpool" && (
+              <div>
+                <p className="text-xs text-stone-600 mb-1">Picked up by: <span className="font-semibold text-stone-800">{openCarpoolDetail.entry.checkOutPickupPersonName}</span></p>
+                {openCarpoolDetail.entry.checkOutPickupSignature && (
+                  <img src={openCarpoolDetail.entry.checkOutPickupSignature} alt="Signature" className="w-full border border-stone-200 rounded-lg bg-stone-50" />
+                )}
+              </div>
+            )}
+            <button onClick={() => setOpenCarpoolDetail(null)} className="w-full mt-3 text-xs font-semibold text-stone-500 border border-stone-300 rounded-md py-2 hover:bg-stone-50">Close</button>
           </div>
         </div>
       )}
