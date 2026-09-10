@@ -9809,6 +9809,38 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => clearInterval(interval);
   }, [refreshUnreadThreads]);
 
+  // Every class and teacher thread's own last-message time, live, and for ALL of them — not just
+  // the unread ones unreadThreads above tracks. Reported directly: finding who just messaged meant
+  // scrolling the whole list every time, since nothing ever reordered it — sorting the Messages
+  // list by "most recent first," the way any other messaging app already works, needs to know when
+  // a thread's last message arrived even after it's already been read, which is exactly what
+  // unreadThreads alone can't say once something's no longer unread.
+  const allThreadClassIds = [...new Set((family?.studentLinks || []).map((l) => l.classId))];
+  const allClassThreadKeysForSort = allThreadClassIds.map((id) => `class:${id}:messages:${family.uid}`);
+  const allTeacherThreadKeysForSort = (eligibleTeachers || []).map((t) => `teacher-messages:${t.uid}:${family.uid}`);
+  const liveClassThreadsForSort = useLiveJSONMap(allClassThreadKeysForSort);
+  const liveTeacherThreadsForSort = useLiveJSONMap(allTeacherThreadKeysForSort);
+  const lastMessageTimeByClassId = Object.fromEntries(allThreadClassIds.map((id) => {
+    const thread = liveClassThreadsForSort[`class:${id}:messages:${family.uid}`];
+    const last = thread?.messages?.[thread.messages.length - 1];
+    return [id, last?.timestamp || null];
+  }));
+  const lastMessageTimeByTeacherUid = Object.fromEntries((eligibleTeachers || []).map((t) => {
+    const thread = liveTeacherThreadsForSort[`teacher-messages:${t.uid}:${family.uid}`];
+    const last = thread?.messages?.[thread.messages.length - 1];
+    return [t.uid, last?.timestamp || null];
+  }));
+  // Newest first; a thread with no messages yet sinks to the bottom rather than sorting as if it
+  // were the oldest or newest activity, since it's neither.
+  const sortByRecency = (list, timeByKey, keyField) => [...list].sort((a, b) => {
+    const aTime = timeByKey[a[keyField]];
+    const bTime = timeByKey[b[keyField]];
+    if (!aTime && !bTime) return 0;
+    if (!aTime) return 1;
+    if (!bTime) return -1;
+    return new Date(bTime) - new Date(aTime);
+  });
+
   // A post's own readBy list — recorded server-side the moment a child's blog is genuinely opened
   // to (see ParentBlogView's own mark-all-as-read effect) — is the single source of truth for
   // whether it's been read: the same data this family's own read receipts already use, not a
@@ -10562,7 +10594,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wide text-[#5F9F9E]/80 mb-2 px-1">Classes</p>
               <div className="space-y-3">
-                {filteredClasses.map((l) => (
+                {sortByRecency(filteredClasses, lastMessageTimeByClassId, "classId").map((l) => (
                   <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
                     className="w-full text-left bg-white border-2 border-[#5F9F9E]/20 rounded-xl p-4 flex items-center justify-between hover:border-[#5F9F9E]">
                     <div>
@@ -10606,7 +10638,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
                 <div className="space-y-3">
-                  {filteredTeachers.map((t) => {
+                  {sortByRecency(filteredTeachers, lastMessageTimeByTeacherUid, "uid").map((t) => {
                     // Whichever of THIS teacher's labels matches one of the selected child's own
                     // classes — a teacher whose admin-assigned role genuinely differs by classroom
                     // (Judaic Studies for one of a family's kids, General Studies for another)
@@ -20292,6 +20324,23 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   // reshaping every call site that reads from this object.
   const liveThreadsByStorageKey = useLiveJSONMap((groups || []).map((g) => `class:${classId}:messages:${g.groupId}`));
   const threads = Object.fromEntries((groups || []).map((g) => [g.groupId, liveThreadsByStorageKey[`class:${classId}:messages:${g.groupId}`] || { messages: [] }]));
+  // Reported directly: finding who just messaged meant scrolling the entire list every time,
+  // since it never reordered itself — every other messaging app moves a thread to the top the
+  // instant something new arrives in it, and this didn't. Sorted here, once, by each thread's own
+  // last message — live, since threads itself already is, so a new message reorders this list the
+  // same instant it arrives, with no separate refresh needed. A thread with no messages yet sinks
+  // to the bottom rather than sorting as if it were the oldest or newest activity, since it's
+  // neither.
+  const sortedGroups = useMemo(() => {
+    return [...(groups || [])].sort((a, b) => {
+      const aLast = threads[a.groupId]?.messages?.[threads[a.groupId].messages.length - 1];
+      const bLast = threads[b.groupId]?.messages?.[threads[b.groupId].messages.length - 1];
+      if (!aLast && !bLast) return 0;
+      if (!aLast) return 1;
+      if (!bLast) return -1;
+      return new Date(bLast.timestamp) - new Date(aLast.timestamp);
+    });
+  }, [groups, threads]);
 
   // Broadcasts sent before this feature existed were never tagged with any shared id at all — each
   // family's copy just sits in their own thread with no link back to the others. Detected here
@@ -20337,6 +20386,17 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
 
   const liveDirectThreadsByStorageKey = useLiveJSONMap((directGroups || []).map((g) => `teacher-messages:${loggedInTeacher.uid}:${g.groupId}`));
   const directThreads = Object.fromEntries((directGroups || []).map((g) => [g.groupId, liveDirectThreadsByStorageKey[`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`] || { messages: [] }]));
+  // Same reasoning and behavior as sortedGroups above, for the Direct tab's own separate list.
+  const sortedDirectGroups = useMemo(() => {
+    return [...(directGroups || [])].sort((a, b) => {
+      const aLast = directThreads[a.groupId]?.messages?.[directThreads[a.groupId].messages.length - 1];
+      const bLast = directThreads[b.groupId]?.messages?.[directThreads[b.groupId].messages.length - 1];
+      if (!aLast && !bLast) return 0;
+      if (!aLast) return 1;
+      if (!bLast) return -1;
+      return new Date(bLast.timestamp) - new Date(aLast.timestamp);
+    });
+  }, [directGroups, directThreads]);
 
   // For showing an actual unread count on each row in both inbox lists below, not just inside an
   // open conversation — refreshed on the same events that already change what's actually unread
@@ -20545,7 +20605,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
           {directGroups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
           {directGroups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families linked to your classes yet.</p>}
           <div className="space-y-2">
-            {(directGroups || []).map((g) => {
+            {sortedDirectGroups.map((g) => {
               const thread = directThreads[g.groupId];
               const last = thread?.messages?.[thread.messages.length - 1];
               const childNames = (g.studentLinks || []).filter((l) => assignedClassIds.includes(l.classId)).map((l) => l.studentName).join(", ");
@@ -20577,7 +20637,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
           {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
 
           <div className="space-y-2">
-            {(groups || []).map((g) => {
+            {sortedGroups.map((g) => {
               const thread = threads[g.groupId];
               const last = thread?.messages?.[thread.messages.length - 1];
               const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
