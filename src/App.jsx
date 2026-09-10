@@ -14489,6 +14489,16 @@ function SignaturePad({ onSave, onCancel, saving }) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
+    // Reported directly and confirmed: the canvas's own background is transparent by default —
+    // the cream color visible while signing was only ever a CSS style on the <canvas> element
+    // itself, never actually part of the bitmap being drawn on. That didn't matter until this
+    // got compressed to JPEG for upload (no transparency support), at which point the real,
+    // unfilled canvas pixels — genuinely black underneath, alpha aside — became the visible
+    // background once flattened, while the dark signature strokes stayed dark, the reverse of
+    // what it needs to look like. Filling the actual bitmap white here, before anything is drawn,
+    // makes the real exported file correct too, not just what happened to render on screen live.
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.lineWidth = 2.5;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -14529,7 +14539,9 @@ function SignaturePad({ onSave, onCancel, saving }) {
   const endDraw = () => { drawingRef.current = false; };
   const clear = () => {
     const canvas = canvasRef.current;
-    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     setIsEmpty(true);
   };
   const confirm = () => {
