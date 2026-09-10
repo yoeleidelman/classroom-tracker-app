@@ -12932,17 +12932,25 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // regular toggle's own optimistic-update path built specifically for an instant single tap.
   // A student blocked by the school-end-time cutoff is skipped rather than failing the whole
   // group, so one student's own edge case never holds up everyone else in the same pickup.
+  // Reported directly and confirmed live: a genuine, existing rule (no new check-ins allowed
+  // after the school day has ended) was silently doing exactly what it's supposed to during an
+  // actual test — but nothing here said so. The regular, single-student toggle already surfaces
+  // this via a plain alert; this returns which students, if any, were blocked so the caller can
+  // do the same, rather than the whole pickup silently appearing to succeed while nothing was
+  // actually recorded for a student well past the cutoff.
   const toggleCarpoolForStudents = async (studentIds, pickupInfo) => {
     const byLabel = `Carpool: ${pickupInfo.personName}`;
     const checkInOutSettings = await loadCheckInOutSettings();
+    const blockedStudentIds = [];
     for (const studentId of studentIds) {
       const data = (await loadJSON(`class:${classId}:kriya:${studentId}`, null, true, 2, true)) || studentData[studentId] || emptyStudentData();
       const result = computeToggledCheckIn(data.checkIns, todayISO(), byLabel, null, null, checkInOutSettings.schoolEndTime, pickupInfo);
-      if (result.action === "blocked-school-ended") continue; // eslint-disable-line no-continue
+      if (result.action === "blocked-school-ended") { blockedStudentIds.push(studentId); continue; } // eslint-disable-line no-continue
       const fullData = { ...data, checkIns: result.checkIns };
       await saveJSON(`class:${classId}:kriya:${studentId}`, fullData, true, 2, true);
       setStudentData((prev) => ({ ...prev, [studentId]: fullData }));
     }
+    return { blockedStudentIds };
   };
 
   // One conversation per guardian per class now, not per family — each guardian's message with
@@ -14668,9 +14676,13 @@ function PreschoolAttendanceView({ roster, studentData, toggleCheckInByTeacher, 
     setCarpoolSelected((prev) => (prev.includes(studentId) ? prev.filter((id) => id !== studentId) : [...prev, studentId]));
   };
   const handleCarpoolConfirm = async (pickupInfo) => {
-    await toggleCarpoolForStudents(carpoolSelected, pickupInfo);
+    const { blockedStudentIds } = await toggleCarpoolForStudents(carpoolSelected, pickupInfo);
     setShowCarpoolModal(false);
     exitCarpoolMode();
+    if (blockedStudentIds.length > 0) {
+      const names = blockedStudentIds.map((id) => roster.find((s) => s.id === id)?.name || "A student").join(", ");
+      window.alert(`Everyone else in this pickup was signed in/out. ${names} could not be, since check-in isn't available after school has ended for the day — that one will need to be handled directly.`);
+    }
   };
 
   return (
@@ -14916,20 +14928,35 @@ function AllPreschoolAttendanceView({ loggedByName, navigate }) {
   // path the single-tap toggle above uses — this is a slower, multi-step, deliberate action to
   // begin with, and the signature pad's own "Saving…" state already covers the wait.
   const allStudentsById = byStudentId;
+  // Same reasoning as the per-class version's own comment — surfaces which students, if any,
+  // were blocked by the school-end-time cutoff, rather than either silently skipping them or (the
+  // real risk here specifically, since toggleUnifiedCheckIn throws on this case) letting one
+  // blocked student's error stop the rest of the group from being processed at all.
   const toggleCarpoolForStudents = async (studentIds, pickupInfo) => {
     const byLabel = `Carpool: ${pickupInfo.personName}`;
+    const blockedStudentIds = [];
     for (const studentId of studentIds) {
       const student = allStudentsById[studentId];
       if (!student) continue; // eslint-disable-line no-continue
       const status = await getUnifiedCheckInStatus(studentId, student.links);
       const targetClassId = status.openEntry ? status.openEntry.classId : student.links[0].classId;
-      await toggleUnifiedCheckIn(studentId, student.links, targetClassId, byLabel, null, null, pickupInfo);
+      try {
+        await toggleUnifiedCheckIn(studentId, student.links, targetClassId, byLabel, null, null, pickupInfo);
+      } catch (err) {
+        if (err.checkInBlocked) { blockedStudentIds.push(studentId); continue; } // eslint-disable-line no-continue
+        throw err;
+      }
     }
+    return { blockedStudentIds };
   };
   const handleCarpoolConfirm = async (pickupInfo) => {
-    await toggleCarpoolForStudents(carpoolSelected, pickupInfo);
+    const { blockedStudentIds } = await toggleCarpoolForStudents(carpoolSelected, pickupInfo);
     setShowCarpoolModal(false);
     exitCarpoolMode();
+    if (blockedStudentIds.length > 0) {
+      const names = blockedStudentIds.map((id) => allStudentsById[id]?.name || "A student").join(", ");
+      window.alert(`Everyone else in this pickup was signed in/out. ${names} could not be, since check-in isn't available after school has ended for the day — that one will need to be handled directly.`);
+    }
   };
 
   return (
