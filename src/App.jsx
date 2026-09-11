@@ -1785,6 +1785,28 @@ function buildSampleData() {
 // is the one place that does: a retry-and-fallback system is only as good as its ability to
 // notice a real failure, and silently returning as if nothing went wrong is exactly what would
 // have kept it from ever noticing one.
+// Reported directly and confirmed real: a genuine "insufficient permissions" failure on a shared
+// classroom device, not reproducible elsewhere, with two students already legitimately checked in
+// at a normal time of day — nothing about the actual request itself was wrong. A session left open
+// for a long stretch on a device that's sometimes idle or on spotty wifi is exactly the kind of
+// case where the quiet, automatic background token refresh a normal login depends on can fail to
+// happen — the device still looks signed in, nothing visibly wrong, but the specific token it
+// sends is no longer valid, and a security rule has no way to tell that apart from someone who
+// genuinely shouldn't have access. Retrying the exact same request with the exact same
+// still-stale token, which is all the existing retry loops below already did, can never fix this
+// specifically — only asking Firebase Auth itself for a genuinely new token can. A session with no
+// real Firebase user at all (the legacy class-password flow) has nothing to refresh, so this stays
+// safe to call regardless of how someone is currently signed in.
+async function refreshAuthTokenIfPossible() {
+  try {
+    const user = auth.currentUser;
+    if (user) await user.getIdToken(true);
+  } catch { /* nothing meaningful to do here — the caller's own next attempt surfaces the real error if this didn't help */ }
+}
+function looksLikeStaleAuthError(err) {
+  return err?.code === "permission-denied" || err?.code === "storage/unauthorized";
+}
+
 async function loadJSON(key, fallback, shared = false, retries = 2, throwOnFailure = false) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -1797,6 +1819,10 @@ async function loadJSON(key, fallback, shared = false, retries = 2, throwOnFailu
         if (throwOnFailure) throw e;
         return fallback;
       }
+      // See refreshAuthTokenIfPossible's own reasoning above for why this specific case gets a
+      // real refresh before the next attempt, rather than the plain wait-and-retry every other
+      // kind of failure already gets below.
+      if (looksLikeStaleAuthError(e)) await refreshAuthTokenIfPossible();
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
     }
   }
@@ -1817,6 +1843,7 @@ async function saveJSON(key, value, shared = false, retries = 2, throwOnFailure 
         if (throwOnFailure) throw e;
         return;
       }
+      if (looksLikeStaleAuthError(e)) await refreshAuthTokenIfPossible();
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
     }
   }
@@ -20947,7 +20974,7 @@ async function uploadOneImage(file, path, onProgress) {
   const isGif = file.type === "image/gif" || (!file.type && /\.gif$/i.test(file.name || ""));
   const uploadBlob = isGif ? file : await compressImageFile(file);
   const contentType = isGif ? "image/gif" : "image/jpeg";
-  return new Promise((resolve, reject) => {
+  const attemptUpload = () => new Promise((resolve, reject) => {
     const task = uploadBytesResumable(fileRef, uploadBlob, { contentType });
     const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 45000);
     task.on("state_changed",
@@ -20960,6 +20987,16 @@ async function uploadOneImage(file, path, onProgress) {
       }
     );
   });
+  try {
+    return await attemptUpload();
+  } catch (err) {
+    // See refreshAuthTokenIfPossible's own reasoning for why a stale-token failure specifically
+    // gets one genuine retry, with a real refreshed token, rather than surfacing immediately —
+    // uploads had no retry of any kind before this, unlike loadJSON/saveJSON above.
+    if (!looksLikeStaleAuthError(err)) throw err;
+    await refreshAuthTokenIfPossible();
+    return await attemptUpload();
+  }
 }
 // Videos aren't compressed client-side the way photos are — real video transcoding in the browser
 // is heavy, complex infrastructure genuinely out of scope here. Instead, length is kept in check by
@@ -20969,7 +21006,7 @@ async function uploadOneImage(file, path, onProgress) {
 async function uploadOneVideo(file, path, onProgress) {
   await validateVideoDuration(file);
   const fileRef = storageRef(storage, path);
-  return new Promise((resolve, reject) => {
+  const attemptUpload = () => new Promise((resolve, reject) => {
     const task = uploadBytesResumable(fileRef, file, { contentType: file.type || "video/mp4" });
     const timeoutId = setTimeout(() => { task.cancel(); reject(new Error("timeout")); }, 120000);
     task.on("state_changed",
@@ -20982,6 +21019,14 @@ async function uploadOneVideo(file, path, onProgress) {
       }
     );
   });
+  try {
+    return await attemptUpload();
+  } catch (err) {
+    // Same reasoning as uploadOneImage's own retry-with-refresh above.
+    if (!looksLikeStaleAuthError(err)) throw err;
+    await refreshAuthTokenIfPossible();
+    return await attemptUpload();
+  }
 }
 // Generic documents (PDF, Word, Excel, etc.) — no compression or format-specific validation the
 // way photos and videos get, just a straight upload with a size cap so one huge file can't stall
