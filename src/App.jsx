@@ -14640,11 +14640,29 @@ function CarpoolPickupModal({ selectedStudents, onConfirm, onCancel }) {
       // added specifically for this feature (published directly, confirmed live) — staff-only
       // read/write, the same access shape incident-attachments already uses, since this is
       // captured and later reviewed by staff, not read directly by families today.
-      const signatureUrl = await uploadOneImage(signatureBlob, `carpool-signatures/${groupId}.jpg`);
+      let signatureUrl;
+      try {
+        signatureUrl = await uploadOneImage(signatureBlob, `carpool-signatures/${groupId}.jpg`);
+      } catch (err) {
+        // Reported directly: a confusing, technical-sounding error appeared once on a real
+        // device, described only as "something about permissions," that couldn't be reproduced
+        // afterward. Traced to a real, separate flaw regardless of whether it's what actually
+        // happened there — describeUploadError's own wording only ever makes sense for a genuine
+        // upload failure ("Couldn't upload — ..."), so any other kind of error reaching this same
+        // catch block, however that happened, would come out equally mismatched and unclear.
+        // Scoped narrowly to the actual upload call specifically now, so only a real upload
+        // failure ever gets described as one.
+        throw new Error(describeUploadError(err));
+      }
       await saveSavedPickupName(personName);
       await onConfirm({ personName: personName.trim(), signature: signatureUrl, groupId });
     } catch (err) {
-      setSaveError(describeUploadError(err));
+      // Anything reaching here now is either the already-accurate upload-specific message just
+      // built above, or a genuinely different failure (saving the name, or completing the
+      // sign-in/out itself) — shown using its own real message directly, rather than every
+      // failure in this flow being described as if it were an upload problem regardless of what
+      // actually went wrong.
+      setSaveError(err.message || "Something went wrong — please try again.");
       setSaving(false);
     }
   };
