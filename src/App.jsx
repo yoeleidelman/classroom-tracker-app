@@ -11347,6 +11347,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [reminders, setReminders] = useState([]);
   const [photos, setPhotos] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
+  // A blog post that's been fully built (every photo/video already uploaded, real urls in hand)
+  // but hasn't yet been confirmed as actually posted or successfully scheduled — see submitBlogPost
+  // and persistBlogDrafts' own comments for the full reasoning behind why this exists at all.
+  const [blogDrafts, setBlogDrafts] = useState([]);
   // Which existing post is currently open in the full compose screen for editing, or null when
   // that screen is instead being used to write a brand-new one — set right before navigating to
   // "blog-compose", cleared again on the way back out either way.
@@ -11527,6 +11531,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onComment={(postId, text) => addBlogComment(postId, text, loggedByName, "teacher")}
           onEditPost={(post) => { setEditingBlogPost(post); navigateView("blog-compose"); }} onDeletePost={deleteBlogPost}
           classId={classId}
+          drafts={blogDrafts} onRetryDraft={retryDraftSend} onDiscardDraft={discardDraft}
           navigate={navigateView} />
         );
       case "homework":
@@ -11774,6 +11779,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const rem = await loadC("reminders", []);
       const ph = await loadC("photos", []);
       const bp = await loadC("blogPosts", []);
+      const bd = await loadC("blogDrafts", []);
       const hw = await loadC("homework", []);
       const ca = await loadC("classAssessments", []);
       const cp = await loadC("classPoints", {});
@@ -11886,6 +11892,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setReminders(finalReminders);
       setPhotos(ph);
       setBlogPosts(bp);
+      setBlogDrafts(bd);
       setHomeworkPosts(hw);
       setClassAssessments(finalCA);
       setClassPoints(finalCP);
@@ -11931,9 +11938,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   useEffect(() => {
     if (!classId) return;
     const interval = setInterval(async () => {
-      const [freshBlog, freshHomework] = await Promise.all([loadC("blogPosts", []), loadC("homework", [])]);
+      const [freshBlog, freshHomework, freshDrafts] = await Promise.all([loadC("blogPosts", []), loadC("homework", []), loadC("blogDrafts", [])]);
       setBlogPosts(freshBlog);
       setHomeworkPosts(freshHomework);
+      setBlogDrafts(freshDrafts);
     }, 20000);
     return () => clearInterval(interval);
   }, [classId, loadC]);
@@ -11992,6 +12000,16 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   }, [studentData, liveRosterKriyaData, optimisticAttendance, roster]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const persistBlogPosts = (next) => { setBlogPosts(next); saveC("blogPosts", next); };
+  // Reported directly, as a real, serious failure: a fully-built post — every photo already
+  // uploaded, real work already done — could vanish completely if the final step that actually
+  // posts or schedules it failed, with no trace and no way to retry short of redoing everything
+  // from scratch. A draft is the fix: the real, durable copy of a post's actual content, saved the
+  // moment its media finishes uploading — the one truly irreversible, time-consuming step — and
+  // kept, untouched, until the post is confirmed either genuinely live or genuinely scheduled.
+  // Never deletes silently on its own; only ever removed once the send it represents has actually
+  // succeeded (here) or has been independently confirmed sent by the scheduled-send process itself
+  // (server-side, once the scheduled time comes and it actually publishes).
+  const persistBlogDrafts = (next) => { setBlogDrafts(next); saveC("blogDrafts", next); };
   // Bundles several photo/video+caption "parts" into one shareable post — a teacher building a
   // weekly recap sends it all at once, one notification, not one per item. Every file across every
   // part goes through the same reliable pipeline as the Photos tile (or its video counterpart).
@@ -12025,35 +12043,69 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     }
     // Media uploads happen here, right now, regardless of whether this posts immediately or is
     // scheduled for later — the original files only exist in this teacher's own browser session,
-    // so this is the only moment they can ever be uploaded. What gets queued for later is the
-    // fully-finished entry itself, with its real, already-uploaded urls; nothing about the actual
-    // sending, when the scheduled time comes, needs to touch a file at all.
-    if (scheduledFor) {
-      const entry = withLogger({
-        id: postId, timestamp: scheduledFor, authorType: "teacher",
-        title: (title || "").trim() || null, blocks: uploadedBlocks, reactions: {}, comments: [],
-      });
-      const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
-      await queueScheduledSend({
-        kind: "blogPost", classId, className,
-        scheduledFor,
-        payload: {
-          entry,
-          notifyTitle: `New post in ${className}`,
-          notifyBody: (title || "").trim() || firstCaption || "Check out the new post",
-        },
-      });
-      return entry;
-    }
-    const entry = withLogger({
-      id: postId, timestamp: new Date().toISOString(), authorType: "teacher",
-      title: (title || "").trim() || null, blocks: uploadedBlocks, reactions: {}, comments: [],
-    });
-    persistBlogPosts([...blogPosts, entry]);
+    // so this is the only moment they can ever be uploaded. What gets queued for later, or saved
+    // as a draft, is the fully-finished entry itself, with its real, already-uploaded urls;
+    // nothing past this point ever needs to touch a file again, including a later retry.
     const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
-    notifyClassFamilies(classId, `New post in ${className}`, (title || "").trim() || firstCaption || "Check out the new post", `/?portal=parent&open=blog&classId=${classId}`);
-    return entry;
+    const draft = {
+      id: postId, title: (title || "").trim() || null, blocks: uploadedBlocks,
+      createdAt: new Date().toISOString(), scheduledFor: scheduledFor || null,
+      notifyTitle: `New post in ${className}`, notifyBody: (title || "").trim() || firstCaption || "Check out the new post",
+      sendStatus: "pending", lastError: null,
+    };
+    persistBlogDrafts([...blogDrafts, draft]);
+    return await attemptSendDraft(draft);
   };
+  // The actual send/schedule attempt, pulled out on its own so a first try (right after uploading)
+  // and a later manual retry (after a failure, using a draft's already-uploaded content — no
+  // re-upload ever needed) share one identical path rather than two copies that could drift.
+  const attemptSendDraft = async (draft) => {
+    try {
+      if (draft.scheduledFor) {
+        const entry = withLogger({
+          id: draft.id, timestamp: draft.scheduledFor, authorType: "teacher",
+          title: draft.title, blocks: draft.blocks, reactions: {}, comments: [],
+        });
+        await queueScheduledSend({
+          kind: "blogPost", classId, className, scheduledFor: draft.scheduledFor,
+          payload: { entry, notifyTitle: draft.notifyTitle, notifyBody: draft.notifyBody },
+        });
+        // Stays in the drafts list, now marked scheduled rather than removed — the scheduled-send
+        // process itself removes it later, once it's confirmed the post is actually, genuinely
+        // live, not just successfully queued. Queued-but-never-actually-delivered is exactly the
+        // failure this whole feature exists to make visible instead of silent.
+        persistBlogDrafts(blogDrafts.map((d) => (d.id === draft.id ? { ...d, sendStatus: "scheduled", lastError: null } : d)));
+        return { ...entry, sendStatus: "scheduled" };
+      }
+      const entry = withLogger({
+        id: draft.id, timestamp: new Date().toISOString(), authorType: "teacher",
+        title: draft.title, blocks: draft.blocks, reactions: {}, comments: [],
+      });
+      persistBlogPosts([...blogPosts, entry]);
+      notifyClassFamilies(classId, draft.notifyTitle, draft.notifyBody, `/?portal=parent&open=blog&classId=${classId}`);
+      // Genuinely live now, in the real posts list — no longer needs its own separate draft record.
+      persistBlogDrafts(blogDrafts.filter((d) => d.id !== draft.id));
+      return { ...entry, sendStatus: "sent" };
+    } catch (err) {
+      // The failure this entire feature exists for — but the draft itself, holding every photo
+      // and every word already safely uploaded, is untouched by this catch block, still sitting
+      // exactly where persistBlogDrafts already put it above. Flagged here so it's visible and
+      // retryable, at the teacher's own choice, rather than either silently vanishing or silently
+      // retrying on its own on a timer no one asked for.
+      persistBlogDrafts(blogDrafts.map((d) => (d.id === draft.id ? { ...d, sendStatus: "failed", lastError: err.message || "Something went wrong." } : d)));
+      throw err;
+    }
+  };
+  const retryDraftSend = (draftId) => {
+    const draft = blogDrafts.find((d) => d.id === draftId);
+    if (!draft) return Promise.reject(new Error("Draft not found."));
+    return attemptSendDraft(draft);
+  };
+  // For a draft that's never going to succeed as-is (a typo the teacher wants to fix, or one
+  // they've simply decided not to send after all) — deliberately separate from a failed SEND
+  // itself, which never deletes anything on its own; this is the one path that removes a draft
+  // without ever having sent it, and only ever at the teacher's own explicit choice.
+  const discardDraft = (draftId) => persistBlogDrafts(blogDrafts.filter((d) => d.id !== draftId));
   // A full post edit — every block, every photo/video, all editable together, not just one
   // part's caption. Uploads only the genuinely NEW media a block picked up during this edit;
   // anything that was already there keeps its own real url and, critically, its own existing
@@ -16874,7 +16926,7 @@ function BlogPostCard({ post, currentUserId, onReact, commentsEnabled, onComment
   );
 }
 
-function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, commentsEnabled, onReact, onComment, onEditPost, onDeletePost, classId, navigate }) {
+function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, commentsEnabled, onReact, onComment, onEditPost, onDeletePost, classId, drafts, onRetryDraft, onDiscardDraft, navigate }) {
   const bottomRef = useRef(null);
   const [lightboxIndex, setLightboxIndex] = useState(null);
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
@@ -16943,6 +16995,41 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
         <p className="text-xs font-semibold text-stone-500 uppercase tracking-wide">Class Blog</p>
       </div>
       <div className="md:w-[28rem]">
+        {/* Reported directly, as a real, serious failure: a fully-built post could vanish
+            completely if the final send/schedule step failed, with the real work behind it —
+            every photo, every caption — gone with no trace and no way to retry. A draft is saved
+            the moment its media finishes uploading, before that final step is ever attempted, and
+            stays right here, impossible to miss, until it's confirmed either genuinely live or
+            genuinely scheduled — never removed just because something went wrong. */}
+        {drafts && drafts.length > 0 && (
+          <div className="space-y-2 mb-4">
+            {drafts.map((draft) => {
+              const firstCaption = draft.blocks?.find((b) => b.text)?.text;
+              const label = draft.title || firstCaption || "Untitled post";
+              const isFailed = draft.sendStatus === "failed";
+              return (
+                <div key={draft.id} className={`rounded-xl border-2 p-3 ${isFailed ? "bg-rose-50 border-rose-300" : "bg-amber-50 border-amber-300"}`}>
+                  <p className={`text-xs font-bold ${isFailed ? "text-rose-800" : "text-amber-800"}`}>
+                    {isFailed ? "Couldn't send — your post is safe, nothing was lost" : draft.scheduledFor ? `Scheduled for ${new Date(draft.scheduledFor).toLocaleString()}` : "Sending…"}
+                  </p>
+                  <p className="text-sm text-stone-700 mt-1 line-clamp-2">{label}</p>
+                  {isFailed && draft.lastError && <p className="text-[11px] text-rose-600 mt-1">{draft.lastError}</p>}
+                  {isFailed && (
+                    <div className="flex gap-2 mt-2">
+                      <button onClick={() => onRetryDraft(draft.id).catch(() => {})} className="text-xs font-bold text-white bg-rose-600 rounded-lg px-3 py-1.5 hover:bg-rose-700">
+                        Retry
+                      </button>
+                      <button onClick={() => { if (window.confirm("Discard this post? This can't be undone.")) onDiscardDraft(draft.id); }}
+                        className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-1.5 hover:bg-white">
+                        Discard
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {sorted.length === 0 ? (
           <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center mt-4">Nothing posted here yet.</p>
         ) : (
@@ -17063,11 +17150,27 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
       // Keeps both a genuinely new upload (m.file) AND an existing, already-uploaded item
       // (m.existing) — dropping only a rejected video that never had a usable file to begin with.
       const cleanBlocks = blocks.map((b) => ({ ...b, mediaItems: b.mediaItems.filter((m) => m.file || m.existing) }));
-      if (editingPost) await onSubmitEdit(editingPost.id, title, cleanBlocks, setProgress);
-      else await onSubmit(title, cleanBlocks, setProgress, scheduledFor ? new Date(scheduledFor).toISOString() : null);
+      if (editingPost) {
+        await onSubmitEdit(editingPost.id, title, cleanBlocks, setProgress);
+      } else {
+        await onSubmit(title, cleanBlocks, setProgress, scheduledFor ? new Date(scheduledFor).toISOString() : null);
+      }
       onBack();
     } catch (err) {
-      setError(describeUploadError(err));
+      if (editingPost) {
+        // An edit has no draft of its own to fall back on — the original post is untouched either
+        // way, but there's nowhere else for this specific error to surface, so it stays right here.
+        setError(err.message || "Something went wrong — please try again.");
+      } else {
+        // Reported directly, as a real, serious failure this whole draft system exists to close:
+        // by this point, the post's own real content — every photo, every word — is already
+        // safely saved as a draft, regardless of whether the send itself just succeeded or failed.
+        // Staying on this screen with a scary, uncertain error would suggest otherwise. Heading
+        // back to the feed is the accurate thing to do either way: a successful send shows the
+        // real, live post; a failed one shows the exact same draft, clearly marked and ready to
+        // retry, right where it was already saved a moment ago — nothing to redo, nothing lost.
+        onBack();
+      }
     }
     setPosting(false);
   };

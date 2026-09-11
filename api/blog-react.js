@@ -453,6 +453,17 @@ async function handleProcessScheduledSends(req, res) {
         const existingPosts = blogDoc.exists ? blogDoc.data().value || [] : [];
         await db.collection("data").doc(blogKey).set({ value: [...existingPosts, value.payload.entry] });
 
+        // The post is now genuinely, confirmedly live — the one specific thing its own draft (see
+        // App.jsx's own persistBlogDrafts and submitBlogPost for the full reasoning) was created
+        // to wait for. Removed here, now that it's actually true, rather than left to sit
+        // indefinitely still marked "scheduled" alongside a post that's already gone out.
+        const draftsKey = `class:${value.classId}:blogDrafts`;
+        const draftsDoc = await db.collection("data").doc(draftsKey).get();
+        const existingDrafts = draftsDoc.exists ? draftsDoc.data().value || [] : [];
+        if (existingDrafts.some((d) => d.id === value.payload.entry.id)) {
+          await db.collection("data").doc(draftsKey).set({ value: existingDrafts.filter((d) => d.id !== value.payload.entry.id) });
+        }
+
         // Same family-lookup logic as api/class-families.js — reading studentLinks directly as
         // the authoritative source, the same real, reported gap that endpoint itself was fixed
         // for: a guardian whose linkedClassIds hadn't backfilled yet would otherwise be invisible
@@ -508,6 +519,29 @@ async function handleProcessScheduledSends(req, res) {
       } catch {
         // If even marking it failed doesn't succeed, the next run will simply see it as still
         // pending and try again — not silently lost either way.
+      }
+      // Same reasoning as the successful-send cleanup just above, the other direction: a genuine
+      // failure here is exactly the kind of thing that used to disappear completely, with nothing
+      // ever telling the teacher it hadn't actually gone out. Flags the matching draft itself
+      // (App.jsx's own blogDrafts) as failed, with this real error attached, so it shows up
+      // clearly in the Class Blog feed — visible and retryable at the teacher's own choice —
+      // rather than silently stuck in this queue where no one would ever see it.
+      if (value.kind === "blogPost") {
+        try {
+          const draftsKey = `class:${value.classId}:blogDrafts`;
+          const draftsDoc = await db.collection("data").doc(draftsKey).get();
+          const existingDrafts = draftsDoc.exists ? draftsDoc.data().value || [] : [];
+          if (existingDrafts.some((d) => d.id === value.payload.entry.id)) {
+            const nextDrafts = existingDrafts.map((d) => (d.id === value.payload.entry.id
+              ? { ...d, sendStatus: "failed", lastError: err.message || "Something went wrong sending this on schedule." }
+              : d));
+            await db.collection("data").doc(draftsKey).set({ value: nextDrafts });
+          }
+        } catch {
+          // Best-effort — the scheduledSend document itself is already marked failed above
+          // regardless, so this isn't the only record of the failure even if this part doesn't
+          // succeed.
+        }
       }
       failed++;
     }
