@@ -11779,7 +11779,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const rem = await loadC("reminders", []);
       const ph = await loadC("photos", []);
       const bp = await loadC("blogPosts", []);
-      const bd = await loadC("blogDrafts", []);
+      const bDrafts = await loadC("blogDrafts", []);
       const hw = await loadC("homework", []);
       const ca = await loadC("classAssessments", []);
       const cp = await loadC("classPoints", {});
@@ -11892,7 +11892,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setReminders(finalReminders);
       setPhotos(ph);
       setBlogPosts(bp);
-      setBlogDrafts(bd);
+      setBlogDrafts(bDrafts);
       setHomeworkPosts(hw);
       setClassAssessments(finalCA);
       setClassPoints(finalCP);
