@@ -76,8 +76,15 @@ export default async function handler(req, res) {
   }
 
   const linkedClassIds = family.linkedClassIds || [];
-  const linkedClassTypes = family.linkedClassTypes || [];
-  if (linkedClassIds.length === 0 && linkedClassTypes.length === 0) {
+  // SAFETY FIX (same gap already found and fixed in class-families.js and staff-reachable-
+  // families.js): linkedClassTypes is a derived, stored field that only gets (re)populated the
+  // first time this specific guardian signs in after it was added or changed — a family that
+  // hasn't signed in since would otherwise be silently invisible to any grade-level matching
+  // below, even though their real, authoritative linkedClassIds is completely correct right now.
+  // Combined with the stored value below, once classTypeById is available, rather than trusting
+  // the stored value alone.
+  const storedLinkedClassTypes = family.linkedClassTypes || [];
+  if (linkedClassIds.length === 0 && storedLinkedClassTypes.length === 0) {
     return res.status(200).json({ teachers: [] });
   }
 
@@ -94,6 +101,8 @@ export default async function handler(req, res) {
   // linked class predates this field would never see any grade-level-reachable staff at all,
   // since every comparison below would be checking against undefined instead of "elementary".
   const classTypeById = Object.fromEntries(allClasses.map((c) => [c.id, c.classType || "elementary"]));
+  const derivedLinkedClassTypes = linkedClassIds.map((id) => classTypeById[id]).filter(Boolean);
+  const linkedClassTypes = [...new Set([...storedLinkedClassTypes, ...derivedLinkedClassTypes])];
 
   // Every one of this family's linked classes, plus every other class sharing a type this family
   // is connected to — the full set of classIds whose messagingLabels could plausibly apply here.
@@ -119,11 +128,19 @@ export default async function handler(req, res) {
   // above only narrows to actual staff records first, which keeps this from having to compare
   // against every document in the whole collection.
   const teachers = [];
+  const preschoolClassmatesByClassId = {};
   snapshot.forEach((doc) => {
     const t = doc.data().value;
     if (!t || t.active === false) return;
     const assigned = t.assignedClassIds || [];
-    const messagingTypes = t.messagingClassTypes || [];
+    // Every preschool parent can reach every preschool teacher, and vice versa — computed here,
+    // at query time, rather than stored on the teacher's own record, so this never shows up as a
+    // surprising, auto-added entry in admin's own messagingClassTypes toggle UI (which is meant to
+    // reflect only what admin explicitly chose there). A teacher assigned to at least one
+    // preschool class is automatically treated as reachable by every preschool family this same
+    // way, on top of whatever messagingClassTypes admin may have separately configured for them.
+    const isPreschoolStaff = assigned.some((id) => classTypeById[id] === "preschool");
+    const messagingTypes = [...new Set([...(t.messagingClassTypes || []), ...(isPreschoolStaff ? ["preschool"] : [])])];
     // Every one of the family's classes that actually makes this person eligible — either
     // directly assigned, or matching by grade level.
     const eligibleViaClassIds = linkedClassIds.filter((id) => assigned.includes(id));
@@ -165,6 +182,21 @@ export default async function handler(req, res) {
       reachableClassTypes: messagingTypes.filter((type) => linkedClassTypes.includes(type)),
       labelsByClassId: labelsByClassIdForTeacher,
     });
+    // Reported directly: a preschool room commonly has more than one teacher sharing it, and a
+    // parent wanting to reach everyone in the room had no way to do that except messaging each
+    // one separately, one at a time. An elementary class, which functions with one main teacher,
+    // has no real version of this need, so this is scoped to preschool specifically. Built here,
+    // for every one of this family's OWN linked preschool classes (not the whole school's), as
+    // {uid, name} for every ACTIVE teacher genuinely assigned to that class — including one whose
+    // eligibility here came only through candidateClassIds' own grade-level matching, since
+    // "who's actually in the room" is a real fact about the classroom itself, independent of
+    // which specific path made any one of them individually reachable by this particular family.
+    if (assigned.some((id) => linkedClassIds.includes(id) && classTypeById[id] === "preschool")) {
+      assigned.forEach((id) => {
+        if (!linkedClassIds.includes(id) || classTypeById[id] !== "preschool") return;
+        (preschoolClassmatesByClassId[id] = preschoolClassmatesByClassId[id] || []).push({ uid: t.uid, name: t.name });
+      });
+    }
   });
 
   // Just this family's own linked classes, not the full school registry — enough for the client
@@ -173,5 +205,12 @@ export default async function handler(req, res) {
   // able to match teachers directly assigned to that exact class.
   const linkedClassTypeById = Object.fromEntries(linkedClassIds.map((id) => [id, classTypeById[id]]));
 
-  return res.status(200).json({ teachers, linkedClassTypeById });
+  // Only a class with genuinely more than one teacher has anything real to offer here — a
+  // single-teacher preschool room "message everyone" would just be a slower way to message the
+  // one teacher it already goes to.
+  const multiTeacherPreschoolClassmates = Object.fromEntries(
+    Object.entries(preschoolClassmatesByClassId).filter(([, list]) => list.length > 1)
+  );
+
+  return res.status(200).json({ teachers, linkedClassTypeById, preschoolClassmatesByClassId: multiTeacherPreschoolClassmates });
 }

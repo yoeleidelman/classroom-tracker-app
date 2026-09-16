@@ -2624,7 +2624,7 @@ const ClassContext = createContext({ className: "", onSwitchClass: () => {}, cla
 // For an account that holds both a teacher and a family record — lets Header (rendered
 // independently by many different screens, not passed props from one shared parent) offer a
 // "switch to parent view" link without threading it through every one of those screens.
-const AppModeContext = createContext({ canSwitchToParent: false, switchToParent: () => {} });
+const AppModeContext = createContext({ canSwitchToParent: false, switchToParent: () => {}, openGlobalMessages: () => {} });
 
 // Fonts, button press/hover feedback, and hand-written layout utilities — extracted into its
 // own component so every screen can render it, not just the ones inside an open class. It used
@@ -2947,6 +2947,15 @@ function AppInner() {
   // direct link and just seeds the initial mode, it no longer hard-locks it.
   const [isParentPortal] = useState(() => new URLSearchParams(window.location.search).get("portal") === "parent");
   const [activeMode, setActiveMode] = useState(() => (isParentPortal ? "parent" : null)); // "teacher" | "parent" | null (null = not yet resolved, or a dual-role account still choosing)
+  // A deliberate, global "Messages" entry point — every conversation across every class this
+  // teacher is assigned to, plus anyone else reachable by grade level, all in one place, reachable
+  // from anywhere (inside any specific class, or from Admin Dashboard) rather than only from
+  // within one class's own Comm tab. Reported directly as a real problem: a teacher assigned to
+  // more than one class had to enter a specific class first just to see whether they had any
+  // messages waiting in a DIFFERENT one. Checked before the normal class-based routing below,
+  // regardless of whether a class is currently open — set back to false to return to wherever this
+  // was opened from, not tied to leaving or re-entering any particular class.
+  const [showGlobalMessages, setShowGlobalMessages] = useState(false);
   const [authUser, setAuthUser] = useState(null); // the raw Firebase Auth user object
   // The signed-in family's own record, for the parent portal — live-subscribed rather than the
   // one-time fetch authResolvedFamily itself is, so a change made from the admin side (a newly
@@ -3523,10 +3532,28 @@ function AppInner() {
     setAuthResolvedFamily((prev) => ({ ...prev, name: newName }));
   };
 
+  // Parent-side counterpart to dismissMessagingOnboarding below — same reasoning, same one-time,
+  // permanent, per-family dismissal.
+  const dismissMyMessagingOnboarding = async () => {
+    if (!currentFamily) return;
+    await updateFamilyRecord(currentFamily.uid, { hasSeenMessagingRedesign: true });
+    setAuthResolvedFamily((prev) => ({ ...prev, hasSeenMessagingRedesign: true }));
+  };
+
   const changeMySignOff = async (newSignOff) => {
     if (!currentTeacher) return;
     await updateTeacherRecord(currentTeacher.uid, { messageSignOff: newSignOff });
     setCurrentTeacher((prev) => ({ ...prev, messageSignOff: newSignOff }));
+  };
+
+  // One-time, per-teacher: the new unified Messages screen replaces the old Classroom/Direct
+  // split entirely, and this is the one chance to actually notice that before wondering, later,
+  // where the classroom messages tab went. Dismissed once, permanently, on this teacher's own
+  // record — never shown again after that, on any device this same account signs into.
+  const dismissMessagingOnboarding = async () => {
+    if (!currentTeacher) return;
+    await updateTeacherRecord(currentTeacher.uid, { hasSeenMessagingRedesign: true });
+    setCurrentTeacher((prev) => ({ ...prev, hasSeenMessagingRedesign: true }));
   };
 
   // Pushing a real history entry here (not just changing React state) is what makes the Android
@@ -4533,7 +4560,7 @@ function AppInner() {
         onSignInWithGoogle={signInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={completeGoogleLink} googleSignInError={googleSignInError} />;
     }
     return <ParentPortalApp family={currentFamily} onSignOut={async () => { if (authUser) { try { await disableNotificationsFor(authUser.uid); } catch { /* best-effort */ } } return signOut(auth); }} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword}
-      canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} />;
+      canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} onDismissMessagingOnboarding={dismissMyMessagingOnboarding} />;
   }
 
   // Substitute session — a separate, code-based entry point that bypasses every other login
@@ -4566,6 +4593,17 @@ function AppInner() {
         </div>
       );
     }
+    // The deliberate, global "Messages" entry point (see showGlobalMessages' own comment) —
+    // checked before any class-based OR admin/teacher-role-based routing below, regardless of
+    // whether a class is currently open or this is an admin's own dashboard, since that's the
+    // entire point: reachable without needing to enter, or already be inside, any one specific
+    // class or screen first. Safe for an admin's own account too — currentTeacher here is always a
+    // real, individual account (never the synthetic "admin-oversight" stand-in used specifically
+    // for an admin BROWSING a class, which is a genuinely different, shared-identity situation).
+    if (showGlobalMessages) {
+      return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff}
+        deepLinkGroupId={pendingStaffDeepLink?.groupId} onBack={() => setShowGlobalMessages(false)} onDismissOnboarding={dismissMessagingOnboarding} />;
+    }
     if (currentTeacher.role === "admin") {
       if (!classId) {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
@@ -4577,7 +4615,7 @@ function AppInner() {
           families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData} onFetchCheckInHistory={fetchAllPreschoolCheckInHistory}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramLogEntry={addProgramLogEntryAdmin} onRemoveProgramLogEntry={removeProgramLogEntryAdmin} onAddProgramCategory={addProgramCategoryAdmin}
-          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />;
+          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onOpenGlobalMessages={() => setShowGlobalMessages(true)} />;
       }
       return (
         <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
@@ -4585,7 +4623,7 @@ function AppInner() {
           onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
           subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
           loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
-          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
+          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onOpenGlobalMessages={() => setShowGlobalMessages(true)}
           createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} onFamilyLinked={refreshCurrentFamily} />
       );
     }
@@ -4597,7 +4635,7 @@ function AppInner() {
       // standalone messages page instead of an empty class picker with nowhere to go; there is
       // deliberately no class list here at all, not even a placeholder one.
       if (myClasses.length === 0 && (currentTeacher.messagingClassTypes || []).length > 0) {
-        return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff} deepLinkGroupId={pendingStaffDeepLink?.groupId} />;
+        return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff} deepLinkGroupId={pendingStaffDeepLink?.groupId} onDismissOnboarding={dismissMessagingOnboarding} />;
       }
       return <TeacherClassPicker teacherName={currentTeacher.name} classes={myClasses} onSelect={enterAssignedClass} onSignOut={signOutStaff}
         rawAssignedClassIds={currentTeacher.assignedClassIds || []} registry={registry} />;
@@ -4608,7 +4646,7 @@ function AppInner() {
         onRenameClass={renameClass} onChangePassword={changeClassPassword} onArchiveClass={archiveClass} onDeleteClass={deleteOwnClassPermanently}
         subCode={registry.find((c) => c.id === classId)?.subCode} onGenerateSubCode={generateSubCode} onClearSubCode={clearSubCode}
         loggedInTeacher={currentTeacher} onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff}
-        canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
+        canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onOpenGlobalMessages={() => setShowGlobalMessages(true)}
         createFamilyAccount={createFamilyAccount} updateFamilyRecord={updateFamilyRecord} onFamilyLinked={refreshCurrentFamily}
         deepLinkGroupId={pendingDeepLink?.classId === classId ? pendingDeepLink.groupId : null}
         deepLinkIsDirect={pendingDeepLink?.classId === classId ? pendingDeepLink.isDirect : false} />
@@ -5605,6 +5643,148 @@ function ParentSetupEmailSettings() {
 // no reason for this tool to be able to reach them at all. Requires an explicit two-step
 // confirmation (see the count first, then a second tap to actually delete) precisely because this
 // is irreversible — there's no undo for a deleted message thread.
+// One-time migration tool for the messaging redesign: copies every existing classroom thread's
+// full message history into each of that class's own currently-assigned teachers' individual
+// threads with that same family — inserted at each message's real original timestamp, interleaved
+// correctly with whatever direct messages already exist there, each one marked
+// migratedFromClassroom: true (see sendDirectMessageToFamily's own comment on that field's exact
+// meaning). Deliberately dry-run first: "Check what this would do" only ever reads and reports —
+// nothing gets written until "Run migration" is pressed separately, on the same plan just shown.
+// Safe to run more than once: each message keeps its own original id, so a message already found
+// in a teacher's thread is skipped rather than duplicated, whether that's from a previous full run
+// or a partial one that didn't finish.
+//
+// A real, known limitation, worth stating plainly rather than working around: this can only use
+// each class's CURRENTLY assigned teachers, since nothing in this app keeps a history of staffing
+// changes — a message from a teacher no longer assigned to that class still migrates, but into
+// whoever teaches that class now, not into that original teacher's own thread with the family.
+// A class with no currently-assigned teacher at all has nowhere for its history to go, and is
+// reported clearly rather than silently skipped.
+//
+// Never touches, modifies, or deletes the original classroom threads themselves — this only ever
+// copies. Retiring the app's own use of that old data is separate work, later, and deliberately
+// not part of what this tool does.
+function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
+  const [status, setStatus] = useState("idle"); // "idle" | "scanning" | "reviewing" | "running" | "done"
+  const [plan, setPlan] = useState(null); // { threads: [...], totalNewMessages, totalAlreadyMigrated, noTeacherClasses: [...] }
+  const [error, setError] = useState(null);
+  const [progress, setProgress] = useState(null); // { done, total } while running
+
+  const buildPlan = async () => {
+    setStatus("scanning");
+    setError(null);
+    try {
+      const threads = [];
+      const noTeacherClasses = [];
+      let totalNewMessages = 0;
+      let totalAlreadyMigrated = 0;
+      for (const cls of activeClasses) {
+        const classTeacherUids = teachers.filter((t) => (t.assignedClassIds || []).includes(cls.id) && t.active !== false).map((t) => t.uid);
+        const threadKeys = await loadAllKeysWithPrefix(`class:${cls.id}:messages:`);
+        if (threadKeys.length === 0) continue;
+        if (classTeacherUids.length === 0) {
+          noTeacherClasses.push({ classId: cls.id, className: cls.name, threadCount: threadKeys.length });
+          continue;
+        }
+        for (const key of threadKeys) {
+          const familyUid = key.slice(key.lastIndexOf(":") + 1);
+          const classroomThread = await loadJSON(key, null, true);
+          const classroomMessages = classroomThread?.messages || [];
+          if (classroomMessages.length === 0) continue;
+          for (const teacherUid of classTeacherUids) {
+            const directKey = `teacher-messages:${teacherUid}:${familyUid}`;
+            const directThread = await loadJSON(directKey, null, true);
+            const existingIds = new Set((directThread?.messages || []).map((m) => m.id));
+            const newCount = classroomMessages.filter((m) => !existingIds.has(m.id)).length;
+            const alreadyCount = classroomMessages.length - newCount;
+            totalNewMessages += newCount;
+            totalAlreadyMigrated += alreadyCount;
+            if (newCount > 0) {
+              threads.push({ classId: cls.id, className: cls.name, familyUid, teacherUid, teacherName: teachers.find((t) => t.uid === teacherUid)?.name || "Unknown", sourceKey: key, directKey, newCount });
+            }
+          }
+        }
+      }
+      setPlan({ threads, totalNewMessages, totalAlreadyMigrated, noTeacherClasses });
+      setStatus("reviewing");
+    } catch (e) {
+      console.error("Migration scan failed", e);
+      setError("Something went wrong scanning existing threads — nothing was written. Safe to try again.");
+      setStatus("idle");
+    }
+  };
+
+  const runMigration = async () => {
+    if (!plan) return;
+    setStatus("running");
+    setError(null);
+    setProgress({ done: 0, total: plan.threads.length });
+    try {
+      for (let i = 0; i < plan.threads.length; i++) {
+        const t = plan.threads[i];
+        const classroomThread = await loadJSON(t.sourceKey, null, true);
+        const classroomMessages = classroomThread?.messages || [];
+        const directThread = await loadJSON(t.directKey, null, true) || { messages: [] };
+        const existingIds = new Set(directThread.messages.map((m) => m.id));
+        const toAdd = classroomMessages.filter((m) => !existingIds.has(m.id)).map((m) => ({ ...m, migratedFromClassroom: true }));
+        if (toAdd.length > 0) {
+          const merged = [...directThread.messages, ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+          await saveJSON(t.directKey, { ...directThread, messages: merged }, true);
+        }
+        setProgress({ done: i + 1, total: plan.threads.length });
+      }
+      setStatus("done");
+    } catch (e) {
+      console.error("Migration run failed", e);
+      setError("Something went wrong partway through — already-migrated messages are safely in place (this is safe to re-run; it will only add what's still missing, never duplicate what's already there).");
+      setStatus("reviewing");
+    }
+  };
+
+  if (status === "done") {
+    return <p className="text-xs font-semibold text-emerald-700">Migration complete — {plan.totalNewMessages} message{plan.totalNewMessages === 1 ? "" : "s"} copied into {plan.threads.length} teacher thread{plan.threads.length === 1 ? "" : "s"}.</p>;
+  }
+
+  if (status === "reviewing" && plan) {
+    return (
+      <div>
+        <div className="text-xs text-stone-600 space-y-1 mb-3">
+          <p><span className="font-semibold">{plan.totalNewMessages}</span> message{plan.totalNewMessages === 1 ? "" : "s"} would be copied, across <span className="font-semibold">{plan.threads.length}</span> teacher thread{plan.threads.length === 1 ? "" : "s"}.</p>
+          {plan.totalAlreadyMigrated > 0 && <p className="text-stone-400">{plan.totalAlreadyMigrated} already migrated previously — those are skipped automatically.</p>}
+        </div>
+        {plan.noTeacherClasses.length > 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
+            <p className="text-xs font-bold text-amber-800 mb-1">These classes have message history but no currently-assigned teacher — their history has nowhere to go and won't be migrated:</p>
+            <ul className="text-xs text-amber-700 space-y-0.5">
+              {plan.noTeacherClasses.map((c) => <li key={c.classId}>{c.className} — {c.threadCount} thread{c.threadCount === 1 ? "" : "s"}</li>)}
+            </ul>
+          </div>
+        )}
+        {plan.totalNewMessages === 0 ? (
+          <p className="text-xs text-stone-400">Nothing left to migrate.</p>
+        ) : (
+          <div className="flex gap-2">
+            <button onClick={runMigration} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800">
+              Run migration — copy {plan.totalNewMessages} message{plan.totalNewMessages === 1 ? "" : "s"}
+            </button>
+            <button onClick={() => setStatus("idle")} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2">Cancel</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button onClick={buildPlan} disabled={status === "scanning" || status === "running"}
+        className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 disabled:opacity-50">
+        {status === "scanning" ? "Scanning…" : status === "running" ? `Running… ${progress ? `${progress.done}/${progress.total}` : ""}` : "Check what this would do"}
+      </button>
+      {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
 function ClearAdminMessagesTool() {
   const [status, setStatus] = useState("idle"); // "idle" | "checking" | "confirming" | "deleting" | "done" | "empty"
   const [count, setCount] = useState(0);
@@ -5791,14 +5971,19 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Reported directly, and clarified precisely: this now goes out the same way as any other
+  // School Office message — one-way from the school, landing in each guardian's own existing
+  // School Office thread, never a two-way conversation reachable from here. A guardian who wants
+  // to respond does so the same way they always could: calling or texting the office directly, not
+  // by replying in-app. Matches sendToFamily's own School Office broadcast exactly, just scoped to
+  // this one class's own families instead of every family in the school.
   const sendAsAdminToClass = async (guardianUid, text) => {
-    const key = `class:${selectedClassId}:messages:${guardianUid}`;
+    const key = `admin-messages:${guardianUid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const className = activeClasses.find((c) => c.id === selectedClassId)?.name || "the class";
-    const entry = { id: uid(), senderType: "teacher", senderName: currentTeacher?.name || "School Office", text, timestamp: new Date().toISOString() };
+    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString() };
     const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    sendPushNotification([guardianUid], `Message from ${className}`, text?.trim() || "New message", `/?portal=parent&open=messages&classId=${selectedClassId}`);
+    sendPushNotification([guardianUid], "Message from the School Office", text?.trim() || "New message", "/?portal=parent&open=admin");
     return next;
   };
 
@@ -6266,7 +6451,7 @@ function TeacherAccountChecker({ onCheck }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent, onOpenGlobalMessages }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -6562,6 +6747,14 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         <div className="flex items-center justify-between mb-1">
           <h1 className="display-font text-2xl font-bold text-stone-900">Admin Dashboard</h1>
           <div className="flex items-center gap-3">
+            {/* This admin's own personal conversations — every one across every class, plus
+                anyone else reachable by grade level — the same global entry point a regular
+                teacher gets, since an admin's own account is a real, individual teacher account
+                too. Deliberately separate from the "Messages" button above, which is admin's own
+                oversight view of OTHER people's conversations, not this account's own. */}
+            {onOpenGlobalMessages && (
+              <button onClick={onOpenGlobalMessages} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Messages</button>
+            )}
             {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
             {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
             <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
@@ -6768,6 +6961,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <p className="text-sm font-semibold text-stone-800 mb-1">Clear test broadcast messages</p>
           <p className="text-xs text-stone-400 mb-3">Deletes every guardian's thread with the School Office — meant for clearing out messages sent while testing, before real families start using this. This does not touch classroom threads or individual teacher threads, and it's permanent: cleared threads can't be recovered. Every guardian's thread with the office is already completely private and separate — from every other family's, and from any other guardian in their own household — so this is only about removing test content specifically, not something needed for privacy.</p>
           <ClearAdminMessagesTool />
+        </div>
+        <div className="pt-1 mb-6">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Migrate classroom messages (messaging redesign)</p>
+          <p className="text-xs text-stone-400 mb-3">Copies every existing classroom thread's history into each of that class's own currently-assigned teachers' individual threads with that family, at its real original time, marked as originally a classroom message. Never touches or deletes the original classroom threads. Always shows exactly what it would do first — nothing is written until you separately choose to run it, and running it again later only ever adds what's still missing.</p>
+          <MigrateClassroomMessagesTool activeClasses={activeClasses} teachers={teachers} />
         </div>
         <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
@@ -8147,7 +8345,7 @@ function useEffectiveLastReadByFamily(threadLastReadByFamily, familyUid, readSta
   return candidates.length ? candidates.reduce((a, b) => (new Date(a) > new Date(b) ? a : b)) : null;
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead, fanOutOption }) {
   // Whichever one is actually present depends on which side of the conversation is viewing —
   // never both at once, since a thread is only ever opened by one specific person at a time.
   const currentUserId = teacher?.uid || family?.uid || null;
@@ -8273,6 +8471,13 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   const removeAttachment = (id) => setAttachItems((prev) => prev.filter((a) => a.id !== id));
   const clearAttachments = () => { setAttachItems([]); setAttachError(null); };
 
+  // Unchecked every time a thread is opened — sending to just this one teacher stays exactly as
+  // simple as it already is unless a parent deliberately opts into reaching everyone in the room.
+  // Never offered at all unless fanOutOption itself is present, which the caller only provides for
+  // a preschool class with genuinely more than one teacher (see the matching comment on
+  // sendMessageToAllClassTeachers for the full reasoning).
+  const [sendToAll, setSendToAll] = useState(false);
+
   const send = async () => {
     if ((!text.trim() && attachItems.length === 0) || sending) return;
     if (scheduledFor && new Date(scheduledFor).getTime() <= Date.now()) { setAttachError("Pick a time in the future."); return; }
@@ -8294,11 +8499,19 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
         }
         attachments.push({ url, type: item.type, name: (item.type === "file" || item.type === "audio") ? item.name : null });
       }
-      await onSend(text.trim(), attachments, scheduledFor ? new Date(scheduledFor).toISOString() : null);
+      // The fan-out path deliberately doesn't support scheduling for later — combining "send this
+      // later" with "send it to several people at once" adds real complexity nothing has actually
+      // asked for; scheduling stays available only for the normal, single-teacher send below.
+      if (fanOutOption && sendToAll) {
+        await fanOutOption.onSendToAll(text.trim(), attachments);
+      } else {
+        await onSend(text.trim(), attachments, scheduledFor ? new Date(scheduledFor).toISOString() : null);
+      }
       setText("");
       clearAttachments();
       setScheduledFor("");
       setShowSchedule(false);
+      setSendToAll(false);
     } catch (err) {
       setAttachError(describeUploadError(err));
     }
@@ -8477,7 +8690,18 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
               <ReactableContent reactions={m.reactions} currentUserId={currentUserId} onReact={(emoji) => handleReact(m.id, emoji)}>
               <div className={`max-w-[80%] rounded-2xl overflow-hidden relative ${mine ? `${mineBubble.base} text-white` : "bg-white border border-stone-200 text-stone-800"}`}>
                 <div className="px-3.5 pt-2.5 flex items-start justify-between gap-2">
-                  <p className={`text-[10px] font-semibold mb-0.5 ${mine ? mineBubble.lightText : "text-stone-400"}`}>{m.senderName}</p>
+                  <div className="min-w-0">
+                    <p className={`text-[10px] font-semibold mb-0.5 ${mine ? mineBubble.lightText : "text-stone-400"}`}>{m.senderName}</p>
+                    {/* Both purely informational, never affecting where a reply to this specific
+                        message actually goes — see sendMessageToAllClassTeachers' and the
+                        migration tool's own comments for the full reasoning behind each. */}
+                    {m.sentToAllTeachersInClassId && (
+                      <p className={`text-[9px] italic ${mine ? mineBubble.lightText : "text-stone-400"}`}>Sent to all teachers in {m.sentToAllTeachersInClassName || "this class"}</p>
+                    )}
+                    {m.migratedFromClassroom && (
+                      <p className={`text-[9px] italic ${mine ? mineBubble.lightText : "text-stone-400"}`}>Originally a classroom message</p>
+                    )}
+                  </div>
                   {canModify && (
                     <button onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)}
                       className={`shrink-0 -mt-1 -mr-1 p-1 rounded ${mine ? `${mineBubble.lighterText} hover:text-white` : "text-stone-300 hover:text-stone-600"}`}>
@@ -8640,6 +8864,12 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
               className="rounded-lg border border-stone-300 px-2 py-1 text-xs" />
             <button onClick={() => { setShowSchedule(false); setScheduledFor(""); }} className="text-xs text-stone-400 hover:text-stone-600">Cancel</button>
           </div>
+        )}
+        {fanOutOption && (
+          <label className="flex items-center gap-1.5 mb-1.5 ml-11 text-xs text-stone-500 cursor-pointer">
+            <input type="checkbox" checked={sendToAll} onChange={(e) => setSendToAll(e.target.checked)} className="rounded border-stone-300" />
+            {fanOutOption.label}
+          </label>
         )}
         <div className="flex items-end gap-2">
           <button onClick={() => setShowGenerate((v) => !v)} title="Generate with AI"
@@ -9512,7 +9742,7 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
   );
 }
 
-function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher }) {
+function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher, onDismissMessagingOnboarding }) {
   const [parentTab, setParentTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home"); // "home" | "messages" | "blog" | "homework" | "settings" — persistent top bar, not a toggled overlay
 
   // Records, once per real session here, whether this family is actually using the app installed
@@ -10158,6 +10388,11 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // so a teacher covering two of this family's classes, or General Studies for a grade they don't
   // otherwise teach, still shows up exactly once, not once per class they share.
   const [linkedClassTypeById, setLinkedClassTypeById] = useState({}); // this family's own classId -> classType, for matching a grade-level-reachable teacher against a specific child
+  // classId -> [{uid, name}] for every preschool class this family is linked to that has more than
+  // one teacher — the data behind the "also send to the other teachers" option (see
+  // sendMessageToAllClassTeachers' own comment). Empty for a class with only one teacher, or any
+  // elementary class, by the same server-side scoping already described there.
+  const [preschoolClassmatesByClassId, setPreschoolClassmatesByClassId] = useState({});
   useEffect(() => {
     (async () => {
       try {
@@ -10166,6 +10401,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         const data = await res.json();
         setEligibleTeachers(res.ok ? (data.teachers || []) : []);
         setLinkedClassTypeById(res.ok ? (data.linkedClassTypeById || {}) : {});
+        setPreschoolClassmatesByClassId(res.ok ? (data.preschoolClassmatesByClassId || {}) : {});
       } catch {
         setEligibleTeachers([]);
       }
@@ -10454,6 +10690,34 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return next;
   };
 
+  // Reported directly: a preschool room commonly has more than one teacher sharing it, and a
+  // parent wanting to reach everyone in the room had no way to do that except messaging each one
+  // separately. This is deliberately NOT one shared message anywhere — it's N genuinely separate
+  // sends, one full copy of sendMessageToIndividualTeacher's own write per teacher, each landing
+  // in that teacher's own private thread with this same family, each one marked
+  // sentToAllTeachersInClassId so it can visibly say so. A reply from any one of them stays
+  // entirely private to that one thread; no teacher ever sees another's reply. classNameForLabel
+  // is passed through rather than looked up here, since the caller already has it on hand from the
+  // same data this whole option is built from.
+  const sendMessageToAllClassTeachers = async (classId, classNameForLabel, teacherUids, text, attachments) => {
+    const results = await Promise.all(teacherUids.map(async (teacherUid) => {
+      const key = `teacher-messages:${teacherUid}:${family.uid}`;
+      const existing = (await loadJSON(key, null, true)) || { messages: [] };
+      const entry = {
+        id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(),
+        ...(attachments?.length ? { attachments } : {}),
+        sentToAllTeachersInClassId: classId, sentToAllTeachersInClassName: classNameForLabel,
+      };
+      const next = { ...existing, messages: [...existing.messages, entry] };
+      await saveJSON(key, next, true);
+      const deepLinkClassId = (eligibleTeachers || []).find((t) => t.uid === teacherUid)?.deepLinkClassId;
+      const deepLinkSuffix = deepLinkClassId ? `&classId=${deepLinkClassId}` : "";
+      notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"} — sent to all teachers in ${classNameForLabel}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${family.uid}${deepLinkSuffix}`);
+      return next;
+    }));
+    return results;
+  };
+
   // One shared code, posted at the school — not tied to any child or class. A correct scan proves
   // this parent is physically here right now and unlocks the action screen; it does not itself
   // check anyone in or out. What happens next is a deliberate tap per child, not automatic.
@@ -10513,6 +10777,17 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   if (messagingTeacherUid) {
     const activeTeacher = (eligibleTeachers || []).find((t) => t.uid === messagingTeacherUid);
     const teacherName = activeTeacher?.name || "the teacher";
+    // Whichever of this teacher's own classes is a preschool room with more than one teacher (see
+    // sendMessageToAllClassTeachers' own comment) — a teacher could in principle be eligible
+    // through more than one such class, in which case the first one found is what "everyone" means
+    // here; genuinely rare in practice, and still correct either way since it's always a real,
+    // actual room this teacher and this family are both actually connected to.
+    const fanOutClassId = (activeTeacher?.classIds || []).find((id) => preschoolClassmatesByClassId[id]?.length > 1);
+    const fanOutClassName = fanOutClassId ? (family?.studentLinks || []).find((l) => l.classId === fanOutClassId)?.className : null;
+    const fanOutOption = (fanOutClassId && fanOutClassName) ? {
+      label: `Also send to the other teachers in ${fanOutClassName}`,
+      onSendToAll: (text, attachments) => sendMessageToAllClassTeachers(fanOutClassId, fanOutClassName, preschoolClassmatesByClassId[fanOutClassId].map((t) => t.uid), text, attachments),
+    } : null;
     return (
       <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
         <GlobalAppStyles />
@@ -10525,6 +10800,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           lastReadBeforeOpen={lastReadBeforeOpen}
           onBack={() => safeGoBack("thread", () => setMessagingTeacherUid(null))}
           onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }}
+          fanOutOption={fanOutOption}
           onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(`teacher-messages:${messagingTeacherUid}:${family.uid}`, messageId, emoji, reactorId, reactorName); }} />
       </div>
     );
@@ -10652,106 +10928,80 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             <button onClick={() => setActionUnlocked(false)} className="w-full bg-stone-200 text-stone-700 rounded-xl py-3 text-sm font-bold hover:bg-stone-300">Done</button>
           </>
         ) : parentTab === "messages" ? (() => {
-          // One row per unique CHILD (a child with links to two classes — General + Judaic
-          // Studies, say — only gets one tab, not two), each with the full set of classIds that
-          // are actually theirs, since that's what a teacher or classroom card below gets checked
-          // against once a specific child is selected.
-          const uniqueChildren = [...new Map((family?.studentLinks || []).map((l) => [l.studentId, l])).values()];
-          const selectedMessagesChildIndex = findChildIndex(uniqueChildren, selectedStudentId);
-          const selectedChild = uniqueChildren[selectedMessagesChildIndex] || uniqueChildren[0];
-          const selectedChildClassIds = (family?.studentLinks || []).filter((l) => l.studentId === selectedChild?.studentId).map((l) => l.classId);
-          const selectedChildClassTypes = [...new Set(selectedChildClassIds.map((id) => linkedClassTypeById[id]).filter(Boolean))];
-          const filteredClasses = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()].filter((l) => selectedChildClassIds.includes(l.classId));
-          // A teacher belongs to the selected child either because they're directly assigned to
-          // one of that child's own classes, or because they're reachable by grade level (a
-          // coordinator, say) and that child has a class in the grade level they cover — checked
-          // against classType specifically for that second case, since a grade-level match was
-          // never tied to one particular classId to begin with.
-          const filteredTeachers = (eligibleTeachers || []).filter((t) =>
-            (t.classIds || []).some((id) => selectedChildClassIds.includes(id)) ||
-            (t.reachableClassTypes || []).some((type) => selectedChildClassTypes.includes(type))
-          );
+          // Every teacher reachable through ANY of this family's children at once — not scoped to
+          // whichever one child happens to be selected elsewhere in the app. That per-child
+          // scoping (and having to switch children to find the right teacher) was the entire thing
+          // reported directly as the actual problem with the old two-tab design; this is the fix,
+          // not a smaller version of it kept around for some children only.
+          const studentLinksByClassId = {};
+          (family?.studentLinks || []).forEach((l) => {
+            (studentLinksByClassId[l.classId] = studentLinksByClassId[l.classId] || []).push(l);
+          });
+          const allTeachers = eligibleTeachers || [];
           return (
-          <div className="space-y-5">
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-wide text-[#5F9F9E]/80 mb-2 px-1">Classes</p>
-              <div className="space-y-3">
-                {sortByRecency(filteredClasses, lastMessageTimeByClassId, "classId").map((l) => (
-                  <button key={l.classId} onClick={() => openMessagesFor(l.classId).then(refreshUnreadThreads)}
-                    className="w-full text-left bg-white border-2 border-[#5F9F9E]/20 rounded-xl p-4 flex items-center justify-between hover:border-[#5F9F9E]">
-                    <div>
-                      <p className="font-semibold text-stone-900">{l.className}</p>
-                      <p className="text-xs text-stone-400">Message goes to every teacher in this class</p>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0 ml-2">
-                      {(() => {
-                        const count = unreadThreads.find((t) => t.threadKey === `class-${l.classId}`)?.unreadCount;
-                        return count > 0 && (
-                          <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-[#5F9F9E] text-white text-[11px] font-bold leading-none">
-                            {count > 9 ? "9+" : count}
-                          </span>
-                        );
-                      })()}
-                      <ChevronRight size={16} className="text-stone-300" />
-                    </div>
-                  </button>
-                ))}
+          <div className="space-y-3">
+            {/* Shown exactly once per family — see dismissMyMessagingOnboarding's own comment for
+                the full reasoning. Every conversation this family had before is still here,
+                unchanged; this only explains where to find them now. */}
+            {!family?.hasSeenMessagingRedesign && (
+              <div className="bg-teal-50 border border-teal-200 rounded-xl p-3.5 flex items-start gap-3">
+                <MessageCircle size={18} className="text-teal-700 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-teal-900">Messages are now all in one place</p>
+                  <p className="text-xs text-teal-800 mt-0.5">Every teacher you can reach, across all your children, is right here in one list — no more separate Classes and Teachers tabs, or switching between kids to find the right conversation. Nothing from before is gone; it's all still here.</p>
+                </div>
+                <button onClick={onDismissMessagingOnboarding} className="text-teal-700 hover:text-teal-900 shrink-0"><X size={16} /></button>
               </div>
-            </div>
-
+            )}
             {eligibleTeachers === null ? (
               // A real, honest loading state — not hidden behind a timer, and not simply absent
-              // while the request is in flight. This is what actually addresses the "classes
-              // appear, then teachers pop in a second later" feeling: the section's presence is
-              // visible immediately, so what's happening reads as "still loading" rather than
-              // "missing," even though the fetch itself still takes the time it genuinely takes.
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
-                <div className="space-y-3">
-                  {[0, 1].map((i) => (
-                    <div key={i} className="bg-white border-2 border-teal-700/10 rounded-xl p-4 animate-pulse">
-                      <div className="h-4 bg-stone-200 rounded w-2/5 mb-2" />
-                      <div className="h-3 bg-stone-100 rounded w-3/5" />
-                    </div>
-                  ))}
+              // while the request is in flight.
+              [0, 1, 2].map((i) => (
+                <div key={i} className="bg-white border-2 border-teal-700/10 rounded-xl p-4 animate-pulse">
+                  <div className="h-4 bg-stone-200 rounded w-2/5 mb-2" />
+                  <div className="h-3 bg-stone-100 rounded w-3/5" />
                 </div>
-              </div>
-            ) : filteredTeachers.length > 0 && (
-              <div>
-                <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700/70 mb-2 px-1">Teachers</p>
-                <div className="space-y-3">
-                  {sortByRecency(filteredTeachers, lastMessageTimeByTeacherUid, "uid").map((t) => {
-                    // Whichever of THIS teacher's labels matches one of the selected child's own
-                    // classes — a teacher whose admin-assigned role genuinely differs by classroom
-                    // (Judaic Studies for one of a family's kids, General Studies for another)
-                    // shows each child their own correct title here, on the outside, while still
-                    // opening the exact same single conversation either way once tapped: the label
-                    // is never part of the thread itself, only of how this list describes it.
-                    const contextualLabel = selectedChildClassIds.map((id) => t.labelsByClassId?.[id]).find((l) => l) || t.label;
-                    return (
-                    <button key={t.uid} onClick={() => openTeacherMessages(t.uid).then(refreshUnreadThreads)}
-                      className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
-                      <div>
-                        <p className="font-semibold text-stone-900">{t.name}</p>
-                        {contextualLabel && <p className="text-xs font-semibold text-[#5F9F9E]">{contextualLabel}</p>}
-                        <p className="text-xs text-stone-400">Message goes only to {t.name}</p>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0 ml-2">
-                        {(() => {
-                          const count = unreadThreads.find((th) => th.threadKey === `teacher-${t.uid}`)?.unreadCount;
-                          return count > 0 && (
-                            <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
-                              {count > 9 ? "9+" : count}
-                            </span>
-                          );
-                        })()}
-                        <ChevronRight size={16} className="text-stone-300" />
-                      </div>
-                    </button>
-                    );
-                  })}
-                </div>
-              </div>
+              ))
+            ) : allTeachers.length === 0 ? (
+              <p className="text-sm text-stone-400 text-center py-8">No teachers to message yet.</p>
+            ) : (
+              sortByRecency(allTeachers, lastMessageTimeByTeacherUid, "uid").map((t) => {
+                // Every one of THIS family's own children this teacher is actually reachable
+                // through directly (never populated for a grade-level-reachable contact who
+                // isn't actually one of this family's own children's teachers — correct, not a
+                // gap, since there's genuinely no specific child to tag there).
+                const relevantStudents = [...new Set(
+                  (t.classIds || []).flatMap((cid) => (studentLinksByClassId[cid] || []).map((l) => l.studentName))
+                )];
+                // Whichever of this teacher's own per-class labels is actually set, preferring one
+                // that matches a class this family is actually linked to — a small, secondary tag
+                // near the name (never the headline the way it was in the old per-child view),
+                // since a parent recognizes a teacher by name first, role second.
+                const primaryLabel = t.classIds.map((id) => t.labelsByClassId?.[id]).find((l) => l) || t.label;
+                return (
+                <button key={t.uid} onClick={() => openTeacherMessages(t.uid).then(refreshUnreadThreads)}
+                  className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-stone-900 truncate">{t.name}</p>
+                    {primaryLabel && <p className="text-xs font-semibold text-[#5F9F9E]">{primaryLabel}</p>}
+                    {relevantStudents.length > 0 && (
+                      <p className="text-[10px] text-stone-400 mt-0.5 truncate">{relevantStudents.join(", ")}</p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0 ml-2">
+                    {(() => {
+                      const count = unreadThreads.find((th) => th.threadKey === `teacher-${t.uid}`)?.unreadCount;
+                      return count > 0 && (
+                        <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
+                          {count > 9 ? "9+" : count}
+                        </span>
+                      );
+                    })()}
+                    <ChevronRight size={16} className="text-stone-300" />
+                  </div>
+                </button>
+                );
+              })
             )}
           </div>
           );
@@ -11093,7 +11343,7 @@ function TeacherClassPicker({ teacherName, classes, onSelect, onSignOut, rawAssi
 // Deliberately NOT a class, and shows no class list or class-shaped UI at all — just their own
 // messages. More (subject-specific assessments and marks across the grades they oversee) is meant
 // to land here later; this is the foundation that gets built on, not the finished picture.
-function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParent, onSignOut, deepLinkGroupId }) {
+function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParent, onSignOut, deepLinkGroupId, onBack, onDismissOnboarding }) {
   const [families, setFamilies] = useState(null); // null = loading
   const [threads, setThreads] = useState({});
   const [openGroup, setOpenGroup] = useState(null);
@@ -11103,7 +11353,18 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   const [listReadState, setListReadState] = useState({});
 
   const refresh = useCallback(async () => {
-    const relevant = await fetchStaffReachableFamilies();
+    // Every family this teacher can reach, from both directions at once: their own assigned
+    // classes' families (the same fetchClassFamilies TeacherMessagesView's own refreshDirect
+    // already uses), and anyone reachable through messagingClassTypes (grade-level reach — the
+    // preschool cross-reach feature, or a specialist's own broader reach). This is what makes this
+    // one screen genuinely universal — every teacher's own single "Messages," everything they can
+    // reach in one place, not two different screens depending on whether they happen to have an
+    // assigned class of their own or not.
+    const [ownClassFamilies, reachable] = await Promise.all([
+      Promise.all((loggedInTeacher.assignedClassIds || []).map((id) => fetchClassFamilies(id))),
+      fetchStaffReachableFamilies(),
+    ]);
+    const relevant = [...ownClassFamilies.flat(), ...reachable];
     // One row per GUARDIAN, not per family — two guardians of the same family are two separate,
     // private threads with this person (same reasoning as the equivalent fix in TeacherMessagesView),
     // so each needs its own entry to actually choose between them.
@@ -11116,7 +11377,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
     setListReadState(await getReadState(loggedInTeacher.uid));
-  }, [loggedInTeacher.uid]);
+  }, [loggedInTeacher.uid, (loggedInTeacher.assignedClassIds || []).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -11193,6 +11454,22 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   return (
     <div className={PAGE}>
       <GlobalAppStyles />
+      {onBack && (
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm hover:text-stone-800 mb-3"><ChevronLeft size={16} /> Back</button>
+      )}
+      {/* Shown exactly once per teacher — see dismissMessagingOnboarding's own comment for the
+          full reasoning. Every conversation this teacher had before is still here, unchanged;
+          this only explains where to find them now. */}
+      {!loggedInTeacher?.hasSeenMessagingRedesign && (
+        <div className="bg-teal-50 border border-teal-200 rounded-xl p-3.5 mb-4 flex items-start gap-3">
+          <MessageCircle size={18} className="text-teal-700 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-teal-900">Messages are now all in one place</p>
+            <p className="text-xs text-teal-800 mt-0.5">Every conversation, across every class you teach, is right here — no more separate Classroom and Direct tabs to check inside each class. Nothing from before is gone; it's all still here.</p>
+          </div>
+          <button onClick={onDismissOnboarding} className="text-teal-700 hover:text-teal-900 shrink-0"><X size={16} /></button>
+        </div>
+      )}
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="display-font text-xl font-bold text-stone-900">Welcome, {loggedInTeacher?.name}</h1>
@@ -11209,7 +11486,14 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
       {families === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
       {families?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are reachable yet.</p>}
       <div className="space-y-2">
-        {(families || []).map((g) => {
+        {[...(families || [])].sort((a, b) => {
+          const aLast = threads[a.groupId]?.messages?.[threads[a.groupId].messages.length - 1];
+          const bLast = threads[b.groupId]?.messages?.[threads[b.groupId].messages.length - 1];
+          if (!aLast && !bLast) return 0;
+          if (!aLast) return 1;
+          if (!bLast) return -1;
+          return new Date(bLast.timestamp) - new Date(aLast.timestamp);
+        }).map((g) => {
           const thread = threads[g.groupId];
           const last = thread?.messages?.[thread.messages.length - 1];
           const childNames = (g.studentLinks || []).map((l) => l.studentName).join(", ");
@@ -11340,7 +11624,7 @@ function ClassGateScreen({ registry, onSelect, onCreate, onRefresh, onLoginAdmin
   );
 }
 
-function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, onFamilyLinked, deepLinkGroupId, deepLinkIsDirect }) {
+function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, onRenameClass, onChangePassword, onArchiveClass, onDeleteClass, loggedInTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, isSubstituteSession, subCode, onGenerateSubCode, onClearSubCode, canSwitchToParent, onSwitchToParent, createFamilyAccount, updateFamilyRecord, onFamilyLinked, deepLinkGroupId, deepLinkIsDirect, onOpenGlobalMessages }) {
   const loggedByName = loggedInTeacher?.name || null;
   // Stamps every logged record with when it happened, unconditionally — unlike loggedBy just
   // below, this doesn't depend on a real signed-in identity, since knowing WHEN something was
@@ -12495,9 +12779,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const result = await createFamilyAccount(parentDisplayName, loggedInTeacher.email, "preview-not-used", links, existing?.familyGroupId);
     if (!result?.ok || !result.uid) return;
     // A short, realistic exchange — not just an empty thread — so "Switch to Parent view" has
-    // something real to show in Messages too, not just Blog and Homework.
+    // something real to show in Messages too, not just Blog and Homework. Lands in this teacher's
+    // own direct thread with the preview family now, matching where a real conversation with them
+    // actually lives in the redesigned Messages screen, not the old, no-longer-shown classroom
+    // storage.
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-    await saveJSON(`class:${classId}:messages:${result.uid}`, {
+    await saveJSON(`teacher-messages:${loggedInTeacher.uid}:${result.uid}`, {
       messages: [
         { id: uid(), senderType: "family", senderName: parentDisplayName, text: `Hi! Just wanted to check in — how is ${firstName} settling in this week?`, timestamp: twoDaysAgo.toISOString() },
         { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text: `So great to hear from you! ${firstName} is doing wonderfully — settling in nicely and participating well.`, timestamp: new Date(twoDaysAgo.getTime() + 60 * 60 * 1000).toISOString() },
@@ -13182,9 +13469,30 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // specifically to fan a notification out to every login sharing a group. sendPushNotification
   // with an explicit single-element list is what actually keeps this notification as private as
   // the thread itself.
-  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor) => {
+  //
+  // A message entry's full shape, going forward: { id, senderType, senderName, text, timestamp,
+  // attachments?, sentToAllTeachersInClassId?, migratedFromClassroom? }. The last two are the two
+  // pieces the messaging redesign adds on top of what already existed above — neither is produced
+  // by any code on the teacher side, since both only ever apply to a message this teacher is
+  // RECEIVING, never composing themselves:
+  //   - sentToAllTeachersInClassId: the classId this message was sent to every teacher of at once
+  //     — set only on the parent side, by sendDirectMessageToAllClassTeachers, when a parent
+  //     deliberately chooses "also send to the other teachers" for a preschool class with more
+  //     than one. Each teacher still gets their own genuinely separate copy, in their own private
+  //     thread — this marker is what lets that copy visibly say so, not a sign of anything shared.
+  //   - migratedFromClassroom: true — set only by the one-time migration (still to be built) that
+  //     copies each old classroom thread's history into every one of its teachers' own individual
+  //     threads with that family, inserted at the message's real original timestamp, interleaved
+  //     correctly with whatever direct messages already existed there. Never set on a message
+  //     composed directly in a one-on-one thread, migrated or not — it marks the message's own
+  //     origin, not which thread it currently lives in.
+  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor, broadcastId) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    const entry = {
+      id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(),
+      ...(attachments?.length ? { attachments } : {}),
+      ...(broadcastId ? { broadcastId } : {}),
+    };
     if (scheduledFor) {
       await queueScheduledSend({
         kind: "message", scheduledFor,
@@ -13332,7 +13640,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
   return (
     <ClassContext.Provider value={{ className, onSwitchClass, switchLabel, classType, commUnreadCount: commUnreadFamilies.length }}>
-    <AppModeContext.Provider value={{ canSwitchToParent: Boolean(canSwitchToParent), switchToParent: onSwitchToParent || (() => {}) }}>
+    <AppModeContext.Provider value={{ canSwitchToParent: Boolean(canSwitchToParent), switchToParent: onSwitchToParent || (() => {}), openGlobalMessages: onOpenGlobalMessages || (() => {}) }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <div style={{
         height: "48px", width: "100%",
@@ -13447,13 +13755,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "monthly-reports" && (
-        <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType}
+        <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType} classId={classId} sendDirectMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
       {view === "range-report" && (
-        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType}
+        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType} classId={classId} sendDirectMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView("communication")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
@@ -13472,13 +13780,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
 
       {view === "assessment-report" && selectedAssessmentId && (
-        <AssessmentReportView assessment={classAssessments.find((ca) => ca.id === selectedAssessmentId)} roster={roster} config={config} loggedInTeacher={loggedInTeacher}
+        <AssessmentReportView assessment={classAssessments.find((ca) => ca.id === selectedAssessmentId)} roster={roster} config={config} loggedInTeacher={loggedInTeacher} classId={classId} sendDirectMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView("assessments")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
       {view === "skill-category-report" && selectedSkillReportCat && (
-        <SkillCategoryReportView category={config.categories.find((c) => c.id === selectedSkillReportCat)} roster={roster} studentData={studentData} config={config} loggedInTeacher={loggedInTeacher}
+        <SkillCategoryReportView category={config.categories.find((c) => c.id === selectedSkillReportCat)} roster={roster} studentData={studentData} config={config} loggedInTeacher={loggedInTeacher} classId={classId} sendDirectMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView("assessments")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)}
           onStartClassSession={startClassSession} />
@@ -13521,7 +13829,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
-        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} classId={classId} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
+        <IncidentDetailView incident={incidents.find((i) => i.id === selectedIncidentId)} roster={roster} classId={classId} config={config} plannerDays={plannerDays} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView(incidentDetailReturn)}
           onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(studentId, email) => updateStudentField(studentId, "parentEmail", email)}
@@ -13530,14 +13838,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "fluency-detail" && currentId && selectedFluencyEntry && (
-        <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
+        <FluencyDetailView student={roster.find((s) => s.id === currentId)} entry={selectedFluencyEntry} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
 
       {view === "skill-detail" && currentId && selectedSkillCat && (
         <SkillDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
-          category={config.categories.find((c) => c.id === selectedSkillCat)} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
+          category={config.categories.find((c) => c.id === selectedSkillCat)} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView(detailReturnView)} onLogSent={(msgEntry) => addCommunication(currentId, msgEntry)}
           onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)} />
       )}
@@ -13563,7 +13871,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "camera-capture" && (
-        <CameraCaptureView roster={roster} classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendMessageToFamily}
+        <CameraCaptureView roster={roster} classId={classId} submitBlogPost={submitBlogPost} sendMessageToFamily={sendDirectMessageToFamily}
           onDone={() => navigateView(cameraReturn)} />
       )}
 
@@ -13574,7 +13882,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       )}
 
       {view === "message-draft" && currentId && messageFlag && (
-        <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily}
+        <MessageDraftView student={roster.find((s) => s.id === currentId)} flag={messageFlag} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendDirectMessageToFamily}
           onBack={() => navigateView("detail")} onSaveParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onLogSent={(entry) => addCommunication(currentId, entry)} />
       )}
@@ -13607,7 +13915,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
 function Header({ navigate }) {
   const { className, onSwitchClass, switchLabel } = useContext(ClassContext);
-  const { canSwitchToParent, switchToParent } = useContext(AppModeContext);
+  const { canSwitchToParent, switchToParent, openGlobalMessages } = useContext(AppModeContext);
   return (
     <div className="flex items-center justify-between mb-2">
       <div className="flex items-center gap-2">
@@ -13622,9 +13930,19 @@ function Header({ navigate }) {
           )}
         </div>
       </div>
-      <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
-        <SettingsIcon size={18} />
-      </button>
+      <div className="flex items-center gap-1.5">
+        {/* Reported directly: a teacher assigned to more than one class had to enter a specific
+            class first just to see whether they had any messages waiting in a different one — the
+            entire reason this exists as its own always-visible button here, rather than only being
+            reachable from within one class's own Comm tab. */}
+        <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
+          className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
+          <MessageCircle size={18} />
+        </button>
+        <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
+          <SettingsIcon size={18} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -20761,6 +21079,7 @@ function BroadcastDetailView({ broadcast, groups, classId, onBack }) {
 // and one conversation here, the same way they share it on their own side, rather than showing up
 // as two disconnected families that happen to have the same kids.
 function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMessageToFamily, sendDirectMessageToFamily, loggedByName, navigate, deepLinkGroupId, deepLinkIsDirect, onCommRead }) {
+  const { className } = useContext(ClassContext);
   const [groups, setGroups] = useState(null); // null = loading
   const [openGroup, setOpenGroup] = useState(null);
   const [mode, setMode] = useState(deepLinkIsDirect ? "direct" : "inbox"); // "inbox" | "direct" | "compose"
@@ -20937,16 +21256,24 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   // once, not once per class they happen to share.
   const assignedClassIds = loggedInTeacher?.assignedClassIds || [];
   const refreshDirect = useCallback(async () => {
-    if (assignedClassIds.length === 0) { setDirectGroups([]); return; }
     // Fetches per-class rather than in one shot — a teacher only ever has a couple of assigned
     // classes, so this stays cheap, and it's what actually keeps each request within the rule
     // fetchClassFamilies itself is built around (one specific, provably-owned class at a time).
-    const perClass = await Promise.all(assignedClassIds.map((id) => fetchClassFamilies(id)));
-    const all = perClass.flat();
+    // Run in parallel with fetchStaffReachableFamilies below — every preschool teacher can reach
+    // every preschool family, on top of their own assigned classes' families; the server itself
+    // decides whether this specific caller actually qualifies (assigned to a preschool class, or
+    // separately configured via messagingClassTypes) and simply returns nothing extra if not, so
+    // this is always safe to call regardless of what this teacher's own classes are.
+    const [perClass, reachable] = await Promise.all([
+      Promise.all(assignedClassIds.map((id) => fetchClassFamilies(id))),
+      fetchStaffReachableFamilies(),
+    ]);
+    const all = [...perClass.flat(), ...reachable];
     const byGuardian = {};
     all.forEach((f) => {
       // Same guardian can appear once per matching class fetch above (two kids, two classes,
-      // same teacher) — keyed by their own uid this keeps them counted once regardless.
+      // same teacher), or once more via the preschool-wide reach above — keyed by their own uid
+      // this keeps them counted once regardless.
       if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f], studentLinks: f.studentLinks };
     });
     setDirectGroups(Object.values(byGuardian));
@@ -21063,7 +21390,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       </div>
 
       {mode === "compose" ? (
-        <ClassBroadcastComposer roster={roster} classId={classId} config={config} loggedInTeacher={loggedInTeacher} sendMessageToFamily={sendMessageToFamily} />
+        <ClassBroadcastComposer roster={roster} classId={classId} className={className} config={config} loggedInTeacher={loggedInTeacher} sendDirectMessageToFamily={sendDirectMessageToFamily} />
       ) : mode === "broadcasts" ? (
         <>
           <p className="text-xs text-stone-400 mb-3">Every message sent to this whole class at once, with who's seen each one.</p>
@@ -21849,7 +22176,7 @@ Write 2-3 short paragraphs weaving the exact figures above into natural sentence
   return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
-function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, onBack, onLogSent, onUpdateParentEmail }) {
+function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
   const now = new Date();
   const isPreschool = classType === "preschool";
   const [year, setYear] = useState(now.getFullYear());
@@ -21939,7 +22266,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
                   {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`Monthly report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
+                    <ParentSendActions student={s} classId={classId} subject={`Monthly report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" sendMessageToFamily={sendDirectMessageToFamily} />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -21956,7 +22283,7 @@ function MonthlyReportsView({ roster, studentData, incidents, classAssessments, 
   );
 }
 
-function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, onBack, onLogSent, onUpdateParentEmail }) {
+function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
   const today = todayISO();
   const isPreschool = classType === "preschool";
   const [startDate, setStartDate] = useState(addDaysISO(today, -13));
@@ -22044,7 +22371,7 @@ function CustomRangeReportView({ roster, studentData, incidents, classAssessment
                   {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`Report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
+                    <ParentSendActions student={s} classId={classId} subject={`Report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" sendMessageToFamily={sendDirectMessageToFamily} />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -22091,7 +22418,7 @@ Write 2-3 sentences. Output only the message text, nothing else.`;
   return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
 }
 
-function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail }) {
+function AssessmentReportView({ assessment, roster, config, loggedInTeacher, classId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
   const [reports, setReports] = useState({});
   const students = roster.filter((s) => assessment.results && assessment.results[s.id] !== undefined);
   const subjLabel = (config?.subjects || []).find((s) => s.id === assessment.subjectId)?.label;
@@ -22146,7 +22473,7 @@ function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onB
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`${assessmentLabel} — Report`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
+                    <ParentSendActions student={s} classId={classId} subject={`${assessmentLabel} — Report`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" sendMessageToFamily={sendDirectMessageToFamily} />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -22162,7 +22489,7 @@ function AssessmentReportView({ assessment, roster, config, loggedInTeacher, onB
   );
 }
 
-function SkillCategoryReportView({ category, roster, studentData, config, loggedInTeacher, onBack, onLogSent, onUpdateParentEmail, onStartClassSession }) {
+function SkillCategoryReportView({ category, roster, studentData, config, loggedInTeacher, classId, onBack, onLogSent, onUpdateParentEmail, onStartClassSession, sendDirectMessageToFamily }) {
   const [reports, setReports] = useState({});
   const [sessionDate, setSessionDate] = useState(todayISO());
   const gradeLabel = {};
@@ -22244,7 +22571,7 @@ function SkillCategoryReportView({ category, roster, studentData, config, logged
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} subject={`${category.title} — Progress note`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" />
+                    <ParentSendActions student={s} classId={classId} subject={`${category.title} — Progress note`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" sendMessageToFamily={sendDirectMessageToFamily} />
                     <button onClick={() => logSent(s)} disabled={r.logged}
                       className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
                       {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
@@ -25672,11 +25999,26 @@ function SegmentCelebrationMessageView({ subjectLabel, segmentLabel, roster, con
 // than living as its own separate top-level destination, since it's fundamentally the same
 // classroom channel as the inbox, just the "write something new" side of it instead of "browse
 // what's there." No header of its own — the view embedding this provides that.
-function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, sendMessageToFamily }) {
+function ClassBroadcastComposer({ roster, classId, className, config, loggedInTeacher, sendDirectMessageToFamily }) {
   const [draft, setDraft] = useState("");
   const [subject, setSubject] = useState("");
   const [sendingInApp, setSendingInApp] = useState(false);
   const [sentInAppTo, setSentInAppTo] = useState(null);
+
+  // Every guardian this broadcast could reach — fetched once, up front, so the recipient picker
+  // below has real names to show, rather than only being resolvable at the moment of sending the
+  // way the old, roster-only version of this screen worked.
+  const [families, setFamilies] = useState(null); // null = loading
+  useEffect(() => { fetchClassFamilies(classId).then(setFamilies); }, [classId]);
+  // "all" (the default, and the common case) or "specific" — a deliberately chosen subset. Never
+  // defaults to a remembered previous selection; every fresh visit to this screen starts at "all."
+  const [recipientScope, setRecipientScope] = useState("all");
+  const [selectedUids, setSelectedUids] = useState(new Set());
+  const toggleSelected = (uid) => setSelectedUids((prev) => {
+    const next = new Set(prev);
+    if (next.has(uid)) next.delete(uid); else next.add(uid);
+    return next;
+  });
 
   // AI is an optional assist, not a gate — the textarea above is always writable directly, this
   // just offers a shortcut for turning a rough note into a fuller announcement when wanted.
@@ -25752,21 +26094,25 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
           attachmentUrl = await uploadOneFile(attachFile, `message-attachments/broadcast-${classId}/${uid()}.${(attachFile.name || "").split(".").pop() || "bin"}`, setUploadProgress);
         }
       }
-      const relevant = await fetchClassFamilies(classId);
       // Every individual GUARDIAN's own uid — not familyGroupId, which was silently collapsing a
       // two-guardian family down to just one recipient here: both guardians share the same group
       // id, so deduplicating by it (rather than by each guardian's own uid) meant the second
       // guardian's own private thread never received this broadcast at all, not merely a
-      // duplicate-avoidance step gone slightly too far.
+      // duplicate-avoidance step gone slightly too far. Scoped down to just the chosen subset when
+      // recipientScope is "specific" — "all" (the default) keeps the original, whole-class reach.
+      const relevant = recipientScope === "specific" ? (families || []).filter((f) => selectedUids.has(f.uid)) : (families || []);
       const uids = new Set(relevant.map((f) => f.uid));
       // One shared id for every copy of this broadcast, and one record of the broadcast itself —
-      // see sendMessageToFamily's own reasoning for why, and BroadcastsListView for where this
-      // actually gets used.
+      // see sendDirectMessageToFamily's own reasoning for why, and BroadcastsListView for where
+      // this actually gets used. Lands in THIS teacher's own direct thread with each family now,
+      // not a shared classroom thread — the messaging redesign's entire point: a genuinely
+      // separate, private copy per family, the same shape as a broadcast always was underneath,
+      // just landing in the new unified threads instead of the old classroom ones.
       const broadcastId = uid();
       const sentAt = new Date().toISOString();
       const attachments = attachmentUrl ? [{ url: attachmentUrl, type: attachType, name: attachType === "file" ? attachFile.name : null }] : [];
       for (const familyUid of uids) {
-        await sendMessageToFamily(familyUid, draft.trim(), attachments, null, broadcastId); // eslint-disable-line no-await-in-loop
+        await sendDirectMessageToFamily(familyUid, draft.trim(), attachments, null, broadcastId); // eslint-disable-line no-await-in-loop
       }
       const existingBroadcasts = (await loadJSON(`class:${classId}:broadcasts`, [], true)) || [];
       await saveJSON(`class:${classId}:broadcasts`, [...existingBroadcasts, {
@@ -25782,7 +26128,35 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
 
   return (
     <div className="md:w-[32rem]">
-      <p className="text-stone-500 text-sm mb-4">One message to every family in this class at once.</p>
+      <p className="text-stone-500 text-sm mb-3">A genuinely separate, private message to each family you choose — landing in your own thread with each one, same as any other message you'd send them.</p>
+
+      <label className="block text-xs font-medium text-stone-500 mb-1">Who gets this</label>
+      <div className="flex gap-1.5 mb-3">
+        <button onClick={() => setRecipientScope("all")}
+          className={`flex-1 text-xs font-semibold px-2.5 py-2 rounded-lg border ${recipientScope === "all" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+          Every family in {className || "this class"}
+        </button>
+        <button onClick={() => setRecipientScope("specific")}
+          className={`flex-1 text-xs font-semibold px-2.5 py-2 rounded-lg border ${recipientScope === "specific" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+          Choose specific families
+        </button>
+      </div>
+      {recipientScope === "specific" && (
+        <div className="border border-stone-200 rounded-lg p-2 mb-3 max-h-48 overflow-y-auto space-y-1">
+          {families === null ? (
+            <p className="text-xs text-stone-400 px-1 py-2">Loading…</p>
+          ) : families.length === 0 ? (
+            <p className="text-xs text-stone-400 px-1 py-2">No families linked to this class yet.</p>
+          ) : (
+            families.map((f) => (
+              <label key={f.uid} className="flex items-center gap-2 px-1 py-1 text-sm text-stone-700 cursor-pointer hover:bg-stone-50 rounded">
+                <input type="checkbox" checked={selectedUids.has(f.uid)} onChange={() => toggleSelected(f.uid)} className="rounded border-stone-300" />
+                {f.name}
+              </label>
+            ))
+          )}
+        </div>
+      )}
 
       <label className="block text-xs font-medium text-stone-500 mb-1">Message</label>
       <div className="flex items-start gap-1.5 mb-1.5">
@@ -25843,11 +26217,11 @@ function ClassBroadcastComposer({ roster, classId, config, loggedInTeacher, send
 
       <div className="border border-teal-200 bg-teal-50/40 rounded-xl p-3 mb-4">
         <p className="text-xs font-semibold text-stone-700 mb-1">Send as an in-app message</p>
-        <p className="text-[11px] text-stone-400 mb-2">Goes to every family linked to this class as a separate message in their classroom thread — each family sees only their own copy.</p>
-        <button onClick={sendInApp} disabled={sendingInApp || sentInAppTo !== null || (!draft.trim() && !attachFile)}
+        <p className="text-[11px] text-stone-400 mb-2">A genuinely separate copy lands in your own private thread with each family chosen above — never one shared conversation, so each family only ever sees their own.</p>
+        <button onClick={sendInApp} disabled={sendingInApp || sentInAppTo !== null || (!draft.trim() && !attachFile) || (recipientScope === "specific" && selectedUids.size === 0)}
           className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2 ${sentInAppTo !== null ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-700 text-white hover:bg-teal-800 disabled:opacity-40"}`}>
           {sendingInApp ? <Loader2 className="animate-spin" size={14} /> : sentInAppTo !== null ? <Check size={14} /> : <MessageCircle size={14} />}
-          {sendingInApp ? (uploadProgress !== null ? `Uploading… ${uploadProgress}%` : "Sending…") : sentInAppTo !== null ? `Sent to ${sentInAppTo} famil${sentInAppTo === 1 ? "y" : "ies"}` : "Send in-app to the whole class"}
+          {sendingInApp ? (uploadProgress !== null ? `Uploading… ${uploadProgress}%` : "Sending…") : sentInAppTo !== null ? `Sent to ${sentInAppTo} famil${sentInAppTo === 1 ? "y" : "ies"}` : recipientScope === "specific" ? `Send in-app to ${selectedUids.size} chosen famil${selectedUids.size === 1 ? "y" : "ies"}` : "Send in-app to the whole class"}
         </button>
       </div>
 

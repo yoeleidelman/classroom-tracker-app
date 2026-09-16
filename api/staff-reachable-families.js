@@ -62,12 +62,6 @@ export default async function handler(req, res) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
 
-  const messagingClassTypes = caller.messagingClassTypes || [];
-  if (messagingClassTypes.length === 0) {
-    return res.status(200).json({ families: [] });
-  }
-  const wantedTypes = new Set(messagingClassTypes);
-
   const db = getFirestore();
   const classesDoc = await db.collection("data").doc("schoolClasses").get();
   const classList = classesDoc.exists ? (classesDoc.data().value || []) : [];
@@ -75,6 +69,19 @@ export default async function handler(req, res) {
   classList.forEach((c) => {
     if (c?.id) classTypeById[c.id] = c.classType || "elementary";
   });
+
+  // Every preschool teacher can reach every preschool family, and vice versa — computed here, at
+  // query time, rather than stored on this caller's own record, so it never shows up as a
+  // surprising, auto-added entry in admin's own messagingClassTypes toggle UI (which is meant to
+  // reflect only what admin explicitly chose there). Assigned to at least one preschool class is
+  // automatically treated as reachable by every preschool family this same way, on top of
+  // whatever messagingClassTypes admin may have separately configured.
+  const isPreschoolStaff = (caller.assignedClassIds || []).some((id) => classTypeById[id] === "preschool");
+  const messagingClassTypes = [...new Set([...(caller.messagingClassTypes || []), ...(isPreschoolStaff ? ["preschool"] : [])])];
+  if (messagingClassTypes.length === 0) {
+    return res.status(200).json({ families: [] });
+  }
+  const wantedTypes = new Set(messagingClassTypes);
 
   // Scoped to just the family:* id range — far cheaper than scanning the whole data collection,
   // while still not depending on any one field being present or correct.
