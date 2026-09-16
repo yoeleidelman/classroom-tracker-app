@@ -3943,9 +3943,9 @@ function AppInner() {
     setPrograms(list);
   };
 
-  const addProgram = async (name, memberClassIds) => {
+  const addProgram = async (name, memberClassIds, programType) => {
     const list = await loadJSON("programs", [], true);
-    const record = { id: uid(), name, memberClassIds: memberClassIds || [], pointsCategories: [] };
+    const record = { id: uid(), name, memberClassIds: memberClassIds || [], pointsCategories: [], programType: programType || "points" };
     const next = [...list, record];
     setPrograms(next);
     await saveJSON("programs", next, true);
@@ -3975,13 +3975,24 @@ function AppInner() {
     const roster = await fetchProgramRoster(prog.memberClassIds);
     const cfg = await loadJSON(`program:${programId}:config`, { points: { categories: [] } }, true);
     const pointsData = await loadJSON(`program:${programId}:pointsData`, {}, true);
-    return { roster, config: cfg, pointsData };
+    const logEntries = await loadJSON(`program:${programId}:logEntries`, [], true);
+    return { roster, config: cfg, pointsData, logEntries, programType: prog.programType || "points" };
   };
 
   const addProgramPointsAdmin = async (programId, currentPointsData, studentId, catId, amount) => {
     const current = currentPointsData[studentId]?.[catId] || 0;
     const next = { ...currentPointsData, [studentId]: { ...currentPointsData[studentId], [catId]: Math.max(0, current + amount) } };
     await saveJSON(`program:${programId}:pointsData`, next, true);
+    return next;
+  };
+
+  // Admin-side counterpart to the teacher-side addProgramLogEntry — same shape, same reasoning
+  // (see that function's own comment): one real entry per card, photo optional and already
+  // uploaded by the time this is called.
+  const addProgramLogEntryAdmin = async (programId, currentLogEntries, studentId, studentName, photoUrl) => {
+    const entry = { id: uid(), studentId, studentName, teacherUid: currentTeacher?.uid || null, teacherName: currentTeacher?.name || "Admin", timestamp: new Date().toISOString(), ...(photoUrl ? { photoUrl } : {}) };
+    const next = [...currentLogEntries, entry];
+    await saveJSON(`program:${programId}:logEntries`, next, true);
     return next;
   };
 
@@ -4559,7 +4570,7 @@ function AppInner() {
           teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
           families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData} onFetchCheckInHistory={fetchAllPreschoolCheckInHistory}
-          programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin}
+          programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramLogEntry={addProgramLogEntryAdmin} onAddProgramCategory={addProgramCategoryAdmin}
           canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} />;
       }
       return (
@@ -4614,7 +4625,7 @@ function AppInner() {
         teachers={teachers} onRefreshTeachers={refreshTeachers} onCreateTeacher={createTeacherAccount} onUpdateTeacher={updateTeacherRecord} onToggleTeacherClass={toggleTeacherClassAssignment} onResetTeacherPassword={resetTeacherPassword} onCheckTeacherAccount={checkTeacherAccount} onDeactivateTeacher={deactivateTeacherRecord} onDeleteTeacher={deleteTeacherPermanently}
         families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
         onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData} onFetchCheckInHistory={fetchAllPreschoolCheckInHistory}
-        programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
+        programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramLogEntry={addProgramLogEntryAdmin} onAddProgramCategory={addProgramCategoryAdmin} />;
     }
     return <ClassGateScreen registry={registry} onSelect={selectClass} onCreate={createClass} onRefresh={refreshRegistry} onLoginAdmin={loginAdmin} />;
   }
@@ -5057,17 +5068,41 @@ function FamilyAccountForm({ allStudents, activeClasses, onSave, onCreateStudent
 function ProgramForm({ classes, existing, onSave, onCancel }) {
   const [name, setName] = useState(existing?.name || "");
   const [memberClassIds, setMemberClassIds] = useState(existing?.memberClassIds || []);
+  // "points" — the original shared program: one running total per student per category, no
+  // individual record of any single time it changed. "log" — a real, individual entry every time,
+  // never just a number: which student, which teacher, when, and an optional photo — the exact
+  // shape needed for something like a Recognition Card, where the actual moment it was given (and
+  // often a photo of the student holding it) is the whole point, not just a count going up.
+  // Deliberately fixed once a program is created, not editable afterward — the two types store
+  // fundamentally different data shapes, so switching later would mean silently discarding
+  // whichever one this program had already collected.
+  const [programType, setProgramType] = useState(existing?.programType || "points");
 
   const toggleClass = (id) => setMemberClassIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const save = () => {
     if (!name.trim() || memberClassIds.length === 0) return;
-    onSave(name.trim(), memberClassIds);
+    onSave(name.trim(), memberClassIds, programType);
   };
 
   return (
     <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 mb-3">
       <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Program name (e.g. Torah Memorization)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+      {!existing && (
+        <>
+          <label className="block text-xs font-semibold text-stone-700 mb-1">Type</label>
+          <div className="flex gap-1.5 mb-3">
+            <button onClick={() => setProgramType("points")}
+              className={`flex-1 text-xs font-semibold px-2.5 py-2 rounded-lg border ${programType === "points" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+              Points — one running total per category
+            </button>
+            <button onClick={() => setProgramType("log")}
+              className={`flex-1 text-xs font-semibold px-2.5 py-2 rounded-lg border ${programType === "log" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+              Recognition Log — a real entry each time, photo optional
+            </button>
+          </div>
+        </>
+      )}
       <label className="block text-xs font-semibold text-stone-700 mb-1">Which classes are part of this?</label>
       <p className="text-[10px] text-stone-400 mb-2">Every student currently in these classes is automatically in the program — add or remove a student from the class later and it updates here too.</p>
       <div className="flex flex-wrap gap-1.5 mb-3">
@@ -6225,7 +6260,7 @@ function TeacherAccountChecker({ onCheck }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent }) {
   const [adminTab, setAdminTab] = useState("overview");
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -6294,6 +6329,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
       saveJSON(`program:${openProgramId}:pointsData`, nextPointsData, true);
       return { ...prev, pointsData: nextPointsData };
     });
+  };
+  // Admin-side counterpart to addPointsInProgram just above, for a Recognition Log program instead
+  // of a Points one — see addProgramLogEntryAdmin's own comment for the underlying save.
+  const addLogEntryInProgram = async (studentId, studentName, photoUrl) => {
+    const nextLogEntries = await onAddProgramLogEntry(openProgramId, programDetail.logEntries, studentId, studentName, photoUrl);
+    setProgramDetail((prev) => ({ ...prev, logEntries: nextLogEntries }));
   };
   const addCategoryInProgram = (newCat) => {
     setProgramDetail((prev) => {
@@ -6889,7 +6930,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           )}
           {showProgramForm && (
             <ProgramForm classes={activeClasses}
-              onSave={async (name, memberClassIds) => { await onAddProgram(name, memberClassIds); setShowProgramForm(false); }}
+              onSave={async (name, memberClassIds, programType) => { await onAddProgram(name, memberClassIds, programType); setShowProgramForm(false); }}
               onCancel={() => setShowProgramForm(false)} />
           )}
 
@@ -6900,7 +6941,10 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               return (
                 <li key={p.id} className="bg-white border border-stone-200 rounded-lg p-2.5">
                   <div className="flex items-center justify-between gap-2">
-                    <button onClick={() => openProgramAdmin(p.id)} className="text-sm font-semibold text-stone-800 hover:text-teal-700 text-left flex-1">{p.name}</button>
+                    <button onClick={() => openProgramAdmin(p.id)} className="text-sm font-semibold text-stone-800 hover:text-teal-700 text-left flex-1">
+                      {p.name}
+                      {p.programType === "log" && <span className="ml-2 text-[10px] font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-full px-2 py-0.5 align-middle">Recognition Log</span>}
+                    </button>
                     <ConfirmDelete onConfirm={() => onRemoveProgram(p.id)} size={13} />
                   </div>
                   <p className="text-xs text-stone-400 mt-0.5">{memberNames.join(", ") || "No classes assigned"}</p>
@@ -7337,6 +7381,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                 onAddCategory={addCategoryInProgram} navigate={() => {}}
                 plannerDays={{}} behaviorLogData={{}} adjustBehaviorMark={() => {}}
                 programMode programName={(programs || []).find((p) => p.id === openProgramId)?.name || "Program"}
+                programType={programDetail.programType || "points"} programLogEntries={programDetail.logEntries || []} onAddLogEntry={addLogEntryInProgram}
                 onBackFromProgram={closeProgramAdmin} backLabel="Back to Admin Dashboard"
                 programs={[]} onOpenProgram={() => {}} />
             )}
@@ -11558,7 +11603,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           initialStudentId={initialAssessmentStudentId}
           navigate={navigateView} />
         );
-      case "points":
+      case "points": {
+        const openProgramRecord = programsInClass.find((p) => p.id === openProgramId);
         return openProgramId ? (
         <PointsView
           roster={programRoster}
@@ -11566,7 +11612,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           classPoints={{}} config={programConfig}
           addPoints={addProgramPoints} addClassPoints={() => {}} resetClassPoints={() => {}}
           onAddCategory={addProgramCategory} navigate={navigateView}
-          programMode programName={programsInClass.find((p) => p.id === openProgramId)?.name || "Program"}
+          programMode programName={openProgramRecord?.name || "Program"} programType={openProgramRecord?.programType || "points"}
+          programLogEntries={programLogEntries} onAddLogEntry={addProgramLogEntry}
           onBackFromProgram={closeProgram} />
         ) : (
         <PointsView roster={roster} studentData={studentData} classPoints={classPoints} config={config}
@@ -11576,6 +11623,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           trackerLog={trackerLog} toggleTracker={toggleTracker}
           programs={programsInClass} onOpenProgram={openProgram} />
         );
+      }
       case "planner":
         return (
         <PlannerView config={config} plannerDays={plannerDays} plannerEvents={effectivePlannerEvents} navigate={navigateView}
@@ -11707,6 +11755,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [programRoster, setProgramRoster] = useState([]);
   const [programConfig, setProgramConfig] = useState({ points: { categories: [] } });
   const [programPointsData, setProgramPointsData] = useState({});
+  const [programLogEntries, setProgramLogEntries] = useState([]);
   const [currentId, setCurrentId] = useState(null);
   const [sessionCat, setSessionCat] = useState(null);
   const [sessionIdx, setSessionIdx] = useState(0);
@@ -13171,6 +13220,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const roster = await fetchProgramRoster(prog.memberClassIds);
     const cfg = await loadJSON(`program:${programId}:config`, { points: { categories: [] } }, true);
     const pd = await loadJSON(`program:${programId}:pointsData`, {}, true);
+    // Fetched regardless of this program's own type, same as pointsData already is above — keeps
+    // this one load path simple and correct for either kind, rather than branching on
+    // prog.programType here just to save one cheap, mostly-empty read for whichever type isn't in
+    // use.
+    const log = await loadJSON(`program:${programId}:logEntries`, [], true);
     // Everything is fetched before any of it is committed to state, and openProgramId is set
     // last — otherwise PointsView would mount on the very first render with an empty category
     // list, lock in "no categories yet" for its form-visibility state, and never reconsider
@@ -13178,6 +13232,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     setProgramRoster(roster);
     setProgramConfig(cfg);
     setProgramPointsData(pd);
+    setProgramLogEntries(log);
     setProgramLoading(false);
     setOpenProgramId(programId);
   };
@@ -13189,6 +13244,18 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const next = { ...programPointsData, [studentId]: { ...programPointsData[studentId], [catId]: Math.max(0, current + amount) } };
     setProgramPointsData(next);
     await saveJSON(`program:${openProgramId}:pointsData`, next, true);
+  };
+
+  // One real, individual entry per card given — see ProgramForm's own comment on why a Recognition
+  // Log program stores this instead of a running total. photoUrl is optional and, when present,
+  // already fully uploaded by the time this is called (see GiveRecognitionCardModal), so this is
+  // purely a data write, never itself responsible for the upload.
+  const addProgramLogEntry = async (studentId, studentName, photoUrl) => {
+    const entry = { id: uid(), studentId, studentName, teacherUid: loggedInTeacher?.uid || null, teacherName: loggedByName || "Teacher", timestamp: new Date().toISOString(), ...(photoUrl ? { photoUrl } : {}) };
+    const next = [...programLogEntries, entry];
+    setProgramLogEntries(next);
+    await saveJSON(`program:${openProgramId}:logEntries`, next, true);
+    return entry;
   };
 
   const addProgramCategory = async (newCat) => {
@@ -17990,7 +18057,156 @@ function RaffleView({ roster, config }) {
   );
 }
 
-function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, trackerLog, toggleTracker, programMode, programName, onBackFromProgram, backLabel, programs, onOpenProgram }) {
+// A Recognition Log program's own dedicated screen — see PointsView's own comment on why this is
+// entirely separate from the rest of that screen. Giving a card is deliberately a real, individual
+// entry every time (who, which teacher, when, an optional photo), never a running number — a
+// student's own count here is simply however many entries actually exist for them, not a value
+// stored or incremented anywhere.
+function RecognitionLogView({ roster, programName, logEntries, onAddLogEntry, onBackFromProgram, backLabel }) {
+  const [givingCardFor, setGivingCardFor] = useState(null); // { id, name } | null
+  const [viewingTimelineFor, setViewingTimelineFor] = useState(null); // { id, name } | null
+  const [search, setSearch] = useState("");
+
+  const countFor = (studentId) => logEntries.filter((e) => e.studentId === studentId).length;
+  const filteredRoster = roster.filter((s) => s.name.toLowerCase().includes(search.toLowerCase()));
+
+  if (viewingTimelineFor) {
+    const entries = logEntries.filter((e) => e.studentId === viewingTimelineFor.id).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    return (
+      <div className={PAGE}>
+        <button onClick={() => setViewingTimelineFor(null)} className="flex items-center text-stone-500 text-sm hover:text-stone-800 mb-3"><ChevronLeft size={16} /> Back to {programName}</button>
+        <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{viewingTimelineFor.name}</h1>
+        <p className="text-xs text-stone-400 mb-5">{entries.length} card{entries.length === 1 ? "" : "s"} given so far.</p>
+        <button onClick={() => setGivingCardFor(viewingTimelineFor)} className="w-full bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800 mb-5">
+          Give another card
+        </button>
+        {entries.length === 0 ? (
+          <p className="text-sm text-stone-400">No cards given yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {entries.map((e) => (
+              <div key={e.id} className="bg-white border border-stone-200 rounded-xl p-3">
+                <p className="text-xs font-semibold text-stone-700">{new Date(e.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })} — given by {e.teacherName}</p>
+                {e.photoUrl && <img src={e.photoUrl} alt="" className="w-full rounded-lg mt-2 border border-stone-200" />}
+              </div>
+            ))}
+          </div>
+        )}
+        {givingCardFor && (
+          <GiveRecognitionCardModal student={givingCardFor} onAddLogEntry={onAddLogEntry} onClose={() => setGivingCardFor(null)} />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBackFromProgram} className="flex items-center text-stone-500 text-sm hover:text-stone-800 mb-1"><ChevronLeft size={16} /> {backLabel || "Back to my class"}</button>
+      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{programName}</h1>
+      <p className="text-xs text-stone-400 mb-5">Give a card the moment you spot it — a photo is optional, never required.</p>
+      {roster.length > 6 && (
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search students…" className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4 md:w-72" />
+      )}
+      <div className="space-y-2">
+        {filteredRoster.map((s) => (
+          <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3 flex items-center justify-between gap-2">
+            <button onClick={() => setViewingTimelineFor({ id: s.id, name: s.name })} className="text-left flex-1 min-w-0">
+              <span className="font-semibold text-stone-800 block truncate">{s.name}</span>
+              <span className="text-xs text-stone-400">{countFor(s.id)} card{countFor(s.id) === 1 ? "" : "s"} so far</span>
+            </button>
+            <button onClick={() => setGivingCardFor({ id: s.id, name: s.name })} className="text-xs font-bold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800 shrink-0">
+              Give Card
+            </button>
+          </div>
+        ))}
+      </div>
+      {givingCardFor && (
+        <GiveRecognitionCardModal student={givingCardFor} onAddLogEntry={onAddLogEntry} onClose={() => setGivingCardFor(null)} />
+      )}
+    </div>
+  );
+}
+
+// A photo here is a real, optional extra step, never a requirement — "Give Card" works immediately
+// with no photo at all; adding one just attaches it to this same entry before it's ever saved, so
+// there's exactly one save either way, not a card first and a photo tacked on after.
+function GiveRecognitionCardModal({ student, onAddLogEntry, onClose }) {
+  const [photoFile, setPhotoFile] = useState(null);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const pickPhoto = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPhotoFile(file);
+    setPhotoPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const confirm = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      let photoUrl = null;
+      if (photoFile) {
+        try {
+          photoUrl = await uploadOneImage(photoFile, `program-recognition/${uid()}.jpg`);
+        } catch (err) {
+          // Same reasoning as the carpool signature flow's own fix — an upload-specific message
+          // only makes sense for an actual upload failure, so it's scoped narrowly to just that.
+          throw new Error(describeUploadError(err));
+        }
+      }
+      await onAddLogEntry(student.id, student.name, photoUrl);
+      onClose();
+    } catch (err) {
+      setError(err.message || "Something went wrong — please try again.");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4">
+      <div className="bg-white rounded-2xl p-4 max-w-sm w-full">
+        <p className="text-sm font-semibold text-stone-800 mb-1">Give {student.name} a card</p>
+        <p className="text-xs text-stone-400 mb-3">A photo is optional.</p>
+        {error && <p className="text-xs text-rose-600 mb-3">{error}</p>}
+        {photoPreviewUrl ? (
+          <div className="relative mb-3">
+            <img src={photoPreviewUrl} alt="" className="w-full rounded-lg border border-stone-200" />
+            <button onClick={() => { setPhotoFile(null); setPhotoPreviewUrl(null); }} className="absolute top-2 right-2 bg-white rounded-full p-1 shadow"><X size={14} /></button>
+          </div>
+        ) : (
+          <label className="flex items-center justify-center gap-2 border-2 border-dashed border-stone-300 rounded-xl py-4 mb-3 text-sm text-stone-500 cursor-pointer hover:bg-stone-50">
+            <Camera size={16} /> Add a photo (optional)
+            <input type="file" accept="image/*" capture="environment" onChange={pickPhoto} className="hidden" />
+          </label>
+        )}
+        <div className="flex gap-2">
+          <button onClick={onClose} disabled={saving} className="flex-1 text-sm font-semibold text-stone-500 border border-stone-300 rounded-lg py-2.5 hover:bg-stone-50 disabled:opacity-40">
+            Cancel
+          </button>
+          <button onClick={confirm} disabled={saving} className="flex-1 text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-40">
+            {saving ? "Saving…" : "Give Card"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PointsView({ roster, studentData, classPoints, config, addPoints, addClassPoints, resetClassPoints, onAddCategory, navigate, plannerDays, behaviorLogData, adjustBehaviorMark, trackerLog, toggleTracker, programMode, programName, programType, programLogEntries, onAddLogEntry, onBackFromProgram, backLabel, programs, onOpenProgram }) {
+  // A Recognition Log program (see ProgramForm's own comment on the two program types) has nothing
+  // in common with the rest of this screen — no categories, no rewards, no raffle, none of that
+  // applies to "log a real moment, optionally with a photo, every time." Rendered as its own
+  // completely separate, dedicated screen rather than woven into the tab structure below, since
+  // trying to fit it into that shape would mean forcing a shape onto it that was never actually
+  // built for it, and risking the existing points flow just to make room for it.
+  if (programMode && programType === "log") {
+    return (
+      <RecognitionLogView roster={roster} programName={programName} logEntries={programLogEntries} onAddLogEntry={onAddLogEntry} onBackFromProgram={onBackFromProgram} backLabel={backLabel} />
+    );
+  }
   const [subTab, setSubTab] = useState("rewards");
   const cats = config.points?.categories || [];
   const [activeId, setActiveId] = useState(cats[0]?.id || null);
