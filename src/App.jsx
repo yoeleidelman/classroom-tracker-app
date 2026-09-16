@@ -31,7 +31,7 @@ import {
   Trash2, Settings as SettingsIcon, ChevronDown, ChevronUp,
   Home as HomeIcon, BookOpen, ClipboardList, Mail, RefreshCw, Copy, Check,
   Star, Minus, Calendar, Bell, ChevronRight, MessageCircle, Maximize2, Flag, Wrench, Printer, X,
-  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload, Clock, Pin, ExternalLink, Car
+  Coffee, Sandwich, Apple, Moon, Baby, Droplets, Smile, HeartPulse, Camera, Newspaper, Heart, ThumbsUp, PartyPopper, Download, Sparkles, Play, Users, Phone, FileText, Paperclip, MoreVertical, Music, Send, Upload, Clock, Pin, ExternalLink, Car, Award
 } from "lucide-react";
 
 // ---------- Default content (all editable later via Settings) ----------
@@ -11500,7 +11500,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onAddPlannerEvent={addPlannerEvent}
           randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
           alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan}
-          openCameraCapture={() => openCameraCapture("home")} />
+          openCameraCapture={() => openCameraCapture("home")}
+          logPrograms={programsInClass.filter((p) => p.programType === "log")} onOpenProgram={(id) => { openProgram(id); navigateView("points"); }} />
         );
       case "attendance":
         return (
@@ -13669,7 +13670,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture, logPrograms, onOpenProgram }) {
   const [date, setDate] = useState(todayISO());
   const [multiSelect, setMultiSelect] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -13758,6 +13759,22 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
           </button>
         </div>
       </div>
+
+      {/* Reported directly: a shared, multi-class program (like Ahavas Yisrael cards) was easy to
+          forget about entirely, buried three steps deep (Points → Shared programs → find it) —
+          especially since it isn't really "this class's own" points at all. A direct shortcut
+          right on the home screen, for every log-type program this class happens to be part of,
+          serves as its own reminder just by being visible here, not just a faster way in. */}
+      {(logPrograms || []).length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-5">
+          {logPrograms.map((p) => (
+            <button key={p.id} onClick={() => onOpenProgram(p.id)}
+              className="flex items-center gap-1.5 text-xs font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-lg px-3 py-1.5 hover:bg-teal-100">
+              <Award size={13} /> {p.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       <button onClick={() => openIncidentForm(null)} title="Record an incident"
         className="fixed bottom-5 right-5 z-30 flex items-center gap-1.5 bg-rose-600 text-white rounded-full pl-3 pr-4 py-3 shadow-lg hover:bg-rose-700">
