@@ -16128,11 +16128,26 @@ function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDi
   const [notes, setNotes] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
+  // Which single student's own "Log" button was just used, shown as its own brief confirmation —
+  // separate from the bottom button's own "Logged ✓", since either can happen independently of
+  // the other now.
+  const [savedOne, setSavedOne] = useState(null);
 
   const submit = () => {
     logDiaperBulkWithDefaults(date, time, types, notes);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+  // Reported directly: diapers is genuinely append-only, real changes happening for one specific
+  // child at one specific real moment — logging always meant logging the entire room at once, with
+  // no way to record just the one child it was actually about right now. Reuses the exact same
+  // underlying save this screen's bottom button already calls — it already only ever acts on
+  // whichever students appear as keys in the object handed to it, so handing it just this one
+  // student's own current type and note, rather than the whole room's, is the entire fix.
+  const logOne = (studentId) => {
+    logDiaperBulkWithDefaults(date, time, { [studentId]: types[studentId] }, { [studentId]: notes[studentId] });
+    setSavedOne(studentId);
+    setTimeout(() => setSavedOne((cur) => (cur === studentId ? null : cur)), 2000);
   };
 
   // Diapers, unlike mood/meals/naps elsewhere on this same dashboard, is genuinely append-only —
@@ -16149,17 +16164,22 @@ function DiaperBulkScreen({ tile, date, roster, studentData, checkedInIds, logDi
       <PreschoolScreenHeader tile={tile} title={tile.label} onBack={onBack} />
       <label className="block text-xs font-medium text-stone-500 mb-1">Time</label>
       <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className="rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4" />
-      <p className="text-xs text-stone-400 mb-4">Everyone starts on "{DIAPER_TYPES[0].label}" — tap a name to change just that student.</p>
+      <p className="text-xs text-stone-400 mb-4">Everyone starts on "{DIAPER_TYPES[0].label}" — tap a name to change just that student, or use its own Log button to log just them.</p>
       <div className="space-y-2 mb-5">
         {checkedInRoster.map((s) => {
           const isOpen = expanded === s.id;
           const current = DIAPER_TYPES.find((d) => d.id === types[s.id]) || DIAPER_TYPES[0];
           return (
             <div key={s.id} className={`rounded-xl border ${types[s.id] === DIAPER_TYPES[0].id ? "border-stone-200 bg-white" : st.rowActive}`}>
-              <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
-                <span className="font-semibold text-stone-800">{s.name}</span>
-                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white ${st.solid}`}>{current.label}</span>
-              </button>
+              <div className="w-full flex items-center justify-between px-4 py-3 gap-2">
+                <button onClick={() => setExpanded(isOpen ? null : s.id)} className="flex-1 flex items-center justify-between text-left min-w-0">
+                  <span className="font-semibold text-stone-800 truncate">{s.name}</span>
+                  <span className={`text-xs font-semibold px-2.5 py-1 rounded-full text-white shrink-0 ml-2 ${st.solid}`}>{current.label}</span>
+                </button>
+                <button onClick={() => logOne(s.id)} className={`text-xs font-bold px-3 py-1.5 rounded-lg text-white shrink-0 ${st.solid} ${st.solidHover}`}>
+                  {savedOne === s.id ? "✓" : "Log"}
+                </button>
+              </div>
               {isOpen && (
                 <div className="px-4 pb-3 space-y-2">
                   <div className="flex flex-wrap gap-1.5">
@@ -16235,6 +16255,9 @@ function NapBulkScreen({ date, roster, studentData, checkedInIds, startNapBulk, 
   const [notes, setNotes] = useState({});
   const [expanded, setExpanded] = useState(null);
   const [saved, setSaved] = useState(false);
+  // Which single student's own row button was just used — its own brief confirmation, separate
+  // from the bottom button's own "Logged ✓", since either can now happen independently.
+  const [savedOne, setSavedOne] = useState(null);
 
   // Leftover exclusions, custom times, or notes from one mode have no business silently carrying
   // into the other — switching tabs starts each one fresh.
@@ -16255,6 +16278,20 @@ function NapBulkScreen({ date, roster, studentData, checkedInIds, startNapBulk, 
     else endNapBulk(date, studentTimes, notes);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+  // Reported directly: each child really only has the one nap, but starting or ending it happens
+  // at that one child's own real moment, not the whole room's — the shared start/end action was
+  // the only way to record it, so logging one child meant either acting on the entire remaining
+  // group at once, or marking every other child "didn't nap"/"still sleeping" just to get them out
+  // of the way, which would misrepresent their actual, real status. Reuses the exact same
+  // startNapBulk/endNapBulk this screen's bottom button already calls — hands it just this one
+  // student's own current time and note, rather than the whole eligible group's.
+  const logOneNap = (studentId) => {
+    const t = customTimes[studentId] || sharedTime;
+    if (mode === "start") startNapBulk(date, { [studentId]: t }, { [studentId]: notes[studentId] });
+    else endNapBulk(date, { [studentId]: t }, { [studentId]: notes[studentId] });
+    setSavedOne(studentId);
+    setTimeout(() => setSavedOne((cur) => (cur === studentId ? null : cur)), 2000);
   };
 
   return (
@@ -16288,13 +16325,20 @@ function NapBulkScreen({ date, roster, studentData, checkedInIds, startNapBulk, 
               const nap = napFor(s.id);
               return (
                 <div key={s.id} className={`rounded-xl border ${isExcluded ? "border-stone-200 bg-stone-50" : custom ? st.rowActive : "border-stone-200 bg-white"}`}>
-                  <button onClick={() => setExpanded(isOpen ? null : s.id)} className="w-full flex items-center justify-between px-4 py-3">
-                    <span className={`font-semibold ${isExcluded ? "text-stone-400 line-through" : "text-stone-800"}`}>{s.name}</span>
-                    <span className="text-xs text-stone-500">
-                      {isExcluded ? (mode === "start" ? "Didn't nap" : "Still sleeping") : custom || sharedTime}
-                      {mode === "end" && nap?.start ? ` (started ${nap.start})` : ""}
-                    </span>
-                  </button>
+                  <div className="w-full flex items-center justify-between px-4 py-3 gap-2">
+                    <button onClick={() => setExpanded(isOpen ? null : s.id)} className="flex-1 flex items-center justify-between text-left min-w-0">
+                      <span className={`font-semibold truncate ${isExcluded ? "text-stone-400 line-through" : "text-stone-800"}`}>{s.name}</span>
+                      <span className="text-xs text-stone-500 shrink-0 ml-2">
+                        {isExcluded ? (mode === "start" ? "Didn't nap" : "Still sleeping") : custom || sharedTime}
+                        {mode === "end" && nap?.start ? ` (started ${nap.start})` : ""}
+                      </span>
+                    </button>
+                    {!isExcluded && (
+                      <button onClick={() => logOneNap(s.id)} className={`text-xs font-bold px-3 py-1.5 rounded-lg text-white shrink-0 ${st.solid} ${st.solidHover}`}>
+                        {savedOne === s.id ? "✓" : mode === "start" ? "Start" : "End"}
+                      </button>
+                    )}
+                  </div>
                   {isOpen && (
                     <div className="px-4 pb-3 space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
