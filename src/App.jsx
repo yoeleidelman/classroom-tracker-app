@@ -6701,9 +6701,14 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
   // Same reasoning as ClassApp's own version — a genuinely separate action from publishing,
   // sending a real direct message to every guardian of this student, tagged with a reference to
   // this specific assessment.
+  // Reported directly: this previously did nothing at all, with no indication, whenever the
+  // student had no linked guardian account — Promise.all([]) resolves immediately, so the calling
+  // UI would show "Message sent" even though nothing was ever actually sent anywhere. Now throws
+  // instead, so the teacher sees an honest error rather than a false success.
   const sendMessageAboutAssessment = async (assessment, student, subjectLabel, text) => {
     const families = await fetchClassFamilies(selectedClassId);
     const guardianUids = families.filter((f) => (f.studentLinks || []).some((l) => l.studentId === student.id)).map((f) => f.uid);
+    if (guardianUids.length === 0) throw new Error(`${student.name} has no linked parent account, so this couldn't be sent anywhere.`);
     const existing = normalizeAssessmentResult(assessment.results?.[student.id]);
     const label = `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
     await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
@@ -6824,20 +6829,25 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
   const [notePromptFor, setNotePromptFor] = useState(null); // { assessmentId, studentId } | null
   const [noteDraft, setNoteDraft] = useState("");
   const [generatingNote, setGeneratingNote] = useState(false);
+  const [generateNoteError, setGenerateNoteError] = useState(null);
   const [publishAllFor, setPublishAllFor] = useState(null); // assessment object | null
   const generateNoteFor = async (assessment, student) => {
     setGeneratingNote(true);
+    setGenerateNoteError(null);
+    // Same fix as AssessmentCellDetail's own generateNote — this previously failed silently,
+    // indistinguishable from the button not being wired up at all.
     try {
       const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
       const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
       const label = `${subjectLabel(assessment.subjectId)} — ${assessment.title || "Assessment"}`;
       setNoteDraft(await generatePublishNote(student, label, gradeDesc, config, null));
-    } catch { /* leave the field as-is; teacher can still write one manually */ }
+    } catch (e) { setGenerateNoteError(e?.message || "Generation failed — try again, or write one manually."); }
     setGeneratingNote(false);
   };
   const [messagePromptFor, setMessagePromptFor] = useState(null); // { assessmentId, studentId } | null
   const [messageDraft, setMessageDraft] = useState("");
   const [messageSentFor, setMessageSentFor] = useState(null); // { assessmentId, studentId } | null
+  const [messageSendError, setMessageSendError] = useState(null);
 
   if (assessments.length === 0) {
     return <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments logged for this class yet.</p>;
@@ -6923,10 +6933,19 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                         <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
                           <textarea value={messageDraft} onChange={(e) => setMessageDraft(e.target.value)} rows={2} autoFocus
                             placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+                          {messageSendError && <p className="text-[11px] text-rose-600 mb-1.5">{messageSendError}</p>}
                           <div className="flex gap-2">
-                            <button onClick={async () => { if (!messageDraft.trim()) return; await onMessageAboutAssessment(a, s, subjectLabel(a.subjectId), messageDraft.trim()); setMessageSentFor({ assessmentId: a.id, studentId: s.id }); setMessagePromptFor(null); }}
+                            <button onClick={async () => {
+                              if (!messageDraft.trim()) return;
+                              setMessageSendError(null);
+                              try {
+                                await onMessageAboutAssessment(a, s, subjectLabel(a.subjectId), messageDraft.trim());
+                                setMessageSentFor({ assessmentId: a.id, studentId: s.id });
+                                setMessagePromptFor(null);
+                              } catch (e) { setMessageSendError(e?.message || "Couldn't send — try again."); }
+                            }}
                               className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Send</button>
-                            <button onClick={() => setMessagePromptFor(null)} className="text-xs text-stone-500 hover:text-stone-700">Cancel</button>
+                            <button onClick={() => { setMessagePromptFor(null); setMessageSendError(null); }} className="text-xs text-stone-500 hover:text-stone-700">Cancel</button>
                           </div>
                         </div>
                       ) : (
@@ -6942,6 +6961,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                             {generatingNote ? "Generating…" : "Generate"}
                           </button>
                         </div>
+                        {generateNoteError && <p className="text-[11px] text-rose-600 mb-1">{generateNoteError}</p>}
                         <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} rows={2}
                           placeholder="e.g. Great work on this one — really showing improvement!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
                         <div className="flex gap-2">
@@ -14379,9 +14399,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // assessment. A student with more than one guardian gets a genuinely separate copy sent to each
   // one's own private thread, same as every other direct message in this app already works —
   // never a single shared send.
+  // Same fix and reasoning as the coordinator's own version — no linked guardian previously meant
+  // this did nothing at all while the UI still showed "Message sent."
   const sendMessageAboutAssessment = async (assessment, student, subjectLabel, text) => {
     const families = await fetchClassFamilies(classId);
     const guardianUids = families.filter((f) => (f.studentLinks || []).some((l) => l.studentId === student.id)).map((f) => f.uid);
+    if (guardianUids.length === 0) throw new Error(`${student.name} has no linked parent account, so this couldn't be sent anywhere.`);
     const existing = normalizeAssessmentResult(assessment.results?.[student.id]);
     const label = `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
     await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
@@ -21237,13 +21260,17 @@ function PublishAllModal({ assessment, students, subjectLabel, config, onGenerat
   const [notes, setNotes] = useState({}); // { [studentId]: string }
   const [generatingAll, setGeneratingAll] = useState(false);
   const [generatingFor, setGeneratingFor] = useState(null);
+  const [generateErrors, setGenerateErrors] = useState({}); // { [studentId]: string }
 
   const generateOne = async (student) => {
     setGeneratingFor(student.id);
+    setGenerateErrors((prev) => ({ ...prev, [student.id]: null }));
+    // Same fix as AssessmentCellDetail's own generateNote — a silent failure here was
+    // indistinguishable from the button not working at all.
     try {
       const text = await onGenerateNote(student);
       setNotes((prev) => ({ ...prev, [student.id]: text }));
-    } catch { /* leave blank; teacher can still write one manually */ }
+    } catch (e) { setGenerateErrors((prev) => ({ ...prev, [student.id]: e?.message || "Generation failed." })); }
     setGeneratingFor(null);
   };
   const generateAll = async () => {
@@ -21274,6 +21301,7 @@ function PublishAllModal({ assessment, students, subjectLabel, config, onGenerat
                     {generatingFor === s.id ? "Generating…" : "Generate"}
                   </button>
                 </div>
+                {generateErrors[s.id] && <p className="text-[11px] text-rose-600 mb-1">{generateErrors[s.id]}</p>}
                 <textarea value={notes[s.id] || ""} onChange={(e) => setNotes((prev) => ({ ...prev, [s.id]: e.target.value }))} rows={2}
                   placeholder="Note to show with this (optional)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
               </div>
@@ -21301,10 +21329,16 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
   const [showMessagePrompt, setShowMessagePrompt] = useState(false);
   const [messageDraft, setMessageDraft] = useState("");
   const [messageSent, setMessageSent] = useState(false);
+  const [messageSendError, setMessageSendError] = useState(null);
   const [generatingNote, setGeneratingNote] = useState(false);
+  const [generateNoteError, setGenerateNoteError] = useState(null);
   const generateNote = async () => {
     setGeneratingNote(true);
-    try { setPublishNoteDraft(await onGenerateNote()); } catch { /* leave the field as-is; teacher can still write one manually */ }
+    setGenerateNoteError(null);
+    // Reported directly: this previously failed completely silently — the button would just go
+    // back to its normal state with nothing in the field, indistinguishable from not being wired
+    // up at all. Now shows an actual error instead, so a real failure looks like a failure.
+    try { setPublishNoteDraft(await onGenerateNote()); } catch (e) { setGenerateNoteError(e?.message || "Generation failed — try again, or write one manually."); }
     setGeneratingNote(false);
   };
 
@@ -21384,6 +21418,7 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
                 </button>
               )}
             </div>
+            {generateNoteError && <p className="text-[11px] text-rose-600 mb-1">{generateNoteError}</p>}
             <textarea value={publishNoteDraft} onChange={(e) => setPublishNoteDraft(e.target.value)} rows={2}
               placeholder="e.g. Great work on this one!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
             <button onClick={() => onPublish(publishNoteDraft.trim() || null)} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Publish to Parent(s)</button>
@@ -21402,10 +21437,16 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
           <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5">
             <textarea value={messageDraft} onChange={(e) => setMessageDraft(e.target.value)} rows={2} autoFocus
               placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+            {messageSendError && <p className="text-[11px] text-rose-600 mb-1.5">{messageSendError}</p>}
             <div className="flex gap-2">
-              <button onClick={async () => { if (!messageDraft.trim()) return; await onMessageParent(messageDraft.trim()); setMessageSent(true); }}
+              <button onClick={async () => {
+                if (!messageDraft.trim()) return;
+                setMessageSendError(null);
+                try { await onMessageParent(messageDraft.trim()); setMessageSent(true); }
+                catch (e) { setMessageSendError(e?.message || "Couldn't send — try again."); }
+              }}
                 className="flex-1 bg-teal-700 text-white rounded-lg py-1.5 text-xs font-semibold hover:bg-teal-800">Send</button>
-              <button onClick={() => setShowMessagePrompt(false)} className="text-xs text-stone-500 hover:text-stone-700 px-2">Cancel</button>
+              <button onClick={() => { setShowMessagePrompt(false); setMessageSendError(null); }} className="text-xs text-stone-500 hover:text-stone-700 px-2">Cancel</button>
             </div>
           </div>
         ))}

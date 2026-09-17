@@ -77,7 +77,14 @@ export default async function handler(req, res) {
   // automatically treated as reachable by every preschool family this same way, on top of
   // whatever messagingClassTypes admin may have separately configured.
   const isPreschoolStaff = (caller.assignedClassIds || []).some((id) => classTypeById[id] === "preschool");
-  const messagingClassTypes = [...new Set([...(caller.messagingClassTypes || []), ...(isPreschoolStaff ? ["preschool"] : [])])];
+  // Same reasoning, same pattern, for the General Studies Coordinator: her own real, separate
+  // administrative role (logging English/Math/STEM assessments across every elementary class)
+  // means she needs to actually reach — and be reachable by — every elementary family, not just
+  // whatever assignedClassIds or messagingClassTypes she happens to also have. Computed here at
+  // query time from the flag itself, same as isPreschoolStaff, never stored as a surprising
+  // messagingClassTypes entry.
+  const isCoordinator = !!caller.isGeneralStudiesCoordinator;
+  const messagingClassTypes = [...new Set([...(caller.messagingClassTypes || []), ...(isPreschoolStaff ? ["preschool"] : []), ...(isCoordinator ? ["elementary"] : [])])];
   if (messagingClassTypes.length === 0) {
     return res.status(200).json({ families: [] });
   }
