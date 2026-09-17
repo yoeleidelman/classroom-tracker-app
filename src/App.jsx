@@ -10310,8 +10310,15 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     await markThreadRead(family.uid, item.threadKey);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
   };
+  // Reported by this final review, not live use — but a real, pre-existing bug worth fixing while
+  // already in this exact code: a "teacher" (direct) unread item never actually had a classId field
+  // at all (only classIds, plural — see refreshUnreadThreads' own construction of it above), so
+  // clicking an unread direct-message notification silently called openMessagesFor(undefined)
+  // instead of ever actually opening that teacher's own thread. Branches on item.kind explicitly
+  // now, matching exactly what refreshUnreadThreads actually produces for each kind.
   const openUnread = async (item) => {
     if (item.kind === "admin") await openAdminMessages();
+    else if (item.kind === "teacher") await openTeacherMessages(item.threadKey.slice(8)); // "teacher-{uid}" -> uid
     else await openMessagesFor(item.classId);
     setUnreadThreads((prev) => prev.filter((t) => t.threadKey !== item.threadKey));
   };
@@ -12069,23 +12076,27 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // everywhere in the app, not just after actually navigating into Comm — matches the same
   // reasoning as the parent side's Messages/Blog badges.
   const [commUnreadFamilies, setCommUnreadFamilies] = useState([]);
+  // Reported by this final review, not live use — but a real, significant gap worth fixing before
+  // this ever goes live: this only ever checked the old classroom storage for something to show
+  // here. Since nothing writes a NEW classroom message going forward (the entire point of the
+  // redesign), this banner would have gone silently, permanently stale — never showing a genuinely
+  // new, real, unread direct message again, even though one might actually be waiting.
   const refreshCommUnread = useCallback(async () => {
     // Substitute sessions have no teacher record at all (by design — they're not a real staff
     // account) and no messaging UI to show a badge on in the first place, so this entire
     // computation is simply irrelevant for them, not just something to guard defensively.
     if (!loggedInTeacher) return;
     const relevant = await fetchClassFamilies(classId);
-    // One row per guardian, matching the classroom thread itself now being per-guardian rather
-    // than per-family — otherwise this would ask about class:*:messages:{familyGroupId}, a key
-    // nothing writes to anymore now that each guardian has their own.
+    // One row per guardian — a direct thread is already per-guardian, same reasoning as the
+    // classroom thread this replaces used to need spelling out for.
     const byGuardian = {};
     relevant.forEach((f) => { if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f] }; });
     const readState = await getReadState(loggedInTeacher.uid);
     const results = [];
     for (const g of Object.values(byGuardian)) {
-      const thread = await loadJSON(`class:${classId}:messages:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const thread = await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
       const last = thread?.messages?.[thread.messages.length - 1];
-      const threadKey = `classroom-${g.groupId}`;
+      const threadKey = `teacher-direct-${g.groupId}`;
       if (isThreadUnread(readState, threadKey, last, "teacher")) {
         const unreadCount = countUnreadInThread(readState, threadKey, thread.messages, "teacher");
         results.push({ groupId: g.groupId, threadKey, guardianNames: g.guardians.map((gu) => gu.name).join(" & "), preview: previewForMessage(last), senderName: last.senderName, timestamp: last.timestamp, unreadCount });
@@ -21475,7 +21486,7 @@ function CommunicationListView({ roster, studentData, classId, loggedInTeacher, 
       )}
 
       <button onClick={() => navigate("messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
-        <Mail size={16} /> Classroom Messages
+        <Mail size={16} /> Messages
       </button>
 
       <div className="flex flex-col md:flex-row gap-2 mb-5">
