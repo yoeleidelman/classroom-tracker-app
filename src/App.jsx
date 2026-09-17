@@ -6773,7 +6773,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
                 <button onClick={() => setView("create")} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
                   <Plus size={16} /> Log a new assessment
                 </button>
-                <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects}
+                <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects} config={gsConfig}
                   onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
               </>
             )}
@@ -6789,10 +6789,21 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // business touching). One row per General Studies assessment, one column per student; a cell shows
 // that student's own grade (and a small note indicator, since results already support one) and is
 // directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
-function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onUpdatePartResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenReport }) {
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenReport }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
   const [notePromptFor, setNotePromptFor] = useState(null); // { assessmentId, studentId } | null
   const [noteDraft, setNoteDraft] = useState("");
+  const [generatingNote, setGeneratingNote] = useState(false);
+  const generateNoteFor = async (assessment, student) => {
+    setGeneratingNote(true);
+    try {
+      const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
+      const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+      const label = `${subjectLabel(assessment.subjectId)} — ${assessment.title || "Assessment"}`;
+      setNoteDraft(await generatePublishNote(student, label, gradeDesc, config, null));
+    } catch { /* leave the field as-is; teacher can still write one manually */ }
+    setGeneratingNote(false);
+  };
   const [messagePromptFor, setMessagePromptFor] = useState(null); // { assessmentId, studentId } | null
   const [messageDraft, setMessageDraft] = useState("");
   const [messageSentFor, setMessageSentFor] = useState(null); // { assessmentId, studentId } | null
@@ -6897,13 +6908,12 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateR
                     )}
                     {isPromptOpen && (
                       <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
-                        {/* Reported directly: deliberately never called "message" or "generate
-                            message" anywhere in this UI — it's a note shown alongside the
-                            published card itself, not a message, and never appears in Messages.
-                            AI-generation for this note (matching the existing per-student
-                            generate/review/edit pattern elsewhere) is a real, planned follow-up,
-                            not yet wired in here — this is a plain text field for now. */}
-                        <label className="block text-[11px] font-semibold text-stone-600 mb-1">Add a note to show with this (optional)</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="block text-[11px] font-semibold text-stone-600">Add a note to show with this (optional)</label>
+                          <button onClick={() => generateNoteFor(a, s)} disabled={generatingNote} className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 disabled:opacity-50">
+                            {generatingNote ? "Generating…" : "Generate"}
+                          </button>
+                        </div>
                         <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} rows={2}
                           placeholder="e.g. Great work on this one — really showing improvement!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
                         <div className="flex gap-2">
@@ -21080,6 +21090,12 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
           onSavePart={(partId, value) => onUpdatePartResult(activeAssessment.id, activeCellStudent.id, partId, value)}
           onSaveNote={(note) => onUpdateNote(activeAssessment.id, activeCellStudent.id, note)}
           onPublish={(publishNote) => { onPublishResult(activeAssessment.id, activeCellStudent.id, publishNote); setActiveCell(null); }}
+          onGenerateNote={() => {
+            const normalized = normalizeAssessmentResult(activeAssessment.results?.[activeCellStudent.id]);
+            const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${activeAssessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+            const label = `${subjectLabel(activeAssessment.subjectId)} — ${activeAssessment.title || "Assessment"}`;
+            return generatePublishNote(activeCellStudent, label, gradeDesc, config, null);
+          }}
           onMessageParent={onMessageAboutAssessment ? (text) => onMessageAboutAssessment(activeAssessment, activeCellStudent, subjectLabel(activeAssessment.subjectId), text) : null}
           onClose={() => setActiveCell(null)}
         />
@@ -21152,7 +21168,7 @@ function AssessmentStudentModal({ student, data, config, classAssessments, onClo
   );
 }
 
-function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave, onSavePart, onSaveNote, onPublish, onMessageParent, onClose }) {
+function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave, onSavePart, onSaveNote, onPublish, onGenerateNote, onMessageParent, onClose }) {
   const normalized = normalizeAssessmentResult(value);
   const isMultiPart = !!assessment.parts;
   const [grade, setGrade] = useState(getResultGrade(value));
@@ -21162,6 +21178,12 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
   const [showMessagePrompt, setShowMessagePrompt] = useState(false);
   const [messageDraft, setMessageDraft] = useState("");
   const [messageSent, setMessageSent] = useState(false);
+  const [generatingNote, setGeneratingNote] = useState(false);
+  const generateNote = async () => {
+    setGeneratingNote(true);
+    try { setPublishNoteDraft(await onGenerateNote()); } catch { /* leave the field as-is; teacher can still write one manually */ }
+    setGeneratingNote(false);
+  };
 
   const save = () => {
     if (!grade.trim() && !note.trim()) { onSave(null); return; }
@@ -21231,10 +21253,14 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
         )}
         {normalized && !normalized.published && showPublishNote && (
           <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5 mb-2">
-            {/* Same deliberate wording as everywhere else this appears — never "message" or
-                "generate message." AI-generation for this note is a planned follow-up, not yet
-                wired in here. */}
-            <label className="block text-[11px] font-semibold text-stone-600 mb-1">Add a note to show with this (optional)</label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[11px] font-semibold text-stone-600">Add a note to show with this (optional)</label>
+              {onGenerateNote && (
+                <button onClick={generateNote} disabled={generatingNote} className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 disabled:opacity-50">
+                  {generatingNote ? "Generating…" : "Generate"}
+                </button>
+              )}
+            </div>
             <textarea value={publishNoteDraft} onChange={(e) => setPublishNoteDraft(e.target.value)} rows={2}
               placeholder="e.g. Great work on this one!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
             <button onClick={() => onPublish(publishNoteDraft.trim() || null)} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Publish to Parent(s)</button>
@@ -23604,6 +23630,35 @@ Write 2-3 short paragraphs weaving the exact figures above into natural sentence
     console.error("[generateHybridReport] full prompt that produced an empty response:", prompt);
   }
   return text; // clean, no disclaimer baked in — applied only at actual email send time, never here
+}
+
+// A short, friendly, descriptive note to show alongside a published assessment result — reused
+// per the same generate/review/edit pattern already built for every other AI-assisted message in
+// this app, since it's the same underlying mechanism, just a different prompt. Explicitly NOT
+// called a message anywhere, matching this whole feature's own careful wording elsewhere — this
+// generates the card-only note, never something that goes to Messages.
+async function generatePublishNote(student, assessmentLabel, gradeDescription, config, teacher) {
+  const prompt = `${buildStyleInstructions(config, teacher?.name)}
+
+Write a short, warm note (1-3 sentences) to a parent, to accompany a published assessment result they're about to see on a card in the app. This is NOT a message and will not be sent as one — it's a brief, friendly caption shown alongside the result itself.
+
+Student: ${student.name}
+Assessment: ${assessmentLabel}
+Result: ${gradeDescription}
+
+STRICT RULES:
+- Use ONLY the information given above. Do not invent detail not present here.
+- Keep it brief and warm — this sits on a small card, not a full report.
+- Output only the note text itself, nothing else.`;
+
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 300, messages: [{ role: "user", content: prompt }] }),
+  });
+  if (!response.ok) throw new Error(`Note generation failed: HTTP ${response.status} ${response.statusText}`);
+  const data = await response.json();
+  return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
 }
 
 function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
