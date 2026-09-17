@@ -285,6 +285,19 @@ const GENERAL_STUDIES_SUBJECT_LABELS = new Set(["english", "math", "stem"]);
 function isGeneralStudiesSubject(label) {
   return GENERAL_STUDIES_SUBJECT_LABELS.has((label || "").trim().toLowerCase());
 }
+// Normalizes any assessment result — old plain-string grades, old {grade, note} objects, and the
+// new, richer shape this feature introduces — into one consistent object every screen can rely on.
+// A result from before this feature existed is treated as already published: it was already fully
+// visible to parents before draft/publish existed at all, so nothing about it should suddenly
+// disappear or need republishing just because this shipped. Only a result explicitly created going
+// forward starts as a real, genuine draft.
+function normalizeAssessmentResult(result) {
+  if (result === undefined || result === null) return null;
+  if (typeof result === "string") return { grade: result, published: true };
+  if (result.published !== undefined) return result; // already the new shape
+  return { grade: result.grade, note: result.note, published: true }; // old {grade, note} shape
+}
+
 // Common schedule blocks that fill out a day but aren't academic subjects — offered as
 // suggestions when building a schedule, but deliberately kept out of the Subjects list itself
 // (so they never show up as a row in Benchmarks or the Assessments grid).
@@ -2239,6 +2252,19 @@ async function notifyClassFamilies(classId, title, body, url) {
   const allFamilies = await fetchClassFamilies(classId);
   const uids = allFamilies
     .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && fullTimeStudentIds.has(l.studentId)))
+    .map((f) => f.uid);
+  await sendPushNotification(uids, title, body, url);
+}
+
+// Same shape as notifyClassFamilies just above, but for a specific subset of students within the
+// class rather than everyone — reported directly, for publishing an assessment result to just the
+// family or families whose child actually has a result in it, not the whole class regardless of
+// who was actually assessed.
+async function notifySpecificStudentFamilies(classId, studentIds, title, body, url) {
+  const studentIdSet = new Set(studentIds);
+  const allFamilies = await fetchClassFamilies(classId);
+  const uids = allFamilies
+    .filter((f) => (f.studentLinks || []).some((l) => l.classId === classId && studentIdSet.has(l.studentId)))
     .map((f) => f.uid);
   await sendPushNotification(uids, title, body, url);
 }
@@ -6563,11 +6589,65 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
       if (ca.id !== assessmentId) return ca;
       const nextResults = { ...(ca.results || {}) };
       if (value === null) delete nextResults[studentId];
-      else nextResults[studentId] = value;
+      else {
+        // Reported directly: changing the grade itself re-drafts the result — a parent who
+        // already saw the old, published value shouldn't silently see a new one appear without
+        // the teacher deliberately publishing again. Any existing structural note carries over
+        // unchanged; only the grade and the published flag reset.
+        const existing = normalizeAssessmentResult(nextResults[studentId]);
+        nextResults[studentId] = { ...(existing || {}), grade: value, published: false };
+      }
       return { ...ca, results: nextResults };
     });
     setClassAssessments(next);
     await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
+  };
+
+  // Reported directly: publishing, not grading, is what actually makes a result visible to a
+  // parent and fires the notification — a teacher can freely enter and adjust grades while still
+  // deciding, with nothing showing up on the other side until this is deliberately called.
+  // publishNote is the one-time, card-only blurb (see its own comment on the parent-side card for
+  // the full reasoning on why it's never part of the historical record) — entirely optional, kept
+  // separate from the structural "note" field a teacher might also leave on a result.
+  const publishResult = async (assessmentId, studentId, publishNote) => {
+    const assessment = classAssessments.find((ca) => ca.id === assessmentId);
+    const existing = normalizeAssessmentResult(assessment?.results?.[studentId]);
+    if (!existing) return;
+    const next = classAssessments.map((ca) => {
+      if (ca.id !== assessmentId) return ca;
+      return { ...ca, results: { ...ca.results, [studentId]: { ...existing, published: true, publishedAt: new Date().toISOString(), ...(publishNote ? { publishNote } : {}) } } };
+    });
+    setClassAssessments(next);
+    await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
+    const student = roster.find((s) => s.id === studentId);
+    if (student) {
+      const subjectLabel = gsSubjects.find((s) => s.id === assessment.subjectId)?.label || "an assessment";
+      notifySpecificStudentFamilies(selectedClassId, [studentId], `New ${subjectLabel} assessment published`, publishNote || `${assessment.title || subjectLabel} — ${existing.grade}`, `/?portal=parent&open=home`);
+    }
+  };
+
+  // Publishes every student in this assessment who has a grade entered but isn't published yet —
+  // reported directly, for exactly the "administered to the whole class, wait until everyone's
+  // done (absences included), then publish together" workflow, rather than requiring one-by-one.
+  const publishAllInAssessment = async (assessmentId) => {
+    const assessment = classAssessments.find((ca) => ca.id === assessmentId);
+    if (!assessment) return;
+    const toPublish = Object.entries(assessment.results || {}).filter(([, r]) => {
+      const n = normalizeAssessmentResult(r);
+      return n && !n.published;
+    });
+    const nextResults = { ...assessment.results };
+    toPublish.forEach(([studentId, r]) => {
+      nextResults[studentId] = { ...normalizeAssessmentResult(r), published: true, publishedAt: new Date().toISOString() };
+    });
+    const next = classAssessments.map((ca) => (ca.id === assessmentId ? { ...ca, results: nextResults } : ca));
+    setClassAssessments(next);
+    await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
+    const subjectLabel = gsSubjects.find((s) => s.id === assessment.subjectId)?.label || "an assessment";
+    const studentIds = toPublish.map(([studentId]) => studentId);
+    if (studentIds.length > 0) {
+      notifySpecificStudentFamilies(selectedClassId, studentIds, `New ${subjectLabel} assessment published`, assessment.title || subjectLabel, "/?portal=parent&open=home");
+    }
   };
 
   const updateStudentParentEmail = async (studentId, email) => {
@@ -6652,7 +6732,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
                   <Plus size={16} /> Log a new assessment
                 </button>
                 <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects}
-                  onUpdateResult={updateResult} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
+                  onUpdateResult={updateResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
               </>
             )}
           </>
@@ -6667,38 +6747,79 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // business touching). One row per General Studies assessment, one column per student; a cell shows
 // that student's own grade (and a small note indicator, since results already support one) and is
 // directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
-function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onOpenReport }) {
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onPublishResult, onPublishAll, onOpenReport }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
+  const [notePromptFor, setNotePromptFor] = useState(null); // { assessmentId, studentId } | null
+  const [noteDraft, setNoteDraft] = useState("");
+
   if (assessments.length === 0) {
     return <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments logged for this class yet.</p>;
   }
   return (
     <div className="space-y-3">
-      {[...assessments].sort((a, b) => new Date(b.date) - new Date(a.date)).map((a) => (
-        <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-1">
-            <div>
-              <p className="font-semibold text-stone-900">{a.title || subjectLabel(a.subjectId)}</p>
-              <p className="text-xs text-stone-400">{subjectLabel(a.subjectId)} · {a.date} {a.loggedBy ? `· logged by ${a.loggedBy}` : ""}</p>
+      {[...assessments].sort((a, b) => new Date(b.date) - new Date(a.date)).map((a) => {
+        const normalizedResults = Object.fromEntries(Object.entries(a.results || {}).map(([sid, r]) => [sid, normalizeAssessmentResult(r)]));
+        const unpublishedCount = Object.values(normalizedResults).filter((r) => r && !r.published).length;
+        return (
+          <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-1">
+              <div>
+                <p className="font-semibold text-stone-900">{a.title || subjectLabel(a.subjectId)}</p>
+                <p className="text-xs text-stone-400">{subjectLabel(a.subjectId)} · {a.date} {a.loggedBy ? `· logged by ${a.loggedBy}` : ""}</p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                {unpublishedCount > 0 && (
+                  <button onClick={() => onPublishAll(a.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Publish all ({unpublishedCount})</button>
+                )}
+                <button onClick={() => onOpenReport(a.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Report & send</button>
+              </div>
             </div>
-            <button onClick={() => onOpenReport(a.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Report & send</button>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
+              {roster.map((s) => {
+                const existing = normalizedResults[s.id];
+                const grade = existing?.grade || "";
+                const isPromptOpen = notePromptFor?.assessmentId === a.id && notePromptFor?.studentId === s.id;
+                return (
+                  <div key={s.id}>
+                    <div className="flex items-center gap-1.5">
+                      <span className="flex-1 text-xs text-stone-600 truncate" title={existing?.note || undefined}>{s.name}{existing?.note ? " •" : ""}</span>
+                      {existing && (
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${existing.published ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                          {existing.published ? "Published" : "Draft"}
+                        </span>
+                      )}
+                      <input defaultValue={grade} onBlur={(e) => onUpdateResult(a.id, s.id, e.target.value.trim() || null)}
+                        placeholder="—" className="w-16 rounded-lg border border-stone-300 px-1.5 py-1 text-xs" />
+                      {existing && !existing.published && (
+                        <button onClick={() => { setNotePromptFor({ assessmentId: a.id, studentId: s.id }); setNoteDraft(""); }}
+                          className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish</button>
+                      )}
+                    </div>
+                    {isPromptOpen && (
+                      <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
+                        {/* Reported directly: deliberately never called "message" or "generate
+                            message" anywhere in this UI — it's a note shown alongside the
+                            published card itself, not a message, and never appears in Messages.
+                            AI-generation for this note (matching the existing per-student
+                            generate/review/edit pattern elsewhere) is a real, planned follow-up,
+                            not yet wired in here — this is a plain text field for now. */}
+                        <label className="block text-[11px] font-semibold text-stone-600 mb-1">Add a note to show with this (optional)</label>
+                        <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} rows={2}
+                          placeholder="e.g. Great work on this one — really showing improvement!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+                        <div className="flex gap-2">
+                          <button onClick={() => { onPublishResult(a.id, s.id, noteDraft.trim() || null); setNotePromptFor(null); }}
+                            className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Publish to Parent(s)</button>
+                          <button onClick={() => setNotePromptFor(null)} className="text-xs font-semibold text-stone-500 hover:text-stone-700">Cancel</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-3">
-            {roster.map((s) => {
-              const existing = a.results?.[s.id];
-              const grade = typeof existing === "object" ? existing.grade : (existing || "");
-              const note = typeof existing === "object" ? existing.note : "";
-              return (
-                <div key={s.id} className="flex items-center gap-1.5">
-                  <span className="flex-1 text-xs text-stone-600 truncate" title={note || undefined}>{s.name}{note ? " •" : ""}</span>
-                  <input defaultValue={grade} onBlur={(e) => onUpdateResult(a.id, s.id, e.target.value.trim() || null)}
-                    placeholder="—" className="w-16 rounded-lg border border-stone-300 px-1.5 py-1 text-xs" />
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -10123,11 +10244,14 @@ function HomeworkPreviewCard({ link, onSeeAll }) {
 function AssessmentsPreviewCard({ link, onSeeAll }) {
   const { value: assessments, loaded } = useLiveJSONLoaded(`class:${link.classId}:classAssessments`, []);
   if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
-  const mine = assessments.filter((a) => a.results && a.results[link.studentId] !== undefined)
+  // Only ever a published result — a parent never sees a draft a teacher is still working on, and
+  // this is exactly what a real, new-assessment push notification is timed to (see publishResult's
+  // own comment for the full reasoning on why publishing, not grading, is the moment that matters).
+  const mine = assessments
+    .map((a) => ({ ...a, result: normalizeAssessmentResult(a.results?.[link.studentId]) }))
+    .filter((a) => a.result?.published)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const latest = mine[0];
-  const latestResult = latest?.results?.[link.studentId];
-  const latestGrade = typeof latestResult === "object" ? latestResult.grade : latestResult;
 
   return (
     <div className="bg-white border-2 border-stone-200 rounded-xl p-4 mb-4">
@@ -10143,9 +10267,12 @@ function AssessmentsPreviewCard({ link, onSeeAll }) {
         <button onClick={onSeeAll} className="block w-full text-left">
           <div className="flex items-center justify-between">
             <p className="text-sm font-bold text-stone-900">{latest.title || "Assessment"}</p>
-            {latestGrade && <p className="text-sm font-bold text-teal-700">{latestGrade}</p>}
+            {latest.result.grade && <p className="text-sm font-bold text-teal-700">{latest.result.grade}</p>}
           </div>
           <p className="text-xs text-stone-400">{new Date(latest.date).toLocaleDateString([], { month: "short", day: "numeric" })}</p>
+          {/* The card-only note — see publishResult's own comment for why this is deliberately
+              never a message and never part of the historical record shown in the full list. */}
+          {latest.result.publishNote && <p className="text-xs text-stone-600 mt-1">{latest.result.publishNote}</p>}
         </button>
       )}
     </div>
@@ -10167,7 +10294,12 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
   if (!assessmentsLoaded || !configLoaded) return <p className="text-sm text-stone-400 text-center py-12">Loading…</p>;
 
   const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
-  const mine = assessments.filter((a) => a.results && a.results[link.studentId] !== undefined)
+  // Only ever a published result — same reasoning as AssessmentsPreviewCard's own filter. Note the
+  // publishNote field is deliberately never shown here — that one-time blurb belongs only to
+  // Home's own preview card, not this fuller, ongoing record (see publishResult's own comment).
+  const mine = assessments
+    .map((a) => ({ ...a, result: normalizeAssessmentResult(a.results?.[link.studentId]) }))
+    .filter((a) => a.result?.published)
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 
   return (
@@ -10182,9 +10314,7 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
         ) : (
           <div className="space-y-3">
             {mine.map((a) => {
-              const result = a.results[link.studentId];
-              const grade = typeof result === "object" ? result.grade : result;
-              const note = typeof result === "object" ? result.note : "";
+              const { grade, note } = a.result;
               const label = `${subjectLabel(a.subjectId)} — ${a.title || "Assessment"} — ${a.date}${grade ? ` — ${grade}` : ""}`;
               return (
                 <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
