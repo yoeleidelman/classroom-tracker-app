@@ -2958,6 +2958,25 @@ function AppInner() {
   // regardless of whether a class is currently open — set back to false to return to wherever this
   // was opened from, not tied to leaving or re-entering any particular class.
   const [showGlobalMessages, setShowGlobalMessages] = useState(false);
+  // Reported directly: a dual-role account (admin/teacher and parent both) had far too many taps
+  // to get from one side's messages to the other's — switch accounts, land on that side's home
+  // screen, then navigate into messages all over again, even though the whole point of switching
+  // in that moment was just to check the other side's messages. These two shortcuts skip straight
+  // there instead. switchToParentMessages updates the URL's own tab param just before switching —
+  // ParentPortalApp reads that same param fresh on its own first mount, which happens exactly
+  // when activeMode flips to "parent," so no separate prop is needed for it to open there directly.
+  // switchToTeacherMessages reuses showGlobalMessages, the same state that already governs showing
+  // StaffMessagesHome instead of the normal teacher home/admin screen.
+  const switchToParentMessages = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "messages");
+    window.history.replaceState({}, "", url);
+    setActiveMode("parent");
+  };
+  const switchToTeacherMessages = () => {
+    setActiveMode("teacher");
+    setShowGlobalMessages(true);
+  };
   const [authUser, setAuthUser] = useState(null); // the raw Firebase Auth user object
   // The signed-in family's own record, for the parent portal — live-subscribed rather than the
   // one-time fetch authResolvedFamily itself is, so a change made from the admin side (a newly
@@ -4572,7 +4591,7 @@ function AppInner() {
         onSignInWithGoogle={signInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={completeGoogleLink} googleSignInError={googleSignInError} />;
     }
     return <ParentPortalApp family={currentFamily} onSignOut={async () => { if (authUser) { try { await disableNotificationsFor(authUser.uid); } catch { /* best-effort */ } } return signOut(auth); }} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword}
-      canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} onDismissMessagingOnboarding={dismissMyMessagingOnboarding} onDismissFanOutTooltip={dismissFanOutTooltip} />;
+      canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} onSwitchToTeacherMessages={switchToTeacherMessages} onDismissMessagingOnboarding={dismissMyMessagingOnboarding} onDismissFanOutTooltip={dismissFanOutTooltip} />;
   }
 
   // Substitute session — a separate, code-based entry point that bypasses every other login
@@ -4613,7 +4632,7 @@ function AppInner() {
     // real, individual account (never the synthetic "admin-oversight" stand-in used specifically
     // for an admin BROWSING a class, which is a genuinely different, shared-identity situation).
     if (showGlobalMessages) {
-      return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff}
+      return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={switchToParentMessages} onSignOut={signOutStaff}
         deepLinkGroupId={pendingStaffDeepLink?.groupId} onBack={() => setShowGlobalMessages(false)} onDismissOnboarding={dismissMessagingOnboarding} />;
     }
     if (currentTeacher.role === "admin") {
@@ -4647,7 +4666,7 @@ function AppInner() {
       // standalone messages page instead of an empty class picker with nowhere to go; there is
       // deliberately no class list here at all, not even a placeholder one.
       if (myClasses.length === 0 && (currentTeacher.messagingClassTypes || []).length > 0) {
-        return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff} deepLinkGroupId={pendingStaffDeepLink?.groupId} onDismissOnboarding={dismissMessagingOnboarding} />;
+        return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={switchToParentMessages} onSignOut={signOutStaff} deepLinkGroupId={pendingStaffDeepLink?.groupId} onDismissOnboarding={dismissMessagingOnboarding} />;
       }
       return <TeacherClassPicker teacherName={currentTeacher.name} classes={myClasses} onSelect={enterAssignedClass} onSignOut={signOutStaff}
         rawAssignedClassIds={currentTeacher.assignedClassIds || []} registry={registry} />;
@@ -9805,7 +9824,7 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
   );
 }
 
-function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher, onDismissMessagingOnboarding, onDismissFanOutTooltip }) {
+function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher, onSwitchToTeacherMessages, onDismissMessagingOnboarding, onDismissFanOutTooltip }) {
   const [parentTab, setParentTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home"); // "home" | "messages" | "blog" | "homework" | "settings" — persistent top bar, not a toggled overlay
 
   // Records, once per real session here, whether this family is actually using the app installed
@@ -11021,6 +11040,16 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           const allTeachers = eligibleTeachers || [];
           return (
           <div className="space-y-3">
+            {/* Reported directly: a dual-role account had to fully switch accounts, land on
+                teacher home, then navigate into messages all over again — even though checking
+                messages was the entire reason for switching in that moment. Only shown for an
+                account that actually has both roles; for anyone else this button has nowhere
+                useful to go, so it doesn't appear at all. */}
+            {canSwitchToTeacher && (
+              <button onClick={onSwitchToTeacherMessages} className="w-full flex items-center justify-center gap-1.5 bg-white border border-teal-300 text-teal-700 rounded-lg py-2 text-xs font-semibold hover:bg-teal-50">
+                <MessageCircle size={14} /> Switch to teacher view — Messages
+              </button>
+            )}
             {/* Shown exactly once per family — see dismissMyMessagingOnboarding's own comment for
                 the full reasoning. Every conversation this family had before is still here,
                 unchanged; this only explains where to find them now. */}
