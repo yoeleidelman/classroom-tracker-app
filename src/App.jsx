@@ -6552,6 +6552,16 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
   const [roster, setRoster] = useState(null); // null = loading
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [classAssessments, setClassAssessments] = useState([]);
+  // Same school-wide template store the regular teacher-side uses — a template she builds here is
+  // immediately available there too, and vice versa, since it's the same single, shared record.
+  const [assessmentTemplates, setAssessmentTemplates] = useState([]);
+  useEffect(() => { loadJSON("assessmentTemplates", [], true).then(setAssessmentTemplates); }, []);
+  const saveAssessmentTemplate = async (template) => {
+    const entry = { id: uid(), ...template, createdBy: loggedInTeacher.name, createdByUid: loggedInTeacher.uid };
+    const next = [entry, ...assessmentTemplates];
+    setAssessmentTemplates(next);
+    await saveJSON("assessmentTemplates", next, true);
+  };
   const [view, setView] = useState("grid"); // "grid" | "create" | "report" | "browse" | "messages" | "account"
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [showMyAccount, setShowMyAccount] = useState(false);
@@ -6757,7 +6767,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
             {roster === null ? (
               <p className="text-sm text-stone-400 text-center py-12">Loading…</p>
             ) : view === "create" ? (
-              <ClassAssessmentForm roster={roster} config={gsConfig} onCancel={() => setView("grid")} onSave={addAssessment} />
+              <ClassAssessmentForm roster={roster} config={gsConfig} templates={assessmentTemplates} onSaveTemplate={saveAssessmentTemplate} onCancel={() => setView("grid")} onSave={addAssessment} />
             ) : (
               <>
                 <button onClick={() => setView("create")} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
@@ -12749,6 +12759,16 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [editingBlogPost, setEditingBlogPost] = useState(null);
   const [homeworkPosts, setHomeworkPosts] = useState([]);
   const [classAssessments, setClassAssessments] = useState([]);
+  // Reported directly: school-wide, not per-class — a template built while working in one class
+  // needs to be just as usable in any other, without needing to rebuild it there too.
+  const [assessmentTemplates, setAssessmentTemplates] = useState([]);
+  useEffect(() => { loadJSON("assessmentTemplates", [], true).then(setAssessmentTemplates); }, []);
+  const saveAssessmentTemplate = async (template) => {
+    const entry = { id: uid(), ...template, createdBy: loggedByName, createdByUid: loggedInTeacher?.uid };
+    const next = [entry, ...assessmentTemplates];
+    setAssessmentTemplates(next);
+    await saveJSON("assessmentTemplates", next, true);
+  };
   const [classPoints, setClassPoints] = useState({});
   const [monthlyReportState, setMonthlyReportState] = useState({ dismissedMonth: null });
   const [reflections, setReflections] = useState([]);
@@ -14961,7 +14981,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
 
       {view === "class-assessment-form" && (
-        <ClassAssessmentForm roster={roster} config={config} onCancel={() => navigateView("assessments")}
+        <ClassAssessmentForm roster={roster} config={config} templates={assessmentTemplates} onSaveTemplate={saveAssessmentTemplate} onCancel={() => navigateView("assessments")}
           onSave={(entry) => { addClassAssessment(entry); navigateView("assessments"); }} />
       )}
 
@@ -21285,7 +21305,7 @@ function levelColorFor(levels, levelLabel) {
   return LEVEL_COLOR_CYCLE[idx % LEVEL_COLOR_CYCLE.length] || LEVEL_COLOR_CYCLE[0];
 }
 
-function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
+function ClassAssessmentForm({ roster, config, templates, onSaveTemplate, onCancel, onSave }) {
   const [subjectId, setSubjectId] = useState(null);
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(todayISO());
@@ -21293,15 +21313,12 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
   const [notes, setNotes] = useState({});
   const [noteOpenFor, setNoteOpenFor] = useState({});
   const [selectedIds, setSelectedIds] = useState([]);
-  // Reported directly: a teacher can define an assessment as having several independently-scored
-  // parts (e.g. 5 sub-skills, or a full 25-item evaluation), each with its own label and its own
-  // kind of value — plain free text (a grade or short answer), or a small, teacher-defined set of
-  // levels (e.g. "Above Level / At Level / Below Level"). Deliberately optional and additive: a
-  // simple, single-grade assessment (still the common case) is completely unaffected — this is
-  // its own explicit choice, not something every assessment now has to think about.
   const [isMultiPart, setIsMultiPart] = useState(false);
   const [parts, setParts] = useState([]); // [{ id, label, valueType: "grade" | "levels", levels: [string] }]
   const [partResults, setPartResults] = useState({}); // { [studentId]: { [partId]: value } }
+  const [saveAsTemplateName, setSaveAsTemplateName] = useState("");
+  const [showSaveTemplate, setShowSaveTemplate] = useState(false);
+  const [templateSaved, setTemplateSaved] = useState(false);
 
   // Recomputed every time the chosen subject changes, not just once on mount — a student added
   // for specific periods only belongs in this list for the one subject those periods actually
@@ -21374,6 +21391,30 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
         </div>
       </div>
 
+      {/* Reported directly: once a teacher (or the coordinator, across any of her own classes)
+          builds a particular multi-part structure, she shouldn't have to rebuild it from scratch
+          next time she wants the same style of assessment again. Picking one here pre-fills the
+          parts below — still fully editable afterward, not locked to the template. */}
+      {templates && templates.length > 0 && (
+        <div className="mb-4">
+          <label className="block text-sm font-semibold text-stone-700 mb-1">Start from a saved template (optional)</label>
+          <select value="" onChange={(e) => {
+            const t = templates.find((tpl) => tpl.id === e.target.value);
+            if (!t) return;
+            setIsMultiPart(true);
+            setParts(t.parts.map((p) => ({ ...p, id: uid() })));
+            // A best-effort match against this class's own subjects, by the template's own saved
+            // label — matched, not guaranteed, since a template built for one class isn't
+            // guaranteed the exact same subject exists (with the exact same id) in another.
+            const matched = subjects.find((s) => s.label.toLowerCase() === t.subjectLabel?.toLowerCase());
+            if (matched) setSubjectId(matched.id);
+          }} className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm bg-white">
+            <option value="">Choose a template…</option>
+            {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+      )}
+
       <label className="flex items-center gap-2 mb-4 text-sm font-semibold text-stone-700 cursor-pointer">
         <input type="checkbox" checked={isMultiPart} onChange={(e) => setIsMultiPart(e.target.checked)} className="rounded border-stone-300" />
         This assessment has multiple parts
@@ -21406,6 +21447,27 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
             </div>
           ))}
           <button onClick={addPart} className="text-xs font-semibold text-teal-700 hover:text-teal-900 flex items-center gap-1"><Plus size={13} /> Add a part</button>
+
+          {onSaveTemplate && parts.some((p) => p.label.trim()) && (
+            templateSaved ? (
+              <p className="text-xs text-emerald-700">Template saved.</p>
+            ) : !showSaveTemplate ? (
+              <button onClick={() => setShowSaveTemplate(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900 flex items-center gap-1">Save these parts as a reusable template</button>
+            ) : (
+              <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5">
+                <input value={saveAsTemplateName} onChange={(e) => setSaveAsTemplateName(e.target.value)} placeholder="Template name, e.g. Reading Evaluation (25-point)"
+                  className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+                <div className="flex gap-2">
+                  <button onClick={() => {
+                    if (!saveAsTemplateName.trim()) return;
+                    onSaveTemplate({ name: saveAsTemplateName.trim(), subjectLabel, parts: parts.filter((p) => p.label.trim()).map(({ id, ...rest }) => rest) });
+                    setTemplateSaved(true); setShowSaveTemplate(false);
+                  }} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Save template</button>
+                  <button onClick={() => setShowSaveTemplate(false)} className="text-xs text-stone-500 hover:text-stone-700">Cancel</button>
+                </div>
+              </div>
+            )
+          )}
         </div>
       )}
 
