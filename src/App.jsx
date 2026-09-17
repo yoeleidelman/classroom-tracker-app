@@ -7296,14 +7296,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
 
       {showReachOut && (
         <MultiAssessmentReachOutModal byStudent={selectedByStudent}
-          onGenerateNote={(student, items) => {
-            const gradeDescs = items.map(({ assessment, subjectLabel: subjLabel }) => {
-              const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
-              const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
-              return `${subjLabel} — ${assessment.title || "Assessment"}: ${gradeDesc}`;
-            }).join("; ");
-            return generatePublishNote(student, "several assessments", gradeDescs, config, null);
-          }}
+          onGenerateNote={(student, items) => generateAssessmentReachOutMessage(student, items, config, null)}
           onSend={(student, items, text) => onMessageAboutAssessments(items, student, text)}
           onClose={() => { setShowReachOut(false); exitSelectMode(); }} />
       )}
@@ -21687,14 +21680,7 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
 
       {showReachOut && (
         <MultiAssessmentReachOutModal byStudent={selectedByStudent}
-          onGenerateNote={(student, items) => {
-            const gradeDescs = items.map(({ assessment, subjectLabel: subjLabel }) => {
-              const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
-              const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
-              return `${subjLabel} — ${assessment.title || "Assessment"}: ${gradeDesc}`;
-            }).join("; ");
-            return generatePublishNote(student, "several assessments", gradeDescs, config, null);
-          }}
+          onGenerateNote={(student, items) => generateAssessmentReachOutMessage(student, items, config, null)}
           onSend={(student, items, text) => onMessageAboutAssessments(items, student, text)}
           onClose={() => { setShowReachOut(false); exitSelectMode(); }} />
       )}
@@ -24435,6 +24421,43 @@ STRICT RULES:
     body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 300, messages: [{ role: "user", content: prompt }] }),
   });
   if (!response.ok) throw new Error(`Note generation failed: HTTP ${response.status} ${response.statusText}`);
+  const data = await response.json();
+  return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+}
+
+// Reported directly: caught while reviewing the multi-select reach-out feature just built —
+// reusing generatePublishNote there was a real mismatch, since that prompt specifically tells the
+// model it's writing a card-only caption that "will not be sent as a message," while this is for
+// an actual, real message that genuinely does get sent (tagged with a reference to every selected
+// assessment, in Message Teacher/Parent About This Assessment and its multi-select follow-up
+// alike). Same underlying mechanism as every other AI-assisted send in this app — just a prompt
+// actually written for what this one is.
+async function generateAssessmentReachOutMessage(student, items, config, teacher) {
+  const resultLines = items.map(({ assessment, subjectLabel }) => {
+    const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
+    const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+    return `- ${subjectLabel} — ${assessment.title || "Assessment"} (${assessment.date}): ${gradeDesc}`;
+  }).join("\n");
+
+  const prompt = `${buildStyleInstructions(config, teacher?.name)}
+
+Write a short, warm, direct message (2-4 sentences) to a parent, following up about one or more of their child's assessment results. This IS a real message that will actually be sent to the parent, not a caption or a card — write it as an actual message a teacher would send.
+
+Student: ${student.name}
+Assessment${items.length > 1 ? "s" : ""} this message is about:
+${resultLines}
+
+STRICT RULES:
+- Use ONLY the information given above. Do not invent detail not present here.
+- If there is more than one assessment listed, address them together naturally in one message — don't just list them mechanically.
+- Output only the message text itself, nothing else.`;
+
+  const response = await fetch("/api/generate", {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 400, messages: [{ role: "user", content: prompt }] }),
+  });
+  if (!response.ok) throw new Error(`Message generation failed: HTTP ${response.status} ${response.statusText}`);
   const data = await response.json();
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
 }
