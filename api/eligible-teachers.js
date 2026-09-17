@@ -6,11 +6,14 @@
 // reachable through two of this family's classes, or reachable both by class and by grade level,
 // still appears exactly once).
 //
-// label is admin's own per-class description of that person's actual role there (e.g. "Judaic
-// Studies Teacher"), since the same person's role can genuinely differ by classroom — never
-// derived from anything about the account itself. When a person is reachable through more than
-// one of this family's classes, whichever of those classes actually has a label set for them
-// wins; if none do, label comes back empty and the app falls back to just their name.
+// label is admin's own description of that person's actual role, stored once directly on their
+// own account — one single label per teacher, the same one every family sees, regardless of which
+// of that teacher's classes actually connects them. This used to be set per class instead (the
+// same person could show up with a different label depending on which class a family reached them
+// through), back when a family could still have a genuinely separate conversation per class with
+// the same teacher; the messaging redesign collapses that to exactly one thread per person, so a
+// label that could still vary by class would only ever look like an arbitrary, unpredictable pick
+// rather than a deliberate one.
 //
 // This runs server-side specifically because families have no Firestore-level read access to
 // teacher:* records at all (only that person can read their own, and admin can read any) — giving
@@ -105,18 +108,10 @@ export default async function handler(req, res) {
   const linkedClassTypes = [...new Set([...storedLinkedClassTypes, ...derivedLinkedClassTypes])];
 
   // Every one of this family's linked classes, plus every other class sharing a type this family
-  // is connected to — the full set of classIds whose messagingLabels could plausibly apply here.
+  // is connected to — still needed below for the eligibility check itself (relevantClassIds), even
+  // though it no longer also drives the label lookup the way it used to.
   const candidateClassIds = new Set(linkedClassIds);
   allClasses.forEach((c) => { if (linkedClassTypes.includes(c.classType || "elementary")) candidateClassIds.add(c.id); });
-
-  // This is the one read that genuinely can't start until candidateClassIds is known, so it still
-  // runs after the two above — but it now overlaps with the in-flight staff query above instead
-  // of waiting for it to finish first.
-  const labelDocs = await Promise.all(
-    [...candidateClassIds].map((id) => db.collection("data").doc(`class:${id}:messagingLabels`).get())
-  );
-  const labelsByClassId = {};
-  [...candidateClassIds].forEach((id, i) => { labelsByClassId[id] = labelDocs[i].exists ? labelDocs[i].data().value || {} : {}; });
 
   // Queries both roles now, not just "teacher" — an admin-role account can be just as
   // individually reachable as a teacher-role one (assignedClassIds or messagingClassTypes work
@@ -147,18 +142,15 @@ export default async function handler(req, res) {
     const eligibleViaClassTypes = [...candidateClassIds].filter((id) => messagingTypes.includes(classTypeById[id]) && linkedClassTypes.includes(classTypeById[id]));
     const relevantClassIds = [...new Set([...eligibleViaClassIds, ...eligibleViaClassTypes])];
     if (relevantClassIds.length === 0) return;
-    const label = relevantClassIds.map((id) => labelsByClassId[id]?.[t.uid]).find((l) => l && l.trim()) || "";
-    // Per-class, not collapsed to one value the way `label` above is — a teacher whose own admin-
-    // assigned role genuinely differs by classroom (Judaic Studies for one of this family's kids,
-    // General Studies for another) needs the app to show each child their own correct label, not
-    // whichever one happened to be found first across every class this person is reachable
-    // through. The conversation itself is unaffected either way — it's keyed by this teacher and
-    // this guardian alone, never by class or label, so a parent always lands in the exact same
-    // single thread with this person regardless of which child's label led them there; only what's
-    // shown on the outside, before that tap, is meant to vary.
-    const labelsByClassIdForTeacher = Object.fromEntries(
-      relevantClassIds.map((id) => [id, labelsByClassId[id]?.[t.uid] || ""]).filter(([, l]) => l)
-    );
+    // One label per teacher now, stored directly on their own account (set once, admin-side, the
+    // same way messageSignOff and messagingClassTypes already are) — not one per class the way
+    // this used to work. That per-class version made sense back when the same person could show up
+    // as a genuinely separate conversation per class; now that every family reaches this same
+    // person through exactly one single thread regardless of which of their classes connects them,
+    // showing a DIFFERENT label depending on which child happened to lead a parent here would only
+    // ever look like an arbitrary, unpredictable pick — never a deliberate choice — since the
+    // conversation itself is the same one either way.
+    const label = t.messagingLabel || "";
     // One of the teacher's OWN assigned classes (not necessarily one shared with this family) —
     // needed only so a tapped notification can deep-link into that teacher's app at all, since
     // entering some class of theirs is a prerequisite their app has for showing any messages
@@ -180,7 +172,6 @@ export default async function handler(req, res) {
       uid: t.uid, name: t.name, label, deepLinkClassId: assigned[0] || null,
       classIds: eligibleViaClassIds,
       reachableClassTypes: messagingTypes.filter((type) => linkedClassTypes.includes(type)),
-      labelsByClassId: labelsByClassIdForTeacher,
     });
     // Reported directly: a preschool room commonly has more than one teacher sharing it, and a
     // parent wanting to reach everyone in the room had no way to do that except messaging each

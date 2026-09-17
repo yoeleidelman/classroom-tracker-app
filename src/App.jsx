@@ -5852,61 +5852,43 @@ function ClearAdminMessagesTool() {
 // same person's role can genuinely differ by classroom (a Judaic Studies teacher in one room, a
 // General Studies teacher in another). A parent picking who to message sees this instead of
 // having to guess from a bare name; the account itself never carries a single fixed title.
-function ClassMessagingLabelsEditor({ activeClasses, teachers }) {
-  const [selectedClassId, setSelectedClassId] = useState(activeClasses[0]?.id || "");
-  const [labels, setLabels] = useState(null); // { [uid]: "label text" }
-  const [drafts, setDrafts] = useState({});
+// Reported directly, as part of a careful review before this went any further: this used to let
+// admin set a DIFFERENT label for the same teacher in each of their classes (the same person could
+// be "Judaic Studies Teacher" for one family and "General Studies Teacher" for another, depending
+// on which class connected them) — which made real sense when a family could have a genuinely
+// separate conversation per class with that same teacher. The messaging redesign collapses that to
+// exactly one thread per person, so a label that could still vary by class would only ever look
+// like an arbitrary, unpredictable pick to whichever family happened to see it, not a deliberate
+// choice — this is the fix: one single, real label per teacher, school-wide, stored directly on
+// their own account (updateTeacherRecord, the same place messageSignOff and messagingClassTypes
+// already live), shown to every family the same way regardless of which of their classes actually
+// connects them.
+//
+// A teacher who previously had different labels set per class will start here with no label at
+// all — there's no way to correctly, automatically pick just one of several conflicting old
+// values, so this is a genuine, one-time thing worth telling admin about directly rather than
+// silently guessing: whoever had a customized label before will need it re-entered once, here.
+function ClassMessagingLabelsEditor({ teachers, onUpdateTeacher }) {
+  const [drafts, setDrafts] = useState(() => Object.fromEntries((teachers || []).map((t) => [t.uid, t.messagingLabel || ""])));
   const [savedFor, setSavedFor] = useState(null);
 
-  const selectedClass = activeClasses.find((c) => c.id === selectedClassId);
-
-  // Everyone parents of THIS class can currently message individually — same eligibility rule
-  // the family-facing endpoint uses, just computed here directly since admin already has full
-  // read access to every teacher record. Falls back to "elementary" for a class missing its own
-  // classType field (any class created before that field existed at all) — the exact same default
-  // eligible-teachers.js already applies for the real, parent-facing version of this same check.
-  // Without it, a class that predates classType would never match anyone's messagingClassTypes at
-  // all (undefined never equals a real type like "elementary"), silently hiding every
-  // grade-level-only person from this editor for that class — not because they're actually
-  // unreachable, just because this one screen couldn't see them.
-  const eligiblePeople = (teachers || []).filter((t) => {
-    if (t.active === false) return false;
-    const viaClass = (t.assignedClassIds || []).includes(selectedClassId);
-    const viaGradeLevel = selectedClass && (t.messagingClassTypes || []).includes(selectedClass.classType || "elementary");
-    return viaClass || viaGradeLevel;
-  });
-
-  useEffect(() => {
-    (async () => {
-      setLabels(null);
-      if (!selectedClassId) { setLabels({}); return; }
-      const data = (await loadJSON(`class:${selectedClassId}:messagingLabels`, {}, true)) || {};
-      setLabels(data);
-      setDrafts(data);
-    })();
-  }, [selectedClassId]);
+  const activePeople = (teachers || []).filter((t) => t.active !== false);
 
   const saveLabel = async (uid) => {
     const value = (drafts[uid] || "").trim();
-    const next = { ...labels, [uid]: value };
-    await saveJSON(`class:${selectedClassId}:messagingLabels`, next, true);
-    setLabels(next);
+    await onUpdateTeacher(uid, { messagingLabel: value });
     setSavedFor(uid);
     setTimeout(() => setSavedFor(null), 2000);
   };
 
   return (
     <div>
-      <select value={selectedClassId} onChange={(e) => setSelectedClassId(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3">
-        {activeClasses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-      </select>
-      <p className="text-xs text-stone-400 mb-3">This is what parents of {selectedClass?.name || "this class"} see under each person's name when choosing who to message — not the same thing as changing their account. Edit anytime; changes apply right away.</p>
-
-      {labels === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-      {labels !== null && eligiblePeople.length === 0 && <p className="text-sm text-stone-400 text-center py-8">Nobody is individually messageable for this class yet.</p>}
-      {labels !== null && (
+      <p className="text-xs text-stone-400 mb-3">This is what parents see under each person's name when choosing who to message — one single label per person, the same for every family, regardless of which class actually connects them. Not the same thing as changing their account otherwise. Edit anytime; changes apply right away.</p>
+      {activePeople.length === 0 ? (
+        <p className="text-sm text-stone-400 text-center py-8">No staff accounts yet.</p>
+      ) : (
         <div className="space-y-2">
-          {eligiblePeople.map((t) => (
+          {activePeople.map((t) => (
             <div key={t.uid} className="bg-white border border-stone-200 rounded-xl p-3.5">
               <p className="text-sm font-semibold text-stone-900 mb-1.5">{t.name}</p>
               <div className="flex gap-2">
@@ -6954,7 +6936,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               <Plus size={12} /> Edit labels
             </button>
           ) : (
-            <ClassMessagingLabelsEditor activeClasses={activeClasses} teachers={teachers} />
+            <ClassMessagingLabelsEditor teachers={teachers} onUpdateTeacher={onUpdateTeacher} />
           )}
         </div>
         <div className="pt-1 mb-6">
@@ -10984,7 +10966,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 // that matches a class this family is actually linked to — a small, secondary tag
                 // near the name (never the headline the way it was in the old per-child view),
                 // since a parent recognizes a teacher by name first, role second.
-                const primaryLabel = t.classIds.map((id) => t.labelsByClassId?.[id]).find((l) => l) || t.label;
+                // One label per teacher now (see eligible-teachers.js's own comment on why), so
+                // this is simply their one, single label — no longer something that could vary
+                // depending on which child led here.
+                const primaryLabel = t.label;
                 return (
                 <button key={t.uid} onClick={() => openTeacherMessages(t.uid).then(refreshUnreadThreads)}
                   className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
