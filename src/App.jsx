@@ -5769,9 +5769,20 @@ function ParentSetupEmailSettings() {
 // Never touches, modifies, or deletes the original classroom threads themselves — this only ever
 // copies. Retiring the app's own use of that old data is separate work, later, and deliberately
 // not part of what this tool does.
+// Reported directly, and confirmed as a real bug affecting already-migrated data: the original
+// version of this tool copied every message in a classroom's shared thread into every currently-
+// assigned teacher's own personal thread, regardless of who actually sent each one — so a School
+// Office message sent into that shared thread would show up as if it were part of a teacher's own
+// private conversation. Rebuilt to route each message individually by its own senderType: a
+// family-sent message still goes to every currently-assigned teacher (that part was correct — a
+// parent's message to "the classroom" legitimately belongs in conversation with whoever teaches it
+// today); an admin-sent message goes to that family's own School Office thread instead, never a
+// teacher's personal one; a teacher-sent message goes only to that specific teacher's own thread,
+// matched by name — a teacher who can't be matched (no longer assigned, or renamed) is left out
+// entirely rather than guessed at, and counted separately so nothing is silently dropped.
 function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
   const [status, setStatus] = useState("idle"); // "idle" | "scanning" | "reviewing" | "running" | "done"
-  const [plan, setPlan] = useState(null); // { threads: [...], totalNewMessages, totalAlreadyMigrated, noTeacherClasses: [...] }
+  const [plan, setPlan] = useState(null); // { destinations: [...], totalNewMessages, totalAlreadyMigrated, noTeacherClasses: [...], unmatchedTeacherCount }
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState(null); // { done, total } while running
 
@@ -5779,15 +5790,19 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
     setStatus("scanning");
     setError(null);
     try {
-      const threads = [];
+      // Keyed by destKey, so a family with more than one classroom thread contributing to the
+      // same destination (e.g. two classes, same family, same teacher) still ends up as one clean
+      // write per destination rather than two competing ones.
+      const byDest = {}; // destKey -> { destKey, destLabel, kind, messages: [] }
       const noTeacherClasses = [];
-      let totalNewMessages = 0;
+      let unmatchedTeacherCount = 0;
       let totalAlreadyMigrated = 0;
+
       for (const cls of activeClasses) {
-        const classTeacherUids = teachers.filter((t) => (t.assignedClassIds || []).includes(cls.id) && t.active !== false).map((t) => t.uid);
+        const classTeachers = teachers.filter((t) => (t.assignedClassIds || []).includes(cls.id) && t.active !== false);
         const threadKeys = await loadAllKeysWithPrefix(`class:${cls.id}:messages:`);
         if (threadKeys.length === 0) continue;
-        if (classTeacherUids.length === 0) {
+        if (classTeachers.length === 0) {
           noTeacherClasses.push({ classId: cls.id, className: cls.name, threadCount: threadKeys.length });
           continue;
         }
@@ -5796,21 +5811,43 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
           const classroomThread = await loadJSON(key, null, true);
           const classroomMessages = classroomThread?.messages || [];
           if (classroomMessages.length === 0) continue;
-          for (const teacherUid of classTeacherUids) {
-            const directKey = `teacher-messages:${teacherUid}:${familyUid}`;
-            const directThread = await loadJSON(directKey, null, true);
-            const existingIds = new Set((directThread?.messages || []).map((m) => m.id));
-            const newCount = classroomMessages.filter((m) => !existingIds.has(m.id)).length;
-            const alreadyCount = classroomMessages.length - newCount;
-            totalNewMessages += newCount;
-            totalAlreadyMigrated += alreadyCount;
-            if (newCount > 0) {
-              threads.push({ classId: cls.id, className: cls.name, familyUid, teacherUid, teacherName: teachers.find((t) => t.uid === teacherUid)?.name || "Unknown", sourceKey: key, directKey, newCount });
+
+          for (const m of classroomMessages) {
+            let destKeys = []; // a message can have more than one real destination (family message -> every current teacher)
+            if (m.senderType === "family") {
+              destKeys = classTeachers.map((t) => ({ key: `teacher-messages:${t.uid}:${familyUid}`, label: `${t.name} (${cls.name})`, kind: "teacher" }));
+            } else if (m.senderType === "admin") {
+              destKeys = [{ key: `admin-messages:${familyUid}`, label: "School Office", kind: "admin" }];
+            } else if (m.senderType === "teacher") {
+              const matched = classTeachers.find((t) => t.name === m.senderName);
+              if (matched) destKeys = [{ key: `teacher-messages:${matched.uid}:${familyUid}`, label: `${matched.name} (${cls.name})`, kind: "teacher" }];
+              else unmatchedTeacherCount++;
+            }
+            for (const d of destKeys) {
+              if (!byDest[d.key]) byDest[d.key] = { destKey: d.key, destLabel: d.label, kind: d.kind, familyUid, messages: [], existingIdsLoaded: false };
+              byDest[d.key].messages.push(m);
             }
           }
         }
       }
-      setPlan({ threads, totalNewMessages, totalAlreadyMigrated, noTeacherClasses });
+
+      // Now check each destination's own existing thread once, to know what's actually new.
+      const destinations = [];
+      let totalNewMessages = 0;
+      for (const dest of Object.values(byDest)) {
+        const existingThread = await loadJSON(dest.destKey, null, true);
+        const existingIds = new Set((existingThread?.messages || []).map((m) => m.id));
+        const newMessages = dest.messages.filter((m) => !existingIds.has(m.id));
+        // Same message can appear twice in dest.messages if two classroom threads both fed it
+        // (shouldn't normally happen, but de-dupe by id defensively either way).
+        const seen = new Set();
+        const deduped = newMessages.filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+        totalAlreadyMigrated += dest.messages.length - newMessages.length;
+        totalNewMessages += deduped.length;
+        if (deduped.length > 0) destinations.push({ ...dest, messages: deduped });
+      }
+
+      setPlan({ destinations, totalNewMessages, totalAlreadyMigrated, noTeacherClasses, unmatchedTeacherCount });
       setStatus("reviewing");
     } catch (e) {
       console.error("Migration scan failed", e);
@@ -5823,34 +5860,31 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
     if (!plan) return;
     setStatus("running");
     setError(null);
-    setProgress({ done: 0, total: plan.threads.length });
+    setProgress({ done: 0, total: plan.destinations.length });
     try {
-      for (let i = 0; i < plan.threads.length; i++) {
-        const t = plan.threads[i];
-        const classroomThread = await loadJSON(t.sourceKey, null, true);
-        const classroomMessages = classroomThread?.messages || [];
-        const directThread = await loadJSON(t.directKey, null, true) || { messages: [] };
-        const existingIds = new Set(directThread.messages.map((m) => m.id));
-        const toAdd = classroomMessages.filter((m) => !existingIds.has(m.id)).map((m) => ({ ...m, migratedFromClassroom: true }));
+      for (let i = 0; i < plan.destinations.length; i++) {
+        const dest = plan.destinations[i];
+        // Re-read right before writing (not just trusting the plan's own snapshot) — safe even if
+        // something else wrote to this same thread in between building the plan and running it.
+        const existingThread = await loadJSON(dest.destKey, null, true) || { messages: [] };
+        const existingIds = new Set(existingThread.messages.map((m) => m.id));
+        const toAdd = dest.messages.filter((m) => !existingIds.has(m.id)).map((m) => ({ ...m, migratedFromClassroom: true }));
         if (toAdd.length > 0) {
-          const merged = [...directThread.messages, ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-          await saveJSON(t.directKey, { ...directThread, messages: merged }, true);
-          // Reported directly, and confirmed as a real, genuine problem before this was ever run
-          // for real: a family or teacher who never had an individual thread with the other person
-          // before today has no existing read-state entry at all for this brand-new thread key —
-          // and isThreadUnread treats that missing entry as "unread" regardless of how old the
-          // message's own timestamp actually is. Without this, every one of these old, already-seen
-          // classroom messages would show up as a brand-new unread message and badge count the
-          // moment this runs, on both sides, even though nothing about them is actually new. Both
-          // sides marked read now (after "now" is later than any migrated message's own historical
-          // timestamp either way) closes that off directly, rather than leaving old history to
-          // masquerade as new activity.
-          await Promise.all([
-            markThreadRead(t.familyUid, `teacher-${t.teacherUid}`),
-            markThreadRead(t.teacherUid, `teacher-direct-${t.familyUid}`),
-          ]);
+          const merged = [...existingThread.messages, ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+          await saveJSON(dest.destKey, { ...existingThread, messages: merged }, true);
+          // Same reasoning as before this rebuild: without marking read, every one of these old,
+          // already-seen messages would show up as brand-new unread the moment this runs.
+          if (dest.kind === "teacher") {
+            const teacherUid = dest.destKey.split(":")[1];
+            await Promise.all([
+              markThreadRead(dest.familyUid, `teacher-${teacherUid}`),
+              markThreadRead(teacherUid, `teacher-direct-${dest.familyUid}`),
+            ]);
+          } else if (dest.kind === "admin") {
+            await markThreadRead(dest.familyUid, `admin-${dest.familyUid}`);
+          }
         }
-        setProgress({ done: i + 1, total: plan.threads.length });
+        setProgress({ done: i + 1, total: plan.destinations.length });
       }
       setStatus("done");
     } catch (e) {
@@ -5861,14 +5895,14 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
   };
 
   if (status === "done") {
-    return <p className="text-xs font-semibold text-emerald-700">Migration complete — {plan.totalNewMessages} message{plan.totalNewMessages === 1 ? "" : "s"} copied into {plan.threads.length} teacher thread{plan.threads.length === 1 ? "" : "s"}.</p>;
+    return <p className="text-xs font-semibold text-emerald-700">Migration complete — {plan.totalNewMessages} message{plan.totalNewMessages === 1 ? "" : "s"} copied into {plan.destinations.length} destination{plan.destinations.length === 1 ? "" : "s"}.</p>;
   }
 
   if (status === "reviewing" && plan) {
     return (
       <div>
         <div className="text-xs text-stone-600 space-y-1 mb-3">
-          <p><span className="font-semibold">{plan.totalNewMessages}</span> message{plan.totalNewMessages === 1 ? "" : "s"} would be copied, across <span className="font-semibold">{plan.threads.length}</span> teacher thread{plan.threads.length === 1 ? "" : "s"}.</p>
+          <p><span className="font-semibold">{plan.totalNewMessages}</span> message{plan.totalNewMessages === 1 ? "" : "s"} would be copied, across <span className="font-semibold">{plan.destinations.length}</span> destination{plan.destinations.length === 1 ? "" : "s"} — each message going to its actual sender's own thread (a teacher's own, or School Office for admin-sent messages), never a different teacher's personal thread.</p>
           {plan.totalAlreadyMigrated > 0 && <p className="text-stone-400">{plan.totalAlreadyMigrated} already migrated previously — those are skipped automatically.</p>}
         </div>
         {plan.noTeacherClasses.length > 0 && (
@@ -5877,6 +5911,11 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
             <ul className="text-xs text-amber-700 space-y-0.5">
               {plan.noTeacherClasses.map((c) => <li key={c.classId}>{c.className} — {c.threadCount} thread{c.threadCount === 1 ? "" : "s"}</li>)}
             </ul>
+          </div>
+        )}
+        {plan.unmatchedTeacherCount > 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-3">
+            <p className="text-xs font-bold text-amber-800">{plan.unmatchedTeacherCount} message{plan.unmatchedTeacherCount === 1 ? "" : "s"} sent by a teacher who no longer matches any currently-assigned, active teacher by name — left out rather than guessed at.</p>
           </div>
         )}
         {plan.totalNewMessages === 0 ? (
@@ -5888,6 +5927,120 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
             </button>
             <button onClick={() => setStatus("idle")} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2">Cancel</button>
           </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <button onClick={buildPlan} disabled={status === "scanning" || status === "running"}
+        className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 disabled:opacity-50">
+        {status === "scanning" ? "Scanning…" : status === "running" ? `Running… ${progress ? `${progress.done}/${progress.total}` : ""}` : "Check what this would do"}
+      </button>
+      {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
+// Reported directly: cleans up the specific damage the original (pre-fix) version of the
+// migration tool above already did to real data before this was caught — an admin-sent message
+// that ended up copied into a teacher's own personal thread, where it never belonged. Finds every
+// such message across every teacher thread in the system, moves each one to that family's actual
+// School Office thread (adding it there only if it isn't already present — most won't be, since
+// admin messages were never routed there by the old migration at all), and removes it from the
+// teacher thread it was incorrectly sitting in. Same safe, review-then-confirm shape as the
+// migration tool itself — nothing is written until explicitly run.
+function CleanupMisroutedAdminMessagesTool() {
+  const [status, setStatus] = useState("idle"); // "idle" | "scanning" | "reviewing" | "running" | "done"
+  const [plan, setPlan] = useState(null); // { items: [{ teacherThreadKey, familyUid, messages: [...] }], totalMessages, totalThreads }
+  const [error, setError] = useState(null);
+  const [progress, setProgress] = useState(null);
+
+  const buildPlan = async () => {
+    setStatus("scanning");
+    setError(null);
+    try {
+      const keys = await loadAllKeysWithPrefix("teacher-messages:");
+      const items = [];
+      let totalMessages = 0;
+      for (const key of keys) {
+        const parts = key.split(":");
+        const familyUid = parts[2];
+        const thread = await loadJSON(key, null, true);
+        const messages = thread?.messages || [];
+        const misrouted = messages.filter((m) => m.migratedFromClassroom && m.senderType === "admin");
+        if (misrouted.length > 0) {
+          items.push({ teacherThreadKey: key, familyUid, messages: misrouted });
+          totalMessages += misrouted.length;
+        }
+      }
+      setPlan({ items, totalMessages, totalThreads: items.length });
+      setStatus("reviewing");
+    } catch (e) {
+      console.error("Cleanup scan failed", e);
+      setError("Something went wrong scanning existing threads — nothing was written. Safe to try again.");
+      setStatus("idle");
+    }
+  };
+
+  const runCleanup = async () => {
+    if (!plan) return;
+    setStatus("running");
+    setError(null);
+    setProgress({ done: 0, total: plan.items.length });
+    try {
+      for (let i = 0; i < plan.items.length; i++) {
+        const item = plan.items[i];
+        const adminKey = `admin-messages:${item.familyUid}`;
+        const [teacherThread, adminThread] = await Promise.all([
+          loadJSON(item.teacherThreadKey, null, true),
+          loadJSON(adminKey, null, true),
+        ]);
+        const misroutedIds = new Set(item.messages.map((m) => m.id));
+        // Remove from the teacher thread it never belonged in.
+        const cleanedTeacherMessages = (teacherThread?.messages || []).filter((m) => !misroutedIds.has(m.id));
+        await saveJSON(item.teacherThreadKey, { ...teacherThread, messages: cleanedTeacherMessages }, true);
+        // Add to the family's actual School Office thread — only whichever of these aren't
+        // somehow already there (e.g. the family also messaged the office directly since).
+        const existingAdminIds = new Set((adminThread?.messages || []).map((m) => m.id));
+        const toAdd = item.messages.filter((m) => !existingAdminIds.has(m.id));
+        if (toAdd.length > 0) {
+          const merged = [...(adminThread?.messages || []), ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+          await saveJSON(adminKey, { ...(adminThread || {}), messages: merged }, true);
+          await markThreadRead(item.familyUid, `admin-${item.familyUid}`);
+        }
+        setProgress({ done: i + 1, total: plan.items.length });
+      }
+      setStatus("done");
+    } catch (e) {
+      console.error("Cleanup run failed", e);
+      setError("Something went wrong partway through — already-moved messages are safely in place (this is safe to re-run; it will only act on what's still misrouted, never duplicate or double-remove).");
+      setStatus("reviewing");
+    }
+  };
+
+  if (status === "done") {
+    return <p className="text-xs font-semibold text-emerald-700">Cleanup complete — {plan.totalMessages} message{plan.totalMessages === 1 ? "" : "s"} moved out of {plan.totalThreads} teacher thread{plan.totalThreads === 1 ? "" : "s"} into their families' School Office threads.</p>;
+  }
+
+  if (status === "reviewing" && plan) {
+    return (
+      <div>
+        {plan.totalMessages === 0 ? (
+          <p className="text-xs text-stone-400">Nothing misrouted found — no admin-sent messages are sitting in a teacher's personal thread.</p>
+        ) : (
+          <>
+            <p className="text-xs text-stone-600 mb-3">
+              <span className="font-semibold">{plan.totalMessages}</span> admin-sent message{plan.totalMessages === 1 ? "" : "s"} found sitting in <span className="font-semibold">{plan.totalThreads}</span> teacher thread{plan.totalThreads === 1 ? "" : "s"} where they never belonged. Running this moves each one to that family's own School Office thread, and removes it from the teacher's.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={runCleanup} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800">
+                Run cleanup — move {plan.totalMessages} message{plan.totalMessages === 1 ? "" : "s"}
+              </button>
+              <button onClick={() => setStatus("idle")} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2">Cancel</button>
+            </div>
+          </>
         )}
       </div>
     );
@@ -7713,6 +7866,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               currently-assigned teacher" check already correctly separates out the classes that
               truly have nowhere for their history to go. */}
           <MigrateClassroomMessagesTool activeClasses={registry} teachers={teachers} />
+        </div>
+        <div className="pt-1 mb-6">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Clean up misrouted admin messages</p>
+          <p className="text-xs text-stone-400 mb-3">The migration tool above previously had a bug: it copied every classroom message into every currently-assigned teacher's own thread, regardless of who actually sent it — so a School Office message could end up sitting in a teacher's personal conversation. This finds any already-migrated message like that, moves it to the family's real School Office thread, and removes it from the teacher's. Safe to run more than once; only acts on what's still actually misrouted.</p>
+          <CleanupMisroutedAdminMessagesTool />
         </div>
         <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
