@@ -13415,7 +13415,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           openAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
           openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); navigateView("skill-category-report"); }}
           activateAssessment={activateAssessment} hideAssessment={hideAssessment} createCustomAssessment={createCustomAssessment}
-          updateClassAssessmentResult={updateClassAssessmentResult} onUpdatePartResult={updateClassAssessmentPartResult} onUpdateNote={updateClassAssessmentNote} onPublishResult={publishClassAssessmentResult} onPublishAll={publishAllInClassAssessment} onMessageAboutAssessment={sendMessageAboutAssessment}
+          updateClassAssessmentResult={updateClassAssessmentResult} onUpdatePartResult={updateClassAssessmentPartResult} onUpdateNote={updateClassAssessmentNote} onPublishResult={publishClassAssessmentResult} onPublishAll={publishAllInClassAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onMessageAboutAssessments={sendMessageAboutAssessments}
           onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); navigateView("session"); }}
           onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); navigateView("fluency"); }}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
@@ -21304,7 +21304,7 @@ function ClassPointsCard({ cat, value, onAdd, onSubtract, onReset }) {
 
 // ---------- Assessments ----------
 
-function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onUpdatePartResult, onUpdateNote, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId, navigate }) {
+function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onMessageAboutAssessments, onUpdatePartResult, onUpdateNote, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId, navigate }) {
   const [showAdd, setShowAdd] = useState(false);
   const activeCats = config.categories.filter((c) => c.active !== false);
   const libraryCats = config.categories.filter((c) => c.active === false);
@@ -21350,7 +21350,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
         <Plus size={16} /> Log an assessment
       </button>
       <AssessmentGridView roster={roster} studentData={studentData} classAssessments={classAssessments} config={config}
-        onUpdateResult={updateClassAssessmentResult} onUpdatePartResult={onUpdatePartResult} onUpdateNote={onUpdateNote} onPublishResult={onPublishResult} onPublishAll={onPublishAll} onMessageAboutAssessment={onMessageAboutAssessment}
+        onUpdateResult={updateClassAssessmentResult} onUpdatePartResult={onUpdatePartResult} onUpdateNote={onUpdateNote} onPublishResult={onPublishResult} onPublishAll={onPublishAll} onMessageAboutAssessment={onMessageAboutAssessment} onMessageAboutAssessments={onMessageAboutAssessments}
         onStartSession={onStartSession} onLogFluency={onLogFluency}
         onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail}
         initialStudentId={initialStudentId} />
@@ -21488,10 +21488,31 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
   );
 }
 
-function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
+function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment, onMessageAboutAssessments, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
   const [activeStudentId, setActiveStudentId] = useState(initialStudentId || null);
   const [publishAllFor, setPublishAllFor] = useState(null); // assessment object | null
+  // Same multi-select the coordinator's own grid already has — tag several assessments (or a
+  // whole subject's worth, by selecting every row under it) at once, reaching out about all of
+  // them together in one message per student rather than one assessment at a time.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedCells, setSelectedCells] = useState(new Set()); // "assessmentId:studentId"
+  const [showReachOut, setShowReachOut] = useState(false);
+  const cellKey = (assessmentId, studentId) => `${assessmentId}:${studentId}`;
+  const toggleCell = (assessmentId, studentId) => setSelectedCells((prev) => {
+    const next = new Set(prev);
+    const key = cellKey(assessmentId, studentId);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const toggleRow = (assessment) => setSelectedCells((prev) => {
+    const rowKeys = roster.filter((s) => assessment.results?.[s.id] !== undefined).map((s) => cellKey(assessment.id, s.id));
+    const allSelected = rowKeys.length > 0 && rowKeys.every((k) => prev.has(k));
+    const next = new Set(prev);
+    rowKeys.forEach((k) => (allSelected ? next.delete(k) : next.add(k)));
+    return next;
+  });
+  const exitSelectMode = () => { setSelectMode(false); setSelectedCells(new Set()); };
   const subjects = config?.subjects || [];
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
 
@@ -21520,8 +21541,28 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
   const activeCellStudent = activeCell ? roster.find((s) => s.id === activeCell.studentId) : null;
   const activeStudent = activeStudentId ? roster.find((s) => s.id === activeStudentId) : null;
 
+  // Grouped by student, for the reach-out modal — each family only ever gets their own child's
+  // own message, tagged with every one of that student's selected results at once.
+  const selectedByStudent = {};
+  selectedCells.forEach((key) => {
+    const [assessmentId, studentId] = key.split(":");
+    const assessment = classAssessments.find((ca) => ca.id === assessmentId);
+    const student = roster.find((s) => s.id === studentId);
+    if (!assessment || !student) return;
+    if (!selectedByStudent[studentId]) selectedByStudent[studentId] = { student, items: [] };
+    selectedByStudent[studentId].items.push({ assessment, subjectLabel: subjectLabel(assessment.subjectId) });
+  });
+
   return (
     <div>
+      <div className="flex items-center justify-between mb-2">
+        <button onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+          className={`text-xs font-semibold px-3 py-1.5 rounded-lg border ${selectMode ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300 hover:bg-teal-50"}`}>
+          {selectMode ? "Done selecting" : "Select assessments"}
+        </button>
+        {selectMode && <p className="text-xs text-stone-400">Tap cells to select, or tap a row's own checkbox to select everyone in it.</p>}
+      </div>
+
       <div className="overflow-auto border border-stone-200 rounded-xl" style={{ maxHeight: "70vh" }}>
         <table className="border-collapse text-sm w-full">
           <thead>
@@ -21542,17 +21583,28 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
             {sorted.map((ca, i) => {
               const isNewGroup = i === 0 || ca.subjectId !== sorted[i - 1].subjectId;
               const unpublishedCount = Object.values(ca.results || {}).filter((r) => !normalizeAssessmentResult(r)?.published).length;
+              const rowKeys = roster.filter((s) => ca.results?.[s.id] !== undefined).map((s) => cellKey(ca.id, s.id));
+              const rowFullySelected = rowKeys.length > 0 && rowKeys.every((k) => selectedCells.has(k));
               return (
                 <tr key={ca.id} className={isNewGroup && i > 0 ? "border-t-2 border-t-stone-300" : ""}>
                   <td className="group sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
-                    <div className="font-semibold text-stone-800 text-xs">{subjectLabel(ca.subjectId)}</div>
-                    <div className="text-[11px] text-stone-400">{ca.title ? `${ca.title} · ` : ""}{ca.date}</div>
-                    <div className="flex items-center gap-2">
-                      {unpublishedCount > 0 && (
-                        <button onClick={() => setPublishAllFor(ca)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
-                          Publish all ({unpublishedCount})
+                    <div className="flex items-start gap-1.5">
+                      {selectMode && rowKeys.length > 0 && (
+                        <button onClick={() => toggleRow(ca)} className={`mt-0.5 w-3.5 h-3.5 rounded border shrink-0 flex items-center justify-center ${rowFullySelected ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
+                          {rowFullySelected && <Check size={9} className="text-white" />}
                         </button>
                       )}
+                      <div>
+                        <div className="font-semibold text-stone-800 text-xs">{subjectLabel(ca.subjectId)}</div>
+                        <div className="text-[11px] text-stone-400">{ca.title ? `${ca.title} · ` : ""}{ca.date}</div>
+                        <div className="flex items-center gap-2">
+                          {unpublishedCount > 0 && (
+                            <button onClick={() => setPublishAllFor(ca)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
+                              Publish all ({unpublishedCount})
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </td>
                   {roster.map((s) => {
@@ -21562,9 +21614,11 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
                     const grade = isMultiPart ? (filledCount > 0 ? `${filledCount}/${ca.parts.length}` : "") : getResultGrade(ca.results?.[s.id]);
                     const hasNote = !!getResultNote(ca.results?.[s.id]);
                     const isPublished = getResultPublished(ca.results?.[s.id]);
+                    const hasResult = ca.results?.[s.id] !== undefined;
+                    const isSelected = selectedCells.has(cellKey(ca.id, s.id));
                     return (
-                      <td key={s.id} onClick={() => setActiveCell({ assessmentId: ca.id, studentId: s.id })}
-                        className="border-b border-stone-100 px-3 py-2 text-center cursor-pointer hover:bg-teal-50 text-xs">
+                      <td key={s.id} onClick={() => (selectMode ? (hasResult && toggleCell(ca.id, s.id)) : setActiveCell({ assessmentId: ca.id, studentId: s.id }))}
+                        className={`border-b border-stone-100 px-3 py-2 text-center text-xs ${selectMode ? (hasResult ? "cursor-pointer" : "cursor-default") : "cursor-pointer hover:bg-teal-50"} ${isSelected ? "bg-teal-100" : ""}`}>
                         {grade || <span className="text-stone-300">—</span>}
                         {hasNote && <span className="ml-1 text-amber-500" title="Has a note">●</span>}
                         {grade && !isPublished && <span className="ml-1 text-amber-600" title="Draft — not yet published to parents">✎</span>}
@@ -21577,6 +21631,16 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
           </tbody>
         </table>
       </div>
+
+      {selectMode && selectedCells.size > 0 && (
+        <div className="sticky bottom-0 mt-3 bg-white border border-teal-300 rounded-xl p-3 flex items-center justify-between shadow-lg">
+          <p className="text-xs font-semibold text-stone-700">{selectedCells.size} result{selectedCells.size === 1 ? "" : "s"} selected across {Object.keys(selectedByStudent).length} student{Object.keys(selectedByStudent).length === 1 ? "" : "s"}</p>
+          <div className="flex gap-2">
+            <button onClick={() => setSelectedCells(new Set())} className="text-xs font-semibold text-stone-500 hover:text-stone-700">Clear</button>
+            <button onClick={() => setShowReachOut(true)} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Message about selected</button>
+          </div>
+        </div>
+      )}
 
       {activeCell && activeAssessment && activeCellStudent && (
         <AssessmentCellDetail
@@ -21619,6 +21683,20 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
           }}
           onConfirm={(notes) => { onPublishAll(publishAllFor.id, notes); setPublishAllFor(null); }}
           onClose={() => setPublishAllFor(null)} />
+      )}
+
+      {showReachOut && (
+        <MultiAssessmentReachOutModal byStudent={selectedByStudent}
+          onGenerateNote={(student, items) => {
+            const gradeDescs = items.map(({ assessment, subjectLabel: subjLabel }) => {
+              const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
+              const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+              return `${subjLabel} — ${assessment.title || "Assessment"}: ${gradeDesc}`;
+            }).join("; ");
+            return generatePublishNote(student, "several assessments", gradeDescs, config, null);
+          }}
+          onSend={(student, items, text) => onMessageAboutAssessments(items, student, text)}
+          onClose={() => { setShowReachOut(false); exitSelectMode(); }} />
       )}
     </div>
   );
