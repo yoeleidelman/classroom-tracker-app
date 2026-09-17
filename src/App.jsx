@@ -21082,7 +21082,10 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   const { className } = useContext(ClassContext);
   const [groups, setGroups] = useState(null); // null = loading
   const [openGroup, setOpenGroup] = useState(null);
-  const [mode, setMode] = useState(deepLinkIsDirect ? "direct" : "inbox"); // "inbox" | "direct" | "compose"
+  // "inbox" (classroom messages) removed entirely per the messaging redesign — every conversation
+  // here is a direct one now; deepLinkIsDirect is kept as a parameter for now (existing deep-link
+  // URLs still pass it) but no longer changes anything, since "direct" is the only starting mode.
+  const [mode, setMode] = useState("direct"); // "direct" | "broadcasts" | "compose"
   const [directGroups, setDirectGroups] = useState(null); // families this teacher can message individually, across every class they teach
   const [openDirectGroup, setOpenDirectGroup] = useState(null);
   const [openBroadcastId, setOpenBroadcastId] = useState(null);
@@ -21372,12 +21375,9 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
       <button onClick={() => safeGoBack(null, () => navigate("home"))} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-lg font-bold text-stone-900 mb-3">{mode === "direct" ? "My Direct Messages" : "Classroom Messages"}</h1>
+      <h1 className="display-font text-lg font-bold text-stone-900 mb-3">{mode === "direct" ? "My Direct Messages" : mode === "broadcasts" ? "Broadcasts" : "New Broadcast"}</h1>
 
-      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[34rem]">
-        <button onClick={() => setMode("inbox")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "inbox" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
-          <Mail size={14} /> Classroom
-        </button>
+      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[26rem]">
         <button onClick={() => setMode("direct")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "direct" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
           <MessageCircle size={14} /> Direct
         </button>
@@ -21408,7 +21408,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
             ))}
           </div>
         </>
-      ) : mode === "direct" ? (
+      ) : (
         <>
           <p className="text-xs text-stone-400 mb-3">Only you see these — not any other teacher sharing a class with these families, and not admin (though admin can view for oversight).</p>
           {directGroups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
@@ -21422,38 +21422,6 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const unreadCount = countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher");
               return (
                 <button key={g.groupId} onClick={() => openDirectGroupThread(g)} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-semibold text-stone-900">{guardianNames}</p>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {unreadCount > 0 && (
-                        <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
-                          {unreadCount > 9 ? "9+" : unreadCount}
-                        </span>
-                      )}
-                      {last && <p className="text-[10px] text-stone-400">{new Date(last.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</p>}
-                    </div>
-                  </div>
-                  <p className="text-xs text-stone-400 mb-1">{childNames}</p>
-                  <p className="text-xs text-stone-500 truncate">{last ? `${last.senderType === "teacher" ? "You: " : ""}${previewForMessage(last)}` : "No messages yet"}</p>
-                </button>
-              );
-            })}
-          </div>
-        </>
-      ) : (
-        <>
-          {groups === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
-          {groups?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are linked to this class yet.</p>}
-
-          <div className="space-y-2">
-            {sortedGroups.map((g) => {
-              const thread = threads[g.groupId];
-              const last = thread?.messages?.[thread.messages.length - 1];
-              const childNames = (g.studentLinks || []).filter((l) => l.classId === classId).map((l) => l.studentName).join(", ");
-              const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-              const unreadCount = countUnreadInThread(listReadState, `classroom-${g.groupId}`, thread?.messages, "teacher");
-              return (
-                <button key={g.groupId} onClick={() => openClassroomGroup(g)} className="w-full text-left bg-white border border-stone-200 rounded-xl p-4 hover:border-teal-300">
                   <div className="flex items-center justify-between gap-2">
                     <p className="font-semibold text-stone-900">{guardianNames}</p>
                     <div className="flex items-center gap-1.5 shrink-0">
