@@ -6958,6 +6958,23 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
     const label = `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
     await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
   };
+  // Reported directly: the multi-select follow-up promised earlier — tagging several assessments
+  // (or a whole subject's worth) at once and reaching out about all of them together in a single
+  // message, rather than one assessment, one message, one at a time. Same underlying send as the
+  // single-assessment version above; the only real difference is the reference tag itself, which
+  // joins every selected assessment's own label into one combined list so the teacher (and later,
+  // the parent reading it) can see exactly which results the message is about, all at once.
+  const sendMessageAboutAssessments = async (items, student, text) => {
+    const families = await fetchClassFamilies(selectedClassId);
+    const guardianUids = families.filter((f) => (f.studentLinks || []).some((l) => l.studentId === student.id)).map((f) => f.uid);
+    if (guardianUids.length === 0) throw new Error(`${student.name} has no linked parent account, so this couldn't be sent anywhere.`);
+    const labels = items.map(({ assessment, subjectLabel }) => {
+      const existing = normalizeAssessmentResult(assessment.results?.[student.id]);
+      return `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
+    });
+    const label = labels.join("; ");
+    await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
+  };
 
   const updateStudentParentEmail = async (studentId, email) => {
     const next = roster.map((s) => (s.id === studentId ? { ...s, parentEmail: email } : s));
@@ -7080,7 +7097,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
                   </div>
                 )}
                 <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects} config={gsConfig}
-                  onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onUpdateNote={updateNote} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} />
+                  onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onUpdateNote={updateNote} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onMessageAboutAssessments={sendMessageAboutAssessments} />
               </>
             )}
           </>
@@ -7098,10 +7115,31 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // already uses: assessments as rows (grouped by subject), students as columns, one cell per
 // result — click a cell to open the same detail/publish/message flow, all in one place, nothing to
 // search through.
-function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment }) {
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment, onMessageAboutAssessments }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
   const [publishAllFor, setPublishAllFor] = useState(null); // assessment object | null
+  // Reported directly, the multi-select follow-up: tagging several assessments (or a whole
+  // subject's worth, by selecting every row under it) at once, reaching out about all of them
+  // together in one message per student rather than one assessment, one message, one at a time.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedCells, setSelectedCells] = useState(new Set()); // "assessmentId:studentId"
+  const [showReachOut, setShowReachOut] = useState(false);
+  const cellKey = (assessmentId, studentId) => `${assessmentId}:${studentId}`;
+  const toggleCell = (assessmentId, studentId) => setSelectedCells((prev) => {
+    const next = new Set(prev);
+    const key = cellKey(assessmentId, studentId);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const toggleRow = (assessment) => setSelectedCells((prev) => {
+    const rowKeys = roster.filter((s) => assessment.results?.[s.id] !== undefined).map((s) => cellKey(assessment.id, s.id));
+    const allSelected = rowKeys.length > 0 && rowKeys.every((k) => prev.has(k));
+    const next = new Set(prev);
+    rowKeys.forEach((k) => (allSelected ? next.delete(k) : next.add(k)));
+    return next;
+  });
+  const exitSelectMode = () => { setSelectMode(false); setSelectedCells(new Set()); };
 
   // Group by subject (in the order subjects were added in Settings), chronological within each
   // group — same ordering the regular teacher-side grid already uses.
@@ -7126,8 +7164,28 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
   const activeAssessment = activeCell ? assessments.find((a) => a.id === activeCell.assessmentId) : null;
   const activeCellStudent = activeCell ? roster.find((s) => s.id === activeCell.studentId) : null;
 
+  // Grouped by student, for the reach-out modal — each family only ever gets their own child's
+  // own message, tagged with every one of that student's selected results at once.
+  const selectedByStudent = {};
+  selectedCells.forEach((key) => {
+    const [assessmentId, studentId] = key.split(":");
+    const assessment = assessments.find((a) => a.id === assessmentId);
+    const student = roster.find((s) => s.id === studentId);
+    if (!assessment || !student) return;
+    if (!selectedByStudent[studentId]) selectedByStudent[studentId] = { student, items: [] };
+    selectedByStudent[studentId].items.push({ assessment, subjectLabel: subjectLabel(assessment.subjectId) });
+  });
+
   return (
     <div>
+      <div className="flex items-center justify-between mb-2">
+        <button onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+          className={`text-xs font-semibold px-3 py-1.5 rounded-lg border ${selectMode ? "bg-teal-700 text-white border-teal-700" : "text-teal-700 border-teal-300 hover:bg-teal-50"}`}>
+          {selectMode ? "Done selecting" : "Select assessments"}
+        </button>
+        {selectMode && <p className="text-xs text-stone-400">Tap cells to select, or tap a row's own checkbox to select everyone in it.</p>}
+      </div>
+
       <div className="overflow-auto border border-stone-200 rounded-xl" style={{ maxHeight: "70vh" }}>
         <table className="border-collapse text-sm w-full">
           <thead>
@@ -7146,16 +7204,27 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
             {sorted.map((a, i) => {
               const isNewGroup = i === 0 || a.subjectId !== sorted[i - 1].subjectId;
               const unpublishedCount = Object.values(a.results || {}).filter((r) => !normalizeAssessmentResult(r)?.published).length;
+              const rowKeys = roster.filter((s) => a.results?.[s.id] !== undefined).map((s) => cellKey(a.id, s.id));
+              const rowFullySelected = rowKeys.length > 0 && rowKeys.every((k) => selectedCells.has(k));
               return (
                 <tr key={a.id} className={isNewGroup && i > 0 ? "border-t-2 border-t-stone-300" : ""}>
                   <td className="sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
-                    <div className="font-semibold text-stone-800 text-xs">{subjectLabel(a.subjectId)}</div>
-                    <div className="text-[11px] text-stone-400">{a.title ? `${a.title} · ` : ""}{a.date}</div>
-                    {unpublishedCount > 0 && (
-                      <button onClick={() => setPublishAllFor(a)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
-                        Publish all ({unpublishedCount})
-                      </button>
-                    )}
+                    <div className="flex items-start gap-1.5">
+                      {selectMode && rowKeys.length > 0 && (
+                        <button onClick={() => toggleRow(a)} className={`mt-0.5 w-3.5 h-3.5 rounded border shrink-0 flex items-center justify-center ${rowFullySelected ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
+                          {rowFullySelected && <Check size={9} className="text-white" />}
+                        </button>
+                      )}
+                      <div>
+                        <div className="font-semibold text-stone-800 text-xs">{subjectLabel(a.subjectId)}</div>
+                        <div className="text-[11px] text-stone-400">{a.title ? `${a.title} · ` : ""}{a.date}</div>
+                        {unpublishedCount > 0 && (
+                          <button onClick={() => setPublishAllFor(a)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
+                            Publish all ({unpublishedCount})
+                          </button>
+                        )}
+                      </div>
+                    </div>
                   </td>
                   {roster.map((s) => {
                     const normalized = normalizeAssessmentResult(a.results?.[s.id]);
@@ -7164,9 +7233,11 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                     const grade = isMultiPart ? (filledCount > 0 ? `${filledCount}/${a.parts.length}` : "") : getResultGrade(a.results?.[s.id]);
                     const hasNote = !!getResultNote(a.results?.[s.id]);
                     const isPublished = getResultPublished(a.results?.[s.id]);
+                    const hasResult = a.results?.[s.id] !== undefined;
+                    const isSelected = selectedCells.has(cellKey(a.id, s.id));
                     return (
-                      <td key={s.id} onClick={() => setActiveCell({ assessmentId: a.id, studentId: s.id })}
-                        className="border-b border-stone-100 px-3 py-2 text-center cursor-pointer hover:bg-teal-50 text-xs">
+                      <td key={s.id} onClick={() => (selectMode ? (hasResult && toggleCell(a.id, s.id)) : setActiveCell({ assessmentId: a.id, studentId: s.id }))}
+                        className={`border-b border-stone-100 px-3 py-2 text-center text-xs ${selectMode ? (hasResult ? "cursor-pointer" : "cursor-default") : "cursor-pointer hover:bg-teal-50"} ${isSelected ? "bg-teal-100" : ""}`}>
                         {grade || <span className="text-stone-300">—</span>}
                         {hasNote && <span className="ml-1 text-amber-500" title="Has a note">●</span>}
                         {grade && !isPublished && <span className="ml-1 text-amber-600" title="Draft — not yet published to parents">✎</span>}
@@ -7179,6 +7250,16 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
           </tbody>
         </table>
       </div>
+
+      {selectMode && selectedCells.size > 0 && (
+        <div className="sticky bottom-0 mt-3 bg-white border border-teal-300 rounded-xl p-3 flex items-center justify-between shadow-lg">
+          <p className="text-xs font-semibold text-stone-700">{selectedCells.size} result{selectedCells.size === 1 ? "" : "s"} selected across {Object.keys(selectedByStudent).length} student{Object.keys(selectedByStudent).length === 1 ? "" : "s"}</p>
+          <div className="flex gap-2">
+            <button onClick={() => setSelectedCells(new Set())} className="text-xs font-semibold text-stone-500 hover:text-stone-700">Clear</button>
+            <button onClick={() => setShowReachOut(true)} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Message about selected</button>
+          </div>
+        </div>
+      )}
 
       {activeCell && activeAssessment && activeCellStudent && (
         <AssessmentCellDetail
@@ -7211,6 +7292,20 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
           }}
           onConfirm={(notes) => { onPublishAll(publishAllFor.id, notes); setPublishAllFor(null); }}
           onClose={() => setPublishAllFor(null)} />
+      )}
+
+      {showReachOut && (
+        <MultiAssessmentReachOutModal byStudent={selectedByStudent}
+          onGenerateNote={(student, items) => {
+            const gradeDescs = items.map(({ assessment, subjectLabel: subjLabel }) => {
+              const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
+              const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+              return `${subjLabel} — ${assessment.title || "Assessment"}: ${gradeDesc}`;
+            }).join("; ");
+            return generatePublishNote(student, "several assessments", gradeDescs, config, null);
+          }}
+          onSend={(student, items, text) => onMessageAboutAssessments(items, student, text)}
+          onClose={() => { setShowReachOut(false); exitSelectMode(); }} />
       )}
     </div>
   );
@@ -14701,6 +14796,19 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const label = `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
     await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
   };
+  // Same reasoning as the coordinator's own sendMessageAboutAssessments — multi-select, tagging
+  // several assessments at once and reaching out about all of them together in one message.
+  const sendMessageAboutAssessments = async (items, student, text) => {
+    const families = await fetchClassFamilies(classId);
+    const guardianUids = families.filter((f) => (f.studentLinks || []).some((l) => l.studentId === student.id)).map((f) => f.uid);
+    if (guardianUids.length === 0) throw new Error(`${student.name} has no linked parent account, so this couldn't be sent anywhere.`);
+    const labels = items.map(({ assessment, subjectLabel }) => {
+      const existing = normalizeAssessmentResult(assessment.results?.[student.id]);
+      return `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
+    });
+    const label = labels.join("; ");
+    await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
+  };
 
   const setAttendance = (studentId, date, statusId, auto) => {
     const data = studentData[studentId];
@@ -21577,6 +21685,102 @@ function AssessmentStudentModal({ student, data, config, classAssessments, onClo
 // one shared note stretched across everyone. Nothing is actually published until this screen's
 // own "Publish all" is pressed; a teacher can review and edit every note first, or skip any one
 // student's note entirely and leave it blank.
+// Reported directly, the multi-select follow-up: reached from the grid after selecting several
+// assessment cells (possibly spanning more than one student at once — selecting a whole subject's
+// row across every student, say). Grouped by student, since each family only ever gets their own
+// child's own message — a teacher composes (or generates) one message per student here, tagged
+// with every one of that student's selected results at once, not one assessment at a time.
+function MultiAssessmentReachOutModal({ byStudent, onGenerateNote, onSend, onClose }) {
+  const students = Object.values(byStudent); // [{ student, items: [{ assessment, subjectLabel }] }]
+  const [activeStudentId, setActiveStudentId] = useState(students.length === 1 ? students[0].student.id : null);
+  const [drafts, setDrafts] = useState({}); // studentId -> { text, generating, error, sent, sendError }
+
+  const activeEntry = activeStudentId ? byStudent[activeStudentId] : null;
+  const draft = activeStudentId ? (drafts[activeStudentId] || { text: "" }) : null;
+  const setDraft = (patch) => setDrafts((prev) => ({ ...prev, [activeStudentId]: { ...(prev[activeStudentId] || { text: "" }), ...patch } }));
+
+  const generate = async () => {
+    setDraft({ generating: true, error: null });
+    try {
+      const text = await onGenerateNote(activeEntry.student, activeEntry.items);
+      setDraft({ generating: false, text });
+    } catch (e) {
+      setDraft({ generating: false, error: e?.message || "Generation failed — try again, or write one manually." });
+    }
+  };
+  const send = async () => {
+    if (!draft.text.trim()) return;
+    setDraft({ sendError: null });
+    try {
+      await onSend(activeEntry.student, activeEntry.items, draft.text.trim());
+      setDraft({ sent: true });
+    } catch (e) {
+      setDraft({ sendError: e?.message || "Couldn't send — try again." });
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl p-5 w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        {!activeEntry ? (
+          <>
+            <p className="font-semibold text-stone-800 mb-1">Message about selected assessments</p>
+            <p className="text-xs text-stone-400 mb-4">{students.length} student{students.length === 1 ? "" : "s"} have results selected — pick one to compose their message.</p>
+            <div className="space-y-2">
+              {students.map(({ student, items }) => {
+                const d = drafts[student.id];
+                return (
+                  <button key={student.id} onClick={() => setActiveStudentId(student.id)}
+                    className="w-full text-left border border-stone-200 rounded-lg p-3 hover:border-teal-300 flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-stone-800">{student.name}</p>
+                      <p className="text-xs text-stone-400">{items.length} assessment{items.length === 1 ? "" : "s"} selected</p>
+                    </div>
+                    {d?.sent && <span className="text-xs font-semibold text-emerald-700">Sent ✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <button onClick={onClose} className="w-full mt-4 text-sm text-stone-500 border border-stone-300 rounded-lg py-2 hover:bg-stone-50">Close</button>
+          </>
+        ) : (
+          <>
+            {students.length > 1 && (
+              <button onClick={() => setActiveStudentId(null)} className="flex items-center text-stone-500 text-xs mb-2 hover:text-stone-800"><ChevronLeft size={14} /> All students</button>
+            )}
+            <p className="font-semibold text-stone-800 mb-1">{activeEntry.student.name}</p>
+            <div className="flex flex-wrap gap-1.5 mb-3">
+              {activeEntry.items.map(({ assessment, subjectLabel }, i) => (
+                <span key={i} className="text-[11px] bg-stone-100 text-stone-600 rounded-full px-2 py-1">{subjectLabel} — {assessment.title || "Assessment"}</span>
+              ))}
+            </div>
+            {draft.sent ? (
+              <p className="text-sm text-emerald-700 text-center py-4">Message sent.</p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold text-stone-600">Message</label>
+                  <button onClick={generate} disabled={draft.generating} className="text-xs font-semibold text-teal-700 hover:text-teal-900 disabled:opacity-50">
+                    {draft.generating ? "Generating…" : "Generate"}
+                  </button>
+                </div>
+                {draft.error && <p className="text-xs text-rose-600 mb-1">{draft.error}</p>}
+                <textarea value={draft.text} onChange={(e) => setDraft({ text: e.target.value })} rows={4} autoFocus
+                  placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1.5" />
+                {draft.sendError && <p className="text-xs text-rose-600 mb-1.5">{draft.sendError}</p>}
+                <div className="flex gap-2">
+                  <button onClick={send} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Send</button>
+                  <button onClick={onClose} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Close</button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PublishAllModal({ assessment, students, subjectLabel, config, onGenerateNote, onConfirm, onClose }) {
   const [notes, setNotes] = useState({}); // { [studentId]: string }
   const [generatingAll, setGeneratingAll] = useState(false);
