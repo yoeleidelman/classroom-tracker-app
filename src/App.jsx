@@ -6803,26 +6803,30 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
     <div className="min-h-screen bg-stone-50 px-4 py-10">
       <GlobalAppStyles />
       <div className="app-page-wide">
-        <div className="flex items-center justify-between mb-1">
+        <div className="flex flex-wrap items-center justify-between gap-y-2 mb-1">
           <h1 className="display-font text-2xl font-bold text-stone-900">Admin Dashboard</h1>
+          {/* Reported directly, same fix and same reasoning as the equivalent one on Header
+              (regular class screens): inline in the same row as the title and the three text
+              links, this labeled button was crowding everything else on a narrow phone screen —
+              made worse here specifically, since a dual-role admin account has more competing
+              links in this same row (Switch to Parent view, My Account, Log out) than a regular
+              class screen ever does. Its own full-width row below on mobile, back inline (in its
+              original position, before the three text links) once there's room for it (sm and up)
+              — placed before them in source order specifically so sm:order-none restores that
+              same original position rather than leaving it stuck after them. */}
+          {onOpenGlobalMessages && (
+            <button onClick={onOpenGlobalMessages} title="Every conversation across every class you teach"
+              className="order-3 basis-full sm:basis-auto sm:order-none relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+              <MessageCircle size={16} />
+              Messages
+              {adminMessagesUnread > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
+                  {adminMessagesUnread > 9 ? "9+" : adminMessagesUnread}
+                </span>
+              )}
+            </button>
+          )}
           <div className="flex items-center gap-3">
-            {/* This admin's own personal conversations — every one across every class, plus
-                anyone else reachable by grade level — the same global entry point a regular
-                teacher gets, since an admin's own account is a real, individual teacher account
-                too. Deliberately separate from the "Messages" button above, which is admin's own
-                oversight view of OTHER people's conversations, not this account's own. */}
-            {onOpenGlobalMessages && (
-              <button onClick={onOpenGlobalMessages} title="Every conversation across every class you teach"
-                className="relative flex items-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
-                <MessageCircle size={16} />
-                Messages
-                {adminMessagesUnread > 0 && (
-                  <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
-                    {adminMessagesUnread > 9 ? "9+" : adminMessagesUnread}
-                  </span>
-                )}
-              </button>
-            )}
             {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
             {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
             <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
@@ -11607,11 +11611,21 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     loadJSON(`class:${broadcastClassId}:roster`, [], true).then(setBroadcastRoster);
   }, [mode, broadcastClassId]);
 
+  // Reported directly: this whole screen was missing the standard min-h-screen bg-stone-50
+  // wrapper every other screen in the app has — StaffMessagesHome is new work built tonight,
+  // and this was simply left out, not a deliberate style choice. Without it, the page defaults to
+  // plain white, which then makes the tab switcher's own stone-100 background (designed to read
+  // as a subtle contrast against stone-50) and the compose bar's own stone-100 background (same
+  // reasoning) both look like a mismatched, out-of-place beige floating on white instead. Adding
+  // the same wrapper here that every comparable screen already uses fixes both at once, rather
+  // than inventing a new, one-off color scheme just for this screen.
   if (openBroadcastId) {
     return (
-      <div className={PAGE}>
-        <GlobalAppStyles />
-        <BroadcastDetailView broadcast={broadcastMessages.find((b) => b.id === openBroadcastId)} groups={broadcastGroups} classId={broadcastClassId} onBack={() => setOpenBroadcastId(null)} />
+      <div className="min-h-screen bg-stone-50">
+        <div className={PAGE}>
+          <GlobalAppStyles />
+          <BroadcastDetailView broadcast={broadcastMessages.find((b) => b.id === openBroadcastId)} groups={broadcastGroups} classId={broadcastClassId} onBack={() => setOpenBroadcastId(null)} />
+        </div>
       </div>
     );
   }
@@ -11622,7 +11636,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     const guardianNames = openGroup.guardians.map((g) => g.name).join(" & ");
     const storageKey = `teacher-messages:${loggedInTeacher.uid}:${openGroup.groupId}`;
     return (
-      <>
+      <div className="min-h-screen bg-stone-50">
         <GlobalAppStyles />
         <ConversationThreadView title={guardianNames} subtitle={childNames} messages={thread.messages} myRole="teacher" teacher={loggedInTeacher} threadKey={`teacher-direct-${openGroup.groupId}`}
           lastReadBeforeOpen={lastReadBeforeOpen} lastReadByFamily={effectiveLastReadByFamily}
@@ -11631,11 +11645,12 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
           onEdit={async (messageId, newText) => { await editMessageInThread(storageKey, messageId, newText); await refresh(); }}
           onDelete={async (messageId) => { await deleteMessageInThread(storageKey, messageId); await refresh(); }}
           onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(storageKey, messageId, emoji, reactorId, reactorName); await refresh(); }} />
-      </>
+      </div>
     );
   }
 
   return (
+    <div className="min-h-screen bg-stone-50">
     <div className={PAGE}>
       <GlobalAppStyles />
       {onBack && (
@@ -11760,6 +11775,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
       </div>
       </>
       )}
+    </div>
     </div>
   );
 }
@@ -14197,7 +14213,7 @@ function Header({ navigate }) {
   const { className, onSwitchClass, switchLabel } = useContext(ClassContext);
   const { canSwitchToParent, switchToParent, openGlobalMessages, globalMessagesUnread } = useContext(AppModeContext);
   return (
-    <div className="flex items-center justify-between mb-2">
+    <div className="flex flex-wrap items-center justify-between gap-y-2 mb-2">
       <div className="flex items-center gap-2">
         <img src="/logo-transparent.png" alt="" className="w-16 h-16 object-contain shrink-0 -my-2" />
         <div>
@@ -14210,27 +14226,24 @@ function Header({ navigate }) {
           )}
         </div>
       </div>
+      {/* Reported directly: made into its own full-width row on a narrow phone screen — inline in
+          the same row as the logo, title, and settings icon, this labeled button was crowding
+          everything else and making the whole header look squeezed. Sits on its own line below on
+          mobile, back inline with everything else once there's room for it (sm and up). Order-3
+          plus basis-full is what actually forces the line break in a wrapping flex row; without
+          both, a flex item doesn't reliably take the whole line to itself the way a block element
+          would. */}
+      <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
+        className="order-3 basis-full sm:basis-auto sm:order-none relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+        <MessageCircle size={16} />
+        Messages
+        {globalMessagesUnread > 0 && (
+          <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
+            {globalMessagesUnread > 9 ? "9+" : globalMessagesUnread}
+          </span>
+        )}
+      </button>
       <div className="flex items-center gap-1.5">
-        {/* Reported directly: a teacher assigned to more than one class had to enter a specific
-            class first just to see whether they had any messages waiting in a different one — the
-            entire reason this exists as its own always-visible button here, rather than only being
-            reachable from within one class's own Comm tab. Made into a labeled button rather than
-            a bare icon per direct feedback that the icon-only version read as too small/easy to
-            miss for something this central. The badge itself is genuinely teacher-wide, the same
-            reach as this button's own destination — always this signed-in teacher's own messages,
-            regardless of which class happens to be open right now, admin included when browsing
-            any class as themselves.
-        */}
-        <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
-          className="relative flex items-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
-          <MessageCircle size={16} />
-          Messages
-          {globalMessagesUnread > 0 && (
-            <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
-              {globalMessagesUnread > 9 ? "9+" : globalMessagesUnread}
-            </span>
-          )}
-        </button>
         <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
           <SettingsIcon size={18} />
         </button>
