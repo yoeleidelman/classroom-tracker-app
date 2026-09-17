@@ -6671,7 +6671,9 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
   // Publishes every student in this assessment who has a grade entered but isn't published yet —
   // reported directly, for exactly the "administered to the whole class, wait until everyone's
   // done (absences included), then publish together" workflow, rather than requiring one-by-one.
-  const publishAllInAssessment = async (assessmentId) => {
+  // notesByStudent: { [studentId]: noteText | undefined } — each student's own, individually
+  // reviewed note (see PublishAllModal's own comment for why these are never one shared note).
+  const publishAllInAssessment = async (assessmentId, notesByStudent = {}) => {
     const assessment = classAssessments.find((ca) => ca.id === assessmentId);
     if (!assessment) return;
     const toPublish = Object.entries(assessment.results || {}).filter(([, r]) => {
@@ -6680,15 +6682,19 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
     });
     const nextResults = { ...assessment.results };
     toPublish.forEach(([studentId, r]) => {
-      nextResults[studentId] = { ...normalizeAssessmentResult(r), published: true, publishedAt: new Date().toISOString() };
+      const note = (notesByStudent[studentId] || "").trim();
+      nextResults[studentId] = { ...normalizeAssessmentResult(r), published: true, publishedAt: new Date().toISOString(), ...(note ? { publishNote: note } : {}) };
     });
     const next = classAssessments.map((ca) => (ca.id === assessmentId ? { ...ca, results: nextResults } : ca));
     setClassAssessments(next);
     await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
     const subjectLabel = gsSubjects.find((s) => s.id === assessment.subjectId)?.label || "an assessment";
-    const studentIds = toPublish.map(([studentId]) => studentId);
-    if (studentIds.length > 0) {
-      notifySpecificStudentFamilies(selectedClassId, studentIds, `New ${subjectLabel} assessment published`, assessment.title || subjectLabel, "/?portal=parent&open=home");
+    // Sent one at a time, not batched — each student's family gets their own child's own note (or
+    // grade) in the notification body, never a generic shared line across every family at once.
+    for (const [studentId, r] of toPublish) {
+      const normalized = normalizeAssessmentResult(r);
+      const note = (notesByStudent[studentId] || "").trim();
+      await notifySpecificStudentFamilies(selectedClassId, [studentId], `New ${subjectLabel} assessment published`, note || `${assessment.title || subjectLabel} — ${normalized.grade || ""}`, "/?portal=parent&open=home");
     }
   };
 
@@ -6798,7 +6804,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
                   </div>
                 )}
                 <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects} config={gsConfig}
-                  onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
+                  onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} />
               </>
             )}
           </>
@@ -6813,11 +6819,12 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // business touching). One row per General Studies assessment, one column per student; a cell shows
 // that student's own grade (and a small note indicator, since results already support one) and is
 // directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
-function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenReport }) {
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onPublishResult, onPublishAll, onMessageAboutAssessment }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
   const [notePromptFor, setNotePromptFor] = useState(null); // { assessmentId, studentId } | null
   const [noteDraft, setNoteDraft] = useState("");
   const [generatingNote, setGeneratingNote] = useState(false);
+  const [publishAllFor, setPublishAllFor] = useState(null); // assessment object | null
   const generateNoteFor = async (assessment, student) => {
     setGeneratingNote(true);
     try {
@@ -6847,12 +6854,9 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                 <p className="font-semibold text-stone-900">{a.title || subjectLabel(a.subjectId)}</p>
                 <p className="text-xs text-stone-400">{subjectLabel(a.subjectId)} · {a.date} {a.loggedBy ? `· logged by ${a.loggedBy}` : ""}</p>
               </div>
-              <div className="flex items-center gap-3 shrink-0">
-                {unpublishedCount > 0 && (
-                  <button onClick={() => onPublishAll(a.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Publish all ({unpublishedCount})</button>
-                )}
-                <button onClick={() => onOpenReport(a.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Report & send</button>
-              </div>
+              {unpublishedCount > 0 && (
+                <button onClick={() => setPublishAllFor(a)} className="text-xs font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish all ({unpublishedCount})</button>
+              )}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
               {roster.map((s) => {
@@ -6954,6 +6958,19 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
           </div>
         );
       })}
+      {publishAllFor && (
+        <PublishAllModal assessment={publishAllFor}
+          students={roster.filter((s) => { const n = normalizeAssessmentResult(publishAllFor.results?.[s.id]); return n && !n.published; })}
+          subjectLabel={subjectLabel(publishAllFor.subjectId)} config={config}
+          onGenerateNote={(student) => {
+            const normalized = normalizeAssessmentResult(publishAllFor.results?.[student.id]);
+            const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${publishAllFor.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+            const label = `${subjectLabel(publishAllFor.subjectId)} — ${publishAllFor.title || "Assessment"}`;
+            return generatePublishNote(student, label, gradeDesc, config, null);
+          }}
+          onConfirm={(notes) => { onPublishAll(publishAllFor.id, notes); setPublishAllFor(null); }}
+          onClose={() => setPublishAllFor(null)} />
+      )}
     </div>
   );
 }
@@ -14334,7 +14351,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const subjectLabel = (config.subjects || []).find((s) => s.id === assessment.subjectId)?.label || "an assessment";
     await notifySpecificStudentFamilies(classId, [studentId], `New ${subjectLabel} assessment published`, publishNote || `${assessment.title || subjectLabel} — ${existing.grade}`, "/?portal=parent&open=home");
   };
-  const publishAllInClassAssessment = async (assessmentId) => {
+  // notesByStudent: { [studentId]: noteText | undefined } — see the coordinator's own
+  // publishAllInAssessment for the full reasoning on why these are per-student, never one shared
+  // note stretched across everyone.
+  const publishAllInClassAssessment = async (assessmentId, notesByStudent = {}) => {
     const assessment = classAssessments.find((ca) => ca.id === assessmentId);
     if (!assessment) return;
     const toPublish = Object.entries(assessment.results || {}).filter(([, r]) => {
@@ -14343,13 +14363,15 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     });
     const nextResults = { ...assessment.results };
     toPublish.forEach(([studentId, r]) => {
-      nextResults[studentId] = { ...normalizeAssessmentResult(r), published: true, publishedAt: new Date().toISOString() };
+      const note = (notesByStudent[studentId] || "").trim();
+      nextResults[studentId] = { ...normalizeAssessmentResult(r), published: true, publishedAt: new Date().toISOString(), ...(note ? { publishNote: note } : {}) };
     });
     persistClassAssessments(classAssessments.map((ca) => (ca.id === assessmentId ? { ...ca, results: nextResults } : ca)));
     const subjectLabel = (config.subjects || []).find((s) => s.id === assessment.subjectId)?.label || "an assessment";
-    const studentIds = toPublish.map(([studentId]) => studentId);
-    if (studentIds.length > 0) {
-      await notifySpecificStudentFamilies(classId, studentIds, `New ${subjectLabel} assessment published`, assessment.title || subjectLabel, "/?portal=parent&open=home");
+    for (const [studentId, r] of toPublish) {
+      const normalized = normalizeAssessmentResult(r);
+      const note = (notesByStudent[studentId] || "").trim();
+      await notifySpecificStudentFamilies(classId, [studentId], `New ${subjectLabel} assessment published`, note || `${assessment.title || subjectLabel} — ${normalized.grade || ""}`, "/?portal=parent&open=home");
     }
   };
   // Reported directly: a genuinely separate action from publishing itself — sends a real, normal
@@ -20876,7 +20898,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
         <Plus size={16} /> Log an assessment
       </button>
       <AssessmentGridView roster={roster} studentData={studentData} classAssessments={classAssessments} config={config}
-        onUpdateResult={updateClassAssessmentResult} onUpdatePartResult={onUpdatePartResult} onUpdateNote={onUpdateNote} onPublishResult={onPublishResult} onPublishAll={onPublishAll} onMessageAboutAssessment={onMessageAboutAssessment} onOpenAssessmentReport={openAssessmentReport}
+        onUpdateResult={updateClassAssessmentResult} onUpdatePartResult={onUpdatePartResult} onUpdateNote={onUpdateNote} onPublishResult={onPublishResult} onPublishAll={onPublishAll} onMessageAboutAssessment={onMessageAboutAssessment}
         onStartSession={onStartSession} onLogFluency={onLogFluency}
         onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail}
         initialStudentId={initialStudentId} />
@@ -21014,9 +21036,10 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
   );
 }
 
-function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
+function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
   const [activeStudentId, setActiveStudentId] = useState(initialStudentId || null);
+  const [publishAllFor, setPublishAllFor] = useState(null); // assessment object | null
   const subjects = config?.subjects || [];
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
 
@@ -21073,12 +21096,8 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
                     <div className="font-semibold text-stone-800 text-xs">{subjectLabel(ca.subjectId)}</div>
                     <div className="text-[11px] text-stone-400">{ca.title ? `${ca.title} · ` : ""}{ca.date}</div>
                     <div className="flex items-center gap-2">
-                      <button onClick={() => onOpenAssessmentReport(ca.id)}
-                        className="text-[10px] font-semibold text-teal-700 hover:text-teal-900 opacity-0 group-hover:opacity-100">
-                        Generate parent reports
-                      </button>
                       {unpublishedCount > 0 && (
-                        <button onClick={() => onPublishAll(ca.id)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
+                        <button onClick={() => setPublishAllFor(ca)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
                           Publish all ({unpublishedCount})
                         </button>
                       )}
@@ -21136,6 +21155,19 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
           onOpenSkillDetail={(catId) => onOpenSkillDetail(activeStudent.id, catId)}
         />
       )}
+      {publishAllFor && (
+        <PublishAllModal assessment={publishAllFor}
+          students={roster.filter((s) => { const n = normalizeAssessmentResult(publishAllFor.results?.[s.id]); return n && !n.published; })}
+          subjectLabel={subjectLabel(publishAllFor.subjectId)} config={config}
+          onGenerateNote={(student) => {
+            const normalized = normalizeAssessmentResult(publishAllFor.results?.[student.id]);
+            const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${publishAllFor.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+            const label = `${subjectLabel(publishAllFor.subjectId)} — ${publishAllFor.title || "Assessment"}`;
+            return generatePublishNote(student, label, gradeDesc, config, null);
+          }}
+          onConfirm={(notes) => { onPublishAll(publishAllFor.id, notes); setPublishAllFor(null); }}
+          onClose={() => setPublishAllFor(null)} />
+      )}
     </div>
   );
 }
@@ -21192,6 +21224,72 @@ function AssessmentStudentModal({ student, data, config, classAssessments, onClo
     </div>
   );
 }
+
+// Reported directly: "Publish all" now goes through this review step instead of publishing
+// immediately, so its behavior actually matches per-student publish — both let a teacher add a
+// note before anything reaches a parent. Generating for the whole batch produces a genuinely
+// separate note per student, written from THAT student's own result — the same pattern the
+// monthly reports' own "Generate all" already uses (a 100% reads differently than a 50%), never
+// one shared note stretched across everyone. Nothing is actually published until this screen's
+// own "Publish all" is pressed; a teacher can review and edit every note first, or skip any one
+// student's note entirely and leave it blank.
+function PublishAllModal({ assessment, students, subjectLabel, config, onGenerateNote, onConfirm, onClose }) {
+  const [notes, setNotes] = useState({}); // { [studentId]: string }
+  const [generatingAll, setGeneratingAll] = useState(false);
+  const [generatingFor, setGeneratingFor] = useState(null);
+
+  const generateOne = async (student) => {
+    setGeneratingFor(student.id);
+    try {
+      const text = await onGenerateNote(student);
+      setNotes((prev) => ({ ...prev, [student.id]: text }));
+    } catch { /* leave blank; teacher can still write one manually */ }
+    setGeneratingFor(null);
+  };
+  const generateAll = async () => {
+    setGeneratingAll(true);
+    for (const s of students) await generateOne(s);
+    setGeneratingAll(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl p-5 w-full max-w-lg max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <p className="font-semibold text-stone-800 mb-1">Publish {students.length} result{students.length === 1 ? "" : "s"}</p>
+        <p className="text-xs text-stone-400 mb-4">{subjectLabel}{assessment.title ? ` · ${assessment.title}` : ""} · {assessment.date}</p>
+
+        <button onClick={generateAll} disabled={generatingAll} className="mb-4 text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-2 hover:bg-teal-800 disabled:opacity-50">
+          {generatingAll ? "Generating…" : "Generate a note for everyone"}
+        </button>
+
+        <div className="space-y-3 mb-4">
+          {students.map((s) => {
+            const normalized = normalizeAssessmentResult(assessment.results?.[s.id]);
+            const grade = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+            return (
+              <div key={s.id} className="border border-stone-200 rounded-lg p-2.5">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-sm font-semibold text-stone-800">{s.name} <span className="text-stone-400 font-normal">— {grade}</span></span>
+                  <button onClick={() => generateOne(s)} disabled={generatingFor === s.id} className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 disabled:opacity-50 shrink-0">
+                    {generatingFor === s.id ? "Generating…" : "Generate"}
+                  </button>
+                </div>
+                <textarea value={notes[s.id] || ""} onChange={(e) => setNotes((prev) => ({ ...prev, [s.id]: e.target.value }))} rows={2}
+                  placeholder="Note to show with this (optional)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex gap-2">
+          <button onClick={() => onConfirm(notes)} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Publish all</button>
+          <button onClick={onClose} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave, onSavePart, onSaveNote, onPublish, onGenerateNote, onMessageParent, onClose }) {
   const normalized = normalizeAssessmentResult(value);
