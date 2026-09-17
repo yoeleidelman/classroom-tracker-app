@@ -2215,8 +2215,10 @@ async function notifyClassTeachers(classId, title, body, url) {
 
 // The individual-teacher counterpart to notifyClassTeachers above — reaches exactly the one
 // teacher a family messaged directly, never every teacher covering the shared classroom thread.
-async function notifySpecificTeacher(teacherUid, title, body, url) {
-  await sendPushNotification([teacherUid], title, body, url);
+// readGuard forwarded through to sendPushNotification itself — see its own comment on why a
+// direct message needs this exactly as much as a classroom one always did.
+async function notifySpecificTeacher(teacherUid, title, body, url, readGuard) {
+  await sendPushNotification([teacherUid], title, body, url, readGuard);
 }
 
 // Every family with a child actually linked to this class, on a full-time basis — used for blog
@@ -5965,7 +5967,10 @@ function AdminMessagesMonitor({ activeClasses, teachers, currentTeacher, familie
     const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString() };
     const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    sendPushNotification([guardianUid], "Message from the School Office", text?.trim() || "New message", "/?portal=parent&open=admin");
+    // Same reasoning as every other sendPushNotification fix in this same review — admin-{uid}
+    // matches the exact key this family's own unread-thread tracking already reads this thread's
+    // state by.
+    sendPushNotification([guardianUid], "Message from the School Office", text?.trim() || "New message", "/?portal=parent&open=admin", { readStateKey: `admin-${guardianUid}`, timestamp: entry.timestamp });
     return next;
   };
 
@@ -10675,7 +10680,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     // the notification still arrives, it just opens the app normally instead of jumping straight in.
     const deepLinkClassId = (eligibleTeachers || []).find((t) => t.uid === teacherUid)?.deepLinkClassId;
     const deepLinkSuffix = deepLinkClassId ? `&classId=${deepLinkClassId}` : "";
-    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${family.uid}${deepLinkSuffix}`);
+    // readStateKey/timestamp let the service worker correctly suppress a stale badge increment for
+    // a thread this teacher already read on another device before this notification actually
+    // arrived — sendMessageToFamily (the classroom sender this direct-message world replaces) has
+    // always done this; this direct path never had, despite every message going forward being sent
+    // through it instead. teacher-direct-{family.uid} matches the exact key this teacher's own
+    // Direct list and Comm badge already read this same thread's state by.
+    notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${family.uid}${deepLinkSuffix}`, { readStateKey: `teacher-direct-${family.uid}`, timestamp: entry.timestamp });
     return next;
   };
 
@@ -10701,7 +10712,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
       await saveJSON(key, next, true);
       const deepLinkClassId = (eligibleTeachers || []).find((t) => t.uid === teacherUid)?.deepLinkClassId;
       const deepLinkSuffix = deepLinkClassId ? `&classId=${deepLinkClassId}` : "";
-      notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"} — sent to all teachers in ${classNameForLabel}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${family.uid}${deepLinkSuffix}`);
+      // Same reasoning as sendMessageToIndividualTeacher's own fix above — each of these N separate
+      // sends needs this correctly scoped to that ONE teacher's own thread with this family, not a
+      // single shared key across all of them.
+      notifySpecificTeacher(teacherUid, `Message from ${family?.name || "a family"} — sent to all teachers in ${classNameForLabel}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?open=teacher-messages&teacherUid=${teacherUid}&groupId=${family.uid}${deepLinkSuffix}`, { readStateKey: `teacher-direct-${family.uid}`, timestamp: entry.timestamp });
       return next;
     }));
     return results;
@@ -11411,7 +11425,12 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    sendPushNotification([guardianUid], `Direct message from ${loggedInTeacher?.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
+    // readStateKey/timestamp let the service worker correctly suppress a stale badge increment for
+    // a thread this family already read on another device before this notification actually
+    // arrived — see sendMessageToIndividualTeacher's own matching fix (App.jsx, parent side) for
+    // the full reasoning; teacher-{uid} matches the exact key this family's own unread-thread
+    // tracking already reads this same thread's state by.
+    sendPushNotification([guardianUid], `Direct message from ${loggedInTeacher?.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`, { readStateKey: `teacher-${loggedInTeacher.uid}`, timestamp: entry.timestamp });
     return next;
   };
 
@@ -13503,7 +13522,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    sendPushNotification([guardianUid], `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`);
+    // Same reasoning and fix as StaffMessagesHome's own sendMessage (App.jsx) — this is the third,
+    // separate "teacher sends a direct message" implementation this review found, and the last one
+    // still missing this.
+    sendPushNotification([guardianUid], `Direct message from ${loggedByName || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`, { readStateKey: `teacher-${loggedInTeacher.uid}`, timestamp: entry.timestamp });
     return next;
   };
 
@@ -20809,7 +20831,10 @@ function AdminMessagesView({ families, loggedInTeacher, navigate }) {
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
-    sendPushNotification([groupId], "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin");
+    // A genuinely pre-existing gap, not something the messaging redesign introduced — found only
+    // because this same review went looking for every sendPushNotification call site missing this.
+    // Same reasoning as every other fix in this same pass.
+    sendPushNotification([groupId], "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin", { readStateKey: `admin-${groupId}`, timestamp: entry.timestamp });
     return next;
   };
 
