@@ -6860,7 +6860,14 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
 function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onPublishResult, onPublishAll, onMessageAboutAssessment }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
-  const [notePromptFor, setNotePromptFor] = useState(null); // { assessmentId, studentId } | null
+  // Reported directly: previously up to three separate, independent interactive blocks could be
+  // open on one student row at once (a note prompt, a message prompt, both with their own
+  // buttons) — genuinely confusing about what a teacher was even doing. Now a single status badge
+  // IS the action: tapping it opens one expanded area below the row, showing whichever one thing
+  // is actually relevant to that result's current state (the publish flow if it's still a draft,
+  // or what's already been sent plus the option to message the parent if it's published) — never
+  // both at once, never a separate row of its own.
+  const [expandedFor, setExpandedFor] = useState(null); // { assessmentId, studentId } | null
   const [noteDraft, setNoteDraft] = useState("");
   const [generatingNote, setGeneratingNote] = useState(false);
   const [generateNoteError, setGenerateNoteError] = useState(null);
@@ -6868,8 +6875,6 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
   const generateNoteFor = async (assessment, student) => {
     setGeneratingNote(true);
     setGenerateNoteError(null);
-    // Same fix as AssessmentCellDetail's own generateNote — this previously failed silently,
-    // indistinguishable from the button not being wired up at all.
     try {
       const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
       const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
@@ -6878,10 +6883,12 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
     } catch (e) { setGenerateNoteError(e?.message || "Generation failed — try again, or write one manually."); }
     setGeneratingNote(false);
   };
-  const [messagePromptFor, setMessagePromptFor] = useState(null); // { assessmentId, studentId } | null
+  const [messageOpenFor, setMessageOpenFor] = useState(null); // { assessmentId, studentId } | null — a sub-state of the expanded "published" area, never shown on its own
   const [messageDraft, setMessageDraft] = useState("");
   const [messageSentFor, setMessageSentFor] = useState(null); // { assessmentId, studentId } | null
   const [messageSendError, setMessageSendError] = useState(null);
+
+  const closeExpanded = () => { setExpandedFor(null); setMessageOpenFor(null); setGenerateNoteError(null); setMessageSendError(null); };
 
   if (assessments.length === 0) {
     return <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments logged for this class yet.</p>;
@@ -6906,24 +6913,23 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
               {roster.map((s) => {
                 const existing = normalizedResults[s.id];
                 const grade = existing?.grade || "";
-                const isPromptOpen = notePromptFor?.assessmentId === a.id && notePromptFor?.studentId === s.id;
+                const isExpanded = expandedFor?.assessmentId === a.id && expandedFor?.studentId === s.id;
+                const isMessaging = messageOpenFor?.assessmentId === a.id && messageOpenFor?.studentId === s.id;
+                const justMessaged = messageSentFor?.assessmentId === a.id && messageSentFor?.studentId === s.id;
                 return (
                   <div key={s.id}>
                     {a.parts ? (
                       // Reported directly: a multi-part assessment shows one input per part
-                      // instead of a single grade box — same student row, same published badge
-                      // and Publish action, just one input per defined part rather than one.
+                      // instead of a single grade box — same student row, same status badge,
+                      // just one input per defined part rather than one.
                       <div>
                         <div className="flex items-center gap-1.5 mb-1">
                           <span className="flex-1 text-xs text-stone-600 truncate" title={existing?.note || undefined}>{s.name}{existing?.note ? " •" : ""}</span>
                           {existing && (
-                            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${existing.published ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                            <button onClick={() => (isExpanded ? closeExpanded() : (setExpandedFor({ assessmentId: a.id, studentId: s.id }), setNoteDraft("")))}
+                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${existing.published ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-amber-50 text-amber-700 hover:bg-amber-100"}`}>
                               {existing.published ? "Published" : "Draft"}
-                            </span>
-                          )}
-                          {existing && !existing.published && (
-                            <button onClick={() => { setNotePromptFor({ assessmentId: a.id, studentId: s.id }); setNoteDraft(""); }}
-                              className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish</button>
+                            </button>
                           )}
                         </div>
                         <div className="space-y-1 pl-2">
@@ -6947,47 +6953,18 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                     ) : (
                     <div className="flex items-center gap-1.5">
                       <span className="flex-1 text-xs text-stone-600 truncate" title={existing?.note || undefined}>{s.name}{existing?.note ? " •" : ""}</span>
-                      {existing && (
-                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${existing.published ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                          {existing.published ? "Published" : "Draft"}
-                        </span>
-                      )}
                       <input defaultValue={grade} onBlur={(e) => onUpdateResult(a.id, s.id, e.target.value.trim() || null)}
                         placeholder="—" className="w-16 rounded-lg border border-stone-300 px-1.5 py-1 text-xs" />
-                      {existing && !existing.published && (
-                        <button onClick={() => { setNotePromptFor({ assessmentId: a.id, studentId: s.id }); setNoteDraft(""); }}
-                          className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish</button>
+                      {existing && (
+                        <button onClick={() => (isExpanded ? closeExpanded() : (setExpandedFor({ assessmentId: a.id, studentId: s.id }), setNoteDraft("")))}
+                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${existing.published ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-amber-50 text-amber-700 hover:bg-amber-100"}`}>
+                          {existing.published ? "Published" : "Draft"}
+                        </button>
                       )}
                     </div>
                     )}
-                    {existing && onMessageAboutAssessment && (
-                      (messageSentFor?.assessmentId === a.id && messageSentFor?.studentId === s.id) ? (
-                        <p className="text-[11px] text-emerald-700 mt-0.5">Message sent.</p>
-                      ) : (messagePromptFor?.assessmentId === a.id && messagePromptFor?.studentId === s.id) ? (
-                        <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
-                          <textarea value={messageDraft} onChange={(e) => setMessageDraft(e.target.value)} rows={2} autoFocus
-                            placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
-                          {messageSendError && <p className="text-[11px] text-rose-600 mb-1.5">{messageSendError}</p>}
-                          <div className="flex gap-2">
-                            <button onClick={async () => {
-                              if (!messageDraft.trim()) return;
-                              setMessageSendError(null);
-                              try {
-                                await onMessageAboutAssessment(a, s, subjectLabel(a.subjectId), messageDraft.trim());
-                                setMessageSentFor({ assessmentId: a.id, studentId: s.id });
-                                setMessagePromptFor(null);
-                              } catch (e) { setMessageSendError(e?.message || "Couldn't send — try again."); }
-                            }}
-                              className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Send</button>
-                            <button onClick={() => { setMessagePromptFor(null); setMessageSendError(null); }} className="text-xs text-stone-500 hover:text-stone-700">Cancel</button>
-                          </div>
-                        </div>
-                      ) : (
-                        <button onClick={() => { setMessagePromptFor({ assessmentId: a.id, studentId: s.id }); setMessageDraft(""); }}
-                          className="text-[10px] font-semibold text-teal-700 hover:text-teal-900 mt-0.5">Message Parent About This Assessment</button>
-                      )
-                    )}
-                    {isPromptOpen && (
+
+                    {isExpanded && existing && !existing.published && (
                       <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
                         <div className="flex items-center justify-between mb-1">
                           <label className="block text-[11px] font-semibold text-stone-600">Add a note to show with this (optional)</label>
@@ -6999,10 +6976,41 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                         <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} rows={2}
                           placeholder="e.g. Great work on this one — really showing improvement!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
                         <div className="flex gap-2">
-                          <button onClick={() => { onPublishResult(a.id, s.id, noteDraft.trim() || null); setNotePromptFor(null); }}
+                          <button onClick={() => { onPublishResult(a.id, s.id, noteDraft.trim() || null); closeExpanded(); }}
                             className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Publish to Parent(s)</button>
-                          <button onClick={() => setNotePromptFor(null)} className="text-xs font-semibold text-stone-500 hover:text-stone-700">Cancel</button>
+                          <button onClick={closeExpanded} className="text-xs font-semibold text-stone-500 hover:text-stone-700">Cancel</button>
                         </div>
+                      </div>
+                    )}
+
+                    {isExpanded && existing && existing.published && (
+                      <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
+                        {existing.publishNote && <p className="text-xs text-stone-600 mb-1.5">"{existing.publishNote}"</p>}
+                        {!onMessageAboutAssessment ? null : justMessaged ? (
+                          <p className="text-[11px] text-emerald-700">Message sent.</p>
+                        ) : !isMessaging ? (
+                          <button onClick={() => { setMessageOpenFor({ assessmentId: a.id, studentId: s.id }); setMessageDraft(""); }}
+                            className="text-[11px] font-semibold text-teal-700 hover:text-teal-900">Message Parent About This Assessment</button>
+                        ) : (
+                          <div>
+                            <textarea value={messageDraft} onChange={(e) => setMessageDraft(e.target.value)} rows={2} autoFocus
+                              placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+                            {messageSendError && <p className="text-[11px] text-rose-600 mb-1.5">{messageSendError}</p>}
+                            <div className="flex gap-2">
+                              <button onClick={async () => {
+                                if (!messageDraft.trim()) return;
+                                setMessageSendError(null);
+                                try {
+                                  await onMessageAboutAssessment(a, s, subjectLabel(a.subjectId), messageDraft.trim());
+                                  setMessageSentFor({ assessmentId: a.id, studentId: s.id });
+                                  setMessageOpenFor(null);
+                                } catch (e) { setMessageSendError(e?.message || "Couldn't send — try again."); }
+                              }}
+                                className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Send</button>
+                              <button onClick={() => { setMessageOpenFor(null); setMessageSendError(null); }} className="text-xs text-stone-500 hover:text-stone-700">Cancel</button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
