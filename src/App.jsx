@@ -6665,6 +6665,21 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
     setClassAssessments(next);
     await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
   };
+  // A multi-part result's own note, saved on its own — same reasoning as the regular teacher-side
+  // updateClassAssessmentNote: the note describes the result as a whole, separate from any single
+  // part's own value, so it's never re-drafted by a part-only edit.
+  const updateNote = async (assessmentId, studentId, note) => {
+    const next = classAssessments.map((ca) => {
+      if (ca.id !== assessmentId) return ca;
+      const nextResults = { ...(ca.results || {}) };
+      const existing = normalizeAssessmentResult(nextResults[studentId]);
+      if (!existing) return ca;
+      nextResults[studentId] = { ...existing, ...(note ? { note } : { note: undefined }) };
+      return { ...ca, results: nextResults };
+    });
+    setClassAssessments(next);
+    await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
+  };
 
   // Reported directly: publishing, not grading, is what actually makes a result visible to a
   // parent and fires the notification — a teacher can freely enter and adjust grades while still
@@ -6856,7 +6871,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
                   </div>
                 )}
                 <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects} config={gsConfig}
-                  onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} />
+                  onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onUpdateNote={updateNote} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} />
               </>
             )}
           </>
@@ -6868,171 +6883,113 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 
 // A simple, dedicated grid — deliberately not the full teacher-side AssessmentGridView, which also
 // mixes in Skill Categories and Fluency Checks (separate, teacher-managed systems this page has no
-// business touching). One row per General Studies assessment, one column per student; a cell shows
-// that student's own grade (and a small note indicator, since results already support one) and is
-// directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
-function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onPublishResult, onPublishAll, onMessageAboutAssessment }) {
+// business touching). Reported directly: previously one card per assessment with each student
+// listed inside it — with multiple classes and many assessments over a school year, that becomes
+// an unscannable stack. Replaced with the same proven table pattern the regular teacher-side grid
+// already uses: assessments as rows (grouped by subject), students as columns, one cell per
+// result — click a cell to open the same detail/publish/message flow, all in one place, nothing to
+// search through.
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
-  // Reported directly: previously up to three separate, independent interactive blocks could be
-  // open on one student row at once (a note prompt, a message prompt, both with their own
-  // buttons) — genuinely confusing about what a teacher was even doing. Now a single status badge
-  // IS the action: tapping it opens one expanded area below the row, showing whichever one thing
-  // is actually relevant to that result's current state (the publish flow if it's still a draft,
-  // or what's already been sent plus the option to message the parent if it's published) — never
-  // both at once, never a separate row of its own.
-  const [expandedFor, setExpandedFor] = useState(null); // { assessmentId, studentId } | null
-  const [noteDraft, setNoteDraft] = useState("");
-  const [generatingNote, setGeneratingNote] = useState(false);
-  const [generateNoteError, setGenerateNoteError] = useState(null);
+  const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
   const [publishAllFor, setPublishAllFor] = useState(null); // assessment object | null
-  const generateNoteFor = async (assessment, student) => {
-    setGeneratingNote(true);
-    setGenerateNoteError(null);
-    try {
-      const normalized = normalizeAssessmentResult(assessment.results?.[student.id]);
-      const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
-      const label = `${subjectLabel(assessment.subjectId)} — ${assessment.title || "Assessment"}`;
-      setNoteDraft(await generatePublishNote(student, label, gradeDesc, config, null));
-    } catch (e) { setGenerateNoteError(e?.message || "Generation failed — try again, or write one manually."); }
-    setGeneratingNote(false);
-  };
-  const [messageOpenFor, setMessageOpenFor] = useState(null); // { assessmentId, studentId } | null — a sub-state of the expanded "published" area, never shown on its own
-  const [messageDraft, setMessageDraft] = useState("");
-  const [messageSentFor, setMessageSentFor] = useState(null); // { assessmentId, studentId } | null
-  const [messageSendError, setMessageSendError] = useState(null);
 
-  const closeExpanded = () => { setExpandedFor(null); setMessageOpenFor(null); setGenerateNoteError(null); setMessageSendError(null); };
+  // Group by subject (in the order subjects were added in Settings), chronological within each
+  // group — same ordering the regular teacher-side grid already uses.
+  const sorted = [...assessments].sort((a, b) => {
+    const aIdx = subjects.findIndex((s) => s.id === a.subjectId);
+    const bIdx = subjects.findIndex((s) => s.id === b.subjectId);
+    const aOrder = aIdx === -1 ? 9999 : aIdx;
+    const bOrder = bIdx === -1 ? 9999 : bIdx;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    const dateCompare = (a.date || "").localeCompare(b.date || "");
+    if (dateCompare !== 0) return dateCompare;
+    return (a.id || "").localeCompare(b.id || "");
+  });
 
+  if (roster.length === 0) {
+    return <p className="text-sm text-stone-400 text-center py-12">No students in this class yet.</p>;
+  }
   if (assessments.length === 0) {
     return <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments logged for this class yet.</p>;
   }
+
+  const activeAssessment = activeCell ? assessments.find((a) => a.id === activeCell.assessmentId) : null;
+  const activeCellStudent = activeCell ? roster.find((s) => s.id === activeCell.studentId) : null;
+
   return (
-    <div className="space-y-3">
-      {[...assessments].sort((a, b) => new Date(b.date) - new Date(a.date)).map((a) => {
-        const normalizedResults = Object.fromEntries(Object.entries(a.results || {}).map(([sid, r]) => [sid, normalizeAssessmentResult(r)]));
-        const unpublishedCount = Object.values(normalizedResults).filter((r) => r && !r.published).length;
-        return (
-          <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
-            <div className="flex items-center justify-between mb-1">
-              <div>
-                <p className="font-semibold text-stone-900">{a.title || subjectLabel(a.subjectId)}</p>
-                <p className="text-xs text-stone-400">{subjectLabel(a.subjectId)} · {a.date} {a.loggedBy ? `· logged by ${a.loggedBy}` : ""}</p>
-              </div>
-              {unpublishedCount > 0 && (
-                <button onClick={() => setPublishAllFor(a)} className="text-xs font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish all ({unpublishedCount})</button>
-              )}
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3">
-              {roster.map((s) => {
-                const existing = normalizedResults[s.id];
-                const grade = existing?.grade || "";
-                const isExpanded = expandedFor?.assessmentId === a.id && expandedFor?.studentId === s.id;
-                const isMessaging = messageOpenFor?.assessmentId === a.id && messageOpenFor?.studentId === s.id;
-                const justMessaged = messageSentFor?.assessmentId === a.id && messageSentFor?.studentId === s.id;
-                return (
-                  <div key={s.id}>
-                    {a.parts ? (
-                      // Reported directly: a multi-part assessment shows one input per part
-                      // instead of a single grade box — same student row, same status badge,
-                      // just one input per defined part rather than one.
-                      <div>
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <span className="flex-1 text-xs text-stone-600 truncate" title={existing?.note || undefined}>{s.name}{existing?.note ? " •" : ""}</span>
-                          {existing && (
-                            <button onClick={() => (isExpanded ? closeExpanded() : (setExpandedFor({ assessmentId: a.id, studentId: s.id }), setNoteDraft("")))}
-                              className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${existing.published ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-amber-50 text-amber-700 hover:bg-amber-100"}`}>
-                              {existing.published ? "Published" : "Draft"}
-                            </button>
-                          )}
-                        </div>
-                        <div className="space-y-1 pl-2">
-                          {a.parts.map((p) => (
-                            <div key={p.id} className="flex items-center gap-1.5">
-                              <span className="flex-1 text-[11px] text-stone-500">{p.label}</span>
-                              {p.valueType === "levels" ? (
-                                <select value={existing?.parts?.[p.id] || ""} onChange={(e) => onUpdatePartResult(a.id, s.id, p.id, e.target.value || null)}
-                                  className="rounded-lg border border-stone-300 px-1.5 py-1 text-xs">
-                                  <option value="">—</option>
-                                  {(p.levels || []).map((lvl) => <option key={lvl} value={lvl}>{lvl}</option>)}
-                                </select>
-                              ) : (
-                                <input defaultValue={existing?.parts?.[p.id] || ""} onBlur={(e) => onUpdatePartResult(a.id, s.id, p.id, e.target.value.trim() || null)}
-                                  placeholder="—" className="w-16 rounded-lg border border-stone-300 px-1.5 py-1 text-xs" />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                    <div className="flex items-center gap-1.5">
-                      <span className="flex-1 text-xs text-stone-600 truncate" title={existing?.note || undefined}>{s.name}{existing?.note ? " •" : ""}</span>
-                      <input defaultValue={grade} onBlur={(e) => onUpdateResult(a.id, s.id, e.target.value.trim() || null)}
-                        placeholder="—" className="w-16 rounded-lg border border-stone-300 px-1.5 py-1 text-xs" />
-                      {existing && (
-                        <button onClick={() => (isExpanded ? closeExpanded() : (setExpandedFor({ assessmentId: a.id, studentId: s.id }), setNoteDraft("")))}
-                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${existing.published ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-amber-50 text-amber-700 hover:bg-amber-100"}`}>
-                          {existing.published ? "Published" : "Draft"}
-                        </button>
-                      )}
-                    </div>
+    <div>
+      <div className="overflow-auto border border-stone-200 rounded-xl" style={{ maxHeight: "70vh" }}>
+        <table className="border-collapse text-sm w-full">
+          <thead>
+            <tr>
+              <th className="sticky top-0 left-0 z-20 bg-stone-50 border-b border-r border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 min-w-[170px]">
+                Assessment
+              </th>
+              {roster.map((s) => (
+                <th key={s.id} className="sticky top-0 z-10 bg-stone-50 border-b border-stone-200 px-3 py-2 text-xs font-semibold whitespace-nowrap text-center">
+                  {s.name}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((a, i) => {
+              const isNewGroup = i === 0 || a.subjectId !== sorted[i - 1].subjectId;
+              const unpublishedCount = Object.values(a.results || {}).filter((r) => !normalizeAssessmentResult(r)?.published).length;
+              return (
+                <tr key={a.id} className={isNewGroup && i > 0 ? "border-t-2 border-t-stone-300" : ""}>
+                  <td className="sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
+                    <div className="font-semibold text-stone-800 text-xs">{subjectLabel(a.subjectId)}</div>
+                    <div className="text-[11px] text-stone-400">{a.title ? `${a.title} · ` : ""}{a.date}</div>
+                    {unpublishedCount > 0 && (
+                      <button onClick={() => setPublishAllFor(a)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
+                        Publish all ({unpublishedCount})
+                      </button>
                     )}
+                  </td>
+                  {roster.map((s) => {
+                    const normalized = normalizeAssessmentResult(a.results?.[s.id]);
+                    const isMultiPart = !!a.parts;
+                    const filledCount = isMultiPart ? Object.keys(normalized?.parts || {}).length : 0;
+                    const grade = isMultiPart ? (filledCount > 0 ? `${filledCount}/${a.parts.length}` : "") : getResultGrade(a.results?.[s.id]);
+                    const hasNote = !!getResultNote(a.results?.[s.id]);
+                    const isPublished = getResultPublished(a.results?.[s.id]);
+                    return (
+                      <td key={s.id} onClick={() => setActiveCell({ assessmentId: a.id, studentId: s.id })}
+                        className="border-b border-stone-100 px-3 py-2 text-center cursor-pointer hover:bg-teal-50 text-xs">
+                        {grade || <span className="text-stone-300">—</span>}
+                        {hasNote && <span className="ml-1 text-amber-500" title="Has a note">●</span>}
+                        {grade && !isPublished && <span className="ml-1 text-amber-600" title="Draft — not yet published to parents">✎</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
 
-                    {isExpanded && existing && !existing.published && (
-                      <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="block text-[11px] font-semibold text-stone-600">Add a note to show with this (optional)</label>
-                          <button onClick={() => generateNoteFor(a, s)} disabled={generatingNote} className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 disabled:opacity-50">
-                            {generatingNote ? "Generating…" : "Generate"}
-                          </button>
-                        </div>
-                        {generateNoteError && <p className="text-[11px] text-rose-600 mb-1">{generateNoteError}</p>}
-                        <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} rows={2}
-                          placeholder="e.g. Great work on this one — really showing improvement!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
-                        <div className="flex gap-2">
-                          <button onClick={() => { onPublishResult(a.id, s.id, noteDraft.trim() || null); closeExpanded(); }}
-                            className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Publish to Parent(s)</button>
-                          <button onClick={closeExpanded} className="text-xs font-semibold text-stone-500 hover:text-stone-700">Cancel</button>
-                        </div>
-                      </div>
-                    )}
+      {activeCell && activeAssessment && activeCellStudent && (
+        <AssessmentCellDetail
+          assessment={activeAssessment} student={activeCellStudent} subjectLabel={subjectLabel(activeAssessment.subjectId)}
+          value={activeAssessment.results?.[activeCellStudent.id]}
+          onSave={(value) => { onUpdateResult(activeAssessment.id, activeCellStudent.id, value); setActiveCell(null); }}
+          onSavePart={(partId, value) => onUpdatePartResult(activeAssessment.id, activeCellStudent.id, partId, value)}
+          onSaveNote={(note) => onUpdateNote(activeAssessment.id, activeCellStudent.id, note)}
+          onPublish={(publishNote) => { onPublishResult(activeAssessment.id, activeCellStudent.id, publishNote); setActiveCell(null); }}
+          onGenerateNote={() => {
+            const normalized = normalizeAssessmentResult(activeAssessment.results?.[activeCellStudent.id]);
+            const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${activeAssessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+            const label = `${subjectLabel(activeAssessment.subjectId)} — ${activeAssessment.title || "Assessment"}`;
+            return generatePublishNote(activeCellStudent, label, gradeDesc, config, null);
+          }}
+          onMessageParent={onMessageAboutAssessment ? (text) => onMessageAboutAssessment(activeAssessment, activeCellStudent, subjectLabel(activeAssessment.subjectId), text) : null}
+          onClose={() => setActiveCell(null)}
+        />
+      )}
 
-                    {isExpanded && existing && existing.published && (
-                      <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
-                        {existing.publishNote && <p className="text-xs text-stone-600 mb-1.5">"{existing.publishNote}"</p>}
-                        {!onMessageAboutAssessment ? null : justMessaged ? (
-                          <p className="text-[11px] text-emerald-700">Message sent.</p>
-                        ) : !isMessaging ? (
-                          <button onClick={() => { setMessageOpenFor({ assessmentId: a.id, studentId: s.id }); setMessageDraft(""); }}
-                            className="text-[11px] font-semibold text-teal-700 hover:text-teal-900">Message Parent About This Assessment</button>
-                        ) : (
-                          <div>
-                            <textarea value={messageDraft} onChange={(e) => setMessageDraft(e.target.value)} rows={2} autoFocus
-                              placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
-                            {messageSendError && <p className="text-[11px] text-rose-600 mb-1.5">{messageSendError}</p>}
-                            <div className="flex gap-2">
-                              <button onClick={async () => {
-                                if (!messageDraft.trim()) return;
-                                setMessageSendError(null);
-                                try {
-                                  await onMessageAboutAssessment(a, s, subjectLabel(a.subjectId), messageDraft.trim());
-                                  setMessageSentFor({ assessmentId: a.id, studentId: s.id });
-                                  setMessageOpenFor(null);
-                                } catch (e) { setMessageSendError(e?.message || "Couldn't send — try again."); }
-                              }}
-                                className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Send</button>
-                              <button onClick={() => { setMessageOpenFor(null); setMessageSendError(null); }} className="text-xs text-stone-500 hover:text-stone-700">Cancel</button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })}
       {publishAllFor && (
         <PublishAllModal assessment={publishAllFor}
           students={roster.filter((s) => { const n = normalizeAssessmentResult(publishAllFor.results?.[s.id]); return n && !n.published; })}
@@ -7053,11 +7010,16 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
 // Every General Studies assessment across every elementary class at once — filterable, not a feed
 // to scroll through blind. Reads each class's own real data fresh (no separate, duplicated store),
 // the same real classAssessments record everything else on this page also reads and writes.
+// Reported directly: previously shown as a stack of individual cards, one per result — with
+// enough data across a school year this becomes exactly the same "unscannable mess" problem as
+// the per-class view had, just at a bigger scale. Redesigned as a real, sortable table instead.
 function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
   const [rows, setRows] = useState(null); // null = loading
   const [filterClassId, setFilterClassId] = useState("");
   const [filterSubject, setFilterSubject] = useState("");
   const [filterStudent, setFilterStudent] = useState("");
+  const [sortBy, setSortBy] = useState("date"); // "date" | "student" | "class" | "subject" | "grade"
+  const [sortDir, setSortDir] = useState("desc");
 
   useEffect(() => {
     (async () => {
@@ -7071,14 +7033,21 @@ function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
         const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
         const studentName = (id) => roster.find((s) => s.id === id)?.name || "Unknown student";
         return classAssessments.filter((a) => gsSubjectIds.has(a.subjectId)).flatMap((a) =>
-          Object.entries(a.results || {}).map(([studentId, result]) => ({
-            classId: c.id, className: c.name, assessmentId: a.id, title: a.title, subject: subjectLabel(a.subjectId), date: a.date,
-            studentId, studentName: studentName(studentId), loggedBy: a.loggedBy,
-            grade: typeof result === "object" ? result.grade : result, note: typeof result === "object" ? result.note : "",
-          }))
+          Object.entries(a.results || {}).map(([studentId, result]) => {
+            // Same fix as the per-class grid's own normalization — an old plain-string or
+            // {grade, note} result is still handled correctly here, and a multi-part result's
+            // grade summarizes its own parts rather than showing nothing.
+            const normalized = normalizeAssessmentResult(result);
+            const grade = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${a.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+            return {
+              classId: c.id, className: c.name, assessmentId: a.id, title: a.title, subject: subjectLabel(a.subjectId), date: a.date,
+              studentId, studentName: studentName(studentId), loggedBy: a.loggedBy,
+              grade, note: normalized?.note || "", published: !!normalized?.published,
+            };
+          })
         );
       }));
-      setRows(perClass.flat().sort((a, b) => new Date(b.date) - new Date(a.date)));
+      setRows(perClass.flat());
     })();
   }, [registry]);
 
@@ -7090,6 +7059,24 @@ function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
     (!filterClassId || r.classId === filterClassId) &&
     (!filterSubject || r.subject === filterSubject) &&
     (!filterStudent.trim() || r.studentName.toLowerCase().includes(filterStudent.trim().toLowerCase()))
+  );
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp = 0;
+    if (sortBy === "date") cmp = (a.date || "").localeCompare(b.date || "");
+    else if (sortBy === "student") cmp = a.studentName.localeCompare(b.studentName);
+    else if (sortBy === "class") cmp = a.className.localeCompare(b.className);
+    else if (sortBy === "subject") cmp = a.subject.localeCompare(b.subject);
+    else if (sortBy === "grade") cmp = (a.grade || "").localeCompare(b.grade || "");
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+  const toggleSort = (col) => {
+    if (sortBy === col) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortBy(col); setSortDir(col === "date" ? "desc" : "asc"); }
+  };
+  const SortHeader = ({ col, children }) => (
+    <th onClick={() => toggleSort(col)} className="sticky top-0 z-10 bg-stone-50 border-b border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 cursor-pointer whitespace-nowrap hover:text-teal-700">
+      {children} {sortBy === col && (sortDir === "asc" ? "↑" : "↓")}
+    </th>
   );
 
   return (
@@ -7106,20 +7093,40 @@ function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
         <input value={filterStudent} onChange={(e) => setFilterStudent(e.target.value)} placeholder="Search by student name"
           className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs flex-1 min-w-[160px]" />
       </div>
-      {filtered.length === 0 ? (
+      {sorted.length === 0 ? (
         <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments match this filter yet.</p>
       ) : (
-        <div className="space-y-1.5">
-          {filtered.map((r, i) => (
-            <button key={i} onClick={() => onOpenClass(r.classId)} className="w-full text-left bg-white border border-stone-200 rounded-lg p-3 hover:border-teal-300">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-stone-900">{r.studentName} — {r.subject}</p>
-                <p className="text-sm font-semibold text-teal-700">{r.grade || "—"}</p>
-              </div>
-              <p className="text-xs text-stone-400">{r.className} · {r.title || r.subject} · {r.date} {r.loggedBy ? `· logged by ${r.loggedBy}` : ""}</p>
-              {r.note && <p className="text-xs text-stone-500 mt-0.5">{r.note}</p>}
-            </button>
-          ))}
+        <div className="overflow-auto border border-stone-200 rounded-xl" style={{ maxHeight: "70vh" }}>
+          <table className="border-collapse text-sm w-full">
+            <thead>
+              <tr>
+                <SortHeader col="student">Student</SortHeader>
+                <SortHeader col="class">Class</SortHeader>
+                <SortHeader col="subject">Subject</SortHeader>
+                <th className="sticky top-0 z-10 bg-stone-50 border-b border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 whitespace-nowrap">Assessment</th>
+                <SortHeader col="date">Date</SortHeader>
+                <SortHeader col="grade">Grade</SortHeader>
+                <th className="sticky top-0 z-10 bg-stone-50 border-b border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 whitespace-nowrap">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((r, i) => (
+                <tr key={i} onClick={() => onOpenClass(r.classId)} className="cursor-pointer hover:bg-teal-50">
+                  <td className="border-b border-stone-100 px-3 py-2 text-xs font-semibold text-stone-800 whitespace-nowrap">{r.studentName}</td>
+                  <td className="border-b border-stone-100 px-3 py-2 text-xs text-stone-600 whitespace-nowrap">{r.className}</td>
+                  <td className="border-b border-stone-100 px-3 py-2 text-xs text-stone-600 whitespace-nowrap">{r.subject}</td>
+                  <td className="border-b border-stone-100 px-3 py-2 text-xs text-stone-600">{r.title || r.subject}{r.note ? " •" : ""}</td>
+                  <td className="border-b border-stone-100 px-3 py-2 text-xs text-stone-400 whitespace-nowrap">{r.date}</td>
+                  <td className="border-b border-stone-100 px-3 py-2 text-xs font-semibold text-teal-700 whitespace-nowrap">{r.grade || "—"}</td>
+                  <td className="border-b border-stone-100 px-3 py-2 text-xs whitespace-nowrap">
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${r.published ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                      {r.published ? "Published" : "Draft"}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
