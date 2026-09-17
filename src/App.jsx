@@ -275,7 +275,16 @@ const COLOR_CHOICES = ["emerald", "amber", "rose", "indigo", "sky", "violet", "s
 const SWIPE_BETWEEN_TABS_ENABLED = false;
 // Quick-add suggestions for a class's Subjects list — tap one to add it instantly, or type
 // something else entirely. Not a fixed or required set, just a head start.
-const SUBJECT_LIBRARY = ["Davening", "Kriya", "Chumash", "Hebrew Grammar", "Ksiva", "Tanya Baal Peh", "Gemara", "Mishnayos", "Yiddish", "English", "Math"];
+const SUBJECT_LIBRARY = ["Davening", "Kriya", "Chumash", "Hebrew Grammar", "Ksiva", "Tanya Baal Peh", "Gemara", "Mishnayos", "Yiddish", "English", "Math", "STEM"];
+// A subject counts as General Studies if its own label is exactly one of these three (case-
+// insensitive) — everything else defaults to Judaic Studies automatically. Reported directly:
+// deliberately no separate field on a subject to set this, and nothing for anyone to configure —
+// the distinction is simple enough as stated that adding a tagging step would only be one more
+// thing to remember, for no real benefit over just checking the name itself.
+const GENERAL_STUDIES_SUBJECT_LABELS = new Set(["english", "math", "stem"]);
+function isGeneralStudiesSubject(label) {
+  return GENERAL_STUDIES_SUBJECT_LABELS.has((label || "").trim().toLowerCase());
+}
 // Common schedule blocks that fill out a day but aren't academic subjects — offered as
 // suggestions when building a schedule, but deliberately kept out of the Subjects list itself
 // (so they never show up as a row in Benchmarks or the Assessments grid).
@@ -4635,6 +4644,17 @@ function AppInner() {
       return <StaffMessagesHome loggedInTeacher={currentTeacher} canSwitchToParent={hasFamilyRole} onSwitchToParent={switchToParentMessages} onSignOut={signOutStaff}
         deepLinkGroupId={pendingStaffDeepLink?.groupId} onBack={() => setShowGlobalMessages(false)} onDismissOnboarding={dismissMessagingOnboarding} />;
     }
+    // A General Studies Coordinator gets her own dedicated page instead of any of the routing
+    // below — checked right after the global-messages override (which still applies to her too,
+    // for her own personal conversations) but before the admin/teacher split, since she is neither
+    // of those in the way this routing otherwise means: not administering a single class of her
+    // own like a teacher, and not running the whole school like admin.
+    if (currentTeacher.isGeneralStudiesCoordinator) {
+      return <GeneralStudiesCoordinatorPage loggedInTeacher={currentTeacher} registry={registry}
+        canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff}
+        onOpenGlobalMessages={() => setShowGlobalMessages(true)}
+        onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff} />;
+    }
     if (currentTeacher.role === "admin") {
       if (!classId) {
         return <AdminDashboard registry={registry} onEnterClass={enterAssignedClass} onCreate={createClass} onRefresh={refreshRegistry} onLogout={signOutStaff} onRestore={restoreClass} onDeleteClass={deleteClassPermanently} onArchiveClassById={archiveClassById} onChangePassword={changeAdminPassword}
@@ -6481,6 +6501,284 @@ function TeacherAccountChecker({ onCheck }) {
   );
 }
 
+// Built directly per a detailed conversation: the General Studies Coordinator is not a monitor —
+// she is the PRIMARY administrator of General Studies assessments across every elementary class,
+// the same real ability a teacher already has, just not tied to one class of her own. One single,
+// continuous page throughout — picking a class only ever changes which class's data this same
+// page is showing, never a navigation into a separate classroom app the way a real teacher's own
+// class entry works. Judaic Studies is never shown here, anywhere, even incidentally — every
+// roster, grid, and picker on this page is filtered down to General Studies (English/Math/STEM,
+// see isGeneralStudiesSubject's own comment) from the start, not filtered after the fact.
+//
+// Deliberately reuses the real, existing assessment tools rather than building parallel ones:
+// ClassAssessmentForm (creating one) and AssessmentReportView (generating and sending one to a
+// parent) are both used completely unchanged from their own teacher-side versions — this page
+// just supplies them with whichever class's own real data is currently selected, filtered to
+// General Studies subjects, and her own name for attribution. Whatever she logs saves directly
+// into that real class's own classAssessments record — the same data a teacher or admin looking
+// at that class later sees, correctly attributed to her by name, not duplicated anywhere.
+function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToParent, onSwitchToParent, onSignOut, onOpenGlobalMessages, onChangeMyPassword, onChangeMyName, onChangeMySignOff }) {
+  const elementaryClasses = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
+  const [selectedClassId, setSelectedClassId] = useState(elementaryClasses[0]?.id || null);
+  const [roster, setRoster] = useState(null); // null = loading
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [classAssessments, setClassAssessments] = useState([]);
+  const [view, setView] = useState("grid"); // "grid" | "create" | "report" | "browse" | "messages" | "account"
+  const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
+  const [showMyAccount, setShowMyAccount] = useState(false);
+
+  const refreshClassData = useCallback(async () => {
+    if (!selectedClassId) return;
+    setRoster(null);
+    const [r, c, ca] = await Promise.all([
+      loadJSON(`class:${selectedClassId}:roster`, [], true),
+      loadJSON(`class:${selectedClassId}:config`, DEFAULT_CONFIG, true),
+      loadJSON(`class:${selectedClassId}:classAssessments`, [], true),
+    ]);
+    setRoster(r);
+    setConfig(c);
+    setClassAssessments(ca);
+  }, [selectedClassId]);
+  useEffect(() => { refreshClassData(); }, [refreshClassData]);
+
+  // Every subsequent screen on this page reads from these two, never the unfiltered originals —
+  // this is what keeps Judaic Studies out entirely, in one single place, rather than needing every
+  // screen to separately remember to filter.
+  const gsSubjects = (config.subjects || []).filter((s) => isGeneralStudiesSubject(s.label));
+  const gsSubjectIds = new Set(gsSubjects.map((s) => s.id));
+  const gsConfig = { ...config, subjects: gsSubjects };
+  const gsAssessments = classAssessments.filter((ca) => gsSubjectIds.has(ca.subjectId));
+
+  const withHerAttribution = (obj) => ({ ...obj, loggedAt: new Date().toISOString(), loggedBy: loggedInTeacher.name });
+
+  const addAssessment = async (entry) => {
+    const next = [withHerAttribution({ id: uid(), ...entry }), ...classAssessments];
+    setClassAssessments(next);
+    await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
+    setView("grid");
+  };
+
+  const updateResult = async (assessmentId, studentId, value) => {
+    const next = classAssessments.map((ca) => {
+      if (ca.id !== assessmentId) return ca;
+      const nextResults = { ...(ca.results || {}) };
+      if (value === null) delete nextResults[studentId];
+      else nextResults[studentId] = value;
+      return { ...ca, results: nextResults };
+    });
+    setClassAssessments(next);
+    await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
+  };
+
+  const updateStudentParentEmail = async (studentId, email) => {
+    const next = roster.map((s) => (s.id === studentId ? { ...s, parentEmail: email } : s));
+    setRoster(next);
+    await saveJSON(`class:${selectedClassId}:roster`, next, true);
+  };
+
+  // Same shape as ClassApp's own sendDirectMessageToFamily — reused directly by
+  // AssessmentReportView below, so "send in-app" from a coordinator-generated report works exactly
+  // the same way it does for a teacher's own.
+  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor, broadcastId) => {
+    const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
+    const entry = {
+      id: uid(), senderType: "teacher", senderName: loggedInTeacher.name || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(),
+      ...(attachments?.length ? { attachments } : {}),
+      ...(broadcastId ? { broadcastId } : {}),
+    };
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const next = { ...existing, messages: [...existing.messages, entry] };
+    await saveJSON(key, next, true);
+    sendPushNotification([guardianUid], `Direct message from ${loggedInTeacher.name || "your teacher"}`, text?.trim() || describeAttachmentsForNotification(attachments), `/?portal=parent&open=teacher-messages&teacherUid=${loggedInTeacher.uid}`, { readStateKey: `teacher-${loggedInTeacher.uid}`, timestamp: entry.timestamp });
+    return next;
+  };
+
+  if (view === "messages") {
+    return <StaffMessagesHome loggedInTeacher={loggedInTeacher} canSwitchToParent={canSwitchToParent} onSwitchToParent={onSwitchToParent} onSignOut={onSignOut} onBack={() => setView("grid")} />;
+  }
+
+  if (view === "report" && selectedAssessmentId) {
+    const assessment = gsAssessments.find((a) => a.id === selectedAssessmentId);
+    return (
+      <div className="min-h-screen bg-stone-50">
+        <div className={PAGE}>
+          <GlobalAppStyles />
+          <button onClick={() => setView("grid")} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+          <AssessmentReportView assessment={assessment} roster={roster} config={gsConfig} loggedInTeacher={loggedInTeacher} classId={selectedClassId}
+            onBack={() => setView("grid")} onLogSent={() => {}} onUpdateParentEmail={updateStudentParentEmail} sendDirectMessageToFamily={sendDirectMessageToFamily} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-stone-50">
+      <div className={PAGE}>
+        <GlobalAppStyles />
+        {showMyAccount && (
+          <MyAccountPanel teacher={loggedInTeacher} onUpdateName={onChangeMyName} onChangePassword={onChangeMyPassword} onClose={() => setShowMyAccount(false)} />
+        )}
+        <div className="flex items-center justify-between mb-1">
+          <h1 className="display-font text-2xl font-bold text-stone-900">General Studies</h1>
+          <div className="flex items-center gap-3">
+            <button onClick={onOpenGlobalMessages} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Messages</button>
+            {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
+            <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>
+            <button onClick={onSignOut} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
+          </div>
+        </div>
+        <p className="text-stone-500 text-sm mb-4">English, Math, and STEM assessments across every elementary class.</p>
+
+        <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-96">
+          <button onClick={() => setView("grid")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "grid" || view === "create" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>This class</button>
+          <button onClick={() => setView("browse")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "browse" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Browse all classes</button>
+        </div>
+
+        {view === "browse" ? (
+          <GeneralStudiesBrowseAllView registry={elementaryClasses} onOpenClass={(id) => { setSelectedClassId(id); setView("grid"); }} />
+        ) : (
+          <>
+            <select value={selectedClassId || ""} onChange={(e) => setSelectedClassId(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4">
+              {elementaryClasses.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+
+            {roster === null ? (
+              <p className="text-sm text-stone-400 text-center py-12">Loading…</p>
+            ) : view === "create" ? (
+              <ClassAssessmentForm roster={roster} config={gsConfig} onCancel={() => setView("grid")} onSave={addAssessment} />
+            ) : (
+              <>
+                <button onClick={() => setView("create")} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
+                  <Plus size={16} /> Log a new assessment
+                </button>
+                <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects}
+                  onUpdateResult={updateResult} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A simple, dedicated grid — deliberately not the full teacher-side AssessmentGridView, which also
+// mixes in Skill Categories and Fluency Checks (separate, teacher-managed systems this page has no
+// business touching). One row per General Studies assessment, one column per student; a cell shows
+// that student's own grade (and a small note indicator, since results already support one) and is
+// directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onOpenReport }) {
+  const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
+  if (assessments.length === 0) {
+    return <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments logged for this class yet.</p>;
+  }
+  return (
+    <div className="space-y-3">
+      {[...assessments].sort((a, b) => new Date(b.date) - new Date(a.date)).map((a) => (
+        <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-1">
+            <div>
+              <p className="font-semibold text-stone-900">{a.title || subjectLabel(a.subjectId)}</p>
+              <p className="text-xs text-stone-400">{subjectLabel(a.subjectId)} · {a.date} {a.loggedBy ? `· logged by ${a.loggedBy}` : ""}</p>
+            </div>
+            <button onClick={() => onOpenReport(a.id)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Report & send</button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-3">
+            {roster.map((s) => {
+              const existing = a.results?.[s.id];
+              const grade = typeof existing === "object" ? existing.grade : (existing || "");
+              const note = typeof existing === "object" ? existing.note : "";
+              return (
+                <div key={s.id} className="flex items-center gap-1.5">
+                  <span className="flex-1 text-xs text-stone-600 truncate" title={note || undefined}>{s.name}{note ? " •" : ""}</span>
+                  <input defaultValue={grade} onBlur={(e) => onUpdateResult(a.id, s.id, e.target.value.trim() || null)}
+                    placeholder="—" className="w-16 rounded-lg border border-stone-300 px-1.5 py-1 text-xs" />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Every General Studies assessment across every elementary class at once — filterable, not a feed
+// to scroll through blind. Reads each class's own real data fresh (no separate, duplicated store),
+// the same real classAssessments record everything else on this page also reads and writes.
+function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
+  const [rows, setRows] = useState(null); // null = loading
+  const [filterClassId, setFilterClassId] = useState("");
+  const [filterSubject, setFilterSubject] = useState("");
+  const [filterStudent, setFilterStudent] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const perClass = await Promise.all(registry.map(async (c) => {
+        const [roster, config, classAssessments] = await Promise.all([
+          loadJSON(`class:${c.id}:roster`, [], true),
+          loadJSON(`class:${c.id}:config`, DEFAULT_CONFIG, true),
+          loadJSON(`class:${c.id}:classAssessments`, [], true),
+        ]);
+        const gsSubjectIds = new Set((config.subjects || []).filter((s) => isGeneralStudiesSubject(s.label)).map((s) => s.id));
+        const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
+        const studentName = (id) => roster.find((s) => s.id === id)?.name || "Unknown student";
+        return classAssessments.filter((a) => gsSubjectIds.has(a.subjectId)).flatMap((a) =>
+          Object.entries(a.results || {}).map(([studentId, result]) => ({
+            classId: c.id, className: c.name, assessmentId: a.id, title: a.title, subject: subjectLabel(a.subjectId), date: a.date,
+            studentId, studentName: studentName(studentId), loggedBy: a.loggedBy,
+            grade: typeof result === "object" ? result.grade : result, note: typeof result === "object" ? result.note : "",
+          }))
+        );
+      }));
+      setRows(perClass.flat().sort((a, b) => new Date(b.date) - new Date(a.date)));
+    })();
+  }, [registry]);
+
+  if (rows === null) return <p className="text-sm text-stone-400 text-center py-12">Loading every class's General Studies assessments…</p>;
+
+  const classOptions = registry.map((c) => ({ id: c.id, name: c.name }));
+  const subjectOptions = [...new Set(rows.map((r) => r.subject))];
+  const filtered = rows.filter((r) =>
+    (!filterClassId || r.classId === filterClassId) &&
+    (!filterSubject || r.subject === filterSubject) &&
+    (!filterStudent.trim() || r.studentName.toLowerCase().includes(filterStudent.trim().toLowerCase()))
+  );
+
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        <select value={filterClassId} onChange={(e) => setFilterClassId(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs">
+          <option value="">Every class</option>
+          {classOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <select value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs">
+          <option value="">Every subject</option>
+          {subjectOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <input value={filterStudent} onChange={(e) => setFilterStudent(e.target.value)} placeholder="Search by student name"
+          className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs flex-1 min-w-[160px]" />
+      </div>
+      {filtered.length === 0 ? (
+        <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments match this filter yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {filtered.map((r, i) => (
+            <button key={i} onClick={() => onOpenClass(r.classId)} className="w-full text-left bg-white border border-stone-200 rounded-lg p-3 hover:border-teal-300">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-stone-900">{r.studentName} — {r.subject}</p>
+                <p className="text-sm font-semibold text-teal-700">{r.grade || "—"}</p>
+              </div>
+              <p className="text-xs text-stone-400">{r.className} · {r.title || r.subject} · {r.date} {r.loggedBy ? `· logged by ${r.loggedBy}` : ""}</p>
+              {r.note && <p className="text-xs text-stone-500 mt-0.5">{r.note}</p>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent, onOpenGlobalMessages }) {
   const [adminTab, setAdminTab] = useState("overview");
   // Same reasoning and computation as ClassApp's own refreshHeaderUnread — this admin's own
@@ -7358,6 +7656,15 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                           </div>
                         </>
                       )}
+                      {/* Reported directly: her own dedicated page, not a messagingClassTypes-style
+                          reachability toggle — she isn't just reachable by grade level the way a
+                          curriculum coordinator's messaging is, she has a real, separate
+                          administrative role (logging General Studies assessments herself, across
+                          every elementary class) that a plain teacher account has no page for. */}
+                      <label className="flex items-center gap-2 mt-2.5 text-xs font-semibold text-stone-600 cursor-pointer">
+                        <input type="checkbox" checked={!!t.isGeneralStudiesCoordinator} onChange={(e) => onUpdateTeacher(t.uid, { isGeneralStudiesCoordinator: e.target.checked })} className="rounded border-stone-300" />
+                        General Studies Coordinator — her own dedicated page for administering English/Math/STEM assessments across every elementary class
+                      </label>
                       <div className="mt-2.5 pt-2.5 border-t border-stone-100">
                         <TeacherPasswordResetForm uid={t.uid} onReset={onResetTeacherPassword} />
                       </div>
