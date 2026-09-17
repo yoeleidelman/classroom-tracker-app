@@ -6549,7 +6549,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
   const gsConfig = { ...config, subjects: gsSubjects };
   const gsAssessments = classAssessments.filter((ca) => gsSubjectIds.has(ca.subjectId));
 
-  const withHerAttribution = (obj) => ({ ...obj, loggedAt: new Date().toISOString(), loggedBy: loggedInTeacher.name });
+  const withHerAttribution = (obj) => ({ ...obj, loggedAt: new Date().toISOString(), loggedBy: loggedInTeacher.name, loggedByUid: loggedInTeacher.uid });
 
   const addAssessment = async (entry) => {
     const next = [withHerAttribution({ id: uid(), ...entry }), ...classAssessments];
@@ -8746,7 +8746,7 @@ function useEffectiveLastReadByFamily(threadLastReadByFamily, familyUid, readSta
   return candidates.length ? candidates.reduce((a, b) => (new Date(a) > new Date(b) ? a : b)) : null;
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead, fanOutOption, showFanOutTooltip, onDismissFanOutTooltip }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead, fanOutOption, showFanOutTooltip, onDismissFanOutTooltip, assessmentReference }) {
   // Whichever one is actually present depends on which side of the conversation is viewing —
   // never both at once, since a thread is only ever opened by one specific person at a time.
   const currentUserId = teacher?.uid || family?.uid || null;
@@ -9102,6 +9102,9 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                     {m.migratedFromClassroom && (
                       <p className={`text-[9px] italic ${mine ? mineBubble.lightText : "text-stone-400"}`}>Originally a classroom message</p>
                     )}
+                    {m.assessmentReference && (
+                      <p className={`text-[9px] italic ${mine ? mineBubble.lightText : "text-stone-400"}`}>Regarding: {m.assessmentReference.label}</p>
+                    )}
                   </div>
                   {canModify && (
                     <button onClick={() => setOpenActionsFor(openActionsFor === m.id ? null : m.id)}
@@ -9258,6 +9261,16 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           </div>
         )}
         {attachError && <p className="text-xs text-rose-600 mb-1.5 ml-11">{attachError}</p>}
+        {/* Reported directly: lets the teacher immediately know which specific assessment a
+            parent's message is about, without them having to explain it themselves. Shown once,
+            right above where the parent is about to type — the reference travels WITH the message
+            itself once sent (see the received-message display of the same field below), not just
+            shown here and then lost. */}
+        {assessmentReference && (
+          <div className="ml-11 mb-1.5 bg-teal-50 border border-teal-200 rounded-lg px-2.5 py-1.5 text-xs text-teal-800">
+            <span className="font-semibold">Regarding:</span> {assessmentReference.label}
+          </div>
+        )}
         {canSchedule && showSchedule && (
           <div className="flex items-center gap-1.5 mb-1.5 ml-11">
             <input type="datetime-local" value={scheduledFor} onChange={(e) => setScheduledFor(e.target.value)}
@@ -10103,6 +10116,97 @@ function HomeworkPreviewCard({ link, onSeeAll }) {
   );
 }
 
+// Reported directly: parents see every assessment across every subject here — Judaic Studies and
+// General Studies both, unlike the coordinator's own page which is deliberately scoped to General
+// Studies only. Same "top of Home, below homework" placement the preschool daily log already gets
+// for that age group, since an elementary child had nothing equivalent shown here before this.
+function AssessmentsPreviewCard({ link, onSeeAll }) {
+  const { value: assessments, loaded } = useLiveJSONLoaded(`class:${link.classId}:classAssessments`, []);
+  if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
+  const mine = assessments.filter((a) => a.results && a.results[link.studentId] !== undefined)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const latest = mine[0];
+  const latestResult = latest?.results?.[link.studentId];
+  const latestGrade = typeof latestResult === "object" ? latestResult.grade : latestResult;
+
+  return (
+    <div className="bg-white border-2 border-stone-200 rounded-xl p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-bold uppercase tracking-wide text-stone-400">Assessments</p>
+        {mine.length > 0 && (
+          <button onClick={onSeeAll} className="text-xs font-semibold text-teal-700 hover:text-teal-900">See all</button>
+        )}
+      </div>
+      {!latest ? (
+        <p className="text-sm text-stone-400">No assessments logged yet.</p>
+      ) : (
+        <button onClick={onSeeAll} className="block w-full text-left">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-bold text-stone-900">{latest.title || "Assessment"}</p>
+            {latestGrade && <p className="text-sm font-bold text-teal-700">{latestGrade}</p>}
+          </div>
+          <p className="text-xs text-stone-400">{new Date(latest.date).toLocaleDateString([], { month: "short", day: "numeric" })}</p>
+        </button>
+      )}
+    </div>
+  );
+}
+
+
+// Reached from AssessmentsPreviewCard's own "See all" — every assessment for this one child,
+// across every subject (Judaic Studies included), unlike the coordinator's own General-Studies-
+// only page. "Message Teacher About This Assessment" opens a normal, private direct message with
+// whoever actually logged that specific assessment (via loggedByUid — see withLogger's own
+// comment for why this exists), tagged with a small reference so the teacher immediately knows
+// which assessment the parent means, without a separate, parallel comment system. An assessment
+// logged before loggedByUid existed has no teacher to route to — its own button is simply left
+// off rather than guessing or routing somewhere wrong.
+function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
+  const { value: assessments, loaded: assessmentsLoaded } = useLiveJSONLoaded(`class:${link.classId}:classAssessments`, []);
+  const { value: config, loaded: configLoaded } = useLiveJSONLoaded(`class:${link.classId}:config`, DEFAULT_CONFIG);
+  if (!assessmentsLoaded || !configLoaded) return <p className="text-sm text-stone-400 text-center py-12">Loading…</p>;
+
+  const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
+  const mine = assessments.filter((a) => a.results && a.results[link.studentId] !== undefined)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  return (
+    <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
+      <GlobalAppStyles />
+      <div className="app-page">
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+        <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.studentName}'s assessments</h1>
+        <p className="text-stone-500 text-sm mb-5">Every subject, Judaic Studies and General Studies both.</p>
+        {mine.length === 0 ? (
+          <p className="text-sm text-stone-400 text-center py-12">No assessments logged yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {mine.map((a) => {
+              const result = a.results[link.studentId];
+              const grade = typeof result === "object" ? result.grade : result;
+              const note = typeof result === "object" ? result.note : "";
+              const label = `${subjectLabel(a.subjectId)} — ${a.title || "Assessment"} — ${a.date}${grade ? ` — ${grade}` : ""}`;
+              return (
+                <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold text-stone-900">{a.title || subjectLabel(a.subjectId)}</p>
+                    {grade && <p className="font-bold text-teal-700">{grade}</p>}
+                  </div>
+                  <p className="text-xs text-stone-400 mb-1">{subjectLabel(a.subjectId)} · {new Date(a.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</p>
+                  {note && <p className="text-sm text-stone-600 mb-2">{note}</p>}
+                  {a.loggedByUid && (
+                    <button onClick={() => onMessageTeacher(a.loggedByUid, label)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Message Teacher About This Assessment</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function ParentHomeworkTabContent({ links, selectedIndex, onMarkRead }) {
   const selectedLink = links[selectedIndex] || links[0];
@@ -10152,6 +10256,14 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
 
 function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher, onSwitchToTeacherMessages, onDismissMessagingOnboarding, onDismissFanOutTooltip }) {
   const [parentTab, setParentTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home"); // "home" | "messages" | "blog" | "homework" | "settings" — persistent top bar, not a toggled overlay
+  // A detail screen reached from Home's own preview card, not a tab of its own — the specific
+  // child (studentLink) whose full assessment history is currently open, or null when closed.
+  const [showAssessmentsFor, setShowAssessmentsFor] = useState(null);
+  // Set right before opening a teacher's thread from "Message Teacher About This Assessment" —
+  // read once by ConversationThreadView to show the small "Regarding: ..." reference header on
+  // the very next message actually sent, then cleared. Never persisted as part of the thread
+  // itself; it's the message the parent is about to compose, not something read back later.
+  const [pendingAssessmentReference, setPendingAssessmentReference] = useState(null);
 
   // Records, once per real session here, whether this family is actually using the app installed
   // rather than just in a browser tab — the other half of gauging genuine engagement, alongside
@@ -11089,10 +11201,10 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   // that one teacher's own thread with THIS SPECIFIC GUARDIAN (family.uid, not myGroupId — see the
   // comment on teacherMessagingThread above for why), and notifying only them, never every teacher
   // sharing the classroom.
-  const sendMessageToIndividualTeacher = async (teacherUid, text, attachments) => {
+  const sendMessageToIndividualTeacher = async (teacherUid, text, attachments, assessmentReference) => {
     const key = `teacher-messages:${teacherUid}:${family.uid}`;
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
-    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    const entry = { id: uid(), senderType: "family", senderName: family?.name || "Family", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(assessmentReference ? { assessmentReference } : {}) };
     const next = { ...existing, messages: [...existing.messages, entry] };
     await saveJSON(key, next, true);
     // deepLinkClassId lets the notification jump straight into this teacher's own app and open
@@ -11198,6 +11310,17 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     );
   }
 
+  if (showAssessmentsFor) {
+    return (
+      <ParentAssessmentsDetailView link={showAssessmentsFor} onBack={() => setShowAssessmentsFor(null)}
+        onMessageTeacher={(teacherUid, label) => {
+          setShowAssessmentsFor(null);
+          setPendingAssessmentReference({ label });
+          openTeacherMessages(teacherUid);
+        }} />
+    );
+  }
+
   if (messagingTeacherUid) {
     const activeTeacher = (eligibleTeachers || []).find((t) => t.uid === messagingTeacherUid);
     const teacherName = activeTeacher?.name || "the teacher";
@@ -11222,8 +11345,9 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
             tapped through from. */}
         <ConversationThreadView title={teacherName} subtitle="Direct message" messages={teacherMessagingThread.messages} myRole="family" family={family} threadKey={`teacher-${messagingTeacherUid}`}
           lastReadBeforeOpen={lastReadBeforeOpen}
-          onBack={() => safeGoBack("thread", () => setMessagingTeacherUid(null))}
-          onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }}
+          onBack={() => { setPendingAssessmentReference(null); safeGoBack("thread", () => setMessagingTeacherUid(null)); }}
+          onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments, pendingAssessmentReference); setPendingAssessmentReference(null); }}
+          assessmentReference={pendingAssessmentReference}
           fanOutOption={fanOutOption}
           showFanOutTooltip={Boolean(fanOutOption) && !family?.hasSeenFanOutTooltip}
           onDismissFanOutTooltip={onDismissFanOutTooltip}
@@ -11508,7 +11632,12 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                   // account — a family with one child in preschool and one in elementary sees this
                   // section change to match whichever of their kids is selected above.
                   if (!isPreschoolChild) {
-                    return <HomeworkPreviewCard link={link} onSeeAll={() => navigateParentTab("homework")} />;
+                    return (
+                      <>
+                        <HomeworkPreviewCard link={link} onSeeAll={() => navigateParentTab("homework")} />
+                        <AssessmentsPreviewCard link={link} onSeeAll={() => setShowAssessmentsFor(link)} />
+                      </>
+                    );
                   }
                   return (
                     <div>
@@ -12215,7 +12344,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // actual correction would produce — while still leaving the final call to a person, since a
   // later timestamp is a strong signal, not a guarantee (a teacher can just as easily re-log the
   // wrong number by mistake).
-  const withLogger = (obj) => ({ ...obj, loggedAt: new Date().toISOString(), ...(loggedByName ? { loggedBy: loggedByName } : {}) });
+  // loggedByUid added alongside the existing loggedByName — reported directly: "Message Teacher
+  // About This Assessment" (parent side) needs to know WHICH teacher actually logged a given
+  // assessment to route the message correctly, and a name string alone can't do that (nothing to
+  // send a direct message to). Omitted for a substitute session, which has no real teacher account
+  // uid at all — loggedByName alone still correctly credits the entry either way.
+  const withLogger = (obj) => ({ ...obj, loggedAt: new Date().toISOString(), ...(loggedByName ? { loggedBy: loggedByName } : {}), ...(loggedInTeacher?.uid ? { loggedByUid: loggedInTeacher.uid } : {}) });
   const loadC = useCallback((key, fallback) => loadJSON(`class:${classId}:${key}`, fallback, true), [classId]);
   const saveC = useCallback((key, value) => saveJSON(`class:${classId}:${key}`, value, true), [classId]);
 
