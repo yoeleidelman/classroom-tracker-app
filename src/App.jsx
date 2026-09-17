@@ -4125,6 +4125,19 @@ function AppInner() {
     })();
   }, []);
 
+  // Reported directly, and confirmed as a real race: the fetch just above fires on mount, before
+  // Firebase's own auth state has necessarily finished resolving on a fresh sign-in — loadJSON
+  // swallows a failed read after its own retries and falls back to an empty array, so a lost race
+  // here silently means an empty class dropdown (or, for the coordinator specifically, no classes
+  // to pick from at all) rather than any visible error, exactly matching "loading, then reload and
+  // it's fine" (a reload has auth's persisted state ready immediately, so the race doesn't recur).
+  // This re-fetches once authChecked genuinely becomes true — a guaranteed-valid token at that
+  // point — as a safety net on top of the mount-time fetch, not a replacement for it.
+  useEffect(() => {
+    if (!authChecked) return;
+    loadJSON("schoolClasses", [], true).then(setRegistry);
+  }, [authChecked]);
+
   const selectClass = (cls) => {
     setClassId(cls.id);
     setClassName(cls.name);
