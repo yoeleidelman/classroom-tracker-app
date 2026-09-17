@@ -311,6 +311,9 @@ function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
 // {grade, note} — these two helpers read either shape the same way so nothing needs migrating.
 function getResultGrade(r) { return r == null ? "" : (typeof r === "object" ? (r.grade || "") : String(r)); }
 function getResultNote(r) { return r != null && typeof r === "object" ? (r.note || "") : ""; }
+// A result from before draft/publish existed is treated as already published — see
+// normalizeAssessmentResult's own comment for the full reasoning.
+function getResultPublished(r) { return r == null ? false : (typeof r === "object" && r.published !== undefined ? r.published : true); }
 
 // Builds the shared instruction block injected into every AI message-drafting prompt, so tone,
 // school terminology, and opening/closing wording are configurable per class instead of
@@ -6650,6 +6653,17 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
     }
   };
 
+  // Same reasoning as ClassApp's own version — a genuinely separate action from publishing,
+  // sending a real direct message to every guardian of this student, tagged with a reference to
+  // this specific assessment.
+  const sendMessageAboutAssessment = async (assessment, student, subjectLabel, text) => {
+    const families = await fetchClassFamilies(selectedClassId);
+    const guardianUids = families.filter((f) => (f.studentLinks || []).some((l) => l.studentId === student.id)).map((f) => f.uid);
+    const existing = normalizeAssessmentResult(assessment.results?.[student.id]);
+    const label = `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
+    await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
+  };
+
   const updateStudentParentEmail = async (studentId, email) => {
     const next = roster.map((s) => (s.id === studentId ? { ...s, parentEmail: email } : s));
     setRoster(next);
@@ -6659,12 +6673,13 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
   // Same shape as ClassApp's own sendDirectMessageToFamily — reused directly by
   // AssessmentReportView below, so "send in-app" from a coordinator-generated report works exactly
   // the same way it does for a teacher's own.
-  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor, broadcastId) => {
+  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor, broadcastId, assessmentReference) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
     const entry = {
       id: uid(), senderType: "teacher", senderName: loggedInTeacher.name || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(),
       ...(attachments?.length ? { attachments } : {}),
       ...(broadcastId ? { broadcastId } : {}),
+      ...(assessmentReference ? { assessmentReference } : {}),
     };
     const existing = (await loadJSON(key, null, true)) || { messages: [] };
     const next = { ...existing, messages: [...existing.messages, entry] };
@@ -6732,7 +6747,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
                   <Plus size={16} /> Log a new assessment
                 </button>
                 <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects}
-                  onUpdateResult={updateResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
+                  onUpdateResult={updateResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
               </>
             )}
           </>
@@ -6747,10 +6762,13 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // business touching). One row per General Studies assessment, one column per student; a cell shows
 // that student's own grade (and a small note indicator, since results already support one) and is
 // directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
-function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onPublishResult, onPublishAll, onOpenReport }) {
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenReport }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
   const [notePromptFor, setNotePromptFor] = useState(null); // { assessmentId, studentId } | null
   const [noteDraft, setNoteDraft] = useState("");
+  const [messagePromptFor, setMessagePromptFor] = useState(null); // { assessmentId, studentId } | null
+  const [messageDraft, setMessageDraft] = useState("");
+  const [messageSentFor, setMessageSentFor] = useState(null); // { assessmentId, studentId } | null
 
   if (assessments.length === 0) {
     return <p className="text-sm text-stone-400 text-center py-12">No General Studies assessments logged for this class yet.</p>;
@@ -6795,6 +6813,24 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateR
                           className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish</button>
                       )}
                     </div>
+                    {existing && onMessageAboutAssessment && (
+                      (messageSentFor?.assessmentId === a.id && messageSentFor?.studentId === s.id) ? (
+                        <p className="text-[11px] text-emerald-700 mt-0.5">Message sent.</p>
+                      ) : (messagePromptFor?.assessmentId === a.id && messagePromptFor?.studentId === s.id) ? (
+                        <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
+                          <textarea value={messageDraft} onChange={(e) => setMessageDraft(e.target.value)} rows={2} autoFocus
+                            placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+                          <div className="flex gap-2">
+                            <button onClick={async () => { if (!messageDraft.trim()) return; await onMessageAboutAssessment(a, s, subjectLabel(a.subjectId), messageDraft.trim()); setMessageSentFor({ assessmentId: a.id, studentId: s.id }); setMessagePromptFor(null); }}
+                              className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Send</button>
+                            <button onClick={() => setMessagePromptFor(null)} className="text-xs text-stone-500 hover:text-stone-700">Cancel</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={() => { setMessagePromptFor({ assessmentId: a.id, studentId: s.id }); setMessageDraft(""); }}
+                          className="text-[10px] font-semibold text-teal-700 hover:text-teal-900 mt-0.5">Message Parent About This Assessment</button>
+                      )
+                    )}
                     {isPromptOpen && (
                       <div className="mt-1.5 bg-stone-50 border border-stone-200 rounded-lg p-2">
                         {/* Reported directly: deliberately never called "message" or "generate
@@ -11766,6 +11802,17 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                       <>
                         <HomeworkPreviewCard link={link} onSeeAll={() => navigateParentTab("homework")} />
                         <AssessmentsPreviewCard link={link} onSeeAll={() => setShowAssessmentsFor(link)} />
+                        {/* Reported directly, and pushed back on for good reason: "See all" tucked
+                            inside the preview card above isn't a real, obvious front door on its
+                            own — a parent thinking "where do I find where my child stands"
+                            shouldn't have to first notice a small link inside a card about the
+                            single most recent result. This is a separate, standalone,
+                            unmistakably-labeled entry point instead. */}
+                        <button onClick={() => setShowAssessmentsFor(link)}
+                          className="w-full flex items-center justify-between bg-white border-2 border-teal-700/20 rounded-xl px-4 py-3 mb-4 hover:border-teal-700">
+                          <span className="text-sm font-bold text-teal-700">See All Assessments</span>
+                          <ChevronRight size={16} className="text-teal-700" />
+                        </button>
                       </>
                     );
                   }
@@ -12731,7 +12778,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           openAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
           openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); navigateView("skill-category-report"); }}
           activateAssessment={activateAssessment} hideAssessment={hideAssessment} createCustomAssessment={createCustomAssessment}
-          updateClassAssessmentResult={updateClassAssessmentResult}
+          updateClassAssessmentResult={updateClassAssessmentResult} onPublishResult={publishClassAssessmentResult} onPublishAll={publishAllInClassAssessment} onMessageAboutAssessment={sendMessageAboutAssessment}
           onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); navigateView("session"); }}
           onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); navigateView("fluency"); }}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
@@ -14018,14 +14065,61 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     });
   };
   const addClassAssessment = (entry) => persistClassAssessments([withLogger({ id: uid(), ...entry }), ...classAssessments]);
+  // Reported directly, same reasoning as the coordinator's own equivalent: any edit from this
+  // modal (grade, note, or both) re-drafts the result — a parent who already saw a published
+  // value shouldn't silently see it change without the teacher deliberately publishing again.
   const updateClassAssessmentResult = (assessmentId, studentId, value) => {
     persistClassAssessments(classAssessments.map((ca) => {
       if (ca.id !== assessmentId) return ca;
       const nextResults = { ...(ca.results || {}) };
       if (value === null) delete nextResults[studentId];
-      else nextResults[studentId] = value;
+      else nextResults[studentId] = { ...(typeof value === "object" ? value : { grade: value }), published: false };
       return { ...ca, results: nextResults };
     }));
+  };
+  // Same shape and reasoning as the coordinator's own publishResult/publishAllInAssessment —
+  // publishing, not grading, is the moment that actually makes a result visible to a parent and
+  // fires the notification.
+  const publishClassAssessmentResult = async (assessmentId, studentId, publishNote) => {
+    const assessment = classAssessments.find((ca) => ca.id === assessmentId);
+    const existing = normalizeAssessmentResult(assessment?.results?.[studentId]);
+    if (!existing) return;
+    persistClassAssessments(classAssessments.map((ca) => {
+      if (ca.id !== assessmentId) return ca;
+      return { ...ca, results: { ...ca.results, [studentId]: { ...existing, published: true, publishedAt: new Date().toISOString(), ...(publishNote ? { publishNote } : {}) } } };
+    }));
+    const subjectLabel = (config.subjects || []).find((s) => s.id === assessment.subjectId)?.label || "an assessment";
+    await notifySpecificStudentFamilies(classId, [studentId], `New ${subjectLabel} assessment published`, publishNote || `${assessment.title || subjectLabel} — ${existing.grade}`, "/?portal=parent&open=home");
+  };
+  const publishAllInClassAssessment = async (assessmentId) => {
+    const assessment = classAssessments.find((ca) => ca.id === assessmentId);
+    if (!assessment) return;
+    const toPublish = Object.entries(assessment.results || {}).filter(([, r]) => {
+      const n = normalizeAssessmentResult(r);
+      return n && !n.published;
+    });
+    const nextResults = { ...assessment.results };
+    toPublish.forEach(([studentId, r]) => {
+      nextResults[studentId] = { ...normalizeAssessmentResult(r), published: true, publishedAt: new Date().toISOString() };
+    });
+    persistClassAssessments(classAssessments.map((ca) => (ca.id === assessmentId ? { ...ca, results: nextResults } : ca)));
+    const subjectLabel = (config.subjects || []).find((s) => s.id === assessment.subjectId)?.label || "an assessment";
+    const studentIds = toPublish.map(([studentId]) => studentId);
+    if (studentIds.length > 0) {
+      await notifySpecificStudentFamilies(classId, studentIds, `New ${subjectLabel} assessment published`, assessment.title || subjectLabel, "/?portal=parent&open=home");
+    }
+  };
+  // Reported directly: a genuinely separate action from publishing itself — sends a real, normal
+  // direct message to every guardian of this one student, tagged with a reference to this specific
+  // assessment. A student with more than one guardian gets a genuinely separate copy sent to each
+  // one's own private thread, same as every other direct message in this app already works —
+  // never a single shared send.
+  const sendMessageAboutAssessment = async (assessment, student, subjectLabel, text) => {
+    const families = await fetchClassFamilies(classId);
+    const guardianUids = families.filter((f) => (f.studentLinks || []).some((l) => l.studentId === student.id)).map((f) => f.uid);
+    const existing = normalizeAssessmentResult(assessment.results?.[student.id]);
+    const label = `${subjectLabel} — ${assessment.title || "Assessment"} — ${assessment.date}${existing?.grade ? ` — ${existing.grade}` : ""}`;
+    await Promise.all(guardianUids.map((uid) => sendDirectMessageToFamily(uid, text, [], null, null, { label })));
   };
 
   const setAttendance = (studentId, date, statusId, auto) => {
@@ -14365,12 +14459,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   //     correctly with whatever direct messages already existed there. Never set on a message
   //     composed directly in a one-on-one thread, migrated or not — it marks the message's own
   //     origin, not which thread it currently lives in.
-  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor, broadcastId) => {
+  const sendDirectMessageToFamily = async (guardianUid, text, attachments, scheduledFor, broadcastId, assessmentReference) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
     const entry = {
       id: uid(), senderType: "teacher", senderName: loggedByName || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(),
       ...(attachments?.length ? { attachments } : {}),
       ...(broadcastId ? { broadcastId } : {}),
+      ...(assessmentReference ? { assessmentReference } : {}),
     };
     if (scheduledFor) {
       await queueScheduledSend({
@@ -20492,7 +20587,7 @@ function ClassPointsCard({ cat, value, onAdd, onSubtract, onReset }) {
 
 // ---------- Assessments ----------
 
-function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId, navigate }) {
+function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId, navigate }) {
   const [showAdd, setShowAdd] = useState(false);
   const activeCats = config.categories.filter((c) => c.active !== false);
   const libraryCats = config.categories.filter((c) => c.active === false);
@@ -20538,7 +20633,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
         <Plus size={16} /> Log an assessment
       </button>
       <AssessmentGridView roster={roster} studentData={studentData} classAssessments={classAssessments} config={config}
-        onUpdateResult={updateClassAssessmentResult} onOpenAssessmentReport={openAssessmentReport}
+        onUpdateResult={updateClassAssessmentResult} onPublishResult={onPublishResult} onPublishAll={onPublishAll} onMessageAboutAssessment={onMessageAboutAssessment} onOpenAssessmentReport={openAssessmentReport}
         onStartSession={onStartSession} onLogFluency={onLogFluency}
         onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail}
         initialStudentId={initialStudentId} />
@@ -20676,7 +20771,7 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
   );
 }
 
-function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
+function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
   const [activeStudentId, setActiveStudentId] = useState(initialStudentId || null);
   const subjects = config?.subjects || [];
@@ -20728,24 +20823,34 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
           <tbody>
             {sorted.map((ca, i) => {
               const isNewGroup = i === 0 || ca.subjectId !== sorted[i - 1].subjectId;
+              const unpublishedCount = Object.values(ca.results || {}).filter((r) => !normalizeAssessmentResult(r)?.published).length;
               return (
                 <tr key={ca.id} className={isNewGroup && i > 0 ? "border-t-2 border-t-stone-300" : ""}>
                   <td className="group sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
                     <div className="font-semibold text-stone-800 text-xs">{subjectLabel(ca.subjectId)}</div>
                     <div className="text-[11px] text-stone-400">{ca.title ? `${ca.title} · ` : ""}{ca.date}</div>
-                    <button onClick={() => onOpenAssessmentReport(ca.id)}
-                      className="text-[10px] font-semibold text-teal-700 hover:text-teal-900 opacity-0 group-hover:opacity-100">
-                      Generate parent reports
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => onOpenAssessmentReport(ca.id)}
+                        className="text-[10px] font-semibold text-teal-700 hover:text-teal-900 opacity-0 group-hover:opacity-100">
+                        Generate parent reports
+                      </button>
+                      {unpublishedCount > 0 && (
+                        <button onClick={() => onPublishAll(ca.id)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
+                          Publish all ({unpublishedCount})
+                        </button>
+                      )}
+                    </div>
                   </td>
                   {roster.map((s) => {
                     const grade = getResultGrade(ca.results?.[s.id]);
                     const hasNote = !!getResultNote(ca.results?.[s.id]);
+                    const isPublished = getResultPublished(ca.results?.[s.id]);
                     return (
                       <td key={s.id} onClick={() => setActiveCell({ assessmentId: ca.id, studentId: s.id })}
                         className="border-b border-stone-100 px-3 py-2 text-center cursor-pointer hover:bg-teal-50 text-xs">
                         {grade || <span className="text-stone-300">—</span>}
                         {hasNote && <span className="ml-1 text-amber-500" title="Has a note">●</span>}
+                        {grade && !isPublished && <span className="ml-1 text-amber-600" title="Draft — not yet published to parents">✎</span>}
                       </td>
                     );
                   })}
@@ -20761,6 +20866,8 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
           assessment={activeAssessment} student={activeCellStudent} subjectLabel={subjectLabel(activeAssessment.subjectId)}
           value={activeAssessment.results?.[activeCellStudent.id]}
           onSave={(value) => { onUpdateResult(activeAssessment.id, activeCellStudent.id, value); setActiveCell(null); }}
+          onPublish={(publishNote) => { onPublishResult(activeAssessment.id, activeCellStudent.id, publishNote); setActiveCell(null); }}
+          onMessageParent={onMessageAboutAssessment ? (text) => onMessageAboutAssessment(activeAssessment, activeCellStudent, subjectLabel(activeAssessment.subjectId), text) : null}
           onClose={() => setActiveCell(null)}
         />
       )}
@@ -20832,9 +20939,15 @@ function AssessmentStudentModal({ student, data, config, classAssessments, onClo
   );
 }
 
-function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave, onClose }) {
+function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave, onPublish, onMessageParent, onClose }) {
+  const normalized = normalizeAssessmentResult(value);
   const [grade, setGrade] = useState(getResultGrade(value));
   const [note, setNote] = useState(getResultNote(value));
+  const [showPublishNote, setShowPublishNote] = useState(false);
+  const [publishNoteDraft, setPublishNoteDraft] = useState("");
+  const [showMessagePrompt, setShowMessagePrompt] = useState(false);
+  const [messageDraft, setMessageDraft] = useState("");
+  const [messageSent, setMessageSent] = useState(false);
 
   const save = () => {
     if (!grade.trim() && !note.trim()) { onSave(null); return; }
@@ -20844,7 +20957,14 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div className="bg-white rounded-xl p-5 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
-        <p className="font-semibold text-stone-800">{student.name}</p>
+        <div className="flex items-center justify-between mb-1">
+          <p className="font-semibold text-stone-800">{student.name}</p>
+          {normalized && (
+            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${normalized.published ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+              {normalized.published ? "Published" : "Draft"}
+            </span>
+          )}
+        </div>
         <p className="text-xs text-stone-400 mb-4">{subjectLabel}{assessment.title ? ` · ${assessment.title}` : ""} · {assessment.date}</p>
 
         <label className="block text-xs font-medium text-stone-500 mb-1">Grade</label>
@@ -20855,10 +20975,45 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
         <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="Anything worth remembering about this result"
           className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
 
-        <div className="flex gap-2">
-          <button onClick={save} className="flex-1 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Save</button>
+        <div className="flex gap-2 mb-3">
+          <button onClick={save} className="flex-1 bg-white text-teal-700 border border-teal-300 rounded-lg py-2 text-sm font-semibold hover:bg-teal-50">Save</button>
           <button onClick={onClose} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
         </div>
+
+        {normalized && !normalized.published && !showPublishNote && (
+          <button onClick={() => setShowPublishNote(true)} className="w-full mb-2 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Publish to Parent(s)</button>
+        )}
+        {normalized && !normalized.published && showPublishNote && (
+          <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5 mb-2">
+            {/* Same deliberate wording as everywhere else this appears — never "message" or
+                "generate message." AI-generation for this note is a planned follow-up, not yet
+                wired in here. */}
+            <label className="block text-[11px] font-semibold text-stone-600 mb-1">Add a note to show with this (optional)</label>
+            <textarea value={publishNoteDraft} onChange={(e) => setPublishNoteDraft(e.target.value)} rows={2}
+              placeholder="e.g. Great work on this one!" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+            <button onClick={() => onPublish(publishNoteDraft.trim() || null)} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Publish to Parent(s)</button>
+          </div>
+        )}
+
+        {/* Reported directly — a genuinely separate thing from the note above: this sends a real,
+            normal direct message, visible in Messages, tagged with a reference to this specific
+            assessment, for an actual follow-up conversation rather than just informing a parent
+            of a result. Available whether or not this result has been published yet. */}
+        {onMessageParent && (messageSent ? (
+          <p className="text-xs text-emerald-700 text-center">Message sent.</p>
+        ) : !showMessagePrompt ? (
+          <button onClick={() => setShowMessagePrompt(true)} className="w-full text-xs font-semibold text-teal-700 hover:text-teal-900 py-1.5">Message Parent About This Assessment</button>
+        ) : (
+          <div className="bg-stone-50 border border-stone-200 rounded-lg p-2.5">
+            <textarea value={messageDraft} onChange={(e) => setMessageDraft(e.target.value)} rows={2} autoFocus
+              placeholder="Type your message…" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs mb-1.5" />
+            <div className="flex gap-2">
+              <button onClick={async () => { if (!messageDraft.trim()) return; await onMessageParent(messageDraft.trim()); setMessageSent(true); }}
+                className="flex-1 bg-teal-700 text-white rounded-lg py-1.5 text-xs font-semibold hover:bg-teal-800">Send</button>
+              <button onClick={() => setShowMessagePrompt(false)} className="text-xs text-stone-500 hover:text-stone-700 px-2">Cancel</button>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
