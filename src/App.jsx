@@ -6803,20 +6803,40 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
     <div className="min-h-screen bg-stone-50 px-4 py-10">
       <GlobalAppStyles />
       <div className="app-page-wide">
-        <div className="flex flex-wrap items-center justify-between gap-y-2 mb-1">
-          <h1 className="display-font text-2xl font-bold text-stone-900">Admin Dashboard</h1>
-          {/* Reported directly, same fix and same reasoning as the equivalent one on Header
-              (regular class screens): inline in the same row as the title and the three text
-              links, this labeled button was crowding everything else on a narrow phone screen —
-              made worse here specifically, since a dual-role admin account has more competing
-              links in this same row (Switch to Parent view, My Account, Log out) than a regular
-              class screen ever does. Its own full-width row below on mobile, back inline (in its
-              original position, before the three text links) once there's room for it (sm and up)
-              — placed before them in source order specifically so sm:order-none restores that
-              same original position rather than leaving it stuck after them. */}
+        <div className="mb-1">
+          <div className="flex items-center justify-between">
+            <h1 className="display-font text-2xl font-bold text-stone-900">Admin Dashboard</h1>
+            <div className="flex items-center gap-3">
+              {/* Reported directly, same reasoning and same fix as the equivalent one on Header
+                  (regular class screens): rendering one button and repositioning it with flex
+                  order/basis tricks put it as a THIRD item in what the browser's justify-between
+                  then treated as one row of evenly-spaced things, pushing it into an awkward gap
+                  on a wider screen instead of the tight, inline spot it originally had — made
+                  worse here specifically, since a dual-role admin account has more competing links
+                  in this same row (Switch to Parent view, My Account, Log out) than a regular class
+                  screen ever does. Two separate, independent instances instead: one full-width on
+                  its own row below, shown only under the phone-width breakpoint; one inline with
+                  the other links exactly as it always was, shown only at that breakpoint and up. */}
+              {onOpenGlobalMessages && (
+                <button onClick={onOpenGlobalMessages} title="Every conversation across every class you teach"
+                  className="hidden sm:flex relative items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+                  <MessageCircle size={16} />
+                  Messages
+                  {adminMessagesUnread > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
+                      {adminMessagesUnread > 9 ? "9+" : adminMessagesUnread}
+                    </span>
+                  )}
+                </button>
+              )}
+              {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
+              {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
+              <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
+            </div>
+          </div>
           {onOpenGlobalMessages && (
             <button onClick={onOpenGlobalMessages} title="Every conversation across every class you teach"
-              className="order-3 basis-full sm:basis-auto sm:order-none relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+              className="sm:hidden mt-2 w-full relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
               <MessageCircle size={16} />
               Messages
               {adminMessagesUnread > 0 && (
@@ -6826,11 +6846,6 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               )}
             </button>
           )}
-          <div className="flex items-center gap-3">
-            {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
-            {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
-            <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
-          </div>
         </div>
         <p className="text-stone-500 text-sm mb-5">Every class in the school. Tap one to open it with full access.</p>
 
@@ -14212,42 +14227,54 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 function Header({ navigate }) {
   const { className, onSwitchClass, switchLabel } = useContext(ClassContext);
   const { canSwitchToParent, switchToParent, openGlobalMessages, globalMessagesUnread } = useContext(AppModeContext);
+  // Reported directly: rendering one button and repositioning it with flex order/basis tricks put
+  // it as a THIRD item in what the browser's justify-between then treated as one row of three
+  // evenly-spaced things — exactly what pushed it into an awkward gap in the middle on a wider
+  // screen, not the tight, inline spot next to settings it originally had. Two separate,
+  // independent instances of the same button instead: one full-width on its own row, shown only
+  // below the phone-width breakpoint; one inline with settings exactly as it always was, shown
+  // only at that breakpoint and up. Each is simple and predictable at its own size, rather than
+  // one element trying to serve both.
+  const messagesButtonContent = (
+    <>
+      <MessageCircle size={16} />
+      Messages
+      {globalMessagesUnread > 0 && (
+        <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
+          {globalMessagesUnread > 9 ? "9+" : globalMessagesUnread}
+        </span>
+      )}
+    </>
+  );
   return (
-    <div className="flex flex-wrap items-center justify-between gap-y-2 mb-2">
-      <div className="flex items-center gap-2">
-        <img src="/logo-transparent.png" alt="" className="w-16 h-16 object-contain shrink-0 -my-2" />
-        <div>
-          <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
-          {className && (
-            <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-teal-700">{className} · {switchLabel || "Switch class"}</button>
-          )}
-          {canSwitchToParent && (
-            <button onClick={switchToParent} className="block text-xs text-stone-400 hover:text-teal-700">Switch to Parent view</button>
-          )}
+    <div className="mb-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <img src="/logo-transparent.png" alt="" className="w-16 h-16 object-contain shrink-0 -my-2" />
+          <div>
+            <h1 className="display-font text-2xl font-bold text-stone-900">Classroom Tracker</h1>
+            {className && (
+              <button onClick={onSwitchClass} className="text-xs text-stone-400 hover:text-teal-700">{className} · {switchLabel || "Switch class"}</button>
+            )}
+            {canSwitchToParent && (
+              <button onClick={switchToParent} className="block text-xs text-stone-400 hover:text-teal-700">Switch to Parent view</button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
+            className="hidden sm:flex relative items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+            {messagesButtonContent}
+          </button>
+          <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
+            <SettingsIcon size={18} />
+          </button>
         </div>
       </div>
-      {/* Reported directly: made into its own full-width row on a narrow phone screen — inline in
-          the same row as the logo, title, and settings icon, this labeled button was crowding
-          everything else and making the whole header look squeezed. Sits on its own line below on
-          mobile, back inline with everything else once there's room for it (sm and up). Order-3
-          plus basis-full is what actually forces the line break in a wrapping flex row; without
-          both, a flex item doesn't reliably take the whole line to itself the way a block element
-          would. */}
       <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
-        className="order-3 basis-full sm:basis-auto sm:order-none relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
-        <MessageCircle size={16} />
-        Messages
-        {globalMessagesUnread > 0 && (
-          <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
-            {globalMessagesUnread > 9 ? "9+" : globalMessagesUnread}
-          </span>
-        )}
+        className="sm:hidden mt-2 w-full relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+        {messagesButtonContent}
       </button>
-      <div className="flex items-center gap-1.5">
-        <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
-          <SettingsIcon size={18} />
-        </button>
-      </div>
     </div>
   );
 }
