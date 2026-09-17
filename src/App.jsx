@@ -6440,6 +6440,35 @@ function TeacherAccountChecker({ onCheck }) {
 
 function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent, onOpenGlobalMessages }) {
   const [adminTab, setAdminTab] = useState("overview");
+  // Same reasoning and computation as ClassApp's own refreshHeaderUnread — this admin's own
+  // personal messages, genuinely across every class plus grade-level reach, so the same "My
+  // Messages" button reads consistently whether it's shown here or from inside any one class.
+  const [adminMessagesUnread, setAdminMessagesUnread] = useState(0);
+  const refreshAdminMessagesUnread = useCallback(async () => {
+    if (!currentTeacher) return;
+    const [ownClassFamilies, reachable] = await Promise.all([
+      Promise.all((currentTeacher.assignedClassIds || []).map((id) => fetchClassFamilies(id))),
+      fetchStaffReachableFamilies(),
+    ]);
+    const byGuardian = {};
+    [...ownClassFamilies.flat(), ...reachable].forEach((f) => { byGuardian[f.uid] = true; });
+    const readState = await getReadState(currentTeacher.uid);
+    let total = 0;
+    for (const guardianUid of Object.keys(byGuardian)) {
+      const thread = await loadJSON(`teacher-messages:${currentTeacher.uid}:${guardianUid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const last = thread?.messages?.[thread.messages.length - 1];
+      const threadKey = `teacher-direct-${guardianUid}`;
+      if (isThreadUnread(readState, threadKey, last, "teacher")) {
+        total += countUnreadInThread(readState, threadKey, thread.messages, "teacher");
+      }
+    }
+    setAdminMessagesUnread(total);
+  }, [currentTeacher]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { refreshAdminMessagesUnread(); }, [refreshAdminMessagesUnread]);
+  useEffect(() => {
+    const interval = setInterval(refreshAdminMessagesUnread, 45000);
+    return () => clearInterval(interval);
+  }, [refreshAdminMessagesUnread]);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPw, setNewPw] = useState("");
@@ -6740,7 +6769,16 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                 too. Deliberately separate from the "Messages" button above, which is admin's own
                 oversight view of OTHER people's conversations, not this account's own. */}
             {onOpenGlobalMessages && (
-              <button onClick={onOpenGlobalMessages} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Messages</button>
+              <button onClick={onOpenGlobalMessages} title="Every conversation across every class you teach"
+                className="relative flex items-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+                <MessageCircle size={16} />
+                Messages
+                {adminMessagesUnread > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
+                    {adminMessagesUnread > 9 ? "9+" : adminMessagesUnread}
+                  </span>
+                )}
+              </button>
             )}
             {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
             {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
