@@ -25,6 +25,9 @@ import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
+import { jsPDF } from "jspdf";
+import { autoTable } from "jspdf-autotable";
+import JSZip from "jszip";
 import { ref as storageRef, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import {
   ChevronLeft, Plus, AlertTriangle, Mic, ArrowRight, Loader2,
@@ -7464,6 +7467,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showArchivedStudents, setShowArchivedStudents] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
+  const [showBulkReportExport, setShowBulkReportExport] = useState(false);
   const [showMessagesLookup, setShowMessagesLookup] = useState(false);
   const [showLabelsEditor, setShowLabelsEditor] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
@@ -7933,6 +7937,17 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             </button>
           ) : (
             <ExportPanel classes={activeClasses} globalStudents={globalStudents} onExport={handleExport} onCancel={() => setShowExportPanel(false)} />
+          )}
+        </div>
+        <div className="pt-1">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Bulk student reports (elementary)</p>
+          <p className="text-xs text-stone-400 mb-3">The same "Export report" a teacher can generate for one student, at once for every elementary student across every elementary class — one real PDF per student, all bundled into a single zip download, grouped into a folder per class.</p>
+          {!showBulkReportExport ? (
+            <button onClick={() => setShowBulkReportExport(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+              <Plus size={12} /> Build a bulk export
+            </button>
+          ) : (
+            <BulkStudentReportExportTool registry={registry} />
           )}
         </div>
         </>
@@ -24989,6 +25004,265 @@ const REPORT_SECTIONS = [
   { id: "fluency", label: "Fluency checks" },
   { id: "contact", label: "Parent & contact info" },
 ];
+
+// Reported directly: the per-student "Export report" button above generates nothing but a
+// browser print dialog — a person manually choosing Save as PDF themselves, one at a time. That
+// can't be automated to produce many files in the background, so a genuine bulk export needs an
+// actually different mechanism: real, programmatic PDF generation (jsPDF + jspdf-autotable, one
+// real PDF file per student, not an image of a page) rather than the print dialog. Deliberately
+// mirrors the exact same 7 sections, in the exact same order, as PrintableStudentReport above, so
+// a bulk-exported PDF and a single-student one look and read the same way — just with a date
+// range added, since a bulk export needs one applied consistently across everyone at once rather
+// than left to whatever history happens to exist.
+function buildStudentReportPdf(student, data, incidents, classAssessments, config, sections, className, startDate, endDate) {
+  const inRange = (dateStr) => !dateStr || ((!startDate || dateStr >= startDate) && (!endDate || dateStr <= endDate));
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  let y = 18;
+
+  doc.setFont("helvetica", "bold"); doc.setFontSize(16);
+  doc.text(student.name, 14, y);
+  y += 6;
+  doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(120);
+  const metaLine = `${className ? `${className} · ` : ""}${startDate || endDate ? `${startDate || "start"} – ${endDate || "today"} · ` : ""}Generated ${todayISO()}`;
+  doc.text(metaLine, 14, y);
+  doc.setTextColor(0);
+  y += 8;
+
+  const addSectionTitle = (title) => {
+    if (y > 270) { doc.addPage(); y = 18; }
+    doc.setFont("helvetica", "bold"); doc.setFontSize(12);
+    doc.text(title, 14, y);
+    y += 6;
+  };
+  const addEmpty = () => {
+    doc.setFont("helvetica", "italic"); doc.setFontSize(9); doc.setTextColor(150);
+    doc.text("Nothing recorded.", 14, y);
+    doc.setTextColor(0);
+    y += 8;
+  };
+  const addTable = (head, rows) => {
+    autoTable(doc, {
+      startY: y, head: [head], body: rows, margin: { left: 14, right: 14 },
+      styles: { fontSize: 8, cellPadding: 2 }, headStyles: { fillColor: [15, 118, 110] }, // teal-700
+      didDrawPage: () => {}, // keep default pagination
+    });
+    y = doc.lastAutoTable.finalY + 8;
+  };
+
+  if (sections.includes("attendance")) {
+    addSectionTitle("Attendance history");
+    const attStatusMap = {}; (config.attendance?.statuses || []).forEach((s) => (attStatusMap[s.id] = s.label));
+    const rows = [...(data.attendance || [])].filter((a) => inRange(a.date)).sort((a, b) => (a.date < b.date ? 1 : -1))
+      .map((a) => [a.date, attStatusMap[a.status] || a.status, a.time || ""]);
+    if (rows.length === 0) addEmpty(); else addTable(["Date", "Status", "Time"], rows);
+  }
+
+  if (sections.includes("homework")) {
+    addSectionTitle("Homework log");
+    const rows = [...(data.homework || [])].filter((h) => inRange(h.date)).sort((a, b) => (a.date < b.date ? 1 : -1))
+      .map((h) => [h.date, h.status]);
+    if (rows.length === 0) addEmpty(); else addTable(["Date", "Status"], rows);
+  }
+
+  if (sections.includes("incidents")) {
+    addSectionTitle("Incidents");
+    const incCatMap = {}; (config.incidents?.categories || []).forEach((c) => (incCatMap[c.id] = c.label));
+    const myIncidents = (incidents || []).filter((i) => (i.studentIds || []).includes(student.id) && inRange(i.date)).sort((a, b) => (a.date < b.date ? 1 : -1));
+    if (myIncidents.length === 0) addEmpty(); else addTable(["Date", "Category", "Description"],
+      myIncidents.map((i) => [i.date, `${incCatMap[i.category] || i.category || "Uncategorized"}${i.flaggedForAdmin ? " (flagged)" : ""}`, i.description || ""]));
+  }
+
+  if (sections.includes("skills")) {
+    addSectionTitle("Skill assessments");
+    const activeSkillCats = (config.categories || []).filter((c) => c.active !== false);
+    let any = false;
+    activeSkillCats.forEach((cat) => {
+      const rows = (cat.items || []).map((item) => {
+        const entry = data.skills?.[skillKey(cat.id, item.id)];
+        if (!entry || !entry.history || entry.history.length === 0) return null;
+        const filteredHistory = entry.history.filter((h) => inRange(h.date));
+        if (filteredHistory.length === 0) return null;
+        const { status } = computeSkillStatus(filteredHistory, { ...cat, gradeOptions: config.gradeOptions });
+        return [item.label, status, filteredHistory[filteredHistory.length - 1]?.date || ""];
+      }).filter(Boolean);
+      if (rows.length === 0) return;
+      any = true;
+      if (y > 260) { doc.addPage(); y = 18; }
+      doc.setFont("helvetica", "bold"); doc.setFontSize(10);
+      doc.text(cat.title, 14, y); y += 5;
+      addTable(["Item", "Status", "Last graded"], rows);
+    });
+    if (!any) addEmpty();
+  }
+
+  if (sections.includes("classAssessments")) {
+    addSectionTitle("Class assessments");
+    const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
+    const myClassAssessments = (classAssessments || []).filter((ca) => ca.results && ca.results[student.id] !== undefined && inRange(ca.date))
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    if (myClassAssessments.length === 0) addEmpty(); else addTable(["Date", "Subject", "Assessment", "Result", "Note"],
+      myClassAssessments.map((ca) => [ca.date, subjectLabel(ca.subjectId), ca.title || "", getResultGrade(ca.results[student.id]), getResultNote(ca.results[student.id]) || ""]));
+  }
+
+  if (sections.includes("fluency")) {
+    addSectionTitle("Fluency checks");
+    const rows = [...(data.fluency || [])].filter((f) => inRange(f.date)).sort((a, b) => (a.date < b.date ? 1 : -1))
+      .map((f) => [f.date, f.summary || f.notes || ""]);
+    if (rows.length === 0) addEmpty(); else addTable(["Date", "Detail"], rows);
+  }
+
+  if (sections.includes("contact")) {
+    addSectionTitle("Parent & contact info");
+    const rows = [];
+    if (student.parent1Name) rows.push(["Parent 1", `${student.parent1Name}${student.parentPhone ? ` · ${student.parentPhone}` : ""}${student.parentEmail ? ` · ${student.parentEmail}` : ""}`]);
+    if (student.parent2Name) rows.push(["Parent 2", `${student.parent2Name}${student.parent2Phone ? ` · ${student.parent2Phone}` : ""}${student.parent2Email ? ` · ${student.parent2Email}` : ""}`]);
+    if (student.homeAddress) rows.push(["Address", student.homeAddress]);
+    if (rows.length === 0) addEmpty(); else addTable(["", ""], rows);
+  }
+
+  return doc.output("blob");
+}
+
+// Reported directly: the same report, generated for every elementary student across every
+// elementary class at once, bundled into one zip download instead of one-by-one through each
+// class's own student view. Same safe, review-then-run shape used elsewhere tonight — shows
+// exactly what it's about to generate (how many students, which classes) before committing to the
+// actual work, and reports real progress while running, since generating potentially 100+ real
+// PDF files in the browser takes real time.
+function BulkStudentReportExportTool({ registry }) {
+  const [selected, setSelected] = useState(REPORT_SECTIONS.map((s) => s.id));
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState(todayISO());
+  const [status, setStatus] = useState("idle"); // "idle" | "counting" | "ready" | "running" | "done"
+  const [studentCount, setStudentCount] = useState(0);
+  const [classCount, setClassCount] = useState(0);
+  const [progress, setProgress] = useState(null); // { done, total }
+  const [error, setError] = useState(null);
+
+  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const allSelected = selected.length === REPORT_SECTIONS.length;
+  const elementaryClasses = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
+
+  const buildCount = async () => {
+    setStatus("counting");
+    setError(null);
+    try {
+      let total = 0;
+      for (const cls of elementaryClasses) {
+        const roster = await loadJSON(`class:${cls.id}:roster`, [], true);
+        total += roster.length;
+      }
+      setStudentCount(total);
+      setClassCount(elementaryClasses.length);
+      setStatus("ready");
+    } catch (e) {
+      console.error("Bulk report count failed", e);
+      setError("Something went wrong checking class rosters. Safe to try again.");
+      setStatus("idle");
+    }
+  };
+
+  const runExport = async () => {
+    setStatus("running");
+    setError(null);
+    setProgress({ done: 0, total: studentCount });
+    try {
+      const zip = new JSZip();
+      let done = 0;
+      for (const cls of elementaryClasses) {
+        const safeClassName = cls.name.replace(/[/\\?%*:|"<>]/g, "-");
+        const folder = zip.folder(safeClassName);
+        const [roster, config, classAssessments, incidents] = await Promise.all([
+          loadJSON(`class:${cls.id}:roster`, [], true),
+          loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true),
+          loadJSON(`class:${cls.id}:classAssessments`, [], true),
+          loadJSON(`class:${cls.id}:incidents`, [], true),
+        ]);
+        for (const student of roster) {
+          const data = (await loadJSON(`class:${cls.id}:kriya:${student.id}`, null, true)) || emptyStudentData();
+          const blob = buildStudentReportPdf(student, data, incidents, classAssessments, config, selected, cls.name, startDate || null, endDate || null);
+          const safeStudentName = student.name.replace(/[/\\?%*:|"<>]/g, "-");
+          folder.file(`${safeStudentName}.pdf`, blob);
+          done++;
+          setProgress({ done, total: studentCount });
+        }
+      }
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Student Reports ${startDate || "start"} to ${endDate || "today"}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setStatus("done");
+    } catch (e) {
+      console.error("Bulk report export failed", e);
+      setError("Something went wrong partway through generating reports. Safe to try again from the start.");
+      setStatus("ready");
+    }
+  };
+
+  if (status === "done") {
+    return (
+      <div>
+        <p className="text-xs font-semibold text-emerald-700 mb-2">Done — {studentCount} report{studentCount === 1 ? "" : "s"} across {classCount} class{classCount === 1 ? "" : "es"} downloaded as one zip file.</p>
+        <button onClick={() => setStatus("idle")} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Start another export</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="md:w-96">
+      <div className="flex items-center justify-between mb-2">
+        <label className="text-sm font-semibold text-stone-700">Include</label>
+        <button onClick={() => setSelected(allSelected ? [] : REPORT_SECTIONS.map((s) => s.id))} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
+          {allSelected ? "Deselect all" : "Select all"}
+        </button>
+      </div>
+      <div className="space-y-1.5 mb-4">
+        {REPORT_SECTIONS.map((s) => (
+          <button key={s.id} onClick={() => toggle(s.id)}
+            className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left ${selected.includes(s.id) ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+            <span className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center ${selected.includes(s.id) ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
+              {selected.includes(s.id) && <Check size={11} className="text-white" />}
+            </span>
+            <span className={`text-sm font-medium ${selected.includes(s.id) ? "text-teal-800" : "text-stone-600"}`}>{s.label}</span>
+          </button>
+        ))}
+      </div>
+
+      <label className="block text-sm font-semibold text-stone-700 mb-1">Date range</label>
+      <p className="text-xs text-stone-400 mb-2">Applied the same way to every student's report. Leave the start blank for their full history.</p>
+      <div className="flex gap-2 mb-5">
+        <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+        <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+      </div>
+
+      {status === "ready" ? (
+        <div>
+          <p className="text-xs text-stone-600 mb-3">{studentCount} student{studentCount === 1 ? "" : "s"} across {classCount} elementary class{classCount === 1 ? "" : "es"} — one PDF each, all bundled into one zip.</p>
+          <div className="flex gap-2">
+            <button onClick={runExport} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
+              <Printer size={16} /> Generate {studentCount} reports
+            </button>
+            <button onClick={() => setStatus("idle")} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+          </div>
+        </div>
+      ) : status === "running" ? (
+        <p className="text-sm font-semibold text-teal-700">Generating… {progress ? `${progress.done}/${progress.total}` : ""}</p>
+      ) : (
+        <button onClick={buildCount} disabled={selected.length === 0 || status === "counting"}
+          className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          <Printer size={16} /> {status === "counting" ? "Checking rosters…" : "Check what this would generate"}
+        </button>
+      )}
+      {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
+    </div>
+  );
+}
 
 function PrintReportOptionsView({ student, onBack, onGenerate }) {
   const [selected, setSelected] = useState(REPORT_SECTIONS.map((s) => s.id)); // everything, by default — "a full student report"
