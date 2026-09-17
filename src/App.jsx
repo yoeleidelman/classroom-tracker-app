@@ -6952,7 +6952,14 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         <div className="pt-1 mb-6">
           <p className="text-sm font-semibold text-stone-800 mb-1">Migrate classroom messages (messaging redesign)</p>
           <p className="text-xs text-stone-400 mb-3">Copies every existing classroom thread's history into each of that class's own currently-assigned teachers' individual threads with that family, at its real original time, marked as originally a classroom message. Never touches or deletes the original classroom threads. Always shows exactly what it would do first — nothing is written until you separately choose to run it, and running it again later only ever adds what's still missing.</p>
-          <MigrateClassroomMessagesTool activeClasses={activeClasses} teachers={teachers} />
+          {/* Deliberately every class, archived included, not just activeClasses — reported by
+              this review: archiving a class only ever sets a flag, never touches its own
+              assignedTeacherIds, so an archived class whose old teacher is still an active staff
+              member today has real, genuine history that would otherwise be silently skipped by
+              this tool and never migrated, with no warning it even happened. The tool's own "no
+              currently-assigned teacher" check already correctly separates out the classes that
+              truly have nowhere for their history to go. */}
+          <MigrateClassroomMessagesTool activeClasses={registry} teachers={teachers} />
         </div>
         <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
