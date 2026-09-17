@@ -2626,7 +2626,7 @@ const ClassContext = createContext({ className: "", onSwitchClass: () => {}, cla
 // For an account that holds both a teacher and a family record — lets Header (rendered
 // independently by many different screens, not passed props from one shared parent) offer a
 // "switch to parent view" link without threading it through every one of those screens.
-const AppModeContext = createContext({ canSwitchToParent: false, switchToParent: () => {}, openGlobalMessages: () => {} });
+const AppModeContext = createContext({ canSwitchToParent: false, switchToParent: () => {}, openGlobalMessages: () => {}, globalMessagesUnread: 0 });
 
 // Fonts, button press/hover feedback, and hand-written layout utilities — extracted into its
 // own component so every screen can render it, not just the ones inside an open class. It used
@@ -8872,7 +8872,6 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           <div className="flex-1 flex items-end gap-1 bg-white border border-stone-300 rounded-3xl pl-1 py-1 pr-2">
             <AttachmentMenuButton onPickFiles={pickAttachments} />
             <textarea ref={composerRef} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type a message…" rows={1}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               className="flex-1 bg-transparent border-none px-1.5 py-2 text-sm resize-none overflow-y-auto outline-none" style={{ maxHeight: MAX_COMPOSER_HEIGHT }} />
             <button onClick={send} disabled={(!text.trim() && attachItems.length === 0) || sending || (showSchedule && !scheduledFor)} title={scheduledFor ? "Schedule" : "Send"}
               className="text-teal-700 hover:text-teal-800 disabled:opacity-30 shrink-0 flex items-center justify-center mb-1.5 p-1">
@@ -12117,6 +12116,39 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const interval = setInterval(refreshCommUnread, 45000);
     return () => clearInterval(interval);
   }, [refreshCommUnread]);
+
+  // Reported directly: the new "My Messages" header icon had no unread indicator at all — a
+  // teacher had no way to tell at a glance whether anything new was actually waiting without
+  // tapping in to check. Genuinely teacher-wide (every class they teach, plus anyone reachable by
+  // grade level), same reach as "My Messages" itself, not just this one open class — deliberately
+  // separate from commUnreadFamilies above, which stays scoped to this one class specifically for
+  // Comm's own banner.
+  const [headerUnreadTotal, setHeaderUnreadTotal] = useState(0);
+  const refreshHeaderUnread = useCallback(async () => {
+    if (!loggedInTeacher) return;
+    const [ownClassFamilies, reachable] = await Promise.all([
+      Promise.all((loggedInTeacher.assignedClassIds || []).map((id) => fetchClassFamilies(id))),
+      fetchStaffReachableFamilies(),
+    ]);
+    const byGuardian = {};
+    [...ownClassFamilies.flat(), ...reachable].forEach((f) => { byGuardian[f.uid] = true; });
+    const readState = await getReadState(loggedInTeacher.uid);
+    let total = 0;
+    for (const guardianUid of Object.keys(byGuardian)) {
+      const thread = await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${guardianUid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
+      const last = thread?.messages?.[thread.messages.length - 1];
+      const threadKey = `teacher-direct-${guardianUid}`;
+      if (isThreadUnread(readState, threadKey, last, "teacher")) {
+        total += countUnreadInThread(readState, threadKey, thread.messages, "teacher");
+      }
+    }
+    setHeaderUnreadTotal(total);
+  }, [loggedInTeacher]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { refreshHeaderUnread(); }, [refreshHeaderUnread]);
+  useEffect(() => {
+    const interval = setInterval(refreshHeaderUnread, 45000);
+    return () => clearInterval(interval);
+  }, [refreshHeaderUnread]);
   const [messageFlag, setMessageFlag] = useState(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
@@ -13658,7 +13690,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
   return (
     <ClassContext.Provider value={{ className, onSwitchClass, switchLabel, classType, commUnreadCount: commUnreadFamilies.length }}>
-    <AppModeContext.Provider value={{ canSwitchToParent: Boolean(canSwitchToParent), switchToParent: onSwitchToParent || (() => {}), openGlobalMessages: onOpenGlobalMessages || (() => {}) }}>
+    <AppModeContext.Provider value={{ canSwitchToParent: Boolean(canSwitchToParent), switchToParent: onSwitchToParent || (() => {}), openGlobalMessages: onOpenGlobalMessages || (() => {}), globalMessagesUnread: headerUnreadTotal }}>
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
       <div style={{
         height: "48px", width: "100%",
@@ -13933,7 +13965,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
 function Header({ navigate }) {
   const { className, onSwitchClass, switchLabel } = useContext(ClassContext);
-  const { canSwitchToParent, switchToParent, openGlobalMessages } = useContext(AppModeContext);
+  const { canSwitchToParent, switchToParent, openGlobalMessages, globalMessagesUnread } = useContext(AppModeContext);
   return (
     <div className="flex items-center justify-between mb-2">
       <div className="flex items-center gap-2">
@@ -13952,10 +13984,17 @@ function Header({ navigate }) {
         {/* Reported directly: a teacher assigned to more than one class had to enter a specific
             class first just to see whether they had any messages waiting in a different one — the
             entire reason this exists as its own always-visible button here, rather than only being
-            reachable from within one class's own Comm tab. */}
+            reachable from within one class's own Comm tab. The badge itself was a real, separate
+            gap this same review found afterward — genuinely teacher-wide, the same reach as this
+            button's own destination, not scoped to whichever one class happens to be open. */}
         <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
-          className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
+          className="relative text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
           <MessageCircle size={18} />
+          {globalMessagesUnread > 0 && (
+            <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none">
+              {globalMessagesUnread > 9 ? "9+" : globalMessagesUnread}
+            </span>
+          )}
         </button>
         <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
           <SettingsIcon size={18} />
