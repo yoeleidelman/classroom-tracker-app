@@ -23594,7 +23594,7 @@ function buildRangeFacts(student, data, incidents, classAssessments, config, sta
       }
     }
     const caInRange = (classAssessments || []).filter((ca) => inRange(ca.date) && ca.results && ca.results[student.id] !== undefined);
-    for (const ca of caInRange) lines.push(`${ca.title} (${ca.date}): ${ca.results[student.id]}`);
+    for (const ca of caInRange) lines.push(`${ca.title} (${ca.date}): ${getResultGrade(ca.results[student.id])}`);
     const fluencyInRange = (data.fluency || []).filter((f) => inRange(f.date));
     for (const f of fluencyInRange) lines.push(`Fluency check (${f.date}): ${f.wordsRead} words, hesitation ${f.hesitation}, ${f.mode}`);
     assessmentLines = lines; // may be empty — handled by caller (section omitted entirely if empty)
@@ -23946,13 +23946,17 @@ function AssessmentReportView({ assessment, roster, config, loggedInTeacher, cla
   const assessmentLabel = subjLabel && assessment.title ? `${subjLabel} — ${assessment.title}` : subjLabel || assessment.title || "Untitled assessment";
 
   const generateOne = async (student) => {
-    const grade = assessment.results[student.id];
+    // Reported directly: a result here is now always the richer {grade, published, note, ...}
+    // object, not a plain grade — this generates from the plain grade text (or, for a multi-part
+    // result, a short summary of its parts), never the raw object itself.
+    const normalized = normalizeAssessmentResult(assessment.results[student.id]);
+    const gradeDescription = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
     setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
     try {
-      const text = await generateAssessmentReport(student, assessment, grade, config, loggedInTeacher);
+      const text = await generateAssessmentReport(student, assessment, gradeDescription, config, loggedInTeacher);
       setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, email: student.parentEmail || "", logged: false } }));
     } catch {
-      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: `${assessmentLabel} (${assessment.date}): ${grade}`, email: student.parentEmail || "", logged: false } }));
+      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: `${assessmentLabel} (${assessment.date}): ${gradeDescription}`, email: student.parentEmail || "", logged: false } }));
     }
   };
   const generateAll = async () => { for (const s of students) await generateOne(s); };
@@ -23974,7 +23978,8 @@ function AssessmentReportView({ assessment, roster, config, loggedInTeacher, cla
       <div className="space-y-3">
         {students.map((s) => {
           const r = reports[s.id];
-          const grade = assessment.results[s.id];
+          const normalized = normalizeAssessmentResult(assessment.results[s.id]);
+          const grade = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${assessment.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
           return (
             <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
               <div className="flex items-center justify-between mb-2">
