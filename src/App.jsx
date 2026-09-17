@@ -13991,14 +13991,19 @@ function Header({ navigate }) {
         {/* Reported directly: a teacher assigned to more than one class had to enter a specific
             class first just to see whether they had any messages waiting in a different one — the
             entire reason this exists as its own always-visible button here, rather than only being
-            reachable from within one class's own Comm tab. The badge itself was a real, separate
-            gap this same review found afterward — genuinely teacher-wide, the same reach as this
-            button's own destination, not scoped to whichever one class happens to be open. */}
+            reachable from within one class's own Comm tab. Made into a labeled button rather than
+            a bare icon per direct feedback that the icon-only version read as too small/easy to
+            miss for something this central. The badge itself is genuinely teacher-wide, the same
+            reach as this button's own destination — always this signed-in teacher's own messages,
+            regardless of which class happens to be open right now, admin included when browsing
+            any class as themselves.
+        */}
         <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
-          className="relative text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
-          <MessageCircle size={18} />
+          className="relative flex items-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+          <MessageCircle size={16} />
+          Messages
           {globalMessagesUnread > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none">
+            <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full bg-rose-600 text-white text-[10px] font-bold leading-none border-2 border-white">
               {globalMessagesUnread > 9 ? "9+" : globalMessagesUnread}
             </span>
           )}
