@@ -3234,6 +3234,14 @@ function AppInner() {
           }
           setCurrentTeacher(mine);
           setAuthResolvedFamily(effectiveFamily);
+          // Reported directly, and confirmed as too fragile: the cleanup previously only fired
+          // from AdminDashboard's own mount, so an admin account that lands somewhere else first
+          // (straight into one of their own assigned classes, say) would never trigger it at all.
+          // Moved here instead — fires the moment admin role is confirmed on sign-in, regardless
+          // of which screen this account actually lands on afterward. Still fully gated by its own
+          // done-flag inside the function itself, so this remains a true no-op after the first
+          // successful run.
+          if (mine?.role === "admin") runMisroutedAdminMessagesCleanup();
           // Auto-resolve when there's only one possible side; a genuinely dual-role account keeps
           // whatever mode it's already in (its ?portal=parent seed, or a choice already made this
           // session) — it only falls through to "unresolved" the very first time both exist and
@@ -5978,13 +5986,20 @@ async function runMisroutedAdminMessagesCleanup() {
   // A fresh flag, deliberately distinct from the original, narrower version's own — that one may
   // already have run and marked itself done before this broader rule replaced it, and reusing the
   // same flag would have meant this corrected logic silently never running at all.
-  const alreadyDone = await loadJSON("misroutedMessagesCleanupDoneV2", false, true);
+  const alreadyDone = await loadJSON("misroutedMessagesCleanupDoneV3", false, true);
   if (alreadyDone) return;
   try {
     const allTeachers = await loadAllWithPrefix("teacher:");
     const teacherByUid = Object.fromEntries(allTeachers.map((t) => [t.uid, t]));
-    const nonAdminTeachersByName = {}; // name -> teacher record, for teachers who are NOT admin
-    allTeachers.forEach((t) => { if (t.role !== "admin" && t.name) nonAdminTeachersByName[t.name] = t; });
+    // Reported directly, confirmed with a second real example: a dual-role account (admin AND a
+    // real, legitimate teacher of specific classes) is not "an admin" for this purpose whenever
+    // their own message was actually sent as that class's own teacher — excluding every admin-
+    // flagged account from this map (the previous version's bug) wrongly routed even a dual-role
+    // person's own, legitimate class messages to School Office. Matched by name against EVERY
+    // teacher regardless of role; which class they actually sent as is resolved per-message below
+    // by checking whether they're genuinely assigned to a class this family is linked to.
+    const teachersByName = {};
+    allTeachers.forEach((t) => { if (t.name) teachersByName[t.name] = t; });
 
     const keys = await loadAllKeysWithPrefix("teacher-messages:");
     for (const key of keys) {
@@ -5999,13 +6014,21 @@ async function runMisroutedAdminMessagesCleanup() {
       const misrouted = messages.filter((m) => m.migratedFromClassroom && m.senderType !== "family" && m.senderName !== ownerTeacherName);
       if (misrouted.length === 0) continue;
 
-      // Split by actual correct destination: a real, different, non-admin teacher's own thread if
-      // matched by name, otherwise the family's School Office thread as the safe default.
+      // Needed to tell "sent as this family's own class's teacher" apart from "sent as admin to a
+      // family/class they don't actually teach" — both can be the exact same dual-role person.
+      const family = await loadJSON(`family:${familyUid}`, null, true);
+      const familyClassIds = new Set((family?.studentLinks || []).map((l) => l.classId));
+
+      // Split by actual correct destination: a real, different teacher's own thread if matched by
+      // name AND genuinely assigned to a class this family is linked to; otherwise the family's
+      // School Office thread as the safe default (covers a true School Office send, and a
+      // dual-role person's admin-capacity send to a family/class they don't actually teach).
       const toOtherTeacher = {}; // matchedUid -> messages[]
       const toAdmin = [];
       for (const m of misrouted) {
-        const matched = nonAdminTeachersByName[m.senderName];
-        if (matched && matched.uid !== ownerTeacherUid) {
+        const matched = teachersByName[m.senderName];
+        const matchedTeachesThisFamily = matched && (matched.assignedClassIds || []).some((id) => familyClassIds.has(id));
+        if (matched && matchedTeachesThisFamily && matched.uid !== ownerTeacherUid) {
           if (!toOtherTeacher[matched.uid]) toOtherTeacher[matched.uid] = [];
           toOtherTeacher[matched.uid].push(m);
         } else {
