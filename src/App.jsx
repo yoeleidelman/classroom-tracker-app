@@ -21995,7 +21995,15 @@ function describeUploadError(err) {
 // check length. Rejects clips over the limit before any bytes ever go to Storage, since there's no
 // value in letting someone wait through an upload only to find out afterward it was too long.
 const MAX_VIDEO_SECONDS = 30;
-function validateVideoDuration(file, maxSeconds = MAX_VIDEO_SECONDS) {
+//
+// Deliberately its own, separate limit from MAX_VIDEO_SECONDS above (used by the live, in-app
+// recording feature elsewhere) rather than sharing it — reported directly: an uploaded file never
+// touches MediaRecorder at all, so it has none of the documented iOS Safari crash risk a long,
+// actively-running recording session does, which is specifically why that other limit stays
+// conservative at 30s. An upload merely being read for its length has no such risk, so it can
+// safely allow more.
+const MAX_UPLOAD_VIDEO_SECONDS = 60;
+function validateVideoDuration(file, maxSeconds = MAX_UPLOAD_VIDEO_SECONDS) {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     video.preload = "metadata";
