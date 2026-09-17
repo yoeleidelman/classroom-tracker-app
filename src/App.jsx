@@ -10324,19 +10324,69 @@ function AssessmentsPreviewCard({ link, onSeeAll }) {
 // which assessment the parent means, without a separate, parallel comment system. An assessment
 // logged before loggedByUid existed has no teacher to route to — its own button is simply left
 // off rather than guessing or routing somewhere wrong.
+// Extracts a plottable number from a grade string, or null if it isn't one — "85%" or "85" both
+// become 85; "Pass", "B+", "At Level" and similar become null (skipped from the trend line
+// itself, but still shown in that subject's own list of individual assessments below it).
+function extractNumericGrade(grade) {
+  if (!grade) return null;
+  const match = String(grade).match(/-?\d+(\.\d+)?/);
+  return match ? parseFloat(match[0]) : null;
+}
+
+// A small, self-contained SVG sparkline — oldest to newest, left to right. Deliberately simple:
+// this is meant to answer "is this generally trending up, down, or flat," not to be a precise,
+// interactive chart a parent would need to study.
+function SubjectTrendSparkline({ points }) {
+  if (points.length < 2) return null;
+  const w = 240, h = 44, pad = 4;
+  const values = points.map((p) => p.value);
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = max - min || 1;
+  const coords = points.map((p, i) => {
+    const x = pad + (i / (points.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((p.value - min) / range) * (h - pad * 2);
+    return `${x},${y}`;
+  });
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="overflow-visible">
+      <polyline points={coords.join(" ")} fill="none" stroke="#0f766e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {coords.map((c, i) => {
+        const [x, y] = c.split(",");
+        return <circle key={i} cx={x} cy={y} r="2.5" fill="#0f766e" />;
+      })}
+    </svg>
+  );
+}
+
 function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
   const { value: assessments, loaded: assessmentsLoaded } = useLiveJSONLoaded(`class:${link.classId}:classAssessments`, []);
   const { value: config, loaded: configLoaded } = useLiveJSONLoaded(`class:${link.classId}:config`, DEFAULT_CONFIG);
+  const [expandedSubjectId, setExpandedSubjectId] = useState(null);
   if (!assessmentsLoaded || !configLoaded) return <p className="text-sm text-stone-400 text-center py-12">Loading…</p>;
 
-  const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
+  const subjects = config.subjects || [];
+  const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
   // Only ever a published result — same reasoning as AssessmentsPreviewCard's own filter. Note the
   // publishNote field is deliberately never shown here — that one-time blurb belongs only to
   // Home's own preview card, not this fuller, ongoing record (see publishResult's own comment).
   const mine = assessments
     .map((a) => ({ ...a, result: normalizeAssessmentResult(a.results?.[link.studentId]) }))
-    .filter((a) => a.result?.published)
-    .sort((a, b) => new Date(b.date) - new Date(a.date));
+    .filter((a) => a.result?.published);
+
+  // Reported directly: grouped by subject, each with its own visible progression, rather than one
+  // flat, mixed-subject list — a parent asking "where does my child stand in Chumash" shouldn't
+  // have to mentally filter Math and Gemara out of a single combined feed to answer that. Order
+  // follows however subjects were originally added in Settings (matching the teacher-side grid's
+  // own grouping order), with a subject that has no published assessments left out entirely.
+  const bySubject = subjects.map((subj) => {
+    const items = mine.filter((a) => a.subjectId === subj.id).sort((a, b) => new Date(a.date) - new Date(b.date));
+    const numericPoints = items.map((a) => ({ date: a.date, value: extractNumericGrade(a.result.grade) })).filter((p) => p.value !== null);
+    const average = numericPoints.length > 0 ? Math.round(numericPoints.reduce((sum, p) => sum + p.value, 0) / numericPoints.length) : null;
+    return { subject: subj, items: [...items].reverse(), numericPoints, average }; // reversed for display: newest first
+  }).filter((g) => g.items.length > 0);
+  // Assessments logged before subjects existed, or with no subject set — kept in their own group
+  // at the end rather than silently dropped.
+  const noSubjectItems = mine.filter((a) => !subjects.some((s) => s.id === a.subjectId)).sort((a, b) => new Date(b.date) - new Date(a.date));
 
   return (
     <div className="min-h-screen bg-stone-50" style={{ fontFamily: "'Inter', sans-serif" }}>
@@ -10345,27 +10395,69 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
         <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
         <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.studentName}'s assessments</h1>
         <p className="text-stone-500 text-sm mb-5">Every subject, Judaic Studies and General Studies both.</p>
-        {mine.length === 0 ? (
+        {bySubject.length === 0 && noSubjectItems.length === 0 ? (
           <p className="text-sm text-stone-400 text-center py-12">No assessments logged yet.</p>
         ) : (
           <div className="space-y-3">
-            {mine.map((a) => {
-              const { grade, note } = a.result;
-              const label = `${subjectLabel(a.subjectId)} — ${a.title || "Assessment"} — ${a.date}${grade ? ` — ${grade}` : ""}`;
+            {bySubject.map(({ subject, items, numericPoints, average }) => {
+              const expanded = expandedSubjectId === subject.id;
               return (
-                <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
-                  <div className="flex items-center justify-between">
-                    <p className="font-semibold text-stone-900">{a.title || subjectLabel(a.subjectId)}</p>
-                    {grade && <p className="font-bold text-teal-700">{grade}</p>}
-                  </div>
-                  <p className="text-xs text-stone-400 mb-1">{subjectLabel(a.subjectId)} · {new Date(a.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</p>
-                  {note && <p className="text-sm text-stone-600 mb-2">{note}</p>}
-                  {a.loggedByUid && (
-                    <button onClick={() => onMessageTeacher(a.loggedByUid, label)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Message Teacher About This Assessment</button>
+                <div key={subject.id} className="bg-white border border-stone-200 rounded-xl p-4">
+                  <button onClick={() => setExpandedSubjectId(expanded ? null : subject.id)} className="w-full flex items-center justify-between text-left">
+                    <div>
+                      <p className="font-semibold text-stone-900">{subject.label}</p>
+                      <p className="text-xs text-stone-400">{items.length} assessment{items.length === 1 ? "" : "s"}{average !== null ? ` · average ${average}%` : ""}</p>
+                    </div>
+                    <ChevronRight size={16} className={`text-stone-400 transition-transform ${expanded ? "rotate-90" : ""}`} />
+                  </button>
+                  {numericPoints.length >= 2 && (
+                    <div className="mt-2"><SubjectTrendSparkline points={numericPoints} /></div>
+                  )}
+                  {expanded && (
+                    <div className="mt-3 pt-3 border-t border-stone-100 space-y-2.5">
+                      {items.map((a) => {
+                        const { grade, note } = a.result;
+                        const label = `${subject.label} — ${a.title || "Assessment"} — ${a.date}${grade ? ` — ${grade}` : ""}`;
+                        return (
+                          <div key={a.id}>
+                            <div className="flex items-center justify-between">
+                              <p className="text-sm font-semibold text-stone-800">{a.title || subject.label}</p>
+                              {grade && <p className="text-sm font-bold text-teal-700">{grade}</p>}
+                            </div>
+                            <p className="text-[11px] text-stone-400">{new Date(a.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</p>
+                            {note && <p className="text-xs text-stone-600 mt-0.5">{note}</p>}
+                            {a.loggedByUid && (
+                              <button onClick={() => onMessageTeacher(a.loggedByUid, label)} className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 mt-0.5">Message Teacher About This Assessment</button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
               );
             })}
+            {noSubjectItems.length > 0 && (
+              <div className="space-y-2.5">
+                {noSubjectItems.map((a) => {
+                  const { grade, note } = a.result;
+                  const label = `Assessment — ${a.title || "Assessment"} — ${a.date}${grade ? ` — ${grade}` : ""}`;
+                  return (
+                    <div key={a.id} className="bg-white border border-stone-200 rounded-xl p-4">
+                      <div className="flex items-center justify-between">
+                        <p className="font-semibold text-stone-900">{a.title || "Assessment"}</p>
+                        {grade && <p className="font-bold text-teal-700">{grade}</p>}
+                      </div>
+                      <p className="text-xs text-stone-400 mb-1">{new Date(a.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</p>
+                      {note && <p className="text-sm text-stone-600 mb-2">{note}</p>}
+                      {a.loggedByUid && (
+                        <button onClick={() => onMessageTeacher(a.loggedByUid, label)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Message Teacher About This Assessment</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>
