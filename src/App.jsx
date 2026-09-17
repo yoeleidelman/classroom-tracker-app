@@ -11132,25 +11132,14 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
         onSelect: (i) => setSelectedStudentId(uniqueChildren[i]?.studentId),
       };
     }
-    if (parentTab === "messages") {
-      const uniqueChildren = [...new Map((family?.studentLinks || []).map((l) => [l.studentId, l])).values()];
-      if (uniqueChildren.length <= 1) return null;
-      // Every class thread carries its own classId; a teacher-direct thread carries classIds
-      // instead (plural, since a teacher can cover more than one class) — office messages
-      // (kind === "admin") deliberately never count toward any one child, staying under Contact
-      // office instead, exactly as already agreed. A child's own count sums every OTHER thread
-      // that's actually theirs either way — two siblings sharing a class both correctly see the
-      // same number, since the same real messages genuinely apply to both.
-      const countForChild = (childLink) => unreadThreads
-        .filter((t) => t.kind === "class" ? t.classId === childLink.classId : t.kind === "teacher" ? (t.classIds || []).includes(childLink.classId) : false)
-        .reduce((sum, t) => sum + (t.unreadCount || 1), 0);
-      return {
-        labels: uniqueChildren.map((l) => l.studentName),
-        counts: uniqueChildren.map(countForChild),
-        selectedIndex: findChildIndex(uniqueChildren, selectedStudentId),
-        onSelect: (i) => setSelectedStudentId(uniqueChildren[i]?.studentId),
-      };
-    }
+    // Reported directly, and this really should have been caught proactively during the redesign
+    // itself: the parent-side unified list already shows every teacher across every child at
+    // once — it never actually filtered by selectedStudentId at all — so this per-child switcher
+    // bar was pure leftover from the old, per-child-scoped design, sitting on top of a screen it
+    // no longer does anything for. Falls through to the same null every other tab with nothing to
+    // switch between already returns (Settings, a single-child family, etc.) — exactly matching
+    // what already happens for Homework, where a preschool child's own name already disappears
+    // from this same switcher once it no longer applies to that tab.
     return null;
   })();
   return (
@@ -11363,6 +11352,21 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   // markThreadRead overwrites it, since opening a thread marks it read immediately.
   const [lastReadBeforeOpen, setLastReadBeforeOpen] = useState(null);
   const [listReadState, setListReadState] = useState({});
+  // Reported directly: Broadcasts and New broadcast used to live inside the old, separate
+  // Classroom Messages screen (now Reports, and no longer about messaging at all) — moved here
+  // instead, since sending a message to a group of families is exactly what this screen is for,
+  // not a report. "direct" (the default) is this teacher's own regular conversations; the other
+  // two are scoped to whichever ONE of this teacher's own classes is picked below, since a
+  // broadcast is inherently "everyone in one specific class," the same as it always was.
+  const [mode, setMode] = useState("direct"); // "direct" | "broadcasts" | "compose"
+  const [broadcastClassId, setBroadcastClassId] = useState(null);
+  const [openBroadcastId, setOpenBroadcastId] = useState(null);
+  const [broadcastMessages, setBroadcastMessages] = useState(null);
+  const [broadcastGroups, setBroadcastGroups] = useState(null);
+  // ClassBroadcastComposer's own email-send option needs each student's real parentEmail — not
+  // available from the guardian-shaped family data this screen already has, so fetched separately,
+  // scoped to whichever class is currently picked for a new broadcast.
+  const [broadcastRoster, setBroadcastRoster] = useState([]);
 
   const refresh = useCallback(async () => {
     // Every family this teacher can reach, from both directions at once: their own assigned
@@ -11409,14 +11413,62 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     if (match) openThread(match);
   }, [deepLinkGroupId, families]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Derived from the families already fetched above, not a separate fetch — each family's own
+  // studentLinks already carries the className for any class they're actually linked to, so
+  // scanning for the first match per one of this teacher's own assignedClassIds gets every name
+  // needed here for free. A class with genuinely no linked families yet has no name available this
+  // way, but also has nobody to broadcast to, so there's nothing lost by that.
+  const myClassOptions = (loggedInTeacher.assignedClassIds || []).map((id) => {
+    const match = (families || []).flatMap((g) => g.studentLinks || []).find((l) => l.classId === id);
+    return { id, name: match?.className || null };
+  }).filter((c) => c.name);
+
+  useEffect(() => {
+    if ((mode === "broadcasts" || mode === "compose") && !broadcastClassId && myClassOptions.length > 0) {
+      setBroadcastClassId(myClassOptions[0].id);
+    }
+  }, [mode, myClassOptions, broadcastClassId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Same combined recorded-plus-detected shape TeacherMessagesView's own allBroadcasts already
+  // uses — recorded ones from class:{id}:broadcasts (this teacher's own sends, and anyone else's
+  // from before this teacher had a class of their own to send from), detected ones scanning the
+  // old classroom threads for a still-valid, pre-redesign broadcastId that was never recorded to
+  // begin with, since that mechanism still holds for genuinely historical broadcasts.
+  useEffect(() => {
+    if (mode !== "broadcasts" || !broadcastClassId) return;
+    setBroadcastMessages(null);
+    (async () => {
+      const recorded = (await loadJSON(`class:${broadcastClassId}:broadcasts`, [], true)) || [];
+      const relevant = await fetchClassFamilies(broadcastClassId);
+      const byGuardian = {};
+      relevant.forEach((f) => { if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f] }; });
+      setBroadcastGroups(Object.values(byGuardian));
+      const entries = await Promise.all(Object.values(byGuardian).map(async (g) => [g.groupId, await loadJSON(`class:${broadcastClassId}:messages:${g.groupId}`, { messages: [] }, true)]));
+      const threadsByGroup = Object.fromEntries(entries);
+      const recordedIds = new Set(recorded.map((b) => b.id));
+      const detectedMap = {};
+      Object.entries(threadsByGroup).forEach(([groupId, t]) => {
+        (t.messages || []).forEach((m) => {
+          if (!m.broadcastId || recordedIds.has(m.broadcastId)) return;
+          if (!detectedMap[m.broadcastId]) detectedMap[m.broadcastId] = { id: m.broadcastId, text: m.text, attachments: m.attachments, timestamp: m.timestamp, senderName: m.senderName, recipientUids: [], detected: true };
+          detectedMap[m.broadcastId].recipientUids.push(groupId);
+        });
+      });
+      setBroadcastMessages([...recorded, ...Object.values(detectedMap)].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
+    })();
+  }, [mode, broadcastClassId]);
+
   // Same shape as ClassApp's own sendDirectMessageToFamily — this person has no classroom thread
   // at all, only ever this one kind of message. guardianUid is deliberately the specific
   // guardian's own uid (see sendDirectMessageToFamily's own comment for the full reasoning) —
   // sendPushNotification with an explicit single-uid list, not notifyFamilyGroup, is what keeps
-  // this notification as private as the thread itself.
-  const sendMessage = async (guardianUid, text, attachments, scheduledFor) => {
+  // this notification as private as the thread itself. broadcastId forwarded through now too,
+  // the same as ClassApp's own version, so ClassBroadcastComposer (moved here from the old
+  // Classroom Messages screen) can mark each of its own copies with the shared id that ties them
+  // together as one broadcast.
+  const sendMessage = async (guardianUid, text, attachments, scheduledFor, broadcastId) => {
     const key = `teacher-messages:${loggedInTeacher.uid}:${guardianUid}`;
-    const entry = { id: uid(), senderType: "teacher", senderName: loggedInTeacher?.name || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    const entry = { id: uid(), senderType: "teacher", senderName: loggedInTeacher?.name || "Teacher", text, timestamp: scheduledFor || new Date().toISOString(), ...(attachments?.length ? { attachments } : {}), ...(broadcastId ? { broadcastId } : {}) };
     if (scheduledFor) {
       await queueScheduledSend({
         kind: "message", scheduledFor,
@@ -11448,6 +11500,20 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     openGroup?.groupId || null,
     openGroup ? `teacher-${loggedInTeacher.uid}` : null,
   );
+
+  useEffect(() => {
+    if (mode !== "compose" || !broadcastClassId) return;
+    loadJSON(`class:${broadcastClassId}:roster`, [], true).then(setBroadcastRoster);
+  }, [mode, broadcastClassId]);
+
+  if (openBroadcastId) {
+    return (
+      <div className={PAGE}>
+        <GlobalAppStyles />
+        <BroadcastDetailView broadcast={broadcastMessages.find((b) => b.id === openBroadcastId)} groups={broadcastGroups} classId={broadcastClassId} onBack={() => setOpenBroadcastId(null)} />
+      </div>
+    );
+  }
 
   if (openGroup) {
     const thread = threads[openGroup.groupId] || { messages: [] };
@@ -11500,6 +11566,61 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
         </div>
       </div>
 
+      <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-[26rem]">
+        <button onClick={() => setMode("direct")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "direct" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <MessageCircle size={14} /> Messages
+        </button>
+        <button onClick={() => setMode("broadcasts")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "broadcasts" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <Users size={14} /> Broadcasts
+        </button>
+        <button onClick={() => setMode("compose")} className={`flex-1 flex items-center justify-center gap-1.5 rounded-md py-1.5 text-xs font-semibold ${mode === "compose" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>
+          <Plus size={14} /> New broadcast
+        </button>
+      </div>
+
+      {mode === "compose" ? (
+        myClassOptions.length === 0 ? (
+          <p className="text-sm text-stone-400 text-center py-8">No classes with any linked families yet.</p>
+        ) : (
+          <>
+            {myClassOptions.length > 1 && (
+              <select value={broadcastClassId || ""} onChange={(e) => setBroadcastClassId(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3">
+                {myClassOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            )}
+            {broadcastClassId && (
+              <ClassBroadcastComposer roster={broadcastRoster} classId={broadcastClassId} className={myClassOptions.find((c) => c.id === broadcastClassId)?.name} config={{}} loggedInTeacher={loggedInTeacher} sendDirectMessageToFamily={sendMessage} />
+            )}
+          </>
+        )
+      ) : mode === "broadcasts" ? (
+        myClassOptions.length === 0 ? (
+          <p className="text-sm text-stone-400 text-center py-8">No classes with any linked families yet.</p>
+        ) : (
+          <>
+            {myClassOptions.length > 1 && (
+              <select value={broadcastClassId || ""} onChange={(e) => setBroadcastClassId(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-3">
+                {myClassOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            )}
+            <p className="text-xs text-stone-400 mb-3">Every message sent to this whole class at once, with who's seen each one.</p>
+            {broadcastMessages === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
+            {broadcastMessages !== null && broadcastMessages.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No broadcasts sent to this class yet.</p>}
+            <div className="space-y-2">
+              {(broadcastMessages || []).map((b) => (
+                <button key={b.id} onClick={() => setOpenBroadcastId(b.id)} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs text-stone-400">{new Date(b.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })} · {b.recipientUids.length} {b.recipientUids.length === 1 ? "family" : "families"}</p>
+                    {b.detected && <span className="text-[10px] text-stone-300">before this list existed</span>}
+                  </div>
+                  <p className="text-sm text-stone-800 truncate mt-0.5">{b.text || describeAttachmentsForNotification(b.attachments)}</p>
+                </button>
+              ))}
+            </div>
+          </>
+        )
+      ) : (
+      <>
       {families === null && <p className="text-sm text-stone-400 text-center py-8">Loading…</p>}
       {families?.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No families are reachable yet.</p>}
       <div className="space-y-2">
@@ -11536,6 +11657,8 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
           );
         })}
       </div>
+      </>
+      )}
     </div>
   );
 }
@@ -11877,7 +12000,6 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       case "communication":
         return (
         <CommunicationListView roster={roster} studentData={studentData} classId={classId} loggedInTeacher={loggedInTeacher} navigate={navigateView}
-          unreadFamilies={commUnreadFamilies} onRefreshUnread={refreshCommUnread}
           openStudent={(id) => { setCurrentId(id); navigateView("comm-entry"); }} />
         );
       case "blog":
@@ -14022,7 +14144,7 @@ function MainTabs({ active, navigate }) {
     ? [
         { id: "attendance", label: "Attendance", icon: Check },
         { id: "daily-log", label: "Daily Log", icon: ClipboardList },
-        { id: "communication", label: "Comm", icon: Mail, count: commUnreadCount },
+        { id: "communication", label: "Reports", icon: Mail },
         { id: "blog", label: "Blog", icon: Newspaper },
         { id: "planner", label: "Planner", icon: Calendar },
       ]
@@ -14030,7 +14152,7 @@ function MainTabs({ active, navigate }) {
         { id: "home", label: "Home", icon: HomeIcon },
         { id: "assessments", label: "Assessments", icon: BookOpen },
         { id: "points", label: "Points", icon: Star },
-        { id: "communication", label: "Comm", icon: Mail, count: commUnreadCount },
+        { id: "communication", label: "Reports", icon: Mail },
         { id: "blog", label: "Blog", icon: Newspaper },
         { id: "homework", label: "Homework", icon: FileText },
         { id: "planner", label: "Planner", icon: Calendar },
@@ -21517,38 +21639,22 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   );
 }
 
-function CommunicationListView({ roster, studentData, classId, loggedInTeacher, navigate, openStudent, unreadFamilies, onRefreshUnread }) {
+function CommunicationListView({ roster, studentData, classId, loggedInTeacher, navigate, openStudent }) {
   const { classType } = useContext(ClassContext);
   const isPreschool = classType === "preschool";
-
-  const snoozeFamily = async (item) => {
-    await snoozeThread(loggedInTeacher.uid, item.threadKey, 60); // snoozes for an hour
-    onRefreshUnread();
-  };
 
   return (
     <div className={PAGE}>
       <Header navigate={navigate} />
       <MainTabs active="communication" navigate={navigate} />
 
-      {unreadFamilies.length > 0 && (
-        <div className="space-y-2 mb-4">
-          {unreadFamilies.map((item) => (
-            <div key={item.threadKey} className="bg-teal-50 border border-teal-300 rounded-xl p-3.5 flex items-start gap-2.5">
-              <div className="bg-teal-700 text-white rounded-full p-1.5 shrink-0 mt-0.5"><MessageCircle size={14} /></div>
-              <button onClick={() => navigate("messages")} className="flex-1 text-left min-w-0">
-                <p className="text-sm font-bold text-stone-900">New message — {item.guardianNames}</p>
-                <p className="text-xs text-stone-600 truncate">{item.preview}</p>
-              </button>
-              <button onClick={() => snoozeFamily(item)} title="Snooze for an hour" className="text-stone-400 hover:text-stone-600 p-1 shrink-0"><Bell size={16} /></button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <button onClick={() => navigate("messages")} className="w-full mb-3 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
-        <Mail size={16} /> Messages
-      </button>
+      {/* Reported directly: this screen is for building and sending reports to parents, not for
+          reading or browsing conversations — that lives entirely in the separate, always-visible
+          Messages button now. The "Messages" button and unread-message banner that used to be
+          here are both removed for exactly that reason, not just renamed; nothing about
+          conversations belongs on this screen anymore. */}
+      <h1 className="display-font text-lg font-bold text-stone-900 mb-1">Reports</h1>
+      <p className="text-xs text-stone-400 mb-4">Build a report and send it to a parent — for actual conversations, use the Messages button.</p>
 
       <div className="flex flex-col md:flex-row gap-2 mb-5">
         <button onClick={() => navigate("monthly-reports")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
