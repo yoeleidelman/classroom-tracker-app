@@ -5820,8 +5820,22 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
               destKeys = [{ key: `admin-messages:${familyUid}`, label: "School Office", kind: "admin" }];
             } else if (m.senderType === "teacher") {
               const matched = classTeachers.find((t) => t.name === m.senderName);
-              if (matched) destKeys = [{ key: `teacher-messages:${matched.uid}:${familyUid}`, label: `${matched.name} (${cls.name})`, kind: "teacher" }];
-              else unmatchedTeacherCount++;
+              if (matched) {
+                destKeys = [{ key: `teacher-messages:${matched.uid}:${familyUid}`, label: `${matched.name} (${cls.name})`, kind: "teacher" }];
+              } else {
+                // Reported directly, confirmed with a real example: the old, pre-redesign
+                // classroom system likely never distinguished admin senders from teacher senders
+                // at all — an admin's own message could be stored as senderType "teacher" under
+                // her own real name. If that name doesn't match any of THIS class's own assigned
+                // teachers but does match a known admin account (anywhere in the school, not
+                // scoped to this one class), it goes to that family's School Office thread rather
+                // than being silently skipped — skipping was only ever the right fallback for a
+                // truly unrecognized name, not a known admin who simply isn't this class's own
+                // teacher.
+                const matchedAdmin = teachers.find((t) => t.name === m.senderName && t.role === "admin");
+                if (matchedAdmin) destKeys = [{ key: `admin-messages:${familyUid}`, label: "School Office", kind: "admin" }];
+                else unmatchedTeacherCount++;
+              }
             }
             for (const d of destKeys) {
               if (!byDest[d.key]) byDest[d.key] = { destKey: d.key, destLabel: d.label, kind: d.kind, familyUid, messages: [], existingIdsLoaded: false };
@@ -5943,42 +5957,95 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
   );
 }
 
-// Reported directly, and explicitly requested as a one-time fix rather than a standing admin
-// tool: cleans up the specific damage the original (pre-fix) version of the migration tool above
-// already did to real data before this was caught — an admin-sent message that ended up copied
-// into a teacher's own personal thread, where it never belonged. Runs silently, once, in the
-// background the next time Admin Dashboard loads (see the useEffect below that calls this,
-// gated by the "misroutedAdminMessagesCleanupDone" flag) — no button, no visible tool, nothing
-// for anyone to click. Finds every such message across every teacher thread in the system, moves
-// each one to that family's actual School Office thread (adding it there only if it isn't already
-// present), and removes it from the teacher thread it was incorrectly sitting in.
+// Reported directly, confirmed with a concrete real example, and explicitly requested as a
+// one-time fix rather than a standing admin tool: cleans up the damage the original (pre-fix)
+// version of the migration tool above already did to real data before this was caught. The rule,
+// stated plainly and confirmed directly: a migrated message that wasn't sent by the family, and
+// wasn't sent by the thread's own teacher, never belongs in that teacher's personal thread —
+// regardless of what senderType says. The original, narrower version of this only caught messages
+// explicitly marked senderType: "admin", which misses the actual real-world case reported: an
+// admin's message sent under her own name into the old, pre-redesign classroom system (which
+// likely never distinguished admin senders from teacher senders at all) got copied into every
+// other teacher's own thread for classes she was never even the assigned teacher of. Runs
+// silently, once, in the background the next time Admin Dashboard loads (see the useEffect below
+// that calls this, gated by its own done-flag) — no button, no visible tool. For each misrouted
+// message: if its sender's name matches a different, real, non-admin teacher, it moves to THAT
+// teacher's own thread instead (matching the same by-name logic the migration tool itself uses);
+// otherwise (the sender is admin, or doesn't match any known teacher at all) it moves to that
+// family's own School Office thread as the safest catch-all. Removed from the teacher thread it
+// was incorrectly sitting in either way.
 async function runMisroutedAdminMessagesCleanup() {
-  const alreadyDone = await loadJSON("misroutedAdminMessagesCleanupDone", false, true);
+  // A fresh flag, deliberately distinct from the original, narrower version's own — that one may
+  // already have run and marked itself done before this broader rule replaced it, and reusing the
+  // same flag would have meant this corrected logic silently never running at all.
+  const alreadyDone = await loadJSON("misroutedMessagesCleanupDoneV2", false, true);
   if (alreadyDone) return;
   try {
+    const allTeachers = await loadAllWithPrefix("teacher:");
+    const teacherByUid = Object.fromEntries(allTeachers.map((t) => [t.uid, t]));
+    const nonAdminTeachersByName = {}; // name -> teacher record, for teachers who are NOT admin
+    allTeachers.forEach((t) => { if (t.role !== "admin" && t.name) nonAdminTeachersByName[t.name] = t; });
+
     const keys = await loadAllKeysWithPrefix("teacher-messages:");
     for (const key of keys) {
-      const familyUid = key.split(":")[2];
+      const parts = key.split(":");
+      const ownerTeacherUid = parts[1];
+      const familyUid = parts[2];
+      const ownerTeacherName = teacherByUid[ownerTeacherUid]?.name;
       const teacherThread = await loadJSON(key, null, true);
       const messages = teacherThread?.messages || [];
-      const misrouted = messages.filter((m) => m.migratedFromClassroom && m.senderType === "admin");
+      // The rule, applied directly: belongs here only if the family sent it, or this thread's own
+      // teacher sent it themselves. Anything else migrated in doesn't belong, no matter its type.
+      const misrouted = messages.filter((m) => m.migratedFromClassroom && m.senderType !== "family" && m.senderName !== ownerTeacherName);
       if (misrouted.length === 0) continue;
-      const adminKey = `admin-messages:${familyUid}`;
-      const adminThread = await loadJSON(adminKey, null, true);
+
+      // Split by actual correct destination: a real, different, non-admin teacher's own thread if
+      // matched by name, otherwise the family's School Office thread as the safe default.
+      const toOtherTeacher = {}; // matchedUid -> messages[]
+      const toAdmin = [];
+      for (const m of misrouted) {
+        const matched = nonAdminTeachersByName[m.senderName];
+        if (matched && matched.uid !== ownerTeacherUid) {
+          if (!toOtherTeacher[matched.uid]) toOtherTeacher[matched.uid] = [];
+          toOtherTeacher[matched.uid].push(m);
+        } else {
+          toAdmin.push(m);
+        }
+      }
+
       const misroutedIds = new Set(misrouted.map((m) => m.id));
       const cleanedTeacherMessages = messages.filter((m) => !misroutedIds.has(m.id));
       await saveJSON(key, { ...teacherThread, messages: cleanedTeacherMessages }, true);
-      const existingAdminIds = new Set((adminThread?.messages || []).map((m) => m.id));
-      const toAdd = misrouted.filter((m) => !existingAdminIds.has(m.id));
-      if (toAdd.length > 0) {
-        const merged = [...(adminThread?.messages || []), ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-        await saveJSON(adminKey, { ...(adminThread || {}), messages: merged }, true);
-        await markThreadRead(familyUid, `admin-${familyUid}`);
+
+      if (toAdmin.length > 0) {
+        const adminKey = `admin-messages:${familyUid}`;
+        const adminThread = await loadJSON(adminKey, null, true);
+        const existingAdminIds = new Set((adminThread?.messages || []).map((m) => m.id));
+        const toAdd = toAdmin.filter((m) => !existingAdminIds.has(m.id));
+        if (toAdd.length > 0) {
+          const merged = [...(adminThread?.messages || []), ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+          await saveJSON(adminKey, { ...(adminThread || {}), messages: merged }, true);
+          await markThreadRead(familyUid, `admin-${familyUid}`);
+        }
+      }
+      for (const [matchedUid, msgs] of Object.entries(toOtherTeacher)) {
+        const destKey = `teacher-messages:${matchedUid}:${familyUid}`;
+        const destThread = await loadJSON(destKey, null, true);
+        const existingDestIds = new Set((destThread?.messages || []).map((m) => m.id));
+        const toAdd = msgs.filter((m) => !existingDestIds.has(m.id));
+        if (toAdd.length > 0) {
+          const merged = [...(destThread?.messages || []), ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+          await saveJSON(destKey, { ...(destThread || {}), messages: merged }, true);
+          await Promise.all([
+            markThreadRead(familyUid, `teacher-${matchedUid}`),
+            markThreadRead(matchedUid, `teacher-direct-${familyUid}`),
+          ]);
+        }
       }
     }
-    await saveJSON("misroutedAdminMessagesCleanupDone", true, true);
+    await saveJSON("misroutedMessagesCleanupDoneV2", true, true);
   } catch (e) {
-    console.error("Misrouted admin messages cleanup failed — will retry next time Admin Dashboard loads", e);
+    console.error("Misrouted messages cleanup failed — will retry next time Admin Dashboard loads", e);
     // Deliberately does NOT set the done flag on failure, so this safely retries on the next load
     // rather than silently giving up partway through.
   }
