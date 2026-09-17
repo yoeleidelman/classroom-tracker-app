@@ -5943,118 +5943,45 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
   );
 }
 
-// Reported directly: cleans up the specific damage the original (pre-fix) version of the
-// migration tool above already did to real data before this was caught — an admin-sent message
-// that ended up copied into a teacher's own personal thread, where it never belonged. Finds every
-// such message across every teacher thread in the system, moves each one to that family's actual
-// School Office thread (adding it there only if it isn't already present — most won't be, since
-// admin messages were never routed there by the old migration at all), and removes it from the
-// teacher thread it was incorrectly sitting in. Same safe, review-then-confirm shape as the
-// migration tool itself — nothing is written until explicitly run.
-function CleanupMisroutedAdminMessagesTool() {
-  const [status, setStatus] = useState("idle"); // "idle" | "scanning" | "reviewing" | "running" | "done"
-  const [plan, setPlan] = useState(null); // { items: [{ teacherThreadKey, familyUid, messages: [...] }], totalMessages, totalThreads }
-  const [error, setError] = useState(null);
-  const [progress, setProgress] = useState(null);
-
-  const buildPlan = async () => {
-    setStatus("scanning");
-    setError(null);
-    try {
-      const keys = await loadAllKeysWithPrefix("teacher-messages:");
-      const items = [];
-      let totalMessages = 0;
-      for (const key of keys) {
-        const parts = key.split(":");
-        const familyUid = parts[2];
-        const thread = await loadJSON(key, null, true);
-        const messages = thread?.messages || [];
-        const misrouted = messages.filter((m) => m.migratedFromClassroom && m.senderType === "admin");
-        if (misrouted.length > 0) {
-          items.push({ teacherThreadKey: key, familyUid, messages: misrouted });
-          totalMessages += misrouted.length;
-        }
+// Reported directly, and explicitly requested as a one-time fix rather than a standing admin
+// tool: cleans up the specific damage the original (pre-fix) version of the migration tool above
+// already did to real data before this was caught — an admin-sent message that ended up copied
+// into a teacher's own personal thread, where it never belonged. Runs silently, once, in the
+// background the next time Admin Dashboard loads (see the useEffect below that calls this,
+// gated by the "misroutedAdminMessagesCleanupDone" flag) — no button, no visible tool, nothing
+// for anyone to click. Finds every such message across every teacher thread in the system, moves
+// each one to that family's actual School Office thread (adding it there only if it isn't already
+// present), and removes it from the teacher thread it was incorrectly sitting in.
+async function runMisroutedAdminMessagesCleanup() {
+  const alreadyDone = await loadJSON("misroutedAdminMessagesCleanupDone", false, true);
+  if (alreadyDone) return;
+  try {
+    const keys = await loadAllKeysWithPrefix("teacher-messages:");
+    for (const key of keys) {
+      const familyUid = key.split(":")[2];
+      const teacherThread = await loadJSON(key, null, true);
+      const messages = teacherThread?.messages || [];
+      const misrouted = messages.filter((m) => m.migratedFromClassroom && m.senderType === "admin");
+      if (misrouted.length === 0) continue;
+      const adminKey = `admin-messages:${familyUid}`;
+      const adminThread = await loadJSON(adminKey, null, true);
+      const misroutedIds = new Set(misrouted.map((m) => m.id));
+      const cleanedTeacherMessages = messages.filter((m) => !misroutedIds.has(m.id));
+      await saveJSON(key, { ...teacherThread, messages: cleanedTeacherMessages }, true);
+      const existingAdminIds = new Set((adminThread?.messages || []).map((m) => m.id));
+      const toAdd = misrouted.filter((m) => !existingAdminIds.has(m.id));
+      if (toAdd.length > 0) {
+        const merged = [...(adminThread?.messages || []), ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        await saveJSON(adminKey, { ...(adminThread || {}), messages: merged }, true);
+        await markThreadRead(familyUid, `admin-${familyUid}`);
       }
-      setPlan({ items, totalMessages, totalThreads: items.length });
-      setStatus("reviewing");
-    } catch (e) {
-      console.error("Cleanup scan failed", e);
-      setError("Something went wrong scanning existing threads — nothing was written. Safe to try again.");
-      setStatus("idle");
     }
-  };
-
-  const runCleanup = async () => {
-    if (!plan) return;
-    setStatus("running");
-    setError(null);
-    setProgress({ done: 0, total: plan.items.length });
-    try {
-      for (let i = 0; i < plan.items.length; i++) {
-        const item = plan.items[i];
-        const adminKey = `admin-messages:${item.familyUid}`;
-        const [teacherThread, adminThread] = await Promise.all([
-          loadJSON(item.teacherThreadKey, null, true),
-          loadJSON(adminKey, null, true),
-        ]);
-        const misroutedIds = new Set(item.messages.map((m) => m.id));
-        // Remove from the teacher thread it never belonged in.
-        const cleanedTeacherMessages = (teacherThread?.messages || []).filter((m) => !misroutedIds.has(m.id));
-        await saveJSON(item.teacherThreadKey, { ...teacherThread, messages: cleanedTeacherMessages }, true);
-        // Add to the family's actual School Office thread — only whichever of these aren't
-        // somehow already there (e.g. the family also messaged the office directly since).
-        const existingAdminIds = new Set((adminThread?.messages || []).map((m) => m.id));
-        const toAdd = item.messages.filter((m) => !existingAdminIds.has(m.id));
-        if (toAdd.length > 0) {
-          const merged = [...(adminThread?.messages || []), ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-          await saveJSON(adminKey, { ...(adminThread || {}), messages: merged }, true);
-          await markThreadRead(item.familyUid, `admin-${item.familyUid}`);
-        }
-        setProgress({ done: i + 1, total: plan.items.length });
-      }
-      setStatus("done");
-    } catch (e) {
-      console.error("Cleanup run failed", e);
-      setError("Something went wrong partway through — already-moved messages are safely in place (this is safe to re-run; it will only act on what's still misrouted, never duplicate or double-remove).");
-      setStatus("reviewing");
-    }
-  };
-
-  if (status === "done") {
-    return <p className="text-xs font-semibold text-emerald-700">Cleanup complete — {plan.totalMessages} message{plan.totalMessages === 1 ? "" : "s"} moved out of {plan.totalThreads} teacher thread{plan.totalThreads === 1 ? "" : "s"} into their families' School Office threads.</p>;
+    await saveJSON("misroutedAdminMessagesCleanupDone", true, true);
+  } catch (e) {
+    console.error("Misrouted admin messages cleanup failed — will retry next time Admin Dashboard loads", e);
+    // Deliberately does NOT set the done flag on failure, so this safely retries on the next load
+    // rather than silently giving up partway through.
   }
-
-  if (status === "reviewing" && plan) {
-    return (
-      <div>
-        {plan.totalMessages === 0 ? (
-          <p className="text-xs text-stone-400">Nothing misrouted found — no admin-sent messages are sitting in a teacher's personal thread.</p>
-        ) : (
-          <>
-            <p className="text-xs text-stone-600 mb-3">
-              <span className="font-semibold">{plan.totalMessages}</span> admin-sent message{plan.totalMessages === 1 ? "" : "s"} found sitting in <span className="font-semibold">{plan.totalThreads}</span> teacher thread{plan.totalThreads === 1 ? "" : "s"} where they never belonged. Running this moves each one to that family's own School Office thread, and removes it from the teacher's.
-            </p>
-            <div className="flex gap-2">
-              <button onClick={runCleanup} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800">
-                Run cleanup — move {plan.totalMessages} message{plan.totalMessages === 1 ? "" : "s"}
-              </button>
-              <button onClick={() => setStatus("idle")} className="text-xs font-semibold text-stone-500 border border-stone-300 rounded-lg px-3 py-2">Cancel</button>
-            </div>
-          </>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <button onClick={buildPlan} disabled={status === "scanning" || status === "running"}
-        className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-2 hover:bg-teal-50 disabled:opacity-50">
-        {status === "scanning" ? "Scanning…" : status === "running" ? `Running… ${progress ? `${progress.done}/${progress.total}` : ""}` : "Check what this would do"}
-      </button>
-      {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
-    </div>
-  );
 }
 
 function ClearAdminMessagesTool() {
@@ -7288,6 +7215,10 @@ function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
 
 function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent, canSwitchToCoordinator, onSwitchToCoordinator, onOpenGlobalMessages }) {
   const [adminTab, setAdminTab] = useState("overview");
+  // Runs once, silently, in the background — see runMisroutedAdminMessagesCleanup's own comment
+  // for the full reasoning. No UI, no button; the done-flag it checks itself means this is a
+  // true no-op on every load after the first successful run.
+  useEffect(() => { runMisroutedAdminMessagesCleanup(); }, []);
   // Same reasoning and computation as ClassApp's own refreshHeaderUnread — this admin's own
   // personal messages, genuinely across every class plus grade-level reach, so the same "My
   // Messages" button reads consistently whether it's shown here or from inside any one class.
@@ -7866,11 +7797,6 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
               currently-assigned teacher" check already correctly separates out the classes that
               truly have nowhere for their history to go. */}
           <MigrateClassroomMessagesTool activeClasses={registry} teachers={teachers} />
-        </div>
-        <div className="pt-1 mb-6">
-          <p className="text-sm font-semibold text-stone-800 mb-1">Clean up misrouted admin messages</p>
-          <p className="text-xs text-stone-400 mb-3">The migration tool above previously had a bug: it copied every classroom message into every currently-assigned teacher's own thread, regardless of who actually sent it — so a School Office message could end up sitting in a teacher's personal conversation. This finds any already-migrated message like that, moves it to the family's real School Office thread, and removes it from the teacher's. Safe to run more than once; only acts on what's still actually misrouted.</p>
-          <CleanupMisroutedAdminMessagesTool />
         </div>
         <div className="pt-1">
           <p className="text-sm font-semibold text-stone-800 mb-1">Export data</p>
