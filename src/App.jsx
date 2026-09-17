@@ -2987,6 +2987,15 @@ function AppInner() {
   // direct link and just seeds the initial mode, it no longer hard-locks it.
   const [isParentPortal] = useState(() => new URLSearchParams(window.location.search).get("portal") === "parent");
   const [activeMode, setActiveMode] = useState(() => (isParentPortal ? "parent" : null)); // "teacher" | "parent" | null (null = not yet resolved, or a dual-role account still choosing)
+  // Reported directly: an account that holds BOTH the coordinator flag and the admin role (a real,
+  // if uncommon, combination — an admin testing the coordinator page on her own account, say) would
+  // otherwise be permanently routed to the coordinator page with no way back to Admin Dashboard at
+  // all, since that routing check runs before the admin one and has no toggle of its own. This is
+  // that toggle — false means "show whichever the routing below would normally pick first"
+  // (coordinator, if she has that flag), true means "show admin instead, even though she also has
+  // the coordinator flag." Irrelevant, and never shown, for the ordinary case of an account with
+  // only one of the two.
+  const [coordinatorViewingAsAdmin, setCoordinatorViewingAsAdmin] = useState(false);
   // A deliberate, global "Messages" entry point — every conversation across every class this
   // teacher is assigned to, plus anyone else reachable by grade level, all in one place, reachable
   // from anywhere (inside any specific class, or from Admin Dashboard) rather than only from
@@ -4678,10 +4687,11 @@ function AppInner() {
     // for her own personal conversations) but before the admin/teacher split, since she is neither
     // of those in the way this routing otherwise means: not administering a single class of her
     // own like a teacher, and not running the whole school like admin.
-    if (currentTeacher.isGeneralStudiesCoordinator) {
+    if (currentTeacher.isGeneralStudiesCoordinator && !coordinatorViewingAsAdmin) {
       return <GeneralStudiesCoordinatorPage loggedInTeacher={currentTeacher} registry={registry}
         canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onSignOut={signOutStaff}
         onOpenGlobalMessages={() => setShowGlobalMessages(true)}
+        canSwitchToAdmin={currentTeacher.role === "admin"} onSwitchToAdmin={() => setCoordinatorViewingAsAdmin(true)}
         onChangeMyPassword={changeMyPassword} onChangeMyName={changeMyName} onChangeMySignOff={changeMySignOff} />;
     }
     if (currentTeacher.role === "admin") {
@@ -4695,7 +4705,9 @@ function AppInner() {
           families={families} onRefreshFamilies={refreshFamilies} onCreateFamily={createFamilyAccount} onAddGuardianToFamily={addGuardianToFamily} onCreateStudentInClass={createStudentInClass} onUpdateFamily={updateFamilyRecord} onDeactivateFamily={deactivateFamilyRecord} onDeleteFamily={deleteFamilyPermanently} onFetchAllStudentsForLinking={fetchAllStudentsForLinking}
           onFetchDailyOverview={fetchDailyOverview} onFetchStudentHistory={fetchAdminStudentHistory} onFetchStudentClassMap={fetchStudentClassMap} onFetchStudentProfile={fetchAdminStudentProfile} onBuildExportData={buildExportData} onFetchCheckInHistory={fetchAllPreschoolCheckInHistory}
           programs={programs} onRefreshPrograms={refreshPrograms} onAddProgram={addProgram} onUpdateProgram={updateProgram} onRemoveProgram={removeProgram} onFetchProgramDetail={fetchProgramDetail} onAddProgramPoints={addProgramPointsAdmin} onAddProgramLogEntry={addProgramLogEntryAdmin} onRemoveProgramLogEntry={removeProgramLogEntryAdmin} onAddProgramCategory={addProgramCategoryAdmin}
-          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")} onOpenGlobalMessages={() => setShowGlobalMessages(true)} />;
+          canSwitchToParent={hasFamilyRole} onSwitchToParent={() => setActiveMode("parent")}
+          canSwitchToCoordinator={currentTeacher.isGeneralStudiesCoordinator && coordinatorViewingAsAdmin} onSwitchToCoordinator={() => setCoordinatorViewingAsAdmin(false)}
+          onOpenGlobalMessages={() => setShowGlobalMessages(true)} />;
       }
       return (
         <ClassApp classId={classId} className={className} classType={registry.find((c) => c.id === classId)?.classType}
@@ -6546,7 +6558,7 @@ function TeacherAccountChecker({ onCheck }) {
 // General Studies subjects, and her own name for attribution. Whatever she logs saves directly
 // into that real class's own classAssessments record — the same data a teacher or admin looking
 // at that class later sees, correctly attributed to her by name, not duplicated anywhere.
-function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToParent, onSwitchToParent, onSignOut, onOpenGlobalMessages, onChangeMyPassword, onChangeMyName, onChangeMySignOff }) {
+function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToParent, onSwitchToParent, onSignOut, onOpenGlobalMessages, canSwitchToAdmin, onSwitchToAdmin, onChangeMyPassword, onChangeMyName, onChangeMySignOff }) {
   const elementaryClasses = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
   const [selectedClassId, setSelectedClassId] = useState(elementaryClasses[0]?.id || null);
   const [roster, setRoster] = useState(null); // null = loading
@@ -6745,6 +6757,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
           <div className="flex items-center gap-3">
             <button onClick={onOpenGlobalMessages} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Messages</button>
             {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
+            {canSwitchToAdmin && <button onClick={onSwitchToAdmin} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Admin view</button>}
             <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>
             <button onClick={onSignOut} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
           </div>
@@ -6767,12 +6780,23 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
             {roster === null ? (
               <p className="text-sm text-stone-400 text-center py-12">Loading…</p>
             ) : view === "create" ? (
-              <ClassAssessmentForm roster={roster} config={gsConfig} templates={assessmentTemplates} onSaveTemplate={saveAssessmentTemplate} onCancel={() => setView("grid")} onSave={addAssessment} />
+              <ClassAssessmentForm roster={roster} config={gsConfig} templates={assessmentTemplates} onSaveTemplate={saveAssessmentTemplate} requireSubject onCancel={() => setView("grid")} onSave={addAssessment} />
             ) : (
               <>
                 <button onClick={() => setView("create")} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
                   <Plus size={16} /> Log a new assessment
                 </button>
+                {/* Reported directly: an assessment logged here without a subject selected (before
+                    the fix that now requires one) would have saved correctly but stayed
+                    permanently invisible on this page — this surfaces any that already exist so
+                    they aren't silently lost, with a pointer to where they're actually visible and
+                    fixable (the regular class's own Assessments tab, which shows everything
+                    regardless of subject). */}
+                {classAssessments.some((ca) => !ca.subjectId) && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4 text-xs text-amber-800">
+                    {classAssessments.filter((ca) => !ca.subjectId).length} assessment(s) in this class were logged without a subject and won't appear here. Open this class's own Assessments tab (as a regular teacher, or from Admin) to find and fix them.
+                  </div>
+                )}
                 <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects} config={gsConfig}
                   onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
               </>
@@ -7010,7 +7034,7 @@ function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
   );
 }
 
-function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent, onOpenGlobalMessages }) {
+function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent, canSwitchToCoordinator, onSwitchToCoordinator, onOpenGlobalMessages }) {
   const [adminTab, setAdminTab] = useState("overview");
   // Same reasoning and computation as ClassApp's own refreshHeaderUnread — this admin's own
   // personal messages, genuinely across every class plus grade-level reach, so the same "My
@@ -7359,6 +7383,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                 </button>
               )}
               {canSwitchToParent && <button onClick={onSwitchToParent} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Parent view</button>}
+              {canSwitchToCoordinator && <button onClick={onSwitchToCoordinator} className="text-xs font-semibold text-stone-400 hover:text-teal-700">Switch to Coordinator view</button>}
               {currentTeacher && <button onClick={() => setShowMyAccount(true)} className="text-xs font-semibold text-teal-700 hover:text-teal-900">My Account</button>}
               <button onClick={onLogout} className="text-xs font-semibold text-stone-400 hover:text-red-500">Log out</button>
             </div>
@@ -21331,7 +21356,7 @@ function levelColorFor(levels, levelLabel) {
   return LEVEL_COLOR_CYCLE[idx % LEVEL_COLOR_CYCLE.length] || LEVEL_COLOR_CYCLE[0];
 }
 
-function ClassAssessmentForm({ roster, config, templates, onSaveTemplate, onCancel, onSave }) {
+function ClassAssessmentForm({ roster, config, templates, onSaveTemplate, requireSubject, onCancel, onSave }) {
   const [subjectId, setSubjectId] = useState(null);
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(todayISO());
@@ -21396,12 +21421,23 @@ function ClassAssessmentForm({ roster, config, templates, onSaveTemplate, onCanc
       <button onClick={onCancel} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Cancel</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-5">Log an assessment</h1>
 
-      <label className="block text-sm font-semibold text-stone-700 mb-1">Subject</label>
+      <label className="block text-sm font-semibold text-stone-700 mb-1">Subject{requireSubject ? " (required)" : ""}</label>
       {subjects.length === 0 ? (
-        <p className="text-xs text-stone-400 mb-4">No subjects set up yet — add some in Settings first, or this will just be logged without one.</p>
+        <p className="text-xs text-stone-400 mb-4">
+          {requireSubject
+            // Reported directly: this page only ever shows an assessment whose subject is one of
+            // her own General Studies subjects — logging one without a subject here would save
+            // correctly but then be permanently invisible on her own page, which is exactly the
+            // silent-vanishing bug this whole requirement exists to prevent.
+            ? "This class has no General Studies subjects (English, Math, or STEM) set up yet — add one in Settings first. Without a subject selected, this would save but never appear on this page."
+            : "No subjects set up yet — add some in Settings first, or this will just be logged without one."}
+        </p>
       ) : (
         <div className="mb-4">
           <SubjectPicker subjects={subjects} value={subjectId} onChange={setSubjectId} placeholder="Select a subject" />
+          {requireSubject && !subjectId && (
+            <p className="text-xs text-amber-700 mt-1">Pick a subject above — without one, this assessment would save but never show up here.</p>
+          )}
         </div>
       )}
 
@@ -21578,7 +21614,7 @@ function ClassAssessmentForm({ roster, config, templates, onSaveTemplate, onCanc
         })}
       </div>
       )}
-      <button onClick={submit} disabled={selectedIds.length === 0}
+      <button onClick={submit} disabled={selectedIds.length === 0 || (requireSubject && !subjectId)}
         className="w-full mt-4 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
         Save assessment
       </button>
