@@ -6574,9 +6574,10 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
     setAssessmentTemplates(next);
     await saveJSON("assessmentTemplates", next, true);
   };
-  const [view, setView] = useState("grid"); // "grid" | "create" | "report" | "browse" | "messages" | "account"
+  const [view, setView] = useState("grid"); // "grid" | "create" | "just-logged" | "browse" | "messages" | "account"
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
   const [showMyAccount, setShowMyAccount] = useState(false);
+  const [showJustLoggedPublish, setShowJustLoggedPublish] = useState(false);
 
   const refreshClassData = useCallback(async () => {
     if (!selectedClassId) return;
@@ -6599,14 +6600,21 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
   const gsSubjectIds = new Set(gsSubjects.map((s) => s.id));
   const gsConfig = { ...config, subjects: gsSubjects };
   const gsAssessments = classAssessments.filter((ca) => gsSubjectIds.has(ca.subjectId));
+  const subjectLabel = (id) => gsSubjects.find((s) => s.id === id)?.label || "No subject";
 
   const withHerAttribution = (obj) => ({ ...obj, loggedAt: new Date().toISOString(), loggedBy: loggedInTeacher.name, loggedByUid: loggedInTeacher.uid });
 
   const addAssessment = async (entry) => {
-    const next = [withHerAttribution({ id: uid(), ...entry }), ...classAssessments];
+    const newAssessment = withHerAttribution({ id: uid(), ...entry });
+    const next = [newAssessment, ...classAssessments];
     setClassAssessments(next);
     await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
-    setView("grid");
+    // Reported directly: logging used to just close straight back to the grid with no next step
+    // at all, leaving a teacher to go hunt for what she just created if she wanted to publish it.
+    // This screen offers that as an actual, immediate next step — Publish now, or I'll publish
+    // later (which behaves exactly as it always did: back to the grid, nothing forced).
+    setSelectedAssessmentId(newAssessment.id);
+    setView("just-logged");
   };
 
   const updateResult = async (assessmentId, studentId, value) => {
@@ -6792,6 +6800,32 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
               <p className="text-sm text-stone-400 text-center py-12">Loading…</p>
             ) : view === "create" ? (
               <ClassAssessmentForm roster={roster} config={gsConfig} templates={assessmentTemplates} onSaveTemplate={saveAssessmentTemplate} requireSubject onCancel={() => setView("grid")} onSave={addAssessment} />
+            ) : view === "just-logged" ? (
+              (() => {
+                const justLogged = classAssessments.find((ca) => ca.id === selectedAssessmentId);
+                if (!justLogged) { setView("grid"); return null; }
+                const studentsInIt = roster.filter((s) => justLogged.results && justLogged.results[s.id] !== undefined);
+                return (
+                  <div className="bg-white border border-stone-200 rounded-xl p-5 text-center">
+                    <Check size={28} className="text-emerald-600 mx-auto mb-2" />
+                    <p className="font-semibold text-stone-900 mb-1">Assessment logged</p>
+                    <p className="text-xs text-stone-400 mb-5">{justLogged.title || subjectLabel(justLogged.subjectId)} · {studentsInIt.length} student{studentsInIt.length === 1 ? "" : "s"}</p>
+                    <button onClick={() => setShowJustLoggedPublish(true)} className="w-full mb-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Publish now</button>
+                    <button onClick={() => setView("grid")} className="w-full text-xs font-semibold text-stone-400 hover:text-stone-600 py-1.5">I'll publish later</button>
+                    {showJustLoggedPublish && (
+                      <PublishAllModal assessment={justLogged} students={studentsInIt} subjectLabel={subjectLabel(justLogged.subjectId)} config={gsConfig}
+                        onGenerateNote={(student) => {
+                          const normalized = normalizeAssessmentResult(justLogged.results?.[student.id]);
+                          const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${justLogged.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+                          const label = `${subjectLabel(justLogged.subjectId)} — ${justLogged.title || "Assessment"}`;
+                          return generatePublishNote(student, label, gradeDesc, gsConfig, null);
+                        }}
+                        onConfirm={(notes) => { publishAllInAssessment(justLogged.id, notes); setShowJustLoggedPublish(false); setView("grid"); }}
+                        onClose={() => setShowJustLoggedPublish(false)} />
+                    )}
+                  </div>
+                );
+              })()
             ) : (
               <>
                 <button onClick={() => setView("create")} className="w-full mb-4 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
@@ -13285,6 +13319,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   }, [refreshHeaderUnread]);
   const [messageFlag, setMessageFlag] = useState(null);
   const [selectedAssessmentId, setSelectedAssessmentId] = useState(null);
+  const [showJustLoggedPublish, setShowJustLoggedPublish] = useState(false);
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
   const [initialAssessmentStudentId, setInitialAssessmentStudentId] = useState(null); // auto-opens a student's modal in the Assessments grid when navigating in from elsewhere
   const [detailReturnView, setDetailReturnView] = useState("detail"); // fluency-detail/skill-detail are reachable from both StudentDetailView and the Assessments grid modal — this tracks which one "Back" should return to
@@ -14319,7 +14354,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       persistStudent(sid, { ...data, periodAttendance: next });
     });
   };
-  const addClassAssessment = (entry) => persistClassAssessments([withLogger({ id: uid(), ...entry }), ...classAssessments]);
+  const addClassAssessment = (entry) => {
+    const newAssessment = withLogger({ id: uid(), ...entry });
+    persistClassAssessments([newAssessment, ...classAssessments]);
+    return newAssessment;
+  };
   // Reported directly, same reasoning as the coordinator's own equivalent: any edit from this
   // modal (grade, note, or both) re-drafts the result — a parent who already saw a published
   // value shouldn't silently see it change without the teacher deliberately publishing again.
@@ -15062,8 +15101,37 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
       {view === "class-assessment-form" && (
         <ClassAssessmentForm roster={roster} config={config} templates={assessmentTemplates} onSaveTemplate={saveAssessmentTemplate} onCancel={() => navigateView("assessments")}
-          onSave={(entry) => { addClassAssessment(entry); navigateView("assessments"); }} />
+          onSave={(entry) => { const newAssessment = addClassAssessment(entry); setSelectedAssessmentId(newAssessment.id); navigateView("just-logged-assessment"); }} />
       )}
+
+      {view === "just-logged-assessment" && selectedAssessmentId && (() => {
+        const justLogged = classAssessments.find((ca) => ca.id === selectedAssessmentId);
+        if (!justLogged) return null;
+        const studentsInIt = roster.filter((s) => justLogged.results && justLogged.results[s.id] !== undefined);
+        const subjLabel = (config.subjects || []).find((s) => s.id === justLogged.subjectId)?.label || "No subject";
+        return (
+          <div className={PAGE}>
+            <div className="bg-white border border-stone-200 rounded-xl p-5 text-center max-w-sm mx-auto mt-8">
+              <Check size={28} className="text-emerald-600 mx-auto mb-2" />
+              <p className="font-semibold text-stone-900 mb-1">Assessment logged</p>
+              <p className="text-xs text-stone-400 mb-5">{justLogged.title || subjLabel} · {studentsInIt.length} student{studentsInIt.length === 1 ? "" : "s"}</p>
+              <button onClick={() => setShowJustLoggedPublish(true)} className="w-full mb-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Publish now</button>
+              <button onClick={() => navigateView("assessments")} className="w-full text-xs font-semibold text-stone-400 hover:text-stone-600 py-1.5">I'll publish later</button>
+              {showJustLoggedPublish && (
+                <PublishAllModal assessment={justLogged} students={studentsInIt} subjectLabel={subjLabel} config={config}
+                  onGenerateNote={(student) => {
+                    const normalized = normalizeAssessmentResult(justLogged.results?.[student.id]);
+                    const gradeDesc = normalized?.grade || (normalized?.parts ? Object.entries(normalized.parts).map(([pid, val]) => `${justLogged.parts?.find((p) => p.id === pid)?.label || pid}: ${val}`).join(", ") : "");
+                    const label = `${subjLabel} — ${justLogged.title || "Assessment"}`;
+                    return generatePublishNote(student, label, gradeDesc, config, loggedInTeacher);
+                  }}
+                  onConfirm={(notes) => { publishAllInClassAssessment(justLogged.id, notes); setShowJustLoggedPublish(false); navigateView("assessments"); }}
+                  onClose={() => setShowJustLoggedPublish(false)} />
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {view === "detail" && currentId && (
         <StudentDetailView student={roster.find((s) => s.id === currentId)} data={studentData[currentId]}
