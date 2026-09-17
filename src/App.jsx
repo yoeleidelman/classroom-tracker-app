@@ -6606,6 +6606,23 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
     await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
   };
 
+  // Same reasoning as updateResult just above, for a multi-part assessment's own results — updates
+  // just this one part's value within the student's own parts object, re-drafting the whole result
+  // (every part shares one published flag, not one per part).
+  const updatePartResult = async (assessmentId, studentId, partId, value) => {
+    const next = classAssessments.map((ca) => {
+      if (ca.id !== assessmentId) return ca;
+      const nextResults = { ...(ca.results || {}) };
+      const existing = normalizeAssessmentResult(nextResults[studentId]) || { parts: {} };
+      const nextParts = { ...(existing.parts || {}) };
+      if (value) nextParts[partId] = value; else delete nextParts[partId];
+      nextResults[studentId] = { ...existing, parts: nextParts, published: false };
+      return { ...ca, results: nextResults };
+    });
+    setClassAssessments(next);
+    await saveJSON(`class:${selectedClassId}:classAssessments`, next, true);
+  };
+
   // Reported directly: publishing, not grading, is what actually makes a result visible to a
   // parent and fires the notification — a teacher can freely enter and adjust grades while still
   // deciding, with nothing showing up on the other side until this is deliberately called.
@@ -6747,7 +6764,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
                   <Plus size={16} /> Log a new assessment
                 </button>
                 <GeneralStudiesAssessmentGrid roster={roster} assessments={gsAssessments} subjects={gsSubjects}
-                  onUpdateResult={updateResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
+                  onUpdateResult={updateResult} onUpdatePartResult={updatePartResult} onPublishResult={publishResult} onPublishAll={publishAllInAssessment} onMessageAboutAssessment={sendMessageAboutAssessment} onOpenReport={(id) => { setSelectedAssessmentId(id); setView("report"); }} />
               </>
             )}
           </>
@@ -6762,7 +6779,7 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // business touching). One row per General Studies assessment, one column per student; a cell shows
 // that student's own grade (and a small note indicator, since results already support one) and is
 // directly editable inline, the same simple text-field pattern the teacher-side grid already uses.
-function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenReport }) {
+function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateResult, onUpdatePartResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenReport }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
   const [notePromptFor, setNotePromptFor] = useState(null); // { assessmentId, studentId } | null
   const [noteDraft, setNoteDraft] = useState("");
@@ -6799,6 +6816,42 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateR
                 const isPromptOpen = notePromptFor?.assessmentId === a.id && notePromptFor?.studentId === s.id;
                 return (
                   <div key={s.id}>
+                    {a.parts ? (
+                      // Reported directly: a multi-part assessment shows one input per part
+                      // instead of a single grade box — same student row, same published badge
+                      // and Publish action, just one input per defined part rather than one.
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span className="flex-1 text-xs text-stone-600 truncate" title={existing?.note || undefined}>{s.name}{existing?.note ? " •" : ""}</span>
+                          {existing && (
+                            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${existing.published ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                              {existing.published ? "Published" : "Draft"}
+                            </span>
+                          )}
+                          {existing && !existing.published && (
+                            <button onClick={() => { setNotePromptFor({ assessmentId: a.id, studentId: s.id }); setNoteDraft(""); }}
+                              className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish</button>
+                          )}
+                        </div>
+                        <div className="space-y-1 pl-2">
+                          {a.parts.map((p) => (
+                            <div key={p.id} className="flex items-center gap-1.5">
+                              <span className="flex-1 text-[11px] text-stone-500">{p.label}</span>
+                              {p.valueType === "levels" ? (
+                                <select value={existing?.parts?.[p.id] || ""} onChange={(e) => onUpdatePartResult(a.id, s.id, p.id, e.target.value || null)}
+                                  className="rounded-lg border border-stone-300 px-1.5 py-1 text-xs">
+                                  <option value="">—</option>
+                                  {(p.levels || []).map((lvl) => <option key={lvl} value={lvl}>{lvl}</option>)}
+                                </select>
+                              ) : (
+                                <input defaultValue={existing?.parts?.[p.id] || ""} onBlur={(e) => onUpdatePartResult(a.id, s.id, p.id, e.target.value.trim() || null)}
+                                  placeholder="—" className="w-16 rounded-lg border border-stone-300 px-1.5 py-1 text-xs" />
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
                     <div className="flex items-center gap-1.5">
                       <span className="flex-1 text-xs text-stone-600 truncate" title={existing?.note || undefined}>{s.name}{existing?.note ? " •" : ""}</span>
                       {existing && (
@@ -6813,6 +6866,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, onUpdateR
                           className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 shrink-0">Publish</button>
                       )}
                     </div>
+                    )}
                     {existing && onMessageAboutAssessment && (
                       (messageSentFor?.assessmentId === a.id && messageSentFor?.studentId === s.id) ? (
                         <p className="text-[11px] text-emerald-700 mt-0.5">Message sent.</p>
@@ -12887,7 +12941,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           openAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
           openSkillCategoryReport={(catId) => { setSelectedSkillReportCat(catId); navigateView("skill-category-report"); }}
           activateAssessment={activateAssessment} hideAssessment={hideAssessment} createCustomAssessment={createCustomAssessment}
-          updateClassAssessmentResult={updateClassAssessmentResult} onPublishResult={publishClassAssessmentResult} onPublishAll={publishAllInClassAssessment} onMessageAboutAssessment={sendMessageAboutAssessment}
+          updateClassAssessmentResult={updateClassAssessmentResult} onUpdatePartResult={updateClassAssessmentPartResult} onUpdateNote={updateClassAssessmentNote} onPublishResult={publishClassAssessmentResult} onPublishAll={publishAllInClassAssessment} onMessageAboutAssessment={sendMessageAboutAssessment}
           onStartSession={(studentId, catId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); setSessionCat(catId); setSessionIdx(0); navigateView("session"); }}
           onLogFluency={(studentId) => { setCurrentId(studentId); setInitialAssessmentStudentId(studentId); navigateView("fluency"); }}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
@@ -14183,6 +14237,31 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const nextResults = { ...(ca.results || {}) };
       if (value === null) delete nextResults[studentId];
       else nextResults[studentId] = { ...(typeof value === "object" ? value : { grade: value }), published: false };
+      return { ...ca, results: nextResults };
+    }));
+  };
+  // Same reasoning as the coordinator's own updatePartResult — one part's value within a
+  // multi-part result, re-drafting the whole result (one published flag shared across every part).
+  const updateClassAssessmentPartResult = (assessmentId, studentId, partId, value) => {
+    persistClassAssessments(classAssessments.map((ca) => {
+      if (ca.id !== assessmentId) return ca;
+      const nextResults = { ...(ca.results || {}) };
+      const existing = normalizeAssessmentResult(nextResults[studentId]) || { parts: {} };
+      const nextParts = { ...(existing.parts || {}) };
+      if (value) nextParts[partId] = value; else delete nextParts[partId];
+      nextResults[studentId] = { ...existing, parts: nextParts, published: false };
+      return { ...ca, results: nextResults };
+    }));
+  };
+  // A multi-part result's own note, saved on its own — separate from any one part's own value,
+  // since the note describes the result as a whole rather than any single part of it.
+  const updateClassAssessmentNote = (assessmentId, studentId, note) => {
+    persistClassAssessments(classAssessments.map((ca) => {
+      if (ca.id !== assessmentId) return ca;
+      const nextResults = { ...(ca.results || {}) };
+      const existing = normalizeAssessmentResult(nextResults[studentId]);
+      if (!existing) return ca;
+      nextResults[studentId] = { ...existing, ...(note ? { note } : { note: undefined }) };
       return { ...ca, results: nextResults };
     }));
   };
@@ -20696,7 +20775,7 @@ function ClassPointsCard({ cat, value, onAdd, onSubtract, onReset }) {
 
 // ---------- Assessments ----------
 
-function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId, navigate }) {
+function AssessmentsListView({ roster, studentData, incidents, classAssessments, config, openClassAssessment, openAssessmentReport, openSkillCategoryReport, activateAssessment, hideAssessment, createCustomAssessment, updateClassAssessmentResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onUpdatePartResult, onUpdateNote, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId, navigate }) {
   const [showAdd, setShowAdd] = useState(false);
   const activeCats = config.categories.filter((c) => c.active !== false);
   const libraryCats = config.categories.filter((c) => c.active === false);
@@ -20742,7 +20821,7 @@ function AssessmentsListView({ roster, studentData, incidents, classAssessments,
         <Plus size={16} /> Log an assessment
       </button>
       <AssessmentGridView roster={roster} studentData={studentData} classAssessments={classAssessments} config={config}
-        onUpdateResult={updateClassAssessmentResult} onPublishResult={onPublishResult} onPublishAll={onPublishAll} onMessageAboutAssessment={onMessageAboutAssessment} onOpenAssessmentReport={openAssessmentReport}
+        onUpdateResult={updateClassAssessmentResult} onUpdatePartResult={onUpdatePartResult} onUpdateNote={onUpdateNote} onPublishResult={onPublishResult} onPublishAll={onPublishAll} onMessageAboutAssessment={onMessageAboutAssessment} onOpenAssessmentReport={openAssessmentReport}
         onStartSession={onStartSession} onLogFluency={onLogFluency}
         onOpenClassAssessmentReport={onOpenClassAssessmentReport} onOpenFluencyDetail={onOpenFluencyDetail} onOpenSkillDetail={onOpenSkillDetail}
         initialStudentId={initialStudentId} />
@@ -20880,7 +20959,7 @@ function AddAssessmentPanel({ libraryCats, onActivate, onCreate, onCancel }) {
   );
 }
 
-function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
+function AssessmentGridView({ roster, studentData, classAssessments, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment, onOpenAssessmentReport, onStartSession, onLogFluency, onOpenClassAssessmentReport, onOpenFluencyDetail, onOpenSkillDetail, initialStudentId }) {
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
   const [activeStudentId, setActiveStudentId] = useState(initialStudentId || null);
   const subjects = config?.subjects || [];
@@ -20951,7 +21030,10 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
                     </div>
                   </td>
                   {roster.map((s) => {
-                    const grade = getResultGrade(ca.results?.[s.id]);
+                    const normalized = normalizeAssessmentResult(ca.results?.[s.id]);
+                    const isMultiPart = !!ca.parts;
+                    const filledCount = isMultiPart ? Object.keys(normalized?.parts || {}).length : 0;
+                    const grade = isMultiPart ? (filledCount > 0 ? `${filledCount}/${ca.parts.length}` : "") : getResultGrade(ca.results?.[s.id]);
                     const hasNote = !!getResultNote(ca.results?.[s.id]);
                     const isPublished = getResultPublished(ca.results?.[s.id]);
                     return (
@@ -20975,6 +21057,8 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
           assessment={activeAssessment} student={activeCellStudent} subjectLabel={subjectLabel(activeAssessment.subjectId)}
           value={activeAssessment.results?.[activeCellStudent.id]}
           onSave={(value) => { onUpdateResult(activeAssessment.id, activeCellStudent.id, value); setActiveCell(null); }}
+          onSavePart={(partId, value) => onUpdatePartResult(activeAssessment.id, activeCellStudent.id, partId, value)}
+          onSaveNote={(note) => onUpdateNote(activeAssessment.id, activeCellStudent.id, note)}
           onPublish={(publishNote) => { onPublishResult(activeAssessment.id, activeCellStudent.id, publishNote); setActiveCell(null); }}
           onMessageParent={onMessageAboutAssessment ? (text) => onMessageAboutAssessment(activeAssessment, activeCellStudent, subjectLabel(activeAssessment.subjectId), text) : null}
           onClose={() => setActiveCell(null)}
@@ -21048,8 +21132,9 @@ function AssessmentStudentModal({ student, data, config, classAssessments, onClo
   );
 }
 
-function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave, onPublish, onMessageParent, onClose }) {
+function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave, onSavePart, onSaveNote, onPublish, onMessageParent, onClose }) {
   const normalized = normalizeAssessmentResult(value);
+  const isMultiPart = !!assessment.parts;
   const [grade, setGrade] = useState(getResultGrade(value));
   const [note, setNote] = useState(getResultNote(value));
   const [showPublishNote, setShowPublishNote] = useState(false);
@@ -21062,6 +21147,7 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
     if (!grade.trim() && !note.trim()) { onSave(null); return; }
     onSave(note.trim() ? { grade: grade.trim(), note: note.trim() } : grade.trim());
   };
+  const saveNoteOnly = () => onSaveNote(note.trim() || null); // multi-part: note lives alongside parts, saved separately from any one part's own value
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={onClose}>
@@ -21076,18 +21162,49 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
         </div>
         <p className="text-xs text-stone-400 mb-4">{subjectLabel}{assessment.title ? ` · ${assessment.title}` : ""} · {assessment.date}</p>
 
-        <label className="block text-xs font-medium text-stone-500 mb-1">Grade</label>
-        <input value={grade} onChange={(e) => setGrade(e.target.value)} placeholder="e.g. 90%, Pass, B+" autoFocus
-          className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
+        {isMultiPart ? (
+          <>
+            {/* Reported directly: one input per defined part instead of a single grade box —
+                each saved live on its own, the same way the coordinator's grid handles it, rather
+                than one combined "Save" for the whole assessment. */}
+            <div className="space-y-2 mb-3">
+              {assessment.parts.map((p) => (
+                <div key={p.id} className="flex items-center gap-2">
+                  <span className="flex-1 text-xs font-medium text-stone-600">{p.label}</span>
+                  {p.valueType === "levels" ? (
+                    <select defaultValue={normalized?.parts?.[p.id] || ""} onChange={(e) => onSavePart(p.id, e.target.value || null)}
+                      className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm">
+                      <option value="">—</option>
+                      {(p.levels || []).map((lvl) => <option key={lvl} value={lvl}>{lvl}</option>)}
+                    </select>
+                  ) : (
+                    <input defaultValue={normalized?.parts?.[p.id] || ""} onBlur={(e) => onSavePart(p.id, e.target.value.trim() || null)}
+                      placeholder="—" className="w-24 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                  )}
+                </div>
+              ))}
+            </div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Note (optional)</label>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} onBlur={saveNoteOnly} rows={2} placeholder="Anything worth remembering about this result"
+              className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
+            <button onClick={onClose} className="w-full mb-3 px-4 py-2 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Close</button>
+          </>
+        ) : (
+          <>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Grade</label>
+            <input value={grade} onChange={(e) => setGrade(e.target.value)} placeholder="e.g. 90%, Pass, B+" autoFocus
+              className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
 
-        <label className="block text-xs font-medium text-stone-500 mb-1">Note (optional)</label>
-        <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="Anything worth remembering about this result"
-          className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
+            <label className="block text-xs font-medium text-stone-500 mb-1">Note (optional)</label>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="Anything worth remembering about this result"
+              className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-4" />
 
-        <div className="flex gap-2 mb-3">
-          <button onClick={save} className="flex-1 bg-white text-teal-700 border border-teal-300 rounded-lg py-2 text-sm font-semibold hover:bg-teal-50">Save</button>
-          <button onClick={onClose} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
-        </div>
+            <div className="flex gap-2 mb-3">
+              <button onClick={save} className="flex-1 bg-white text-teal-700 border border-teal-300 rounded-lg py-2 text-sm font-semibold hover:bg-teal-50">Save</button>
+              <button onClick={onClose} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+            </div>
+          </>
+        )}
 
         {normalized && !normalized.published && !showPublishNote && (
           <button onClick={() => setShowPublishNote(true)} className="w-full mb-2 bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800">Publish to Parent(s)</button>
