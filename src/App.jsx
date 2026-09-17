@@ -3542,6 +3542,16 @@ function AppInner() {
     setAuthResolvedFamily((prev) => ({ ...prev, hasSeenMessagingRedesign: true }));
   };
 
+  // A separate, second onboarding moment from the one above — only relevant the first time a
+  // parent actually sees the "message all teachers" checkbox at all (a preschool class with more
+  // than one teacher), which most families never encounter, so it doesn't belong crowded into the
+  // main banner everyone sees regardless.
+  const dismissFanOutTooltip = async () => {
+    if (!currentFamily) return;
+    await updateFamilyRecord(currentFamily.uid, { hasSeenFanOutTooltip: true });
+    setAuthResolvedFamily((prev) => ({ ...prev, hasSeenFanOutTooltip: true }));
+  };
+
   const changeMySignOff = async (newSignOff) => {
     if (!currentTeacher) return;
     await updateTeacherRecord(currentTeacher.uid, { messageSignOff: newSignOff });
@@ -4562,7 +4572,7 @@ function AppInner() {
         onSignInWithGoogle={signInWithGoogle} pendingGoogleLink={pendingGoogleLink} onCompleteGoogleLink={completeGoogleLink} googleSignInError={googleSignInError} />;
     }
     return <ParentPortalApp family={currentFamily} onSignOut={async () => { if (authUser) { try { await disableNotificationsFor(authUser.uid); } catch { /* best-effort */ } } return signOut(auth); }} onUpdateName={changeMyFamilyName} onChangeMyPassword={changeMyPassword}
-      canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} onDismissMessagingOnboarding={dismissMyMessagingOnboarding} />;
+      canSwitchToTeacher={hasTeacherRole} onSwitchToTeacher={() => setActiveMode("teacher")} onDismissMessagingOnboarding={dismissMyMessagingOnboarding} onDismissFanOutTooltip={dismissFanOutTooltip} />;
   }
 
   // Substitute session — a separate, code-based entry point that bypasses every other login
@@ -8391,7 +8401,7 @@ function useEffectiveLastReadByFamily(threadLastReadByFamily, familyUid, readSta
   return candidates.length ? candidates.reduce((a, b) => (new Date(a) > new Date(b) ? a : b)) : null;
 }
 
-function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead, fanOutOption }) {
+function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onDelete, onReact, myRole, config, teacher, family, threadKey, onBack, readOnly = false, lastReadBeforeOpen, lastReadByFamily, onBackfillRead, fanOutOption, showFanOutTooltip, onDismissFanOutTooltip }) {
   // Whichever one is actually present depends on which side of the conversation is viewing —
   // never both at once, since a thread is only ever opened by one specific person at a time.
   const currentUserId = teacher?.uid || family?.uid || null;
@@ -8911,9 +8921,17 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
             <button onClick={() => { setShowSchedule(false); setScheduledFor(""); }} className="text-xs text-stone-400 hover:text-stone-600">Cancel</button>
           </div>
         )}
+        {fanOutOption && showFanOutTooltip && (
+          <div className="ml-11 mb-1.5 bg-teal-700 text-white rounded-lg p-2.5 text-xs relative">
+            <p className="font-semibold">New: Reach every teacher at once</p>
+            <p className="mt-0.5 text-teal-50">Check this box before sending to also send your message to the other teachers in this class — each one gets their own private copy, and can reply just to you.</p>
+            <button onClick={onDismissFanOutTooltip} className="absolute top-1.5 right-1.5 text-teal-100 hover:text-white"><X size={13} /></button>
+            <div className="absolute -bottom-1.5 left-3 w-3 h-3 bg-teal-700 rotate-45"></div>
+          </div>
+        )}
         {fanOutOption && (
           <label className="flex items-center gap-1.5 mb-1.5 ml-11 text-xs text-stone-500 cursor-pointer">
-            <input type="checkbox" checked={sendToAll} onChange={(e) => setSendToAll(e.target.checked)} className="rounded border-stone-300" />
+            <input type="checkbox" checked={sendToAll} onChange={(e) => { setSendToAll(e.target.checked); if (showFanOutTooltip) onDismissFanOutTooltip(); }} className="rounded border-stone-300" />
             {fanOutOption.label}
           </label>
         )}
@@ -9787,7 +9805,7 @@ function ParentMainTabs({ active, navigate, unreadMessagesCount = 0, unreadBlogC
   );
 }
 
-function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher, onDismissMessagingOnboarding }) {
+function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, canSwitchToTeacher, onSwitchToTeacher, onDismissMessagingOnboarding, onDismissFanOutTooltip }) {
   const [parentTab, setParentTab] = useState(() => new URLSearchParams(window.location.search).get("tab") || "home"); // "home" | "messages" | "blog" | "homework" | "settings" — persistent top bar, not a toggled overlay
 
   // Records, once per real session here, whether this family is actually using the app installed
@@ -10862,6 +10880,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           onBack={() => safeGoBack("thread", () => setMessagingTeacherUid(null))}
           onSend={async (text, attachments) => { await sendMessageToIndividualTeacher(messagingTeacherUid, text, attachments); }}
           fanOutOption={fanOutOption}
+          showFanOutTooltip={Boolean(fanOutOption) && !family?.hasSeenFanOutTooltip}
+          onDismissFanOutTooltip={onDismissFanOutTooltip}
           onReact={async (messageId, emoji, reactorId, reactorName) => { await reactToMessageInThread(`teacher-messages:${messagingTeacherUid}:${family.uid}`, messageId, emoji, reactorId, reactorName); }} />
       </div>
     );
@@ -11008,8 +11028,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
               <div className="bg-teal-50 border border-teal-200 rounded-xl p-3.5 flex items-start gap-3">
                 <MessageCircle size={18} className="text-teal-700 shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-teal-900">Messages are now all in one place</p>
-                  <p className="text-xs text-teal-800 mt-0.5">Every teacher you can reach, across all your children, is right here in one list — no more separate Classes and Teachers tabs, or switching between kids to find the right conversation. Nothing from before is gone; it's all still here.</p>
+                  <p className="text-sm font-semibold text-teal-900">New: Messages are now all in one place</p>
+                  <p className="text-xs text-teal-800 mt-0.5">Every teacher you can reach, across all your children, is right here in one list — no more separate Classes and Teachers tabs, or switching between kids to find the right conversation. Any messages you'd sent to a classroom before are now part of your personal conversation with that teacher, so nothing from before is lost.</p>
                 </div>
                 <button onClick={onDismissMessagingOnboarding} className="text-teal-700 hover:text-teal-900 shrink-0"><X size={16} /></button>
               </div>
@@ -11599,8 +11619,8 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
         <div className="bg-teal-50 border border-teal-200 rounded-xl p-3.5 mb-4 flex items-start gap-3">
           <MessageCircle size={18} className="text-teal-700 shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-teal-900">Messages are now all in one place</p>
-            <p className="text-xs text-teal-800 mt-0.5">Every conversation, across every class you teach, is right here — no more separate Classroom and Direct tabs to check inside each class. Nothing from before is gone; it's all still here.</p>
+            <p className="text-sm font-semibold text-teal-900">New: Messages are now all in one place</p>
+            <p className="text-xs text-teal-800 mt-0.5">Every conversation, across every class you teach, is right here — no more separate Classroom and Direct tabs to check inside each class. Any messages sent to your classroom before are now part of your personal conversation with that parent, so nothing from before is lost.</p>
           </div>
           <button onClick={onDismissOnboarding} className="text-teal-700 hover:text-teal-900 shrink-0"><X size={16} /></button>
         </div>
