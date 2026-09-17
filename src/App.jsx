@@ -6819,7 +6819,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
                   the other links exactly as it always was, shown only at that breakpoint and up. */}
               {onOpenGlobalMessages && (
                 <button onClick={onOpenGlobalMessages} title="Every conversation across every class you teach"
-                  className="hidden sm:flex relative items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+                  className="hidden md:flex relative items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
                   <MessageCircle size={16} />
                   Messages
                   {adminMessagesUnread > 0 && (
@@ -6836,7 +6836,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           </div>
           {onOpenGlobalMessages && (
             <button onClick={onOpenGlobalMessages} title="Every conversation across every class you teach"
-              className="sm:hidden mt-2 w-full relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+              className="md:hidden mt-2 w-full relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
               <MessageCircle size={16} />
               Messages
               {adminMessagesUnread > 0 && (
@@ -14263,7 +14263,7 @@ function Header({ navigate }) {
         </div>
         <div className="flex items-center gap-1.5">
           <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
-            className="hidden sm:flex relative items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+            className="hidden md:flex relative items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
             {messagesButtonContent}
           </button>
           <button onClick={() => navigate("settings")} className="text-stone-400 hover:text-teal-700 p-1.5 rounded-lg hover:bg-stone-100">
@@ -14272,7 +14272,7 @@ function Header({ navigate }) {
         </div>
       </div>
       <button onClick={openGlobalMessages} title="Every conversation across every class you teach"
-        className="sm:hidden mt-2 w-full relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
+        className="md:hidden mt-2 w-full relative flex items-center justify-center gap-1.5 bg-teal-700 text-white rounded-lg pl-2.5 pr-3 py-1.5 text-sm font-semibold hover:bg-teal-800">
         {messagesButtonContent}
       </button>
     </div>
