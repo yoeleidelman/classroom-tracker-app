@@ -10416,7 +10416,7 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
                   {expanded && (
                     <div className="mt-3 pt-3 border-t border-stone-100 space-y-2.5">
                       {items.map((a) => {
-                        const { grade, note } = a.result;
+                        const { grade, note, parts: partValues } = a.result;
                         const label = `${subject.label} — ${a.title || "Assessment"} — ${a.date}${grade ? ` — ${grade}` : ""}`;
                         return (
                           <div key={a.id}>
@@ -10425,6 +10425,23 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
                               {grade && <p className="text-sm font-bold text-teal-700">{grade}</p>}
                             </div>
                             <p className="text-[11px] text-stone-400">{new Date(a.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</p>
+                            {/* Reported directly: a multi-part assessment shows every part with its
+                                own label and value, color-coded when the teacher defined it as a
+                                set of levels — the same color that part's own level got wherever
+                                it was defined, not a new, separate scheme invented here. */}
+                            {a.parts && partValues && (
+                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                {a.parts.filter((p) => partValues[p.id]).map((p) => {
+                                  const val = partValues[p.id];
+                                  const color = p.valueType === "levels" ? levelColorFor(p.levels, val) : null;
+                                  return (
+                                    <div key={p.id} className={`text-xs rounded-lg px-2 py-1 ${color ? `${color.bg} ${color.text}` : "bg-stone-100 text-stone-700"}`}>
+                                      <span className="font-semibold">{p.label}:</span> {val}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                             {note && <p className="text-xs text-stone-600 mt-0.5">{note}</p>}
                             {a.loggedByUid && (
                               <button onClick={() => onMessageTeacher(a.loggedByUid, label)} className="text-[11px] font-semibold text-teal-700 hover:text-teal-900 mt-0.5">Message Teacher About This Assessment</button>
@@ -21136,6 +21153,21 @@ function SubjectPicker({ subjects, value, onChange, placeholder = "Select a subj
   );
 }
 
+// A small, fixed palette cycled through in order as levels are defined — reported directly,
+// color-coding matters for a levels-type part (e.g. green/amber/red reading naturally as
+// good/middle/needs-attention) without needing a full color picker for every single level.
+const LEVEL_COLOR_CYCLE = [
+  { bg: "bg-emerald-50", text: "text-emerald-700", dot: "bg-emerald-500" },
+  { bg: "bg-blue-50", text: "text-blue-700", dot: "bg-blue-500" },
+  { bg: "bg-amber-50", text: "text-amber-700", dot: "bg-amber-500" },
+  { bg: "bg-rose-50", text: "text-rose-700", dot: "bg-rose-500" },
+  { bg: "bg-violet-50", text: "text-violet-700", dot: "bg-violet-500" },
+];
+function levelColorFor(levels, levelLabel) {
+  const idx = (levels || []).indexOf(levelLabel);
+  return LEVEL_COLOR_CYCLE[idx % LEVEL_COLOR_CYCLE.length] || LEVEL_COLOR_CYCLE[0];
+}
+
 function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
   const [subjectId, setSubjectId] = useState(null);
   const [title, setTitle] = useState("");
@@ -21144,6 +21176,16 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
   const [notes, setNotes] = useState({});
   const [noteOpenFor, setNoteOpenFor] = useState({});
   const [selectedIds, setSelectedIds] = useState([]);
+  // Reported directly: a teacher can define an assessment as having several independently-scored
+  // parts (e.g. 5 sub-skills, or a full 25-item evaluation), each with its own label and its own
+  // kind of value — plain free text (a grade or short answer), or a small, teacher-defined set of
+  // levels (e.g. "Above Level / At Level / Below Level"). Deliberately optional and additive: a
+  // simple, single-grade assessment (still the common case) is completely unaffected — this is
+  // its own explicit choice, not something every assessment now has to think about.
+  const [isMultiPart, setIsMultiPart] = useState(false);
+  const [parts, setParts] = useState([]); // [{ id, label, valueType: "grade" | "levels", levels: [string] }]
+  const [partResults, setPartResults] = useState({}); // { [studentId]: { [partId]: value } }
+
   // Recomputed every time the chosen subject changes, not just once on mount — a student added
   // for specific periods only belongs in this list for the one subject those periods actually
   // cover, so switching the assessment's own subject genuinely changes who that even means.
@@ -21157,15 +21199,36 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
   const subjects = config?.subjects || [];
   const subjectLabel = subjects.find((s) => s.id === subjectId)?.label || null;
 
+  const addPart = () => setParts((prev) => [...prev, { id: uid(), label: "", valueType: "grade", levels: [] }]);
+  const updatePart = (partId, fields) => setParts((prev) => prev.map((p) => (p.id === partId ? { ...p, ...fields } : p)));
+  const removePart = (partId) => setParts((prev) => prev.filter((p) => p.id !== partId));
+
   const submit = () => {
     const filteredResults = {};
-    selectedIds.forEach((id) => {
-      const grade = (results[id] || "").trim();
-      const note = (notes[id] || "").trim();
-      if (!grade && !note) return; // nothing entered for this student — skip
-      filteredResults[id] = note ? { grade, note } : grade;
-    });
-    onSave({ subjectId, title: title.trim(), date, results: filteredResults });
+    if (isMultiPart) {
+      selectedIds.forEach((id) => {
+        const studentParts = partResults[id] || {};
+        const hasAny = parts.some((p) => (studentParts[p.id] || "").trim());
+        const note = (notes[id] || "").trim();
+        if (!hasAny && !note) return;
+        const cleanParts = {};
+        parts.forEach((p) => { if ((studentParts[p.id] || "").trim()) cleanParts[p.id] = studentParts[p.id].trim(); });
+        // published: false set explicitly here, not left to normalizeAssessmentResult's own
+        // heuristic — a fresh result has no published field at all yet, and that heuristic
+        // specifically treats a result with no such field as an OLD, already-published one (see
+        // its own comment), which would have been wrong here and also silently dropped parts
+        // entirely, since that old-shape branch only ever extracts grade/note.
+        filteredResults[id] = { parts: cleanParts, published: false, ...(note ? { note } : {}) };
+      });
+    } else {
+      selectedIds.forEach((id) => {
+        const grade = (results[id] || "").trim();
+        const note = (notes[id] || "").trim();
+        if (!grade && !note) return; // nothing entered for this student — skip
+        filteredResults[id] = { grade, published: false, ...(note ? { note } : {}) };
+      });
+    }
+    onSave({ subjectId, title: title.trim(), date, results: filteredResults, ...(isMultiPart ? { parts: parts.filter((p) => p.label.trim()) } : {}) });
   };
 
   return (
@@ -21194,6 +21257,41 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
         </div>
       </div>
 
+      <label className="flex items-center gap-2 mb-4 text-sm font-semibold text-stone-700 cursor-pointer">
+        <input type="checkbox" checked={isMultiPart} onChange={(e) => setIsMultiPart(e.target.checked)} className="rounded border-stone-300" />
+        This assessment has multiple parts
+      </label>
+
+      {isMultiPart && (
+        <div className="mb-4 space-y-2.5">
+          <label className="block text-sm font-semibold text-stone-700">Parts</label>
+          {parts.map((p) => (
+            <div key={p.id} className="bg-stone-50 border border-stone-200 rounded-lg p-2.5">
+              <div className="flex items-center gap-2 mb-2">
+                <input value={p.label} onChange={(e) => updatePart(p.id, { label: e.target.value })} placeholder="e.g. Comprehension"
+                  className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                <button onClick={() => removePart(p.id)} className="text-stone-400 hover:text-rose-600 shrink-0"><X size={16} /></button>
+              </div>
+              <div className="flex gap-1.5 mb-2">
+                <button onClick={() => updatePart(p.id, { valueType: "grade" })}
+                  className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${p.valueType === "grade" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                  Free text / grade
+                </button>
+                <button onClick={() => updatePart(p.id, { valueType: "levels" })}
+                  className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${p.valueType === "levels" ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>
+                  Set of levels
+                </button>
+              </div>
+              {p.valueType === "levels" && (
+                <input value={(p.levels || []).join(", ")} onChange={(e) => updatePart(p.id, { levels: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
+                  placeholder="e.g. Above Level, At Level, Below Level" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs" />
+              )}
+            </div>
+          ))}
+          <button onClick={addPart} className="text-xs font-semibold text-teal-700 hover:text-teal-900 flex items-center gap-1"><Plus size={13} /> Add a part</button>
+        </div>
+      )}
+
       <div className="flex items-center justify-between mb-2">
         <label className="block text-sm font-semibold text-stone-700">Who took this assessment?</label>
         <button onClick={toggleAll} className="text-xs font-semibold text-teal-700 hover:text-teal-900">{allSelected ? "Deselect all" : "Select all"}</button>
@@ -21212,6 +21310,45 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
 
       <label className="block text-sm font-semibold text-stone-700 mb-2">Grades</label>
       {selectedIds.length === 0 && <p className="text-xs text-stone-400 mb-2">Select at least one student above.</p>}
+      {isMultiPart && parts.filter((p) => p.label.trim()).length === 0 && selectedIds.length > 0 && (
+        <p className="text-xs text-stone-400 mb-2">Add at least one part above first.</p>
+      )}
+      {isMultiPart ? (
+        <div className="space-y-3">
+          {roster.filter((s) => selectedIds.includes(s.id)).map((s) => {
+            const noteShown = !!noteOpenFor[s.id] || !!(notes[s.id] || "").trim();
+            return (
+              <div key={s.id} className="border border-stone-200 rounded-lg p-2.5">
+                <p className="text-sm font-semibold text-stone-800 mb-1.5">{s.name}</p>
+                {parts.filter((p) => p.label.trim()).map((p) => (
+                  <div key={p.id} className="flex items-center gap-2 mb-1">
+                    <span className="flex-1 text-xs text-stone-500">{p.label}</span>
+                    {p.valueType === "levels" ? (
+                      <select value={partResults[s.id]?.[p.id] || ""} onChange={(e) => setPartResults((prev) => ({ ...prev, [s.id]: { ...(prev[s.id] || {}), [p.id]: e.target.value } }))}
+                        className="rounded-lg border border-stone-300 px-2 py-1 text-xs">
+                        <option value="">—</option>
+                        {(p.levels || []).map((lvl) => <option key={lvl} value={lvl}>{lvl}</option>)}
+                      </select>
+                    ) : (
+                      <input value={partResults[s.id]?.[p.id] || ""} onChange={(e) => setPartResults((prev) => ({ ...prev, [s.id]: { ...(prev[s.id] || {}), [p.id]: e.target.value } }))}
+                        placeholder="—" className="w-24 rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                    )}
+                  </div>
+                ))}
+                {!noteShown && (
+                  <button onClick={() => setNoteOpenFor((prev) => ({ ...prev, [s.id]: true }))}
+                    className="text-[11px] font-semibold text-stone-400 hover:text-teal-700 mt-1">+ Note</button>
+                )}
+                {noteShown && (
+                  <input value={notes[s.id] || ""} onChange={(e) => setNotes((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                    placeholder="Note — anything worth remembering about this result" autoFocus={!!noteOpenFor[s.id] && !notes[s.id]}
+                    className="w-full mt-1.5 rounded-lg border border-stone-200 bg-stone-50 px-2 py-1.5 text-xs" />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
       <div className="md:grid md:grid-cols-2 md:gap-x-4">
         {roster.filter((s) => selectedIds.includes(s.id)).map((s) => {
           const noteShown = !!noteOpenFor[s.id] || !!(notes[s.id] || "").trim();
@@ -21235,6 +21372,7 @@ function ClassAssessmentForm({ roster, config, onCancel, onSave }) {
           );
         })}
       </div>
+      )}
       <button onClick={submit} disabled={selectedIds.length === 0}
         className="w-full mt-4 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
         Save assessment
