@@ -10869,7 +10869,7 @@ function SubjectTrendSparkline({ points }) {
   );
 }
 
-function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
+function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher, siblingLinks, onSwitchStudent }) {
   const { value: assessments, loaded: assessmentsLoaded } = useLiveJSONLoaded(`class:${link.classId}:classAssessments`, []);
   const { value: config, loaded: configLoaded } = useLiveJSONLoaded(`class:${link.classId}:config`, DEFAULT_CONFIG);
   const [expandedSubjectId, setExpandedSubjectId] = useState(null);
@@ -10904,6 +10904,16 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher }) {
       <GlobalAppStyles />
       <div className="app-page">
         <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+        {/* Reported directly: the same child switcher already used on Home and Homework, reused
+            here rather than inventing a separate one — a family with more than one child sees the
+            exact same tab bar they already know from everywhere else in the app. */}
+        {siblingLinks && (
+          <div className="mb-3">
+            <ChildSwitcher labels={siblingLinks.map((l) => l.studentName)}
+              selectedIndex={findChildIndex(siblingLinks, link.studentId)}
+              onSelect={(i) => onSwitchStudent(siblingLinks[i])} />
+          </div>
+        )}
         <h1 className="display-font text-xl font-bold text-stone-900 mb-1">{link.studentName}'s assessments</h1>
         <p className="text-stone-500 text-sm mb-5">Every subject, Judaic Studies and General Studies both.</p>
         {bySubject.length === 0 && noSubjectItems.length === 0 ? (
@@ -12097,8 +12107,13 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   }
 
   if (showAssessmentsFor) {
+    // Same "elementary only" filter homework's own switcher already uses — assessments don't
+    // exist for preschool at all, so a preschool sibling has nothing to switch to here.
+    const assessmentSiblings = (fullTimeStudentLinks || []).filter((l) => l.classType !== "preschool");
     return (
       <ParentAssessmentsDetailView link={showAssessmentsFor} onBack={() => setShowAssessmentsFor(null)}
+        siblingLinks={assessmentSiblings.length > 1 ? assessmentSiblings : null}
+        onSwitchStudent={(link) => setShowAssessmentsFor(link)}
         onMessageTeacher={(teacherUid, label) => {
           setShowAssessmentsFor(null);
           setPendingAssessmentReference({ label });
