@@ -5732,6 +5732,20 @@ function MigrateClassroomMessagesTool({ activeClasses, teachers }) {
         if (toAdd.length > 0) {
           const merged = [...directThread.messages, ...toAdd].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
           await saveJSON(t.directKey, { ...directThread, messages: merged }, true);
+          // Reported directly, and confirmed as a real, genuine problem before this was ever run
+          // for real: a family or teacher who never had an individual thread with the other person
+          // before today has no existing read-state entry at all for this brand-new thread key —
+          // and isThreadUnread treats that missing entry as "unread" regardless of how old the
+          // message's own timestamp actually is. Without this, every one of these old, already-seen
+          // classroom messages would show up as a brand-new unread message and badge count the
+          // moment this runs, on both sides, even though nothing about them is actually new. Both
+          // sides marked read now (after "now" is later than any migrated message's own historical
+          // timestamp either way) closes that off directly, rather than leaving old history to
+          // masquerade as new activity.
+          await Promise.all([
+            markThreadRead(t.familyUid, `teacher-${t.teacherUid}`),
+            markThreadRead(t.teacherUid, `teacher-direct-${t.familyUid}`),
+          ]);
         }
         setProgress({ done: i + 1, total: plan.threads.length });
       }
