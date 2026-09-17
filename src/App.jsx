@@ -25151,7 +25151,12 @@ function BulkStudentReportExportTool({ registry }) {
       let total = 0;
       for (const cls of elementaryClasses) {
         const roster = await loadJSON(`class:${cls.id}:roster`, [], true);
-        total += roster.length;
+        // Reported directly: a student added here as a secondary, part-time enrollment (in for
+        // specific periods/subjects only, from their own primary class) never gets attendance —
+        // or most other data — actually logged against this class at all, so a report generated
+        // here for them would just be empty pages. Same enrollmentScope check already used
+        // elsewhere in this app (notifyClassFamilies) to make this same distinction.
+        total += roster.filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time").length;
       }
       setStudentCount(total);
       setClassCount(elementaryClasses.length);
@@ -25173,12 +25178,15 @@ function BulkStudentReportExportTool({ registry }) {
       for (const cls of elementaryClasses) {
         const safeClassName = cls.name.replace(/[/\\?%*:|"<>]/g, "-");
         const folder = zip.folder(safeClassName);
-        const [roster, config, classAssessments, incidents] = await Promise.all([
+        const [rawRoster, config, classAssessments, incidents] = await Promise.all([
           loadJSON(`class:${cls.id}:roster`, [], true),
           loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true),
           loadJSON(`class:${cls.id}:classAssessments`, [], true),
           loadJSON(`class:${cls.id}:incidents`, [], true),
         ]);
+        // Same filter as the count step above — a part-time, secondary-enrollment student here
+        // never belongs in this class's own reports.
+        const roster = rawRoster.filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time");
         for (const student of roster) {
           const data = (await loadJSON(`class:${cls.id}:kriya:${student.id}`, null, true)) || emptyStudentData();
           const blob = buildStudentReportPdf(student, data, incidents, classAssessments, config, selected, cls.name, startDate || null, endDate || null);
