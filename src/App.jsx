@@ -2896,7 +2896,7 @@ function GlobalAppStyles() {
 // ---------- Flags ----------
 
 function getFlags(data, studentId, incidents, config) {
-  if (!data) return [];
+  if (!data || !config) return [];
   const flags = [];
   for (const cat of config.categories || []) {
     for (const item of cat.items || []) {
@@ -2915,7 +2915,7 @@ function getFlags(data, studentId, incidents, config) {
     const lateCount = (data.attendance || []).filter((a) => statusMap[a.status]?.flagType === "late" && withinWindow(a.date, lateRule.windowDays)).length;
     if (lateCount >= lateRule.threshold) {
       const tier = tierFor(lateCount, lateRule.threshold);
-      flags.push({ key: "attendance-late", type: "late", label: `Lateness — ${lateCount} in last ${lateRule.windowDays} days`, tier, message: config.attendance.lateTierMessages?.[tier] || "Flagged for lateness" });
+      flags.push({ key: "attendance-late", type: "late", label: `Lateness — ${lateCount} in last ${lateRule.windowDays} days`, tier, message: config.attendance?.lateTierMessages?.[tier] || "Flagged for lateness" });
     }
   }
   const absentRule = config.attendance?.absentRule;
@@ -2923,14 +2923,14 @@ function getFlags(data, studentId, incidents, config) {
     const absentCount = (data.attendance || []).filter((a) => statusMap[a.status]?.flagType === "absent" && withinWindow(a.date, absentRule.windowDays)).length;
     if (absentCount >= absentRule.threshold) {
       const tier = tierFor(absentCount, absentRule.threshold);
-      flags.push({ key: "attendance-absent", type: "absent", label: `Absences — ${absentCount} in last ${absentRule.windowDays} days`, tier, message: config.attendance.absentTierMessages?.[tier] || "Flagged for absences" });
+      flags.push({ key: "attendance-absent", type: "absent", label: `Absences — ${absentCount} in last ${absentRule.windowDays} days`, tier, message: config.attendance?.absentTierMessages?.[tier] || "Flagged for absences" });
     }
   }
   if (config.homework?.enabled) {
     const missedCount = (data.homework || []).filter((h) => h.status === "missed" && withinWindow(h.date, config.homework.windowDays)).length;
     if (missedCount >= config.homework.missedThreshold) {
       const tier = tierFor(missedCount, config.homework.missedThreshold);
-      flags.push({ key: "homework-missed", type: "homework", label: `Missed homework — ${missedCount} in last ${config.homework.windowDays} days`, tier, message: config.homework.missedTierMessages?.[tier] || "Flagged for missed homework" });
+      flags.push({ key: "homework-missed", type: "homework", label: `Missed homework — ${missedCount} in last ${config.homework.windowDays} days`, tier, message: config.homework?.missedTierMessages?.[tier] || "Flagged for missed homework" });
     }
   }
   const flagRule = config.incidents?.flagRule;
@@ -2939,7 +2939,7 @@ function getFlags(data, studentId, incidents, config) {
     const incCount = myIncidents.filter((i) => withinWindow(i.date, flagRule.windowDays)).length;
     if (incCount >= flagRule.threshold) {
       const tier = tierFor(incCount, flagRule.threshold);
-      flags.push({ key: "incidents", type: "incident", label: `Incidents — ${incCount} in last ${flagRule.windowDays} days`, tier, message: config.incidents.tierMessages?.[tier] || "Flagged for incidents" });
+      flags.push({ key: "incidents", type: "incident", label: `Incidents — ${incCount} in last ${flagRule.windowDays} days`, tier, message: config.incidents?.tierMessages?.[tier] || "Flagged for incidents" });
     }
   }
   for (const cat of config.points?.categories || []) {
