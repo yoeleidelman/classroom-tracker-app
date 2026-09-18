@@ -20294,7 +20294,11 @@ function GiveRecognitionCardModal({ student, onAddLogEntry, onClose }) {
         ) : (
           <label className="flex items-center justify-center gap-2 border-2 border-dashed border-stone-300 rounded-xl py-4 mb-3 text-sm text-stone-500 cursor-pointer hover:bg-stone-50">
             <Camera size={16} /> Add a photo (optional)
-            <input type="file" accept="image/*" capture="environment" onChange={pickPhoto} className="hidden" />
+            {/* Reported directly: capture="environment" forces a mobile browser straight into the
+                camera, with no way to pick an existing photo from the device at all. Removed —
+                accept="image/*" alone is what actually lets the browser offer its own normal
+                choice between taking a new photo and choosing a saved one. */}
+            <input type="file" accept="image/*" onChange={pickPhoto} className="hidden" />
           </label>
         )}
         <div className="flex gap-2">
