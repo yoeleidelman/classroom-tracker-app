@@ -14434,7 +14434,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   };
 
   const addCommunication = (studentId, entry) => {
-    const data = studentData[studentId];
+    const data = studentData[studentId] || emptyStudentData();
     persistStudent(studentId, { ...data, communications: [{ id: uid(), ...entry }, ...(data.communications || [])] });
   };
 
@@ -14661,7 +14661,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   };
 
   const acknowledgeFlag = (studentId, key) => {
-    const data = studentData[studentId];
+    const data = studentData[studentId] || emptyStudentData();
     if (key.startsWith("skill-")) {
       const skillK = key.replace("skill-", "");
       const skill = data.skills[skillK];
@@ -14675,7 +14675,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   };
 
   const addFluencyEntry = (studentId, entry) => {
-    const data = studentData[studentId];
+    const data = studentData[studentId] || emptyStudentData();
     persistStudent(studentId, { ...data, fluency: [{ ...entry, date: todayISO() }, ...data.fluency] });
   };
 
@@ -14819,7 +14819,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   };
 
   const setAttendance = (studentId, date, statusId, auto) => {
-    const data = studentData[studentId];
+    // Reported directly as a critical production crash: a newly-added student (the kind added as a
+    // brief, once-a-week visiting enrollment, say) may not have any studentData document saved yet
+    // at all — not even an empty one — the moment this runs. This function in particular is called
+    // automatically, for every applicable student, by the auto-absent backfill below, which fires
+    // the instant a class's data loads — so an unguarded access here crashed the entire class open,
+    // for every student in it, the moment one single new student's data hadn't been created yet.
+    const data = studentData[studentId] || emptyStudentData();
     const without = (data.attendance || []).filter((a) => a.date !== date);
     const prevEntry = (data.attendance || []).find((a) => a.date === date);
     const isLate = config.attendance.statuses.find((st) => st.id === statusId)?.flagType === "late";
@@ -14866,13 +14872,13 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     // on every single unrelated data change throughout the whole day.
   }, [config.attendance.autoAbsentTime]); // eslint-disable-line react-hooks/exhaustive-deps
   const setAttendanceTime = (studentId, date, time) => {
-    const data = studentData[studentId];
+    const data = studentData[studentId] || emptyStudentData();
     const attendance = (data.attendance || []).map((a) => (a.date === date ? { ...a, time } : a));
     persistStudent(studentId, { ...data, attendance });
   };
 
   const setHomework = (studentId, date, status) => {
-    const data = studentData[studentId];
+    const data = studentData[studentId] || emptyStudentData();
     const without = (data.homework || []).filter((h) => h.date !== date);
     const newData = { ...data, homework: [...without, withLogger({ date, status })] };
     persistStudent(studentId, newData);
@@ -15193,7 +15199,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   };
 
   const addPoints = (studentId, catId, amount) => {
-    const data = studentData[studentId];
+    const data = studentData[studentId] || emptyStudentData();
     const current = data.points?.[catId] || 0;
     const next = Math.max(0, current + amount);
     persistStudent(studentId, { ...data, points: { ...data.points, [catId]: next } });
