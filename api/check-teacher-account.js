@@ -51,6 +51,18 @@ export default async function handler(req, res) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
 
+  if (req.body?.action === "read-raw") {
+    const { docIds } = req.body;
+    if (!Array.isArray(docIds) || docIds.length === 0) return res.status(400).json({ error: "docIds (array) is required." });
+    const db = getFirestore();
+    const results = {};
+    for (const id of docIds) {
+      const snap = await db.collection("data").doc(id).get();
+      results[id] = snap.exists ? snap.data().value : null;
+    }
+    return res.status(200).json({ ok: true, results });
+  }
+
   // Reported directly: real, accurate attendance data survived after all, in PDF exports the
   // teacher generated the day before the bug hit — restoring it here, merged by date into each
   // student's own current record, never overwriting it wholesale. "preview" (no write) shows
