@@ -64,15 +64,19 @@ export default async function handler(req, res) {
     const db = getFirestore();
     const { Timestamp } = await import("firebase-admin/firestore");
     const readTime = Timestamp.fromDate(new Date(readTimeISO));
+    // Reported directly: a single DocumentReference's own .get({readTime}) silently ignored the
+    // option entirely rather than erroring, always returning current data regardless of what was
+    // asked for — confirmed directly by requesting an impossible, far-future readTime and getting
+    // the exact same result back with no error at all. db.getAll(...refs, {readTime}) is the
+    // Admin SDK's real point-in-time read path.
+    const refs = docIds.map((id) => db.collection("data").doc(id));
     const results = {};
     const errors = {};
-    for (const id of docIds) {
-      try {
-        const snap = await db.collection("data").doc(id).get({ readTime });
-        results[id] = snap.exists ? snap.data() : null;
-      } catch (err) {
-        errors[id] = err.message || String(err);
-      }
+    try {
+      const snaps = await db.getAll(...refs, { readTime });
+      snaps.forEach((snap, i) => { results[docIds[i]] = snap.exists ? snap.data() : null; });
+    } catch (err) {
+      docIds.forEach((id) => { errors[id] = err.message || String(err); });
     }
     return res.status(200).json({ ok: true, results, errors });
   }
