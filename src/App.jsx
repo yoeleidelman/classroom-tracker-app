@@ -19386,6 +19386,7 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
   const [filterClassId, setFilterClassId] = useState(null);
   const [showComposer, setShowComposer] = useState(false);
   const [error, setError] = useState(null);
+  const bottomRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -19396,7 +19397,11 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
           const classPosts = await loadJSON(`class:${c.id}:blogPosts`, [], true);
           return classPosts.map((p) => ({ ...p, classId: c.id, className: classNames[c.id] }));
         }));
-        const merged = perClass.flat().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        // Reported directly: oldest-first, matching the same chronological, scroll-to-the-newest
+        // shape every regular class's own blog feed already uses — reversed from an earlier,
+        // newest-first version of this same view, which read backwards compared to everywhere else
+        // a blog appears in this app.
+        const merged = perClass.flat().sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
         if (!cancelled) setPosts(merged);
       } catch (e) {
         if (!cancelled) setError("Something went wrong loading posts. Safe to try again.");
@@ -19412,6 +19417,13 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
   }
 
   const visiblePosts = filterClassId ? (posts || []).filter((p) => p.classId === filterClassId) : posts;
+
+  // Same reasoning as every other blog feed in this app: useLayoutEffect, not useEffect, is what
+  // makes this genuinely start at the newest post rather than flash the oldest for one frame
+  // before jumping there. Re-runs whenever the visible set changes — switching the class filter,
+  // or coming back from posting — so the newest post for whatever's currently showing is always
+  // what's actually in view, not wherever the scroll happened to be left before.
+  useLayoutEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [filterClassId, visiblePosts?.length]); // eslint-disable-line
 
   return (
     <div>
@@ -19439,6 +19451,7 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
                 onReact={() => {}} onComment={() => {}} onOpenMedia={() => {}} />
             </div>
           ))}
+          <div ref={bottomRef} />
         </div>
       )}
     </div>
