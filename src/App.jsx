@@ -14860,6 +14860,19 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       if (selectedDayType?.hidesAttendance) return;
       roster.forEach((s) => {
         if (!morningAttendanceApplies(s, date, selectedDayType, config, plannerDays)) return;
+        // CRITICAL: reported directly as real, active data loss immediately after a fix deployed
+        // minutes earlier. That fix made setAttendance (and several sibling functions) silently
+        // fall back to an empty student record when studentData[id] isn't there yet, so genuinely
+        // new students wouldn't crash the whole class. But this automatic, unattended backfill can
+        // run before a student's real, already-existing record has finished loading for entirely
+        // unrelated reasons — and unlike a manual tap where the teacher is looking straight at
+        // that student's own data on screen, this runs silently in the background. Substituting an
+        // empty record there and writing it back overwrites whatever real data already existed —
+        // points included. Skipping entirely here (never writing) is always safe: a skipped
+        // student is simply picked up on this same interval's next run a few minutes later, once
+        // their real data has actually loaded — a few minutes' delay in an automatic absent mark
+        // is a trivial cost next to silently destroying real, already-logged data.
+        if (studentData[s.id] === undefined) return;
         const hasEntry = (studentData[s.id]?.attendance || []).some((a) => a.date === date);
         if (!hasEntry) setAttendance(s.id, date, "absent", true);
       });
