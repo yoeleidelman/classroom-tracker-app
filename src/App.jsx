@@ -20569,7 +20569,7 @@ function GiveRecognitionCardModal({ student, onAddLogEntry, onClose }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl p-4 max-w-sm w-full">
         <p className="text-sm font-semibold text-stone-800 mb-1">Give {student.name} a card</p>
         <p className="text-xs text-stone-400 mb-3">A photo is optional.</p>
