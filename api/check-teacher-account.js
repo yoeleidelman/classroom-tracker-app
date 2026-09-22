@@ -51,12 +51,44 @@ export default async function handler(req, res) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
 
-  // Reported directly, urgent: real data loss (points, attendance) for a class from an earlier
-  // fix's own bug today. Every other recovery avenue was checked directly and ruled out (no
-  // separate log of individual point-award events exists anywhere in this app's own data model; no
-  // client-side Firestore cache exists in the browser either). Folded into this existing route
-  // rather than adding a new one, to stay under this project's serverless function count limit —
-  // adding a 13th route earlier today is exactly what silently broke deployment.
+  // Reported directly: real, accurate attendance data survived after all, in PDF exports the
+  // teacher generated the day before the bug hit — restoring it here, merged by date into each
+  // student's own current record, never overwriting it wholesale. "preview" (no write) shows
+  // exactly what would change before anything actually commits; "commit" performs the same merge
+  // for real. Every field other than attendance carries forward completely untouched either way —
+  // this reads the CURRENT document as the base and only replaces the one field.
+  if (req.body?.action === "restore-attendance") {
+    const { entries, commit } = req.body; // entries: [{ docId, attendanceFromPdf: [{date,status,time}] }]
+    if (!Array.isArray(entries) || entries.length === 0) return res.status(400).json({ error: "entries (array) is required." });
+    const db = getFirestore();
+    const preview = [];
+    const batch = commit ? db.batch() : null;
+    for (const { docId, attendanceFromPdf } of entries) {
+      const ref = db.collection("data").doc(docId);
+      const snap = await ref.get();
+      const current = snap.exists ? snap.data().value : null;
+      const currentAttendance = current?.attendance || [];
+      const pdfDates = new Set(attendanceFromPdf.map((a) => a.date));
+      // Keep every existing entry whose date isn't covered by the PDF (post-Sep-17 real entries,
+      // including today's own genuine ones) — replace only the dates the PDF actually covers.
+      const keptExisting = currentAttendance.filter((a) => !pdfDates.has(a.date));
+      const restored = attendanceFromPdf.map((a) => ({ date: a.date, status: a.status, time: a.time || "", restoredFromPdf: true }));
+      const mergedAttendance = [...keptExisting, ...restored].sort((a, b) => (a.date < b.date ? -1 : 1));
+      preview.push({
+        docId, exists: !!current,
+        currentAttendanceCount: currentAttendance.length,
+        keptExistingCount: keptExisting.length, keptExistingDates: keptExisting.map((a) => a.date),
+        restoredCount: restored.length,
+        otherFieldsPreserved: current ? Object.keys(current).filter((k) => k !== "attendance") : [],
+      });
+      if (commit && current) {
+        batch.set(ref, { value: { ...current, attendance: mergedAttendance } });
+      }
+    }
+    if (commit) await batch.commit();
+    return res.status(200).json({ ok: true, committed: !!commit, preview });
+  }
+
   const { email } = req.body || {};
   const trimmedEmail = (email || "").trim();
   if (!trimmedEmail) return res.status(400).json({ error: "An email is required." });
