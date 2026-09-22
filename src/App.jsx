@@ -2275,7 +2275,77 @@ async function notifySpecificStudentFamilies(classId, studentIds, title, body, u
   await sendPushNotification(uids, title, body, url);
 }
 
-// A defensive wrapper around history.back(), for every "Back" button whose own screen depends on
+// Same underlying upload + post logic ClassApp's own submitBlogPost/attemptSendDraft already use,
+// generalized to post the same content to one or more classes at once — built specifically for
+// admin and the General Studies coordinator, who need a real entry point to post directly rather
+// than entering each classroom individually, without losing any of a blog post's own features in
+// the process. Media is uploaded exactly ONCE regardless of how many classes are selected (the
+// same photos and videos are genuinely shared across every post this creates, not re-uploaded per
+// class); what differs per class is only the post entry itself (its own id, so it can be edited or
+// deleted independently later) and that class's own family notification.
+async function submitBlogPostToClasses(classIds, classNames, title, blocksInput, onProgress, scheduledFor, loggedByName, loggedByUid) {
+  const totalItems = blocksInput.reduce((sum, b) => sum + (b.mediaItems?.length || 0), 0);
+  let uploadedCount = 0;
+  const uploadedBlocks = [];
+  const sharedMediaId = uid();
+  for (const block of blocksInput) {
+    const media = [];
+    for (const item of block.mediaItems || []) {
+      const reportProgress = () => { if (onProgress) onProgress(Math.round(((uploadedCount + 0.5) / Math.max(totalItems, 1)) * 100)); };
+      let url;
+      if (item.type === "video") {
+        const ext = (item.file.name || "").split(".").pop() || "mp4";
+        url = await uploadOneVideo(item.file, `blog/_shared/${sharedMediaId}/${uid()}.${ext}`, reportProgress);
+      } else if (item.type === "audio") {
+        const ext = (item.file.name || "").split(".").pop() || "mp3";
+        url = await uploadOneFile(item.file, `blog/_shared/${sharedMediaId}/${uid()}.${ext}`, reportProgress);
+      } else {
+        url = await uploadOneImage(item.file, `blog/_shared/${sharedMediaId}/${uid()}.jpg`, reportProgress);
+      }
+      media.push({ url, type: item.type, name: item.type === "audio" ? item.file.name : null });
+      uploadedCount++;
+      if (onProgress) onProgress(Math.round((uploadedCount / Math.max(totalItems, 1)) * 100));
+    }
+    uploadedBlocks.push({ id: uid(), media, text: (block.text || "").trim() });
+  }
+  const firstCaption = uploadedBlocks.find((b) => b.text)?.text;
+  const trimmedTitle = (title || "").trim() || null;
+
+  const results = [];
+  for (const classId of classIds) {
+    const className = classNames[classId] || "your child's class";
+    const postId = uid();
+    const entry = {
+      id: postId, title: trimmedTitle, blocks: uploadedBlocks,
+      createdAt: new Date().toISOString(), scheduledFor: scheduledFor || null,
+      authorType: "teacher", reactions: {}, comments: [],
+      loggedAt: new Date().toISOString(), ...(loggedByName ? { loggedBy: loggedByName } : {}), ...(loggedByUid ? { loggedByUid } : {}),
+    };
+    try {
+      if (scheduledFor) {
+        await queueScheduledSend({
+          kind: "blogPost", classId, className, scheduledFor,
+          payload: { entry, notifyTitle: `New post in ${className}`, notifyBody: trimmedTitle || firstCaption || "Check out the new post" },
+        });
+        results.push({ classId, className, status: "scheduled" });
+      } else {
+        const existingPosts = await loadJSON(`class:${classId}:blogPosts`, [], true);
+        await saveJSON(`class:${classId}:blogPosts`, [...existingPosts, entry], true);
+        await notifyClassFamilies(classId, `New post in ${className}`, trimmedTitle || firstCaption || "Check out the new post", `/?portal=parent&open=blog&classId=${classId}`);
+        results.push({ classId, className, status: "sent" });
+      }
+    } catch (err) {
+      // Reported directly, and deliberately handled per-class here: a failure specific to one
+      // class (a bad classId, a transient write error) must never look like every class failed,
+      // when the media itself — the expensive, already-done part — succeeded and most classes may
+      // have posted successfully. Each class's own real outcome is reported back individually.
+      results.push({ classId, className, status: "failed", error: err.message || "Something went wrong." });
+    }
+  }
+  return results;
+}
+
+
 // it — reported live as sometimes just not working, several clicks in a row producing nothing.
 // The normal case should already work correctly on its own: a real pushState was made when the
 // screen opened, and back() should simply reverse it, letting a popstate listener elsewhere clear
@@ -6380,6 +6450,7 @@ function AdminMainTabs({ active, navigate }) {
   const tabs = [
     { id: "overview", label: "Overview", icon: HomeIcon },
     { id: "classes", label: "Classes", icon: Wrench },
+    { id: "blog", label: "Blog", icon: Newspaper },
     { id: "students", label: "Students", icon: Users },
     { id: "teachers", label: "Teachers", icon: BookOpen },
     { id: "families", label: "Families", icon: MessageCircle },
@@ -7040,9 +7111,12 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
         <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-96">
           <button onClick={() => setView("grid")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "grid" || view === "create" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>This class</button>
           <button onClick={() => setView("browse")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "browse" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Browse all classes</button>
+          <button onClick={() => setView("blog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "blog" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Blog</button>
         </div>
 
-        {view === "browse" ? (
+        {view === "blog" ? (
+          <AllClassesBlogView classes={elementaryClasses} currentUserId={loggedInTeacher?.uid} loggedInTeacher={loggedInTeacher} />
+        ) : view === "browse" ? (
           <GeneralStudiesBrowseAllView registry={elementaryClasses} onOpenClass={(id) => { setSelectedClassId(id); setView("grid"); }} />
         ) : (
           <>
@@ -8039,6 +8113,10 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           )}
         </div>
         </>
+        )}
+
+        {adminTab === "blog" && (
+          <AllClassesBlogView classes={(registry || []).filter((c) => !c.archived)} currentUserId={currentTeacher?.uid} loggedInTeacher={currentTeacher} />
         )}
 
         {adminTab === "students" && (
@@ -19295,6 +19373,155 @@ function BlogFeedView({ posts, currentUserId, currentUserName, currentUserType, 
           onReact={(emoji) => onReact(allMedia[lightboxIndex].postId, emoji, allMedia[lightboxIndex].blockId, allMedia[lightboxIndex].mediaIndex)}
           onClose={() => setLightboxIndex(null)} />
       )}
+    </div>
+  );
+}
+
+// Reported directly, alongside the composer below: a way to actually see every class's blog
+// without entering each classroom individually either. Same BlogPostCard every class's own blog
+// already renders posts with — reactions, comments, media, all of it — just labeled with which
+// class each post belongs to, since that's implicit everywhere else but isn't here.
+function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
+  const [posts, setPosts] = useState(null); // null = loading
+  const [filterClassId, setFilterClassId] = useState(null);
+  const [showComposer, setShowComposer] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const classNames = Object.fromEntries(classes.map((c) => [c.id, c.name]));
+        const perClass = await Promise.all(classes.map(async (c) => {
+          const classPosts = await loadJSON(`class:${c.id}:blogPosts`, [], true);
+          return classPosts.map((p) => ({ ...p, classId: c.id, className: classNames[c.id] }));
+        }));
+        const merged = perClass.flat().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        if (!cancelled) setPosts(merged);
+      } catch (e) {
+        if (!cancelled) setError("Something went wrong loading posts. Safe to try again.");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [classes.map((c) => c.id).join(",")]);
+
+  if (showComposer) {
+    return <MultiClassBlogComposer classes={classes} initialClassIds={filterClassId ? [filterClassId] : []}
+      config={DEFAULT_CONFIG} loggedInTeacher={loggedInTeacher}
+      onDone={() => { setShowComposer(false); setPosts(null); }} />;
+  }
+
+  const visiblePosts = filterClassId ? (posts || []).filter((p) => p.classId === filterClassId) : posts;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between px-4 pt-3 pb-2 gap-2">
+        <select value={filterClassId || ""} onChange={(e) => setFilterClassId(e.target.value || null)}
+          className="text-sm border border-stone-300 rounded-lg px-2 py-1.5 flex-1">
+          <option value="">Every class</option>
+          {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <button onClick={() => setShowComposer(true)} className="text-sm font-semibold bg-teal-700 text-white rounded-lg px-3 py-1.5 hover:bg-teal-800 whitespace-nowrap">
+          New post
+        </button>
+      </div>
+      {error && <p className="text-xs text-rose-600 px-4 mb-2">{error}</p>}
+      {posts === null ? (
+        <p className="text-sm text-stone-400 text-center py-12">Loading posts…</p>
+      ) : visiblePosts.length === 0 ? (
+        <p className="text-sm text-stone-400 text-center py-12">No posts yet.</p>
+      ) : (
+        <div className="px-4 space-y-4 pb-6">
+          {visiblePosts.map((post) => (
+            <div key={`${post.classId}-${post.id}`}>
+              <p className="text-xs font-semibold text-teal-700 mb-1">{post.className}</p>
+              <BlogPostCard post={post} currentUserId={currentUserId} commentsEnabled={false}
+                onReact={() => {}} onComment={() => {}} onOpenMedia={() => {}} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Reported directly: a real entry point to post to a class's blog for admin and the General
+// Studies coordinator, who otherwise have to enter each classroom individually just to post — and
+// the ability to post the same content to several classes at once when it genuinely applies to
+// more than one. Deliberately wraps the exact same BlogComposeScreen every teacher already uses,
+// rather than a separate one built for this — every real feature it has (photos, video, audio,
+// AI-assisted captions, scheduling) comes along automatically, with nothing to separately rebuild
+// or risk falling behind later.
+function MultiClassBlogComposer({ classes, initialClassIds, config, loggedInTeacher, onDone }) {
+  const [selectedClassIds, setSelectedClassIds] = useState(initialClassIds || []);
+  const [showComposer, setShowComposer] = useState((initialClassIds || []).length > 0);
+  const [lastResults, setLastResults] = useState(null);
+  const toggleClass = (id) => setSelectedClassIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+  const classNames = Object.fromEntries(classes.map((c) => [c.id, c.name]));
+
+  if (lastResults) {
+    const failed = lastResults.filter((r) => r.status === "failed");
+    return (
+      <div className="p-4">
+        <p className="font-semibold text-stone-800 mb-3">
+          {failed.length === 0 ? "Posted to every selected class." : `Posted to ${lastResults.length - failed.length} of ${lastResults.length} classes.`}
+        </p>
+        <div className="space-y-1.5 mb-4">
+          {lastResults.map((r) => (
+            <div key={r.classId} className="flex items-center justify-between text-sm">
+              <span className="text-stone-700">{r.className}{r.status === "scheduled" ? " (scheduled)" : ""}</span>
+              {r.status === "failed" ? <span className="text-rose-600 text-xs">{r.error}</span> : <Check size={14} className="text-emerald-600" />}
+            </div>
+          ))}
+        </div>
+        <button onClick={onDone} className="w-full bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">Done</button>
+      </div>
+    );
+  }
+
+  if (showComposer) {
+    return (
+      <div>
+        <div className="px-4 pt-3 pb-1 flex flex-wrap gap-1.5">
+          {selectedClassIds.map((id) => (
+            <span key={id} className="text-xs bg-teal-50 text-teal-800 rounded-full px-2.5 py-1 font-semibold">{classNames[id]}</span>
+          ))}
+          <button onClick={() => setShowComposer(false)} className="text-xs text-stone-500 underline">Change classes</button>
+        </div>
+        <BlogComposeScreen config={config} loggedInTeacher={loggedInTeacher}
+          onSubmit={async (title, blocksInput, onProgress, scheduledFor) => {
+            const results = await submitBlogPostToClasses(selectedClassIds, classNames, title, blocksInput, onProgress, scheduledFor, loggedInTeacher?.name, loggedInTeacher?.uid);
+            if (results.every((r) => r.status === "failed")) throw new Error(results[0]?.error || "Posting failed for every selected class.");
+            setLastResults(results);
+          }}
+          onBack={onDone}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4">
+      <p className="font-semibold text-stone-800 mb-1">Post to which class(es)?</p>
+      <p className="text-xs text-stone-400 mb-3">Select one, or several if this post applies to more than one.</p>
+      <div className="space-y-1.5 mb-4 max-h-96 overflow-y-auto">
+        {classes.map((c) => (
+          <button key={c.id} onClick={() => toggleClass(c.id)}
+            className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left ${selectedClassIds.includes(c.id) ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+            <span className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center ${selectedClassIds.includes(c.id) ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
+              {selectedClassIds.includes(c.id) && <Check size={11} className="text-white" />}
+            </span>
+            <span className={`text-sm font-medium ${selectedClassIds.includes(c.id) ? "text-teal-800" : "text-stone-600"}`}>{c.name}</span>
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <button onClick={() => setShowComposer(true)} disabled={selectedClassIds.length === 0}
+          className="flex-1 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+          Continue {selectedClassIds.length > 0 ? `(${selectedClassIds.length})` : ""}
+        </button>
+        <button onClick={onDone} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
+      </div>
     </div>
   );
 }
