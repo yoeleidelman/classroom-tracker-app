@@ -13872,7 +13872,36 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   }, [loading]); // eslint-disable-line
 
   const persistConfig = (next) => { setConfig(next); saveC("config", next); };
-  const persistStudent = (id, newData) => { setStudentData((prev) => ({ ...prev, [id]: newData })); saveC(`kriya:${id}`, newData); };
+  // Reported directly, and taken as seriously as anything tonight: a structural safeguard against
+  // this exact class of bug happening again, not just today's specific instance of it. The root
+  // mechanism that made real data loss possible at all is that every save here fully replaces a
+  // student's whole record rather than merging — so any future bug that calls this with an
+  // incomplete or stale object (a loading race, a copy-paste mistake, anything) can silently wipe
+  // out real data nothing here even touched. This won't happen silently anymore: before saving,
+  // compare against the CURRENT, live version of this same record already held in state, and
+  // refuse to save (loudly, visibly) if doing so would empty out multiple fields nothing here was
+  // ever supposed to be touching. A real, single-field update — grading, attendance, points,
+  // anything — never looks like this; only a genuinely broken caller does.
+  const persistStudent = (id, newData) => {
+    const current = studentData[id];
+    if (current) {
+      const substantialFields = ["skills", "fluency", "attendance", "periodAttendance", "homework", "points", "communications"];
+      const isSubstantial = (obj, key) => { const v = obj?.[key]; return v && (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0); };
+      const currentSubstantialCount = substantialFields.filter((k) => isSubstantial(current, k)).length;
+      const newSubstantialCount = substantialFields.filter((k) => isSubstantial(newData, k)).length;
+      // Losing ground on at least two separate fields at once, from a record that had real data
+      // in several of them, is not something any legitimate single-field update ever produces.
+      if (currentSubstantialCount >= 2 && newSubstantialCount <= currentSubstantialCount - 2) {
+        console.error(
+          `BLOCKED a save that would have wiped real data for student ${id} — went from ${currentSubstantialCount} fields with real data to ${newSubstantialCount}. This save was refused rather than risk silently repeating a real, previously reported data-loss incident. If this student's data genuinely needs to be cleared, that needs to be done deliberately, not through this normal save path.`,
+          { currentKeys: substantialFields.filter((k) => isSubstantial(current, k)), newKeys: substantialFields.filter((k) => isSubstantial(newData, k)) }
+        );
+        return;
+      }
+    }
+    setStudentData((prev) => ({ ...prev, [id]: newData }));
+    saveC(`kriya:${id}`, newData);
+  };
   const persistIncidents = (next) => { setIncidents(next); saveC("incidents", next); };
   const persistReminders = (next) => { setReminders(next); saveC("reminders", next); };
   const persistPhotos = (next) => { setPhotos(next); saveC("photos", next); };
