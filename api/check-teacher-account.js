@@ -51,6 +51,32 @@ export default async function handler(req, res) {
     return res.status(err.status || 401).json({ error: err.message || "Not authorized." });
   }
 
+  // Reported directly, urgent: real data loss (points, attendance) for a class from an earlier
+  // fix's own bug today. Every other recovery avenue was checked directly and ruled out (no
+  // separate log of individual point-award events exists anywhere in this app's own data model; no
+  // client-side Firestore cache exists in the browser either). Folded into this existing route
+  // rather than adding a new one, to stay under this project's serverless function count limit —
+  // adding a 13th route earlier today is exactly what silently broke deployment.
+  if (req.body?.action === "recover") {
+    const { docIds, readTimeISO } = req.body;
+    if (!Array.isArray(docIds) || docIds.length === 0) return res.status(400).json({ error: "docIds (array) is required." });
+    if (!readTimeISO) return res.status(400).json({ error: "readTimeISO is required." });
+    const db = getFirestore();
+    const { Timestamp } = await import("firebase-admin/firestore");
+    const readTime = Timestamp.fromDate(new Date(readTimeISO));
+    const results = {};
+    const errors = {};
+    for (const id of docIds) {
+      try {
+        const snap = await db.collection("data").doc(id).get({ readTime });
+        results[id] = snap.exists ? snap.data() : null;
+      } catch (err) {
+        errors[id] = err.message || String(err);
+      }
+    }
+    return res.status(200).json({ ok: true, results, errors });
+  }
+
   const { email } = req.body || {};
   const trimmedEmail = (email || "").trim();
   if (!trimmedEmail) return res.status(400).json({ error: "An email is required." });
