@@ -57,39 +57,6 @@ export default async function handler(req, res) {
   // client-side Firestore cache exists in the browser either). Folded into this existing route
   // rather than adding a new one, to stay under this project's serverless function count limit —
   // adding a 13th route earlier today is exactly what silently broke deployment.
-  if (req.body?.action === "test-write") {
-    // TEMPORARY diagnostic only, safe test doc — writes a timestamped marker so a subsequent
-    // "recover" call with a readTime from before this write can prove definitively whether
-    // point-in-time reads are actually working on this database at all.
-    const db = getFirestore();
-    await db.collection("data").doc("ZZZ-PITR-TEST-DELETE-ME").set({ value: { marker: Date.now(), writtenAt: new Date().toISOString() } });
-    return res.status(200).json({ ok: true, wroteAt: new Date().toISOString() });
-  }
-
-  if (req.body?.action === "recover") {
-    const { docIds, readTimeISO } = req.body;
-    if (!Array.isArray(docIds) || docIds.length === 0) return res.status(400).json({ error: "docIds (array) is required." });
-    if (!readTimeISO) return res.status(400).json({ error: "readTimeISO is required." });
-    const db = getFirestore();
-    const { Timestamp } = await import("firebase-admin/firestore");
-    const readTime = Timestamp.fromDate(new Date(readTimeISO));
-    // Reported directly: a single DocumentReference's own .get({readTime}) silently ignored the
-    // option entirely rather than erroring, always returning current data regardless of what was
-    // asked for — confirmed directly by requesting an impossible, far-future readTime and getting
-    // the exact same result back with no error at all. db.getAll(...refs, {readTime}) is the
-    // Admin SDK's real point-in-time read path.
-    const refs = docIds.map((id) => db.collection("data").doc(id));
-    const results = {};
-    const errors = {};
-    try {
-      const snaps = await db.getAll(...refs, { readTime });
-      snaps.forEach((snap, i) => { results[docIds[i]] = snap.exists ? snap.data() : null; });
-    } catch (err) {
-      docIds.forEach((id) => { errors[id] = err.message || String(err); });
-    }
-    return res.status(200).json({ ok: true, results, errors });
-  }
-
   const { email } = req.body || {};
   const trimmedEmail = (email || "").trim();
   if (!trimmedEmail) return res.status(400).json({ error: "An email is required." });
