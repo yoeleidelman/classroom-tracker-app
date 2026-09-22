@@ -57,6 +57,15 @@ export default async function handler(req, res) {
   // client-side Firestore cache exists in the browser either). Folded into this existing route
   // rather than adding a new one, to stay under this project's serverless function count limit —
   // adding a 13th route earlier today is exactly what silently broke deployment.
+  if (req.body?.action === "test-write") {
+    // TEMPORARY diagnostic only, safe test doc — writes a timestamped marker so a subsequent
+    // "recover" call with a readTime from before this write can prove definitively whether
+    // point-in-time reads are actually working on this database at all.
+    const db = getFirestore();
+    await db.collection("data").doc("ZZZ-PITR-TEST-DELETE-ME").set({ value: { marker: Date.now(), writtenAt: new Date().toISOString() } });
+    return res.status(200).json({ ok: true, wroteAt: new Date().toISOString() });
+  }
+
   if (req.body?.action === "recover") {
     const { docIds, readTimeISO } = req.body;
     if (!Array.isArray(docIds) || docIds.length === 0) return res.status(400).json({ error: "docIds (array) is required." });
