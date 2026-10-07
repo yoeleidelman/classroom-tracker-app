@@ -2573,11 +2573,21 @@ async function snoozeThread(viewerId, threadKey, minutes) {
     await saveJSON(`read-state:${viewerId}`, state, true);
   }
 }
+// Whether a message counts as "mine" for whoever is viewing the thread. Staff (teacher or admin)
+// always sit on one side and the family on the other — a message is a family message only if its
+// senderType is "family"; anything else was written by school staff. Comparing senderType against
+// the viewer's exact role instead put a teacher's own message on the LEFT whenever it happened to
+// be stored as "admin" (an admin who also teaches, migrated or School Office messages), which is
+// the inconsistent alignment that was reported.
+function isOwnMessage(m, myRole) {
+  const fromFamily = m.senderType === "family";
+  return myRole === "family" ? fromFamily : !fromFamily;
+}
 // A thread counts as unread if its last message came from the other side and is newer than the
 // last time this viewer marked it read (or was never marked read at all) — and isn't currently
 // snoozed.
 function isThreadUnread(readState, threadKey, lastMessage, myRole) {
-  if (!lastMessage || lastMessage.senderType === myRole) return false;
+  if (!lastMessage || isOwnMessage(lastMessage, myRole)) return false;
   const snoozedUntil = readState.snoozed?.[threadKey];
   if (snoozedUntil && new Date(snoozedUntil) > new Date()) return false;
   const lastRead = readState[threadKey];
@@ -2595,7 +2605,7 @@ function countUnreadInThread(readState, threadKey, messages, myRole) {
   if (snoozedUntil && new Date(snoozedUntil) > new Date()) return 0;
   const lastRead = readState[threadKey];
   return (messages || []).filter((m) =>
-    m.senderType !== myRole && (!lastRead || new Date(m.timestamp) > new Date(lastRead))
+    !isOwnMessage(m, myRole) && (!lastRead || new Date(m.timestamp) > new Date(lastRead))
   ).length;
 }
 
@@ -9505,7 +9515,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   // ever tells a family whether their OWN messages were read by a teacher, only the reverse — see
   // recordMessageReadByFamily, where the family's own side of this same field actually gets set.
   const lastReadOwnMessageId = myRole === "teacher" && lastReadByFamily
-    ? [...messages].reverse().find((m) => m.senderType === myRole && new Date(lastReadByFamily) >= new Date(m.timestamp))?.id
+    ? [...messages].reverse().find((m) => isOwnMessage(m, myRole) && new Date(lastReadByFamily) >= new Date(m.timestamp))?.id
     : null;
   // The anchor point for "Not yet seen" — my own single most recent message, used only when
   // lastReadByFamily doesn't exist at all yet. Reported directly: an empty space where a read
@@ -9513,7 +9523,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   // or did something just fail to record it? An explicit "Not yet seen" removes that doubt, the
   // same way its "Seen at" sibling above already does for the read case.
   const myLastMessageId = myRole === "teacher"
-    ? [...messages].reverse().find((m) => m.senderType === myRole)?.id
+    ? [...messages].reverse().find((m) => isOwnMessage(m, myRole))?.id
     : null;
   // Backfills this specific thread's own read status the moment a teacher opens it, if it doesn't
   // already have a real value — see backfillMessageReadIfNeeded's own, more detailed reasoning for
@@ -9710,7 +9720,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
   // first time ever has nothing to contrast "new" against (everything in it already is), the same
   // reasoning WhatsApp itself follows for a brand new chat.
   const firstUnreadId = lastReadBeforeOpen
-    ? messages.find((m) => m.senderType !== myRole && !m.deleted && new Date(m.timestamp) > new Date(lastReadBeforeOpen))?.id || null
+    ? messages.find((m) => !isOwnMessage(m, myRole) && !m.deleted && new Date(m.timestamp) > new Date(lastReadBeforeOpen))?.id || null
     : null;
   // Long-running threads build up real history over a school year — every message in one was, up
   // to this point, rendered as a real, live piece of the page at once regardless of whether it was
@@ -9792,7 +9802,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
           <p className="text-sm text-stone-400 text-center py-8">No messages yet — say hello.</p>
         )}
         {visibleMessages.map((m) => {
-          const mine = m.senderType === myRole;
+          const mine = isOwnMessage(m, myRole);
           // Edit/delete only ever apply to staff's own sent messages, never a family's — matches
           // the accountability reasoning behind soft delete itself: the point is a school having
           // a stable, trustworthy record of what it told a family, not the reverse.
@@ -9834,8 +9844,9 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
             <Fragment key={m.id}>
               {divider}
               <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+              <div className={`flex flex-col max-w-[80%] ${mine ? "items-end" : "items-start"}`}>
               <ReactableContent reactions={m.reactions} currentUserId={currentUserId} onReact={(emoji) => handleReact(m.id, emoji)}>
-              <div className={`max-w-[80%] rounded-2xl overflow-hidden relative ${mine ? `${mineBubble.base} text-white` : "bg-white border border-stone-200 text-stone-800"}`}>
+              <div className={`rounded-2xl overflow-hidden relative ${mine ? `${mineBubble.base} text-white` : "bg-white border border-stone-200 text-stone-800"}`}>
                 <div className="px-3.5 pt-2.5 flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className={`text-[10px] font-semibold mb-0.5 ${mine ? mineBubble.lightText : "text-stone-400"}`}>{m.senderName}</p>
@@ -9956,6 +9967,7 @@ function ConversationThreadView({ title, subtitle, messages, onSend, onEdit, onD
                 <ReactionBadge reactions={m.reactions} onOpen={() => setOpenReactionsFor(m.id)}
                   className={`-mt-2.5 relative z-10 ${mine ? "mr-2" : "ml-2"}`} />
               )}
+              </div>
               </div>
               {openReactionsFor === m.id && (
                 <WhoReactedSheet
