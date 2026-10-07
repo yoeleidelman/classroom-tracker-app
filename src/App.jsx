@@ -13769,7 +13769,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [selectedFluencyEntry, setSelectedFluencyEntry] = useState(null);
   const [initialAssessmentStudentId, setInitialAssessmentStudentId] = useState(null); // auto-opens a student's modal in the Assessments grid when navigating in from elsewhere
   const [detailReturnView, setDetailReturnView] = useState("detail"); // fluency-detail/skill-detail are reachable from both StudentDetailView and the Assessments grid modal — this tracks which one "Back" should return to
-  const [reportSections, setReportSections] = useState([]); // which sections were chosen for the current student's print/export report
+  const [createReportsStudentId, setCreateReportsStudentId] = useState(null); // set only when "Create reports" is opened from one student's page, so just that student starts selected
   const [selectedSkillCat, setSelectedSkillCat] = useState(null);
   const [selectedSkillReportCat, setSelectedSkillReportCat] = useState(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState(null);
@@ -15565,15 +15565,11 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onBack={() => navigateView("communication")} onAddEntry={(entry) => addCommunication(currentId, entry)} />
       )}
 
-      {view === "monthly-reports" && (
-        <MonthlyReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType} classId={classId} sendDirectMessageToFamily={sendDirectMessageToFamily}
-          onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
-          onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
-      )}
-
-      {view === "range-report" && (
-        <CustomRangeReportView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType} classId={classId} sendDirectMessageToFamily={sendDirectMessageToFamily}
-          onBack={() => navigateView("communication")} onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
+      {view === "create-reports" && (
+        <CreateReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType} classId={classId} className={className}
+          preselectedStudentId={createReportsStudentId} sendDirectMessageToFamily={sendDirectMessageToFamily}
+          onBack={() => { const back = createReportsStudentId ? "detail" : "communication"; setCreateReportsStudentId(null); navigateView(back); }}
+          onLogSent={(studentId, entry) => addCommunication(studentId, entry)}
           onUpdateParentEmail={(id, email) => updateStudentField(id, "parentEmail", email)} />
       )}
 
@@ -15646,7 +15642,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onBack={() => navigateView(classType === "preschool" ? "daily-log" : "home")} onAcknowledge={(key) => acknowledgeFlag(currentId, key)}
           onLogIncident={() => openIncidentForm(currentId, "detail")} onLogPeriodAttendance={() => openPeriodAttendanceForm(currentId, "detail")}
           onGoToAssessments={() => { setInitialAssessmentStudentId(currentId); navigateView("assessments"); }}
-          onExportReport={() => navigateView("print-report-options")}
+          onExportReport={() => { setCreateReportsStudentId(currentId); navigateView("create-reports"); }}
           onDraftMessage={openMessageDraft} onUpdateParentEmail={(email) => updateStudentField(currentId, "parentEmail", email)}
           onUpdateField={(field, value) => updateStudentField(currentId, field, value)}
           onOpenClassAssessmentReport={(id) => { setSelectedAssessmentId(id); navigateView("assessment-report"); }}
@@ -15654,18 +15650,6 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onOpenSkillDetail={(catId) => { setDetailReturnView("detail"); setSelectedSkillCat(catId); navigateView("skill-detail"); }}
           onOpenIncidentDetail={(id) => { setSelectedIncidentId(id); setIncidentDetailReturn("detail"); navigateView("incident-detail"); }}
           onFetchCrossClassHistory={fetchCrossClassHistory} currentClassName={className} />
-      )}
-
-      {view === "print-report-options" && currentId && (
-        <PrintReportOptionsView student={roster.find((s) => s.id === currentId)}
-          onBack={() => navigateView("detail")}
-          onGenerate={(sections) => { setReportSections(sections); navigateView("print-report"); }} />
-      )}
-
-      {view === "print-report" && currentId && (
-        <PrintableStudentReport student={roster.find((s) => s.id === currentId)} data={studentData[currentId] || emptyStudentData()}
-          incidents={incidents} classAssessments={classAssessments} config={config} sections={reportSections}
-          currentClassName={className} onBack={() => navigateView("print-report-options")} />
       )}
 
       {view === "incident-detail" && selectedIncidentId && (
@@ -15985,7 +15969,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
             <p className="text-xs text-teal-700">For {monthLabel(now.getFullYear(), now.getMonth())} — review and send whenever you're ready.</p>
           </div>
           <div className="flex gap-2 shrink-0">
-            <button onClick={() => navigate("monthly-reports")} className="text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-1.5 hover:bg-teal-800">Generate now</button>
+            <button onClick={() => navigate("create-reports")} className="text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-1.5 hover:bg-teal-800">Generate now</button>
             <button onClick={() => onDismissMonthlyReminder(thisMonthKey)} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-100">Dismiss</button>
           </div>
         </div>
@@ -24042,11 +24026,8 @@ function CommunicationListView({ roster, studentData, classId, loggedInTeacher, 
       <p className="text-xs text-stone-400 mb-4">Build a report and send it to a parent — for actual conversations, use the Messages button.</p>
 
       <div className="flex flex-col md:flex-row gap-2 mb-5">
-        <button onClick={() => navigate("monthly-reports")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
-          <Mail size={16} /> Generate monthly reports
-        </button>
-        <button onClick={() => navigate("range-report")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
-          <Calendar size={16} /> Custom date range report
+        <button onClick={() => navigate("create-reports")} className="flex-1 md:w-80 flex items-center justify-center gap-2 bg-white text-teal-700 border border-teal-300 rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-50">
+          <FileText size={16} /> Create reports
         </button>
       </div>
       <button onClick={() => navigate("reflection-history")} className="mb-5 flex items-center gap-2 text-sm font-semibold text-violet-700 hover:text-violet-900">
@@ -24781,217 +24762,7 @@ STRICT RULES:
   return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
 }
 
-function MonthlyReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
-  const now = new Date();
-  const isPreschool = classType === "preschool";
-  const [year, setYear] = useState(now.getFullYear());
-  const [monthIdx, setMonthIdx] = useState(now.getMonth());
-  const [includeAttendance, setIncludeAttendance] = useState(true);
-  const [includeIncidents, setIncludeIncidents] = useState(true);
-  const [includeAssessments, setIncludeAssessments] = useState(false);
-  const [reports, setReports] = useState({}); // studentId -> { loading, draft, dataUsed, email, logged }
-  const label = monthLabel(year, monthIdx);
-  // Assessment logging isn't in use for preschool rooms yet, so the option is hidden entirely
-  // below, not just defaulted off — but this stays doubly safe even if that ever drifts, since a
-  // preschool report can never actually pull in an assessment section regardless of what state
-  // says, the same way the checkbox itself can never be reached to turn it on.
-  const opts = { attendance: includeAttendance, incidents: includeIncidents, assessments: isPreschool ? false : includeAssessments };
 
-  const generateOne = async (student) => {
-    setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
-    const data = studentData[student.id] || emptyStudentData();
-    const facts = buildMonthlyFacts(student, data, incidents, classAssessments, config, year, monthIdx, opts);
-    const dataUsed = factsToPlainText(student, label, facts);
-    try {
-      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher);
-      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
-    } catch (err) {
-      console.error("Monthly report generation failed:", err);
-      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: "Could not generate — here's the raw data instead:\n\n" + dataUsed, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
-    }
-  };
-
-  const generateAll = async () => { for (const s of roster) await generateOne(s); };
-
-  const logSent = (student) => {
-    const r = reports[student.id];
-    if (!r) return;
-    onLogSent(student.id, { date: todayISO(), channel: "email", type: "automated", source: "monthly-report", subject: `Monthly report — ${label}`, body: r.draft });
-    setReports((prev) => ({ ...prev, [student.id]: { ...prev[student.id], logged: true } }));
-  };
-
-  return (
-    <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Monthly reports</h1>
-      <p className="text-xs text-stone-400 mb-4">AI-worded, but every figure comes from what's logged for the selected month only.</p>
-
-      <div className="flex flex-wrap items-center gap-2 mb-3">
-        <select value={monthIdx} onChange={(e) => setMonthIdx(Number(e.target.value))} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
-          {Array.from({ length: 12 }).map((_, i) => <option key={i} value={i}>{new Date(2000, i, 1).toLocaleDateString("en-US", { month: "long" })}</option>)}
-        </select>
-        <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
-          {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((y) => <option key={y} value={y}>{y}</option>)}
-        </select>
-        <button onClick={generateAll} className="ml-auto text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-2 hover:bg-teal-800">Generate all</button>
-      </div>
-
-      <div className="flex flex-wrap gap-4 mb-5 bg-white border border-stone-200 rounded-lg px-3 py-2.5">
-        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAttendance} onChange={(e) => setIncludeAttendance(e.target.checked)} /> Attendance</label>
-        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeIncidents} onChange={(e) => setIncludeIncidents(e.target.checked)} /> Incidents</label>
-        {!isPreschool && (
-          <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAssessments} onChange={(e) => setIncludeAssessments(e.target.checked)} /> Assessment activity</label>
-        )}
-      </div>
-
-      <div className="space-y-3">
-        {roster.map((s) => {
-          const r = reports[s.id];
-          return (
-            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-semibold text-stone-800 text-sm">{s.name}</span>
-                {!r && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-teal-700 border border-teal-200 rounded-lg px-3 py-1.5 hover:bg-teal-50">Generate report</button>}
-                {r?.loading && <Loader2 className="animate-spin text-teal-700" size={16} />}
-              </div>
-              {r && !r.loading && (
-                <div>
-                  <label className="block text-[10px] text-stone-400 mb-0.5">Parent email</label>
-                  <input type="email" value={r.email} onChange={(e) => { const v = e.target.value; setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], email: v } })); onUpdateParentEmail(s.id, v); }}
-                    placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                  <div className="flex items-start gap-1.5 mb-2">
-                    <textarea value={r.draft} onChange={(e) => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: e.target.value } }))}
-                      rows={6} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                    <MicButton onResult={(spoken) => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: prev[s.id].draft ? `${prev[s.id].draft} ${spoken}` : spoken } }))} />
-                  </div>
-                  <button onClick={() => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], showData: !prev[s.id].showData } }))}
-                    className="text-xs text-stone-500 underline mb-2">
-                    {r.showData ? "Hide" : "Show"} data used
-                  </button>
-                  {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
-                  <div className="flex flex-wrap gap-2">
-                    <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} classId={classId} subject={`Monthly report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" sendMessageToFamily={sendDirectMessageToFamily} />
-                    <button onClick={() => logSent(s)} disabled={r.logged}
-                      className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
-                      {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <p className="text-xs text-stone-400 text-center mt-4">Nothing sends automatically. Review each report — check "Show data used" if you want to verify the figures — then send it yourself and mark it logged.</p>
-    </div>
-  );
-}
-
-function CustomRangeReportView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
-  const today = todayISO();
-  const isPreschool = classType === "preschool";
-  const [startDate, setStartDate] = useState(addDaysISO(today, -13));
-  const [endDate, setEndDate] = useState(today);
-  const [includeAttendance, setIncludeAttendance] = useState(true);
-  const [includeIncidents, setIncludeIncidents] = useState(true);
-  const [includeAssessments, setIncludeAssessments] = useState(false);
-  const [reports, setReports] = useState({});
-  const label = `${startDate} to ${endDate}`;
-  const opts = { attendance: includeAttendance, incidents: includeIncidents, assessments: isPreschool ? false : includeAssessments };
-
-  const generateOne = async (student) => {
-    setReports((prev) => ({ ...prev, [student.id]: { ...(prev[student.id] || {}), loading: true } }));
-    const data = studentData[student.id] || emptyStudentData();
-    const facts = buildRangeFacts(student, data, incidents, classAssessments, config, startDate, endDate, opts);
-    const dataUsed = factsToPlainText(student, label, facts);
-    try {
-      const text = await generateHybridReport(student, label, facts, config, loggedInTeacher);
-      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: text, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
-    } catch (err) {
-      console.error("Custom date range report generation failed:", err);
-      setReports((prev) => ({ ...prev, [student.id]: { loading: false, draft: "Could not generate — here's the raw data instead:\n\n" + dataUsed, dataUsed, email: student.parentEmail || "", logged: false, showData: false } }));
-    }
-  };
-
-  const generateAll = async () => { for (const s of roster) await generateOne(s); };
-
-  const logSent = (student) => {
-    const r = reports[student.id];
-    if (!r) return;
-    onLogSent(student.id, { date: todayISO(), channel: "email", type: "automated", source: "range-report", subject: `Report — ${label}`, body: r.draft });
-    setReports((prev) => ({ ...prev, [student.id]: { ...prev[student.id], logged: true } }));
-  };
-
-  return (
-    <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Custom date range report</h1>
-      <p className="text-xs text-stone-400 mb-4">AI-worded, but every figure comes from what's logged between these two dates only.</p>
-
-      <div className="flex flex-wrap items-end gap-2 mb-3">
-        <div>
-          <label className="block text-[10px] text-stone-400 mb-0.5">From</label>
-          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white" />
-        </div>
-        <div>
-          <label className="block text-[10px] text-stone-400 mb-0.5">To</label>
-          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white" />
-        </div>
-        <button onClick={generateAll} className="ml-auto text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-2 hover:bg-teal-800">Generate all</button>
-      </div>
-
-      <div className="flex flex-wrap gap-4 mb-5 bg-white border border-stone-200 rounded-lg px-3 py-2.5">
-        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAttendance} onChange={(e) => setIncludeAttendance(e.target.checked)} /> Attendance</label>
-        <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeIncidents} onChange={(e) => setIncludeIncidents(e.target.checked)} /> Incidents</label>
-        {!isPreschool && (
-          <label className="flex items-center gap-1.5 text-xs font-medium text-stone-600"><input type="checkbox" checked={includeAssessments} onChange={(e) => setIncludeAssessments(e.target.checked)} /> Assessment activity</label>
-        )}
-      </div>
-
-      <div className="space-y-3">
-        {roster.map((s) => {
-          const r = reports[s.id];
-          return (
-            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-semibold text-stone-800 text-sm">{s.name}</span>
-                {!r && <button onClick={() => generateOne(s)} className="text-xs font-semibold text-teal-700 border border-teal-200 rounded-lg px-3 py-1.5 hover:bg-teal-50">Generate report</button>}
-                {r?.loading && <Loader2 className="animate-spin text-teal-700" size={16} />}
-              </div>
-              {r && !r.loading && (
-                <div>
-                  <label className="block text-[10px] text-stone-400 mb-0.5">Parent email</label>
-                  <input type="email" value={r.email} onChange={(e) => { const v = e.target.value; setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], email: v } })); onUpdateParentEmail(s.id, v); }}
-                    placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
-                  <div className="flex items-start gap-1.5 mb-2">
-                    <textarea value={r.draft} onChange={(e) => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: e.target.value } }))}
-                      rows={6} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-                    <MicButton onResult={(spoken) => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: prev[s.id].draft ? `${prev[s.id].draft} ${spoken}` : spoken } }))} />
-                  </div>
-                  <button onClick={() => setReports((prev) => ({ ...prev, [s.id]: { ...prev[s.id], showData: !prev[s.id].showData } }))}
-                    className="text-xs text-stone-500 underline mb-2">
-                    {r.showData ? "Hide" : "Show"} data used
-                  </button>
-                  {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
-                  <div className="flex flex-wrap gap-2">
-                    <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Regenerate</button>
-                    <ParentSendActions student={s} classId={classId} subject={`Report — ${label}`} body={r.draft} config={config} signOff={loggedInTeacher?.messageSignOff} size="small" sendMessageToFamily={sendDirectMessageToFamily} />
-                    <button onClick={() => logSent(s)} disabled={r.logged}
-                      className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
-                      {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged as sent" : "Log as sent"}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <p className="text-xs text-stone-400 text-center mt-4">Nothing sends automatically. Review each report — check "Show data used" if you want to verify the figures — then send it yourself and mark it logged.</p>
-    </div>
-  );
-}
 
 // ---------- Per-assessment reports (one-off, tied to a single class assessment) ----------
 
@@ -25754,6 +25525,381 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
 // exactly what it's about to generate (how many students, which classes) before committing to the
 // actual work, and reports real progress while running, since generating potentially 100+ real
 // PDF files in the browser takes real time.
+// One place to build every kind of student report: a written message, a PDF, or a PDF sent along
+// with a short note. Replaces the three separate screens that used to exist for this (monthly text
+// reports, custom-date-range text reports, and the per-student PDF export). The same date choices
+// (a whole month, or a custom start/end) and the same section checkboxes apply to every format, and
+// it works for one student, a few, or the whole class.
+function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
+  const now = new Date();
+  const isPreschool = classType === "preschool";
+  const pad2 = (n) => String(n).padStart(2, "0");
+  // Preschool rooms don't track skills/class assessments/fluency, so those options are hidden entirely.
+  const sectionList = REPORT_SECTIONS.filter((s) => !isPreschool || !["skills", "classAssessments", "fluency"].includes(s.id));
+
+  const [selectedIds, setSelectedIds] = useState(() => (preselectedStudentId ? [preselectedStudentId] : roster.map((s) => s.id)));
+  const [whenMode, setWhenMode] = useState("month"); // "month" | "range"
+  const [year, setYear] = useState(now.getFullYear());
+  const [monthIdx, setMonthIdx] = useState(now.getMonth());
+  const [startDate, setStartDate] = useState(addDaysISO(todayISO(), -13));
+  const [endDate, setEndDate] = useState(todayISO());
+  const [sections, setSections] = useState(() => sectionList.map((s) => s.id));
+  const [format, setFormat] = useState("message"); // "message" | "pdf" | "both"
+  const [emailBoth, setEmailBoth] = useState(false);
+  const [results, setResults] = useState({}); // studentId -> { loading, draft, dataUsed, pdfBlob, pdfName, label, error, sendState, logged, showData }
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const [bulkArmed, setBulkArmed] = useState(false);
+  const [bulkSummary, setBulkSummary] = useState(null);
+  const familiesRef = useRef(null);
+
+  const wantMessage = format === "message" || format === "both";
+  const wantPdf = format === "pdf" || format === "both";
+
+  const lastDay = new Date(year, monthIdx + 1, 0).getDate();
+  const rangeStart = whenMode === "month" ? `${year}-${pad2(monthIdx + 1)}-01` : startDate;
+  const rangeEnd = whenMode === "month" ? `${year}-${pad2(monthIdx + 1)}-${pad2(lastDay)}` : endDate;
+  const label = whenMode === "month" ? monthLabel(year, monthIdx) : `${rangeStart || "start"} to ${rangeEnd}`;
+  const rangeValid = whenMode === "month" || (Boolean(endDate) && (!startDate || startDate <= endDate));
+  // What the written message can actually draw on: attendance, incidents, and assessment activity.
+  const msgOpts = {
+    attendance: sections.includes("attendance"),
+    incidents: sections.includes("incidents"),
+    assessments: !isPreschool && ["skills", "classAssessments", "fluency"].some((id) => sections.includes(id)),
+  };
+  const messageHasContent = msgOpts.attendance || msgOpts.incidents || msgOpts.assessments;
+
+  const chosen = roster.filter((s) => selectedIds.includes(s.id));
+  const toggleStudent = (id) => setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const toggleSection = (id) => setSections((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const patch = (id, fields) => setResults((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), ...fields } }));
+
+  const safeName = (s) => String(s).replace(/[/\\?%*:|"<>]/g, "-");
+  const firstName = (s) => (s.name || "").split(" ")[0] || "your child";
+
+  const generateOne = async (student) => {
+    patch(student.id, { loading: true, error: null, sendState: null });
+    const data = studentData[student.id] || emptyStudentData();
+    let draft = `Hi! Attached is ${firstName(student)}'s report for ${label}.`;
+    let dataUsed = null;
+    let pdfBlob = null;
+    let error = null;
+    if (wantMessage) {
+      const facts = buildRangeFacts(student, data, incidents, classAssessments, config, rangeStart, rangeEnd, msgOpts);
+      dataUsed = factsToPlainText(student, label, facts);
+      try {
+        draft = await generateHybridReport(student, label, facts, config, loggedInTeacher);
+      } catch (err) {
+        console.error("Report text generation failed:", err);
+        draft = "Could not generate — here's the raw data instead:\n\n" + dataUsed;
+      }
+    }
+    if (wantPdf) {
+      try {
+        pdfBlob = buildStudentReportPdf(student, data, incidents, classAssessments, config, sections, className, rangeStart || null, rangeEnd || null);
+      } catch (err) {
+        console.error("Report PDF generation failed:", err);
+        error = "The PDF couldn't be created for this student.";
+      }
+    }
+    setResults((prev) => ({
+      ...prev,
+      [student.id]: {
+        loading: false, draft, dataUsed, pdfBlob, error, label,
+        pdfName: `${safeName(student.name)} - Report ${safeName(label)}.pdf`,
+        logged: false, sendState: null, showData: false, email: student.parentEmail || "",
+      },
+    }));
+  };
+
+  const generateAll = async () => {
+    setRunning(true);
+    setBulkSummary(null);
+    setBulkArmed(false);
+    familiesRef.current = null;
+    setResults({});
+    setProgress({ done: 0, total: chosen.length });
+    let done = 0;
+    for (const s of chosen) {
+      await generateOne(s); // eslint-disable-line no-await-in-loop
+      done++;
+      setProgress({ done, total: chosen.length });
+    }
+    setRunning(false);
+    setProgress(null);
+  };
+
+  const saveBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const downloadZip = async () => {
+    const zip = new JSZip();
+    for (const s of chosen) {
+      const r = results[s.id];
+      if (r?.pdfBlob) zip.file(r.pdfName, r.pdfBlob);
+    }
+    const blob = await zip.generateAsync({ type: "blob" });
+    saveBlob(blob, `${safeName(className || "Class")} Reports ${safeName(label)}.zip`);
+  };
+
+  const logSent = (student, channel) => {
+    const r = results[student.id];
+    if (!r) return;
+    onLogSent(student.id, {
+      date: todayISO(), channel: channel || "email", type: "automated", source: "report",
+      subject: `Report — ${r.label}`, body: r.draft + (r.pdfBlob ? "\n\n[PDF report attached]" : ""),
+    });
+    patch(student.id, { logged: true });
+  };
+
+  // Returns "sent" | "no-family" | "failed" | "empty"
+  const sendInApp = async (student) => {
+    const r = results[student.id];
+    if (!r || !(r.draft || "").trim() && !r.pdfBlob) return "empty";
+    patch(student.id, { sendState: "sending" });
+    try {
+      if (!familiesRef.current) familiesRef.current = await fetchClassFamilies(classId);
+      const match = familiesRef.current.find((f) => (f.studentLinks || []).some((l) => l.studentId === student.id && l.classId === classId));
+      if (!match) { patch(student.id, { sendState: "no-family" }); return "no-family"; }
+      let attachments;
+      if (r.pdfBlob) {
+        const file = new File([r.pdfBlob], r.pdfName, { type: "application/pdf" });
+        const url = await uploadOneFile(file, `message-attachments/report-${classId}/${uid()}.pdf`);
+        attachments = [{ url, type: "file", name: r.pdfName }];
+      }
+      await sendDirectMessageToFamily(match.uid, (r.draft || "").trim(), attachments);
+      patch(student.id, { sendState: "sent" });
+      logSent(student, "other");
+      return "sent";
+    } catch (err) {
+      console.error("Report in-app send failed:", err);
+      patch(student.id, { sendState: "failed" });
+      return "failed";
+    }
+  };
+
+  const sendAllInApp = async () => {
+    setBulkArmed(false);
+    const summary = { sent: 0, noFamily: 0, failed: 0, skipped: 0 };
+    for (const s of chosen) {
+      const r = results[s.id];
+      if (!r || r.loading || r.sendState === "sent") { summary.skipped++; continue; }
+      const outcome = await sendInApp(s); // eslint-disable-line no-await-in-loop
+      if (outcome === "sent") summary.sent++;
+      else if (outcome === "no-family") summary.noFamily++;
+      else summary.failed++;
+    }
+    setBulkSummary(summary);
+  };
+
+  const generatedCount = chosen.filter((s) => results[s.id] && !results[s.id].loading).length;
+  const pdfCount = chosen.filter((s) => results[s.id]?.pdfBlob).length;
+  const canGenerate = chosen.length > 0 && sections.length > 0 && rangeValid && !running && (!wantMessage || messageHasContent);
+
+  const stepCard = "bg-white border border-stone-200 rounded-xl p-3 mb-3";
+  const stepTitle = "text-xs font-bold uppercase tracking-wide text-stone-400 mb-2";
+  const chip = (on) => `text-xs font-semibold px-3 py-1.5 rounded-full border ${on ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`;
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Create reports</h1>
+      <p className="text-xs text-stone-400 mb-4">A written message, a PDF, or both — for one student, a few, or the whole class. Every figure comes only from what's logged in the dates you pick. Nothing sends until you press send.</p>
+
+      <div className="md:max-w-xl">
+        <div className={stepCard}>
+          <p className={stepTitle}>1 · Who</p>
+          <div className="flex items-center gap-2 mb-2">
+            <button onClick={() => setSelectedIds(roster.map((s) => s.id))} className={chip(selectedIds.length === roster.length)}>Whole class</button>
+            <button onClick={() => setSelectedIds([])} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Clear</button>
+            <span className="ml-auto text-xs text-stone-400">{chosen.length} of {roster.length} selected</span>
+          </div>
+          <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1">
+            {roster.map((s) => (
+              <label key={s.id} className="flex items-center gap-2 text-sm text-stone-700 px-1 py-0.5">
+                <input type="checkbox" checked={selectedIds.includes(s.id)} onChange={() => toggleStudent(s.id)} /> {s.name}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div className={stepCard}>
+          <p className={stepTitle}>2 · When</p>
+          <div className="flex gap-2 mb-2">
+            <button onClick={() => setWhenMode("month")} className={chip(whenMode === "month")}>A month</button>
+            <button onClick={() => setWhenMode("range")} className={chip(whenMode === "range")}>Custom dates</button>
+          </div>
+          {whenMode === "month" ? (
+            <div className="flex gap-2">
+              <select value={monthIdx} onChange={(e) => setMonthIdx(Number(e.target.value))} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                {Array.from({ length: 12 }).map((_, i) => <option key={i} value={i}>{new Date(2000, i, 1).toLocaleDateString("en-US", { month: "long" })}</option>)}
+              </select>
+              <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white">
+                {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
+          ) : (
+            <div>
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <label className="block text-[10px] text-stone-400 mb-0.5">From (blank = from the beginning)</label>
+                  <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white" />
+                </div>
+                <div className="flex-1">
+                  <label className="block text-[10px] text-stone-400 mb-0.5">To</label>
+                  <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm bg-white" />
+                </div>
+              </div>
+              {!rangeValid && <p className="text-xs text-rose-600 mt-1">Pick an end date that isn't before the start date.</p>}
+            </div>
+          )}
+        </div>
+
+        <div className={stepCard}>
+          <div className="flex items-center justify-between mb-2">
+            <p className={`${stepTitle} mb-0`}>3 · What to include</p>
+            <button onClick={() => setSections(sections.length === sectionList.length ? [] : sectionList.map((s) => s.id))} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
+              {sections.length === sectionList.length ? "Deselect all" : "Select all"}
+            </button>
+          </div>
+          <div className="space-y-1.5">
+            {sectionList.map((s) => (
+              <button key={s.id} onClick={() => toggleSection(s.id)}
+                className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2 text-left ${sections.includes(s.id) ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
+                <span className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center ${sections.includes(s.id) ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
+                  {sections.includes(s.id) && <Check size={11} className="text-white" />}
+                </span>
+                <span className={`text-sm font-medium ${sections.includes(s.id) ? "text-teal-800" : "text-stone-600"}`}>{s.label}</span>
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-stone-400 mt-2">A written message covers attendance, incidents and assessment activity. A PDF can include everything checked here.</p>
+        </div>
+
+        <div className={stepCard}>
+          <p className={stepTitle}>4 · Format</p>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => setFormat("message")} className={chip(format === "message")}>Message</button>
+            <button onClick={() => setFormat("pdf")} className={chip(format === "pdf")}>PDF</button>
+            <button onClick={() => setFormat("both")} className={chip(format === "both")}>PDF + message</button>
+          </div>
+          <p className="text-[10px] text-stone-400 mt-2">
+            {format === "message" && "A short written summary you can edit, then send in-app or by email."}
+            {format === "pdf" && "A professional PDF per student. You can add a short note to go with it."}
+            {format === "both" && "A written summary plus the PDF. In-app, the PDF is attached to the message."}
+          </p>
+          {wantMessage && !messageHasContent && <p className="text-xs text-rose-600 mt-1">A written message needs attendance, incidents or an assessment section checked.</p>}
+        </div>
+
+        <button onClick={generateAll} disabled={!canGenerate}
+          className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40 mb-2">
+          {running ? <><Loader2 className="animate-spin" size={16} /> Creating… {progress ? `${progress.done}/${progress.total}` : ""}</> : <><FileText size={16} /> Create {chosen.length} report{chosen.length === 1 ? "" : "s"}</>}
+        </button>
+      </div>
+
+      {generatedCount > 0 && (
+        <div className="mt-5">
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <h2 className="text-sm font-bold text-stone-800 mr-auto">{label}</h2>
+            {pdfCount > 1 && (
+              <button onClick={downloadZip} className="flex items-center gap-1 text-xs font-semibold text-stone-700 border border-stone-300 rounded-lg px-3 py-1.5 hover:bg-stone-50">
+                <Download size={13} /> Download all PDFs (zip)
+              </button>
+            )}
+            {!bulkArmed ? (
+              <button onClick={() => setBulkArmed(true)} disabled={running} className="flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800 disabled:opacity-40">
+                <MessageCircle size={13} /> Send all in-app
+              </button>
+            ) : (
+              <div className="flex items-center gap-1">
+                <button onClick={sendAllInApp} className="text-xs font-semibold text-white bg-rose-600 rounded-lg px-3 py-1.5">Send to {generatedCount} famil{generatedCount === 1 ? "y" : "ies"} now?</button>
+                <button onClick={() => setBulkArmed(false)} className="text-xs text-stone-500 px-2">Cancel</button>
+              </div>
+            )}
+          </div>
+          {bulkSummary && (
+            <p className="text-xs text-stone-600 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 mb-3">
+              Sent {bulkSummary.sent}.{bulkSummary.noFamily ? ` ${bulkSummary.noFamily} had no parent account linked yet.` : ""}{bulkSummary.failed ? ` ${bulkSummary.failed} failed — try those again below.` : ""}{bulkSummary.skipped ? ` ${bulkSummary.skipped} skipped (already sent or not ready).` : ""}
+            </p>
+          )}
+
+          <div className="space-y-3">
+            {chosen.map((s) => {
+              const r = results[s.id];
+              if (!r) return null;
+              const emails = [s.parentEmail, emailBoth && s.parent2Email].filter(Boolean).join(", ");
+              return (
+                <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-semibold text-stone-800 text-sm">{s.name}</span>
+                    {r.loading && <Loader2 className="animate-spin text-teal-700" size={16} />}
+                  </div>
+                  {!r.loading && (
+                    <div>
+                      <label className="block text-[10px] text-stone-400 mb-0.5">Parent email</label>
+                      <input type="email" value={r.email} onChange={(e) => { const v = e.target.value; patch(s.id, { email: v }); onUpdateParentEmail(s.id, v); }}
+                        placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                      <label className="block text-[10px] text-stone-400 mb-0.5">{wantMessage ? "Message" : "Note to go with the PDF"}</label>
+                      <div className="flex items-start gap-1.5 mb-2">
+                        <textarea value={r.draft} onChange={(e) => patch(s.id, { draft: e.target.value })} rows={wantMessage ? 6 : 2} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+                        <MicButton onResult={(spoken) => setResults((prev) => ({ ...prev, [s.id]: { ...prev[s.id], draft: prev[s.id].draft ? `${prev[s.id].draft} ${spoken}` : spoken } }))} />
+                      </div>
+                      {r.dataUsed && (
+                        <>
+                          <button onClick={() => patch(s.id, { showData: !r.showData })} className="text-xs text-stone-500 underline mb-2">{r.showData ? "Hide" : "Show"} data used</button>
+                          {r.showData && <pre className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 mb-2 whitespace-pre-wrap font-mono">{r.dataUsed}</pre>}
+                        </>
+                      )}
+                      {r.error && <p className="text-xs text-rose-600 mb-2">{r.error}</p>}
+                      <div className="flex flex-wrap gap-2">
+                        {r.pdfBlob && (
+                          <button onClick={() => saveBlob(r.pdfBlob, r.pdfName)} className="flex items-center gap-1 text-xs font-semibold text-stone-700 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50">
+                            <Download size={12} /> Download PDF
+                          </button>
+                        )}
+                        <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Redo</button>
+                        {emails && <MailActionButtons email={emails} subject={`Report — ${r.label}`} body={applyMessageDisclaimer(r.draft, config, null, loggedInTeacher?.messageSignOff)} size="small" />}
+                        {r.sendState === "sent" ? (
+                          <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><Check size={13} /> Sent in-app{r.pdfBlob ? " with PDF" : ""}</span>
+                        ) : r.sendState === "no-family" ? (
+                          <span className="text-xs text-amber-700">No parent account linked for this student yet.</span>
+                        ) : (
+                          <button onClick={() => sendInApp(s)} disabled={r.sendState === "sending"}
+                            className="flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg px-2.5 py-1.5 hover:bg-teal-800 disabled:opacity-50">
+                            {r.sendState === "sending" ? <Loader2 className="animate-spin" size={12} /> : <MessageCircle size={12} />} Send in-app{r.pdfBlob ? " (with PDF)" : ""}
+                          </button>
+                        )}
+                        <button onClick={() => logSent(s, "email")} disabled={r.logged}
+                          className={`flex items-center gap-1 text-xs font-semibold rounded-lg px-2.5 py-1.5 ${r.logged ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "text-stone-600 border border-stone-300 hover:bg-stone-50"}`}>
+                          {r.logged ? <Check size={12} /> : null} {r.logged ? "Logged" : "Log as sent"}
+                        </button>
+                      </div>
+                      {r.sendState === "failed" && <p className="text-xs text-rose-600 mt-1">Couldn't send — try again.</p>}
+                      {r.pdfBlob && emails && <p className="text-[10px] text-stone-400 mt-1">Email can't carry the PDF automatically — download it and attach it, or use Send in-app.</p>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <label className="flex items-center gap-1.5 text-xs text-stone-500 mt-3">
+            <input type="checkbox" checked={emailBoth} onChange={(e) => setEmailBoth(e.target.checked)} /> Also email the second parent (when one is on file)
+          </label>
+          <p className="text-xs text-stone-400 text-center mt-4">Nothing sends automatically. Review each report first. In-app sends are logged for you automatically.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BulkStudentReportExportTool({ registry }) {
   const [selected, setSelected] = useState(REPORT_SECTIONS.map((s) => s.id));
   const [startDate, setStartDate] = useState("");
@@ -25896,198 +26042,7 @@ function BulkStudentReportExportTool({ registry }) {
   );
 }
 
-function PrintReportOptionsView({ student, onBack, onGenerate }) {
-  const [selected, setSelected] = useState(REPORT_SECTIONS.map((s) => s.id)); // everything, by default — "a full student report"
-  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  const allSelected = selected.length === REPORT_SECTIONS.length;
 
-  if (!student) {
-    return (
-      <div className={PAGE}>
-        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-        <p className="text-sm text-stone-400">This student could not be found.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-xl font-bold text-stone-900 mb-1">Export report</h1>
-      <p className="text-stone-500 text-sm mb-5">{student.name} — pick what to include, or leave everything checked for a full report.</p>
-      <div className="md:w-96">
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-sm font-semibold text-stone-700">Include</label>
-          <button onClick={() => setSelected(allSelected ? [] : REPORT_SECTIONS.map((s) => s.id))} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
-            {allSelected ? "Deselect all" : "Select all"}
-          </button>
-        </div>
-        <div className="space-y-1.5 mb-6">
-          {REPORT_SECTIONS.map((s) => (
-            <button key={s.id} onClick={() => toggle(s.id)}
-              className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left ${selected.includes(s.id) ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
-              <span className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center ${selected.includes(s.id) ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
-                {selected.includes(s.id) && <Check size={11} className="text-white" />}
-              </span>
-              <span className={`text-sm font-medium ${selected.includes(s.id) ? "text-teal-800" : "text-stone-600"}`}>{s.label}</span>
-            </button>
-          ))}
-        </div>
-        <button onClick={() => onGenerate(selected)} disabled={selected.length === 0}
-          className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-          <Printer size={16} /> Generate report
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function PrintableStudentReport({ student, data, incidents, classAssessments, config, sections, currentClassName, onBack }) {
-  useEffect(() => { if (student) document.title = `${student.name} — Report`; }, [student]); // becomes the suggested filename in most browsers' Save-as-PDF dialog
-
-  if (!student) {
-    return (
-      <div className={PAGE}>
-        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-        <p className="text-sm text-stone-400">This student could not be found.</p>
-      </div>
-    );
-  }
-
-  const attStatusMap = {}; (config.attendance?.statuses || []).forEach((s) => (attStatusMap[s.id] = s.label));
-  const incCatMap = {}; (config.incidents?.categories || []).forEach((c) => (incCatMap[c.id] = c.label));
-  const myIncidents = (incidents || []).filter((i) => (i.studentIds || []).includes(student.id)).sort((a, b) => (a.date < b.date ? 1 : -1));
-  const activeSkillCats = (config.categories || []).filter((c) => c.active !== false);
-  const subjectLabel = (id) => (config.subjects || []).find((s) => s.id === id)?.label || "No subject";
-  const myClassAssessments = (classAssessments || []).filter((ca) => ca.results && ca.results[student.id] !== undefined);
-
-  return (
-    <div className={PAGE}>
-      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <div className="flex items-center gap-2 mb-5">
-        <button onClick={() => window.print()} className="flex items-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 px-4 text-sm font-semibold hover:bg-teal-800">
-          <Printer size={16} /> Print / Save as PDF
-        </button>
-        <p className="text-xs text-stone-400">Opens your browser's print dialog — choose "Save as PDF" there for a file.</p>
-      </div>
-
-      {/* On-screen preview, roughly matching the printed layout */}
-      <div className="bg-white border border-stone-200 rounded-xl p-6 md:w-[40rem]">
-        <h2 className="display-font text-lg font-bold text-stone-900">{student.name}</h2>
-        <p className="text-xs text-stone-400 mb-4">{currentClassName ? `${currentClassName} · ` : ""}Generated {todayISO()}</p>
-        {sections.map((id) => <p key={id} className="text-xs text-stone-500 mb-1">✓ {REPORT_SECTIONS.find((s) => s.id === id)?.label}</p>)}
-        <p className="text-xs text-stone-400 mt-4">This is a quick preview — click "Print / Save as PDF" above to see the full formatted report.</p>
-      </div>
-
-      {/* The actual print output — invisible on screen, only rendered when printing */}
-      <div className="print-report">
-        <h1>{student.name}</h1>
-        <p className="print-meta">{currentClassName ? `${currentClassName} · ` : ""}Report generated {todayISO()}</p>
-
-        {sections.includes("attendance") && (
-          <div className="print-section">
-            <h2>Attendance history</h2>
-            {(data.attendance || []).length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
-              <table><thead><tr><th>Date</th><th>Status</th><th>Time</th></tr></thead>
-                <tbody>{[...(data.attendance || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).map((a, i) => (
-                  <tr key={i}><td>{a.date}</td><td>{attStatusMap[a.status] || a.status}</td><td>{a.time || ""}</td></tr>
-                ))}</tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {sections.includes("homework") && (
-          <div className="print-section">
-            <h2>Homework log</h2>
-            {(data.homework || []).length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
-              <table><thead><tr><th>Date</th><th>Status</th></tr></thead>
-                <tbody>{[...(data.homework || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).map((h, i) => (
-                  <tr key={i}><td>{h.date}</td><td>{h.status}</td></tr>
-                ))}</tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {sections.includes("incidents") && (
-          <div className="print-section">
-            <h2>Incidents</h2>
-            {myIncidents.length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
-              <table><thead><tr><th>Date</th><th>Category</th><th>Description</th></tr></thead>
-                <tbody>{myIncidents.map((i) => (
-                  <tr key={i.id}><td>{i.date}</td><td>{incCatMap[i.category] || i.category || "Uncategorized"}{i.flaggedForAdmin ? " 🚩" : ""}</td><td>{i.description || ""}</td></tr>
-                ))}</tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {sections.includes("skills") && (
-          <div className="print-section">
-            <h2>Skill assessments</h2>
-            {activeSkillCats.length === 0 ? <p className="print-empty">No skill categories set up.</p> : activeSkillCats.map((cat) => {
-              const rows = (cat.items || []).map((item) => {
-                const entry = data.skills?.[skillKey(cat.id, item.id)];
-                if (!entry || !entry.history || entry.history.length === 0) return null;
-                const { status } = computeSkillStatus(entry.history, { ...cat, gradeOptions: config.gradeOptions });
-                return { label: item.label, status, last: entry.history[entry.history.length - 1]?.date || "" };
-              }).filter(Boolean);
-              if (rows.length === 0) return null;
-              return (
-                <div key={cat.id}>
-                  <p style={{ fontWeight: 600, fontSize: "12px", margin: "8px 0 2px 0" }}>{cat.title}</p>
-                  <table><thead><tr><th>Item</th><th>Status</th><th>Last graded</th></tr></thead>
-                    <tbody>{rows.map((r, i) => <tr key={i}><td>{r.label}</td><td>{r.status}</td><td>{r.last}</td></tr>)}</tbody>
-                  </table>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {sections.includes("classAssessments") && (
-          <div className="print-section">
-            <h2>Class assessments</h2>
-            {myClassAssessments.length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
-              <table><thead><tr><th>Date</th><th>Subject</th><th>Assessment</th><th>Result</th><th>Note</th></tr></thead>
-                <tbody>{myClassAssessments.sort((a, b) => (a.date < b.date ? 1 : -1)).map((ca) => (
-                  <tr key={ca.id}><td>{ca.date}</td><td>{subjectLabel(ca.subjectId)}</td><td>{ca.title || ""}</td>
-                    <td>{getResultGrade(ca.results[student.id])}</td><td>{getResultNote(ca.results[student.id]) || ""}</td></tr>
-                ))}</tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {sections.includes("fluency") && (
-          <div className="print-section">
-            <h2>Fluency checks</h2>
-            {(data.fluency || []).length === 0 ? <p className="print-empty">Nothing recorded.</p> : (
-              <table><thead><tr><th>Date</th><th>Detail</th></tr></thead>
-                <tbody>{[...(data.fluency || [])].sort((a, b) => (a.date < b.date ? 1 : -1)).map((f, i) => (
-                  <tr key={i}><td>{f.date}</td><td>{f.summary || f.notes || ""}</td></tr>
-                ))}</tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {sections.includes("contact") && (
-          <div className="print-section">
-            <h2>Parent &amp; contact info</h2>
-            <table><tbody>
-              {student.parent1Name && <tr><td>Parent 1</td><td>{student.parent1Name}{student.parentPhone ? ` · ${student.parentPhone}` : ""}{student.parentEmail ? ` · ${student.parentEmail}` : ""}</td></tr>}
-              {student.parent2Name && <tr><td>Parent 2</td><td>{student.parent2Name}{student.parent2Phone ? ` · ${student.parent2Phone}` : ""}{student.parent2Email ? ` · ${student.parent2Email}` : ""}</td></tr>}
-              {student.homeAddress && <tr><td>Address</td><td>{student.homeAddress}</td></tr>}
-              {!student.parent1Name && !student.parent2Name && !student.homeAddress && <tr><td colSpan={2} className="print-empty">Nothing on file.</td></tr>}
-            </tbody></table>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
 
 function IncidentDetailView({ incident, roster, classId, config, plannerDays, loggedInTeacher, sendMessageToFamily, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
