@@ -21348,6 +21348,7 @@ function TehillimFamilyCard({ family }) {
   const [state, setState] = useState(null); // { cycle, children: [{ link, quota, done }] }
   const [popupOpen, setPopupOpen] = useState(false);
   const [saving, setSaving] = useState(null);
+  const [saveError, setSaveError] = useState(null); // student id whose last tap could not be saved
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
@@ -21395,11 +21396,12 @@ function TehillimFamilyCard({ family }) {
   const setCompleted = async (child, completed) => {
     if (tehillimIsLocked(cycle) || tehillimInShabbosQuietWindow(cycle)) return;
     setSaving(child.link.studentId);
+    setSaveError(null);
     const doc = { completed, at: new Date().toISOString(), by: family.uid, byName: family.name || "" };
     try {
       await saveJSON(`tehillim:${cycle.id}:done:${child.link.studentId}`, doc, true, 2, true);
       setState((prev) => ({ ...prev, children: prev.children.map((c) => (c.link.studentId === child.link.studentId ? { ...c, done: doc } : c)) }));
-    } catch (e) { console.error("Tehillim checkoff failed", e); setTick((t) => t + 1); }
+    } catch (e) { console.error("Tehillim checkoff failed", e); setSaveError(child.link.studentId); setTick((t) => t + 1); }
     setSaving(null);
   };
 
@@ -21435,6 +21437,7 @@ function TehillimFamilyCard({ family }) {
                     <button onClick={() => setCompleted(c, false)} disabled={saving === c.link.studentId}
                       className={`flex-1 rounded-lg py-2 text-sm font-semibold border ${c.done && !isDone ? "bg-stone-700 text-white border-stone-700" : "text-stone-600 border-stone-300 bg-white"}`}>Not completed</button>
                   </div>
+                  {saveError === c.link.studentId && <p className="text-xs font-semibold text-rose-600 mt-1.5">That did not save. Please check your connection and tap again. If it keeps happening, tell your child's teacher.</p>}
                   {isDone && <p className="text-xs font-semibold text-emerald-700 mt-1.5">Checked off — {first} is entered in this month's raffle!</p>}
                 </>
               )}
