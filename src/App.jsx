@@ -13419,7 +13419,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
           alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan}
           openCameraCapture={() => openCameraCapture("home")}
-          logPrograms={programsInClass.filter((p) => p.programType === "log" || p.programType === "tehillim")} onOpenProgram={(id) => { openProgram(id); navigateView("points"); }}
+          logPrograms={programsInClass.filter((p) => p.programType === "log")} onOpenProgram={(id) => { openProgram(id); navigateView("points"); }}
           tehillimBanner={<TehillimTeacherBanner classId={classId} programs={programsInClass.filter((p) => p.programType === "tehillim")} onOpen={(id) => { openProgram(id); navigateView("points"); }} />} />
         );
       case "attendance":
