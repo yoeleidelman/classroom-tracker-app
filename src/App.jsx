@@ -19399,6 +19399,9 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
   const [showComposer, setShowComposer] = useState(false);
   const [error, setError] = useState(null);
   const bottomRef = useRef(null);
+  // Bumped each time the composer closes so the list reloads and shows the post just made —
+  // without this, coming back from posting cleared the list but nothing ever asked for it again.
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -19420,7 +19423,7 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [classes.map((c) => c.id).join(",")]);
+  }, [classes.map((c) => c.id).join(","), reloadTick]);
 
   const visiblePosts = filterClassId ? (posts || []).filter((p) => p.classId === filterClassId) : posts;
 
@@ -19437,7 +19440,7 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
   if (showComposer) {
     return <MultiClassBlogComposer classes={classes} initialClassIds={filterClassId ? [filterClassId] : []}
       config={DEFAULT_CONFIG} loggedInTeacher={loggedInTeacher}
-      onDone={() => { setShowComposer(false); setPosts(null); }} />;
+      onDone={() => { setShowComposer(false); setPosts(null); setReloadTick((t) => t + 1); }} />;
   }
 
   return (
