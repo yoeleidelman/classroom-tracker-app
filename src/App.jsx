@@ -7896,7 +7896,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
         {adminTab === "overview" && (
         <>
-        <TehillimAdminBanner onOpen={openProgramAdmin} />
+        <TehillimAdminBanner onOpen={openProgramAdmin} programs={programs} />
         <OfficeContactSettings />
 
         <button onClick={() => setShowAdminMessages(true)} className="w-full mb-6 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800">
@@ -20741,6 +20741,41 @@ function tehillimUpcomingMevarchim(fromISO, count = 1) {
   out.sort((a, b) => (a.shabbosDate < b.shabbosDate ? -1 : 1));
   return out.slice(0, count);
 }
+// Starts this month's cycle on its own, from Tuesday of Shabbos Mevarchim week (no one has to press anything).
+// Runs whenever staff open the app, and the daily server job does the same, so whichever comes first wins;
+// the id is fixed per program + Shabbos so it can never be created twice. A program made only of ZZZ test
+// classes gets a test cycle; anything else is a real cycle and is only ever started from the live site, so a
+// preview link can never start (or alert teachers about) a real month.
+async function tehillimEnsureCycle(program) {
+  try {
+    if (!program || program.programType !== "tehillim") return;
+    const classIds = program.memberClassIds || [];
+    if (classIds.length === 0) return;
+    const classes = (await loadJSON("schoolClasses", [], true)) || [];
+    const names = classIds.map((id) => classes.find((c) => c.id === id)?.name);
+    const testOnly = names.every((n) => isTestFamilyName(n));
+    if (!testOnly && !canSendRealTehillimNotices()) return;
+    const today = laTodayISO();
+    const next = tehillimUpcomingMevarchim(today, 1)[0];
+    if (!next || today < addDaysISO(next.shabbosDate, -4) || today >= next.shabbosDate) return;
+    const id = `auto-${program.id}-${next.shabbosDate}`;
+    const exists = (list) => list.some((c) => c.id === id || (c.programId === program.id && c.shabbosDate === next.shabbosDate));
+    if (exists(await tehillimLoadCycles())) return;
+    const list = await tehillimLoadCycles(); // read again right before writing, to keep the race window tiny
+    if (exists(list)) return;
+    const firstOne = !list.some((c) => c.programId === program.id && c.parentNotifiedAt && Boolean(c.testMode) === testOnly);
+    const c = {
+      id, programId: program.id, hebrewMonth: next.hebrewMonth, shabbosDate: next.shabbosDate,
+      checkoffDeadline: laTimeToISO(addDaysISO(next.shabbosDate, 2), "12:00"), classIds,
+      winnersCount: 3, prizeDescription: "", testMode: testOnly, introLetter: firstOne ? TEHILLIM_INTRO_LETTER : "",
+      status: "confirming", createdAt: new Date().toISOString(), createdBy: "Automatic", auto: true,
+    };
+    await saveJSON("tehillim:cycles", [...list, c], true);
+    for (const classId of classIds) {
+      await sendPushNotificationResolved({ type: "classTeachers", classId }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/"); // eslint-disable-line no-await-in-loop
+    }
+  } catch (e) { console.error("Tehillim auto-start failed", e); }
+}
 // What the "New cycle" form should start with: the next Shabbos Mevarchim after any cycle already made.
 function tehillimNextCycleDefaults(existingCycles) {
   const latest = (existingCycles || []).reduce((mx, c) => (c.shabbosDate > mx ? c.shabbosDate : mx), "");
@@ -21011,7 +21046,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
             {c.hebrewMonth}{c.testMode ? " (test)" : ""}
           </button>
         ))}
-        {isAdmin && <button onClick={() => { setNewCycle((p) => ({ ...p, ...(tehillimNextCycleDefaults(cycles) || {}), includeIntro: (cycles || []).length === 0 })); setShowNew(!showNew); }} className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed text-teal-700 border-teal-300"><Plus size={12} /> New cycle</button>}
+        {isAdmin && <button onClick={() => { setNewCycle((p) => ({ ...p, ...(tehillimNextCycleDefaults(cycles) || {}), includeIntro: (cycles || []).length === 0 })); setShowNew(!showNew); }} className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed text-teal-700 border-teal-300"><Plus size={12} /> Add a cycle by hand</button>}
       </div>
 
       {showNew && isAdmin && (
@@ -21051,7 +21086,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
       )}
 
       {!cycle ? (
-        <p className="text-sm text-stone-400">{isAdmin ? "No cycle yet — tap New cycle to start one." : "Nothing to do yet — the office hasn't started this month's Tehillim program. You'll see your students here when it starts."}</p>
+        <p className="text-sm text-stone-400">{isAdmin ? "No cycle yet. This month's starts by itself on the Tuesday before Shabbos Mevarchim." : "Nothing to do yet — the office hasn't started this month's Tehillim program. You'll see your students here when it starts."}</p>
       ) : (
         <>
           <div className="bg-white border border-stone-200 rounded-xl p-3 mb-4 md:max-w-xl">
@@ -21254,6 +21289,7 @@ function TehillimTeacherBanner({ classId, programs, onOpen }) {
     let cancelled = false;
     (async () => {
       try {
+        for (const prog of programs || []) await tehillimEnsureCycle(prog); // eslint-disable-line no-await-in-loop
         const all = await tehillimLoadCycles();
         const classes = (await loadJSON("schoolClasses", [], true)) || [];
         const cls = classes.find((x) => x.id === classId);
@@ -21276,12 +21312,14 @@ function TehillimTeacherBanner({ classId, programs, onOpen }) {
     </button>
   );
 }
-function TehillimAdminBanner({ onOpen }) {
+function TehillimAdminBanner({ onOpen, programs }) {
   const [info, setInfo] = useState(null);
+  const progIds = (programs || []).filter((p) => p.programType === "tehillim").map((p) => p.id).join(",");
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
+        for (const prog of (programs || []).filter((p) => p.programType === "tehillim")) await tehillimEnsureCycle(prog); // eslint-disable-line no-await-in-loop
         const cycle = (await tehillimLoadCycles()).filter((c) => !c.parentNotifiedAt && !tehillimIsLocked(c)).sort((a, b) => (a.shabbosDate < b.shabbosDate ? -1 : 1))[0];
         if (!cycle) { if (!cancelled) setInfo(null); return; }
         let confirmed = 0;
@@ -21291,7 +21329,8 @@ function TehillimAdminBanner({ onOpen }) {
       } catch { /* a missing banner is harmless */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progIds]);
   if (!info) return null;
   return (
     <button type="button" onClick={() => onOpen(info.programId)} className={`w-full flex items-center gap-2 text-left rounded-xl px-3 py-2.5 mb-4 border ${info.due ? "bg-amber-50 border-amber-200 text-amber-900" : "bg-teal-50 border-teal-200 text-teal-900"}`}>

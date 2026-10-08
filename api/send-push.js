@@ -84,6 +84,56 @@ async function pushToUids(db, uids, title, body, url) {
   });
   return result.successCount;
 }
+// Same launch letter the app uses (shown to parents in the first month only).
+const TEHILLIM_INTRO_LETTER = `Dear Parents,
+
+We are excited to introduce the Shabbos Mevarchim Tehillim Program.
+
+The last Shabbos of each Hebrew month is Shabbos Mevarchim, when it is customary to read Tehillim. Each month your child's teacher sets a personal quota matched to their reading level.
+
+Here is how it works: on the Friday before Shabbos Mevarchim you get a notification with your child's quota. Your child reads over the weekend (Friday–Sunday). You check it off in the app by Monday at 12:00 noon. Every child who finishes enters a school-wide raffle, drawn Monday afternoon.
+
+Quotas start small and grow monthly. There is no penalty for missing a month. Questions or quota adjustments — please contact your child's teacher.
+
+Warm regards,
+Rabbi Eidelman`;
+
+// Pacific wall-clock time on a date, as a real instant (ISO), correct across daylight saving.
+function laTimeToISO(dateStr, hhmm) {
+  const probe = new Date(`${dateStr}T20:00:00Z`);
+  const part = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", timeZoneName: "shortOffset" }).formatToParts(probe).find((p) => p.type === "timeZoneName")?.value || "GMT-8";
+  const m = part.match(/GMT([+-])(\d+)(?::(\d+))?/);
+  const offset = m ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] || 0)) : -480;
+  const [y, mo, d] = dateStr.split("-").map(Number);
+  const [h, mi] = hhmm.split(":").map(Number);
+  return new Date(Date.UTC(y, mo - 1, d, h, mi) - offset * 60000).toISOString();
+}
+const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+// Same rule as the app: Shabbos Mevarchim = last Shabbos strictly before the first day of Rosh Chodesh.
+async function nextMevarchim(todayStr) {
+  const { HebrewCalendar } = await import("@hebcal/core");
+  const [y, m, d] = todayStr.split("-").map(Number);
+  const start = new Date(y, m - 1, d);
+  const groups = [];
+  for (const ev of HebrewCalendar.calendar({ start: new Date(y, m - 1, d - 10), end: new Date(y, m - 1, d + 70) })) {
+    const desc = ev.getDesc();
+    if (!desc.startsWith("Rosh Chodesh")) continue;
+    const g = ev.getDate().greg();
+    g.setHours(0, 0, 0, 0);
+    const last = groups[groups.length - 1];
+    if (last && last.desc === desc && g - last.lastDate <= 36 * 3600 * 1000) { last.lastDate = g; last.hyear = ev.getDate().getFullYear(); }
+    else groups.push({ desc, date: g, lastDate: g, hyear: ev.getDate().getFullYear(), monthName: desc.replace("Rosh Chodesh ", "") });
+  }
+  const out = [];
+  for (const info of groups) {
+    const sat = new Date(info.date);
+    sat.setDate(sat.getDate() - 1);
+    while (sat.getDay() !== 6) sat.setDate(sat.getDate() - 1);
+    if (sat >= start) out.push({ shabbosDate: isoLocal(sat), hebrewMonth: `${info.monthName} ${info.hyear}` });
+  }
+  out.sort((a, b) => (a.shabbosDate < b.shabbosDate ? -1 : 1));
+  return out[0] || null;
+}
 async function runTehillimReminders(req, res) {
   if (process.env.CRON_SECRET && req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ error: "Not authorized." });
@@ -98,6 +148,38 @@ async function runTehillimReminders(req, res) {
   const logDoc = await logRef.get();
   const log = logDoc.exists ? (logDoc.data().value || {}) : {};
   const done = [];
+
+  // (0) From Tuesday of Shabbos Mevarchim week, start this month's cycle for every real Tehillim program that
+  // does not have one yet, and alert the class teachers. (Test programs are left to the app itself.)
+  try {
+    const next = await nextMevarchim(today);
+    if (next && today >= addDaysStr(next.shabbosDate, -4) && today < next.shabbosDate) {
+      const progDoc = await db.collection("data").doc("programs").get();
+      const classesDoc = await db.collection("data").doc("schoolClasses").get();
+      const programs = (progDoc.exists ? progDoc.data().value || [] : []).filter((p) => p.programType === "tehillim");
+      const classes = classesDoc.exists ? classesDoc.data().value || [] : [];
+      for (const prog of programs) {
+        const classIds = prog.memberClassIds || [];
+        if (classIds.length === 0) continue;
+        if (classIds.every((id) => /^\s*ZZZ/i.test(classes.find((c) => c.id === id)?.name || ""))) continue;
+        const id = `auto-${prog.id}-${next.shabbosDate}`;
+        if (cycles.some((c) => c.id === id || (c.programId === prog.id && c.shabbosDate === next.shabbosDate))) continue;
+        const firstOne = !cycles.some((c) => c.programId === prog.id && c.parentNotifiedAt && !c.testMode);
+        cycles.push({
+          id, programId: prog.id, hebrewMonth: next.hebrewMonth, shabbosDate: next.shabbosDate,
+          checkoffDeadline: laTimeToISO(addDaysStr(next.shabbosDate, 2), "12:00"), classIds,
+          winnersCount: 3, prizeDescription: "", testMode: false, introLetter: firstOne ? TEHILLIM_INTRO_LETTER : "",
+          status: "confirming", createdAt: new Date().toISOString(), createdBy: "Automatic", auto: true,
+        });
+        await db.collection("data").doc("tehillim:cycles").set({ value: cycles });
+        const snap = await db.collection("data").where("value.role", "in", ["teacher", "admin"]).get();
+        const uids = new Set();
+        snap.forEach((doc) => { const t = doc.data().value; if (t && t.active !== false && t.uid && doc.id.startsWith("teacher:") && (t.assignedClassIds || []).some((cid) => classIds.includes(cid))) uids.add(t.uid); });
+        const sent = uids.size ? await pushToUids(db, [...uids], "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/") : 0;
+        done.push({ cycle: id, kind: "auto-start", sent });
+      }
+    }
+  } catch (err) { done.push({ kind: "auto-start-failed", error: err.message }); }
 
   for (const c of cycles) {
     if (c.testMode || c.parentNotifiedAt || c.lockedAt || c.paused) continue;
