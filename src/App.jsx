@@ -7610,7 +7610,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const openProgramAdmin = (programId) => {
     setOpenProgramId(programId);
     setProgramDetail(null);
-    onFetchProgramDetail(programId).then(setProgramDetail);
+    // A program that no longer exists comes back empty; close instead of showing "Loading..." forever.
+    onFetchProgramDetail(programId).then((d) => { if (d) setProgramDetail(d); else setOpenProgramId(null); }).catch(() => setOpenProgramId(null));
   };
   const closeProgramAdmin = () => { setOpenProgramId(null); setProgramDetail(null); };
   const addPointsInProgram = (studentId, catId, amount) => {
@@ -21321,7 +21322,10 @@ function TehillimAdminBanner({ onOpen, programs }) {
     (async () => {
       try {
         for (const prog of (programs || []).filter((p) => p.programType === "tehillim")) await tehillimEnsureCycle(prog); // eslint-disable-line no-await-in-loop
-        const cycle = (await tehillimLoadCycles()).filter((c) => !c.parentNotifiedAt && !tehillimIsLocked(c)).sort((a, b) => (a.shabbosDate < b.shabbosDate ? -1 : 1))[0];
+        // Only cycles whose program still exists: an old test cycle left behind by a deleted program
+        // used to win here, and tapping it opened nothing (just "Loading...").
+        const liveProgramIds = new Set((programs || []).map((p) => p.id));
+        const cycle = (await tehillimLoadCycles()).filter((c) => liveProgramIds.has(c.programId) && !c.parentNotifiedAt && !tehillimIsLocked(c)).sort((a, b) => (a.shabbosDate < b.shabbosDate ? -1 : 1))[0];
         if (!cycle) { if (!cancelled) setInfo(null); return; }
         let confirmed = 0;
         for (const classId of cycle.classIds || []) if (await loadJSON(tehillimConfirmKey(cycle.id, classId), null, true)) confirmed += 1; // eslint-disable-line no-await-in-loop
