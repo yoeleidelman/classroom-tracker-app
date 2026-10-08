@@ -7896,6 +7896,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
         {adminTab === "overview" && (
         <>
+        <TehillimAdminBanner onOpen={openProgramAdmin} />
         <OfficeContactSettings />
 
         <button onClick={() => setShowAdminMessages(true)} className="w-full mb-6 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-xl py-3 text-sm font-bold hover:bg-teal-800">
@@ -13418,7 +13419,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           randomPickerData={randomPickerData} onRandomPick={recordRandomPick} onResetRandomPicker={resetRandomPicker}
           alerts={alerts} dismissAlert={dismissAlert} showPlan={showPlan} setShowPlan={setShowPlan}
           openCameraCapture={() => openCameraCapture("home")}
-          logPrograms={programsInClass.filter((p) => p.programType === "log" || p.programType === "tehillim")} onOpenProgram={(id) => { openProgram(id); navigateView("points"); }} />
+          logPrograms={programsInClass.filter((p) => p.programType === "log" || p.programType === "tehillim")} onOpenProgram={(id) => { openProgram(id); navigateView("points"); }}
+          tehillimBanner={<TehillimTeacherBanner classId={classId} programs={programsInClass.filter((p) => p.programType === "tehillim")} onOpen={(id) => { openProgram(id); navigateView("points"); }} />} />
         );
       case "attendance":
         return (
@@ -15860,7 +15862,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture, logPrograms, onOpenProgram }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture, logPrograms, onOpenProgram, tehillimBanner }) {
   const [date, setDate] = useState(todayISO());
   const [multiSelect, setMultiSelect] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -15937,6 +15939,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
   return (
     <div className="app-page-wide">
       <Header navigate={navigate} />
+      {tehillimBanner}
       <div className="flex items-center justify-between gap-2 md:w-full flex-wrap">
         <MainTabs active="home" navigate={navigate} />
         <div className="flex items-center gap-2 mb-5">
@@ -20706,6 +20709,46 @@ const tehillimInShabbosQuietWindow = (cycle, nowMs = Date.now()) => {
   return nowMs >= start && nowMs < end;
 };
 async function tehillimLoadCycles() { return (await loadJSON("tehillim:cycles", [], true)) || []; }
+const tehillimConfirmKey = (cycleId, classId) => `tehillim:${cycleId}:confirm:${classId}`;
+// Today's date in Pacific time as YYYY-MM-DD, whatever time zone the device is in.
+function laTodayISO(nowMs = Date.now()) {
+  try { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(nowMs)); } catch { return todayISO(); }
+}
+// Shabbos Mevarchim is the last Shabbos STRICTLY BEFORE the first day of Rosh Chodesh. When Rosh Chodesh
+// itself begins on Shabbos, that means the Shabbos one week earlier (birchas hachodesh is not said on a
+// Shabbos that is itself Rosh Chodesh). A two-day Rosh Chodesh counts from its first day (the 30th of the
+// old month). Verified against real @hebcal/core output for the whole 2026-27 school year.
+function tehillimUpcomingMevarchim(fromISO, count = 1) {
+  const [y, m, d] = fromISO.split("-").map(Number);
+  const start = new Date(y, m - 1, d);
+  const groups = [];
+  for (const ev of HebrewCalendar.calendar({ start: new Date(y, m - 1, d - 10), end: new Date(y, m - 1, d + 460) })) {
+    const desc = ev.getDesc();
+    if (!desc.startsWith("Rosh Chodesh")) continue;
+    const g = ev.getDate().greg();
+    g.setHours(0, 0, 0, 0);
+    const last = groups[groups.length - 1];
+    if (last && last.desc === desc && g - last.lastDate <= 36 * 3600 * 1000) { last.lastDate = g; last.hyear = ev.getDate().getFullYear(); }
+    else groups.push({ desc, date: g, lastDate: g, hyear: ev.getDate().getFullYear(), monthName: desc.replace("Rosh Chodesh ", "") });
+  }
+  const out = [];
+  for (const info of groups) {
+    const s = new Date(info.date);
+    s.setDate(s.getDate() - 1);
+    while (s.getDay() !== 6) s.setDate(s.getDate() - 1);
+    if (s >= start) out.push({ shabbosDate: isoDate(s), roshChodeshStart: isoDate(info.date), hebrewMonth: `${info.monthName} ${info.hyear}` });
+  }
+  out.sort((a, b) => (a.shabbosDate < b.shabbosDate ? -1 : 1));
+  return out.slice(0, count);
+}
+// What the "New cycle" form should start with: the next Shabbos Mevarchim after any cycle already made.
+function tehillimNextCycleDefaults(existingCycles) {
+  const latest = (existingCycles || []).reduce((mx, c) => (c.shabbosDate > mx ? c.shabbosDate : mx), "");
+  const from = latest && latest >= laTodayISO() ? addDaysISO(latest, 1) : laTodayISO();
+  const next = tehillimUpcomingMevarchim(from, 1)[0];
+  if (!next) return null;
+  return { hebrewMonth: next.hebrewMonth, shabbosDate: next.shabbosDate, deadlineDate: addDaysISO(next.shabbosDate, 2) };
+}
 
 // ---- Staff side: lives inside the existing Shared Programs area ----
 function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
@@ -20722,7 +20765,9 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
   const [notice, setNotice] = useState("");
   const [armedSend, setArmedSend] = useState(false);
   const [classDefaults, setClassDefaults] = useState({}); // classId -> { unit, amount }
-  const [newCycle, setNewCycle] = useState({ hebrewMonth: "Cheshvan 5787", shabbosDate: "2026-10-10", deadlineDate: "2026-10-12", winnersCount: 3, prizeDescription: "", testMode: true, includeIntro: true, classIds: program.memberClassIds || [] });
+  const [confirms, setConfirms] = useState({}); // classId -> { by, at } once that class's teacher confirmed
+  const [sendCount, setSendCount] = useState(null); // number of families the send would reach (shown before confirming)
+  const [newCycle, setNewCycle] = useState({ ...(tehillimNextCycleDefaults([]) || { hebrewMonth: "", shabbosDate: "", deadlineDate: "" }), winnersCount: 3, prizeDescription: "", testMode: true, includeIntro: true, classIds: program.memberClassIds || [] });
 
   const cycle = (cycles || []).find((c) => c.id === cycleId) || null;
   const whoName = loggedInTeacher?.name || "Staff";
@@ -20750,11 +20795,17 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
 
   // Everyone in the cycle's classes (full-time only), grouped by class, plus their quotas/checkoffs.
   const loadCycleData = async (c) => {
-    if (!c) { setGroups([]); setQuotas({}); setDone({}); return; }
+    if (!c) { setGroups([]); setQuotas({}); setDone({}); setConfirms({}); return; }
     const allClasses = await loadJSON("schoolClasses", [], true);
     const gs = [];
     const qs = {};
-    for (const classId of c.classIds || []) {
+    const cf = {};
+    // A teacher sees only their own class(es); the office sees every class in the cycle.
+    const mine = loggedInTeacher?.assignedClassIds || [];
+    const visibleIds = isAdmin || !(c.classIds || []).some((id) => mine.includes(id)) ? (c.classIds || []) : (c.classIds || []).filter((id) => mine.includes(id));
+    for (const classId of visibleIds) {
+      const cdoc = await loadJSON(tehillimConfirmKey(c.id, classId), null, true); // eslint-disable-line no-await-in-loop
+      if (cdoc) cf[classId] = cdoc;
       const cls = allClasses.find((x) => x.id === classId);
       const roster = ((await loadJSON(`class:${classId}:roster`, [], true)) || []).filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time"); // eslint-disable-line no-await-in-loop
       gs.push({ classId, className: cls?.name || "Class", students: roster.map((s) => ({ id: s.id, name: s.name })) });
@@ -20764,7 +20815,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
     const ids = gs.flatMap((g) => g.students.map((s) => s.id));
     const docs = await Promise.all(ids.map((id) => loadJSON(`tehillim:${c.id}:done:${id}`, null, true)));
     ids.forEach((id, i) => { if (docs[i]) dn[id] = docs[i]; });
-    setGroups(gs); setQuotas(qs); setDone(dn); setDrafts({});
+    setGroups(gs); setQuotas(qs); setDone(dn); setDrafts({}); setConfirms(cf);
   };
   useEffect(() => { if (cycle) loadCycleData(cycle); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [cycleId, cycles === null]);
 
@@ -20780,6 +20831,16 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
     await saveJSON("tehillim:cycles", [...list, c], true);
     const all = await refreshCycles();
     setCycleId(c.id); setShowNew(false);
+    // Prompt each class's teacher(s) right away. A test cycle only ever pings teachers of a ZZZ test
+    // class, and a real cycle only pings from the live site, so a preview can never alert real teachers.
+    try {
+      const allClasses = (await loadJSON("schoolClasses", [], true)) || [];
+      for (const classId of c.classIds) {
+        const cls = allClasses.find((x) => x.id === classId);
+        if (c.testMode ? !isTestFamilyName(cls?.name) : !canSendRealTehillimNotices()) continue;
+        await sendPushNotificationResolved({ type: "classTeachers", classId }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/"); // eslint-disable-line no-await-in-loop
+      }
+    } catch { /* teacher alerts are best-effort; the Home banner still shows */ }
     return all;
   };
 
@@ -20839,6 +20900,28 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
     } finally { setBusy(false); }
   };
 
+  // What a student shows (and gets, if the teacher just confirms) when nothing was typed: the grade default.
+  const defaultFor = (className) => { const sug = tehillimSuggestForClass(className); return { unit: sug.unit, amount: sug.amount }; };
+  // One tap for the teacher: save every student exactly as shown (typed changes, saved quotas, or the grade
+  // default for anyone untouched) and mark the class confirmed so the Home banner goes away.
+  const confirmClass = async (g, by = whoName) => {
+    setBusy(true);
+    try {
+      const def = classDefaults[g.classId]?.amount ? { unit: classDefaults[g.classId].unit || defaultFor(g.className).unit, amount: classDefaults[g.classId].amount } : defaultFor(g.className);
+      const changes = {};
+      g.students.forEach((s) => {
+        const d = drafts[s.id];
+        if (d && d.amount) changes[s.id] = d;
+        else if (!quotas[s.id]) changes[s.id] = def;
+      });
+      if (Object.keys(changes).length) await saveQuotaChanges(g.classId, changes);
+      const rec = { by, at: new Date().toISOString() };
+      await saveJSON(tehillimConfirmKey(cycleId, g.classId), rec, true);
+      setConfirms((prev) => ({ ...prev, [g.classId]: rec }));
+      setNotice(`${g.className} confirmed. Thank you!`);
+    } finally { setBusy(false); }
+  };
+
   const applyToClass = async (classId) => {
     const g = groups.find((x) => x.classId === classId);
     if (!g) return;
@@ -20852,11 +20935,22 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
     try { await saveQuotaChanges(classId, changes); setNotice(`Set ${Object.keys(changes).length} students in ${g.className}.`); } finally { setBusy(false); }
   };
 
+  const allStudentIds = () => new Set(groups.flatMap((g) => g.students.map((s) => s.id)));
+  // Step 1 of sending: work out exactly how many families it would reach, then ask for the second tap.
+  const armSend = async () => {
+    setBusy(true);
+    try { const uids = await familiesFor(allStudentIds()); setSendCount(uids.length); setArmedSend(true); } finally { setBusy(false); }
+  };
   const sendToParents = async () => {
     setBusy(true);
     setArmedSend(false);
     try {
-      const idsWithQuota = new Set(Object.keys(quotas));
+      // Any class whose teacher never confirmed uses the grade default, so no family misses a month.
+      for (const g of groups) {
+        if (confirms[g.classId] && g.students.every((s) => quotas[s.id])) continue;
+        await confirmClass(g, "Grade default (not confirmed by teacher)"); // eslint-disable-line no-await-in-loop
+      }
+      const idsWithQuota = allStudentIds();
       const uids = await familiesFor(idsWithQuota);
       await sendPushNotification(uids, "Shabbos Mevarchim Tehillim", "This Shabbos is Shabbos Mevarchim. Open the app to see your children's Tehillim quotas.", "/?portal=parent&tab=home");
       const now = new Date().toISOString();
@@ -20917,12 +21011,12 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
             {c.hebrewMonth}{c.testMode ? " (test)" : ""}
           </button>
         ))}
-        {isAdmin && <button onClick={() => { setNewCycle((p) => ({ ...p, includeIntro: (cycles || []).length === 0 })); setShowNew(!showNew); }} className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed text-teal-700 border-teal-300"><Plus size={12} /> New cycle</button>}
+        {isAdmin && <button onClick={() => { setNewCycle((p) => ({ ...p, ...(tehillimNextCycleDefaults(cycles) || {}), includeIntro: (cycles || []).length === 0 })); setShowNew(!showNew); }} className="flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-full border border-dashed text-teal-700 border-teal-300"><Plus size={12} /> New cycle</button>}
       </div>
 
       {showNew && isAdmin && (
         <div className="bg-stone-50 border border-stone-200 rounded-xl p-3 mb-4 md:max-w-xl">
-          <p className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">New cycle — dates are yours to set</p>
+          <p className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">New cycle — dates filled in from the Hebrew calendar</p>
           <label className="block text-[10px] text-stone-400 mb-0.5">Hebrew month</label>
           <input value={newCycle.hebrewMonth} onChange={(e) => setNewCycle({ ...newCycle, hebrewMonth: e.target.value })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
           <div className="flex gap-2 mb-2">
@@ -20950,6 +21044,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
             <span><b>Test cycle</b> — only families whose account name starts with ZZZ will ever see it or get a notification. Untick for the real thing.</span>
           </label>
           {!newCycle.testMode && !canSendRealTehillimNotices() && <p className="text-[11px] text-amber-700 mb-1">You can set up a real cycle here, but it can only be sent to parents from the live site, not from this test link.</p>}
+          {newCycle.shabbosDate && <p className="text-[11px] text-stone-500 mb-1">Teachers are alerted when you create this. You send to parents Friday {addDaysISO(newCycle.shabbosDate, -1)} at 9 AM (you get a reminder). Checkoff closes Monday {addDaysISO(newCycle.shabbosDate, 2)} at noon, and you draw the raffle that afternoon.</p>}
           {newCycle.shabbosDate && new Date(`${newCycle.shabbosDate}T12:00:00`).getDay() !== 6 && <p className="text-[11px] text-amber-700 mb-1">That date isn't a Saturday — double-check it.</p>}
           <button onClick={createCycle} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 mt-1">Create cycle</button>
         </div>
@@ -20996,7 +21091,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
                       const saved = quotas[s.id];
                       const d = drafts[s.id];
                       const unit = d?.unit ?? saved?.unit ?? tehillimSuggestForClass(g.className).unit;
-                      const amount = d?.amount ?? saved?.amount ?? "";
+                      const amount = d?.amount ?? saved?.amount ?? classDefaults[g.classId]?.amount ?? tehillimSuggestForClass(g.className).amount;
                       const chaptersText = d?.chaptersText ?? saved?.chaptersText ?? "";
                       const edit = (fields) => setDrafts((prev) => ({ ...prev, [s.id]: { unit, amount, chaptersText, ...(prev[s.id] || {}), ...fields } }));
                       return (
@@ -21011,6 +21106,14 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
                       );
                     })}
                   </div>
+                  {confirms[g.classId] ? (
+                    <p className="text-xs font-semibold text-emerald-700 mt-3">✓ Confirmed{confirms[g.classId].by ? ` by ${confirms[g.classId].by}` : ""}. Change any number and tap Confirm again to update.</p>
+                  ) : null}
+                  {!cycle.parentNotifiedAt && (
+                    <button onClick={() => confirmClass(g)} disabled={busy} className="w-full mt-3 bg-teal-700 text-white rounded-xl py-2.5 text-sm font-bold hover:bg-teal-800 disabled:opacity-50">
+                      {confirms[g.classId] ? "Confirm again" : "Confirm quotas"}
+                    </button>
+                  )}
                 </div>
               ))}
               {dirtyCount > 0 && (
@@ -21030,21 +21133,35 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
               {isAdmin && (
                 <div className="bg-white border border-stone-200 rounded-xl p-3 mt-4">
                   <p className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">Send to parents</p>
+                  <div className="mb-3">
+                    {groups.map((g) => {
+                      const ok = Boolean(confirms[g.classId]) && g.students.every((s) => quotas[s.id]);
+                      return (
+                        <div key={g.classId} className="flex items-center justify-between text-xs py-0.5">
+                          <span className="text-stone-700">{g.className}</span>
+                          {ok ? <span className="font-semibold text-emerald-700">Confirmed</span> : <span className="font-semibold text-amber-700">Not confirmed: grade default will be used</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
                   {!sendAllowed() ? (
                     <p className="text-xs text-amber-700">This is a real cycle, and real families can only be notified from the live site — not from this test link. Nothing will be sent from here.</p>
                   ) : cycle.parentNotifiedAt ? (
                     <p className="text-xs text-emerald-700">Already published {formatLaDateTime(cycle.parentNotifiedAt)}. Families see the card and pop-up in their app.</p>
                   ) : armedSend ? (
-                    <div className="flex items-center gap-2">
-                      <button onClick={sendToParents} disabled={busy} className="text-xs font-semibold text-white bg-rose-600 rounded-lg px-3 py-2">Yes — send {cycle.testMode ? "to TEST families" : "to REAL families"} now</button>
-                      <button onClick={() => setArmedSend(false)} className="text-xs text-stone-500">Cancel</button>
+                    <div>
+                      <p className="text-xs text-stone-700 mb-2">This will notify <b>{sendCount ?? "…"} {cycle.testMode ? "test " : ""}famil{sendCount === 1 ? "y" : "ies"}</b> with a child in the {groups.length} class{groups.length === 1 ? "" : "es"} above. Preschool and camp families are not included.</p>
+                      <div className="flex items-center gap-2">
+                        <button onClick={sendToParents} disabled={busy} className="text-xs font-semibold text-white bg-rose-600 rounded-lg px-3 py-2">Yes — send {cycle.testMode ? "to TEST families" : "to REAL families"} now</button>
+                        <button onClick={() => setArmedSend(false)} className="text-xs text-stone-500">Cancel</button>
+                      </div>
                     </div>
                   ) : (
-                    <button onClick={() => setArmedSend(true)} disabled={quotaCount === 0 || busy} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-                      Publish quotas &amp; notify parents{quotaCount === 0 ? " (set quotas first)" : ""}
+                    <button onClick={armSend} disabled={groups.length === 0 || busy} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+                      Publish quotas &amp; notify parents
                     </button>
                   )}
-                  <p className="text-[10px] text-stone-400 mt-2">Students with no quota set are left out. Nothing is ever sent automatically.</p>
+                  <p className="text-[10px] text-stone-400 mt-2">Any class that was not confirmed uses its grade default. Only you can send, and nothing goes to parents automatically.</p>
                 </div>
               )}
             </div>
@@ -21126,6 +21243,64 @@ function TehillimClassChip({ classId, on, onToggle }) {
   const [name, setName] = useState("");
   useEffect(() => { (async () => { const all = await loadJSON("schoolClasses", [], true); setName(all.find((c) => c.id === classId)?.name || "Class"); })(); }, [classId]);
   return <button onClick={onToggle} className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${on ? "bg-teal-700 text-white border-teal-700" : "text-stone-600 border-stone-300"}`}>{name}</button>;
+}
+
+
+// ---- Home-screen prompts: teacher banner (until their class is confirmed) and office "not sent yet" bar ----
+function TehillimTeacherBanner({ classId, programs, onOpen }) {
+  const [info, setInfo] = useState(null);
+  const progIds = (programs || []).map((p) => p.id).join(",");
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const all = await tehillimLoadCycles();
+        const classes = (await loadJSON("schoolClasses", [], true)) || [];
+        const cls = classes.find((x) => x.id === classId);
+        const cycle = all
+          .filter((cy) => (cy.classIds || []).includes(classId) && !cy.parentNotifiedAt && !tehillimIsLocked(cy) && (programs || []).some((p) => p.id === cy.programId) && (!cy.testMode || isTestFamilyName(cls?.name)))
+          .sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1))[0];
+        if (!cycle) { if (!cancelled) setInfo(null); return; }
+        const conf = await loadJSON(tehillimConfirmKey(cycle.id, classId), null, true);
+        if (!cancelled) setInfo(conf ? null : { programId: cycle.programId, className: cls?.name || "your class" });
+      } catch { /* a missing banner is harmless */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [classId, progIds]);
+  if (!info) return null;
+  return (
+    <button type="button" onClick={() => onOpen(info.programId)} className="w-full flex items-center gap-2 text-left bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2.5 mb-4">
+      <span className="text-sm font-semibold flex-1">Tehillim quota needed for {info.className}</span>
+      <span className="text-lg leading-none">›</span>
+    </button>
+  );
+}
+function TehillimAdminBanner({ onOpen }) {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cycle = (await tehillimLoadCycles()).filter((c) => !c.parentNotifiedAt && !tehillimIsLocked(c)).sort((a, b) => (a.shabbosDate < b.shabbosDate ? -1 : 1))[0];
+        if (!cycle) { if (!cancelled) setInfo(null); return; }
+        let confirmed = 0;
+        for (const classId of cycle.classIds || []) if (await loadJSON(tehillimConfirmKey(cycle.id, classId), null, true)) confirmed += 1; // eslint-disable-line no-await-in-loop
+        const sendFrom = new Date(laTimeToISO(addDaysISO(cycle.shabbosDate, -1), "09:00")).getTime();
+        if (!cancelled) setInfo({ programId: cycle.programId, confirmed, total: (cycle.classIds || []).length, due: Date.now() >= sendFrom, friday: addDaysISO(cycle.shabbosDate, -1), test: Boolean(cycle.testMode), month: cycle.hebrewMonth });
+      } catch { /* a missing banner is harmless */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  if (!info) return null;
+  return (
+    <button type="button" onClick={() => onOpen(info.programId)} className={`w-full flex items-center gap-2 text-left rounded-xl px-3 py-2.5 mb-4 border ${info.due ? "bg-amber-50 border-amber-200 text-amber-900" : "bg-teal-50 border-teal-200 text-teal-900"}`}>
+      <span className="text-sm font-semibold flex-1">
+        {info.due ? `Tehillim (${info.month}${info.test ? ", test" : ""}) has not been sent yet. Tap to review and send.` : `Tehillim (${info.month}${info.test ? ", test" : ""}): ${info.confirmed} of ${info.total} classes confirmed. Send Friday ${info.friday} at 9 AM.`}
+      </span>
+      <span className="text-lg leading-none">›</span>
+    </button>
+  );
 }
 
 // ---- Parent side: one card + pop-up per FAMILY, with a Done / Not done control per child ----
@@ -21241,13 +21416,28 @@ function TehillimFamilyCard({ family }) {
 
   return (
     <>
-      <div className="mb-5 bg-teal-50 border border-teal-200 rounded-2xl p-3">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-sm font-bold text-teal-900">Shabbos Mevarchim Tehillim{cycle.testMode ? " (test)" : ""}</p>
-          <button onClick={() => setPopupOpen(true)} className="text-xs font-semibold text-teal-700">Open</button>
-        </div>
-        <p className="text-xs text-teal-800">{locked ? (winnersVisible ? "The raffle winners are in — tap Open." : "Checkoff is closed for this month.") : "Tap Open to see the quota and check it off."}</p>
-      </div>
+      {/* Stays at the top of Home (like homework) after the pop-up is closed, so the family can always reopen it. */}
+      {(() => {
+        const doneCount = children.filter((c) => c.done?.completed).length;
+        const allDone = children.length > 0 && doneCount === children.length;
+        const summary = children.map((c) => `${(c.link.studentName || "").split(" ")[0] || "Your child"}: ${c.quota.unit === "minutes" ? `${c.quota.amount} minutes` : `${c.quota.amount} chapter${Number(c.quota.amount) === 1 ? "" : "s"}`}`).join(" · ");
+        let tag; let tagCls; let borderCls = "border-l-[#5F9F9E]";
+        if (winnersVisible) { tag = "Raffle winners announced: tap Open"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; borderCls = "border-l-stone-400"; }
+        else if (locked) { tag = allDone ? "Checkoff closed. Entered in the raffle!" : "Checkoff is closed for this month"; tagCls = "bg-stone-100 text-stone-500 border-stone-200"; borderCls = "border-l-stone-400"; }
+        else if (allDone) { tag = children.length > 1 ? "All checked off. Entered in the raffle!" : "Checked off. Entered in the raffle!"; tagCls = "bg-emerald-50 text-emerald-700 border-emerald-200"; borderCls = "border-l-emerald-500"; }
+        else if (quiet) { tag = "Check off after Shabbos"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; }
+        else { tag = doneCount > 0 ? `${doneCount} of ${children.length} checked off` : "Not checked off yet"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; }
+        return (
+          <button type="button" onClick={() => setPopupOpen(true)} className={`block w-full text-left mb-5 bg-white border border-stone-200 border-l-4 ${borderCls} rounded-xl p-3`}>
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-bold text-[#4a8483]">Shabbos Mevarchim Tehillim{cycle.testMode ? " (test)" : ""}</p>
+              <span className="text-xs font-semibold text-teal-700">Open</span>
+            </div>
+            {!locked && <p className="text-xs text-stone-700 mt-1">{summary}</p>}
+            <span className={`inline-block mt-1.5 text-[10px] font-bold border rounded-full px-2 py-0.5 ${tagCls}`}>{tag}</span>
+          </button>
+        );
+      })()}
       {popupOpen && createPortal(
         <div className="fixed inset-0 z-[70] bg-black/40 flex items-center justify-center p-4" onClick={() => setPopupOpen(false)}>
           <div className="bg-stone-50 rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto p-4" onClick={(e) => e.stopPropagation()}>

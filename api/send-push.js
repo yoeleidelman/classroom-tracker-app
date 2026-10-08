@@ -56,7 +56,98 @@ async function requireActiveAccount(req) {
 // same rule, but listing many of them at once never validates, no matter how the rule is phrased.
 // A family has no rules-based access to teacher:* records at all, for the same underlying reason.
 // Resolving server-side sidesteps this entirely, since the Admin SDK isn't subject to these rules.
+// ---- Daily Tehillim reminders (called by Vercel's scheduler, see vercel.json "crons") ----
+// This NEVER sends anything to parents. It only reminds staff: (1) the day after a real cycle is created, the
+// teachers of any class that has not confirmed yet; (2) on the Friday before Shabbos Mevarchim, once it is 9 AM
+// Pacific or later, the office, but only if the notice has not been sent yet. Each reminder is logged so a
+// second run the same day (the schedule fires twice to cover daylight saving) never repeats it. Test cycles
+// are ignored here entirely.
+function laNow() {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, hour: Number(get("hour")) };
+}
+function addDaysStr(dateStr, n) {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+async function pushToUids(db, uids, title, body, url) {
+  const docs = await Promise.all(uids.map((uid) => db.collection("data").doc(`push-tokens:${uid}`).get()));
+  const tokens = [];
+  docs.forEach((doc) => { if (doc.exists) (doc.data().value?.tokens || []).forEach((t) => tokens.push(t.token)); });
+  if (tokens.length === 0) return 0;
+  const result = await getMessaging().sendEachForMulticast({
+    tokens,
+    data: { title, body, url: url || "/", icon: "/icons-parent/icon-192.png" },
+    webpush: { headers: { Urgency: "high" } },
+  });
+  return result.successCount;
+}
+async function runTehillimReminders(req, res) {
+  if (process.env.CRON_SECRET && req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: "Not authorized." });
+  }
+  const db = getFirestore();
+  const { date: today, hour } = laNow();
+  if (hour < 9) return res.status(200).json({ ok: true, skipped: "before 9 AM Pacific" });
+
+  const cyclesDoc = await db.collection("data").doc("tehillim:cycles").get();
+  const cycles = cyclesDoc.exists ? (cyclesDoc.data().value || []) : [];
+  const logRef = db.collection("data").doc("tehillim:reminder-log");
+  const logDoc = await logRef.get();
+  const log = logDoc.exists ? (logDoc.data().value || {}) : {};
+  const done = [];
+
+  for (const c of cycles) {
+    if (c.testMode || c.parentNotifiedAt || c.lockedAt || c.paused) continue;
+    const friday = addDaysStr(c.shabbosDate, -1);
+
+    // (2) Friday: remind the office that the notice has not gone out.
+    if (today === friday) {
+      const key = `${c.id}:office:${today}`;
+      if (!log[key]) {
+        let confirmed = 0;
+        for (const classId of c.classIds || []) {
+          const d = await db.collection("data").doc(`tehillim:${c.id}:confirm:${classId}`).get(); // eslint-disable-line no-await-in-loop
+          if (d.exists) confirmed += 1;
+        }
+        const snap = await db.collection("data").where("value.role", "==", "admin").get();
+        const adminUids = [];
+        snap.forEach((doc) => { const t = doc.data().value; if (t && t.active !== false && t.uid && doc.id.startsWith("teacher:")) adminUids.push(t.uid); });
+        const sent = await pushToUids(db, adminUids, "Tehillim has not been sent yet", `Tap to review and send to parents. ${confirmed} of ${(c.classIds || []).length} classes confirmed; the rest will use the grade default.`, "/");
+        log[key] = new Date().toISOString();
+        done.push({ cycle: c.id, kind: "office", sent });
+      }
+    }
+
+    // (1) The day after the cycle was created: nudge teachers who have not confirmed.
+    const createdDay = c.createdAt ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(c.createdAt)) : null;
+    if (createdDay && today === addDaysStr(createdDay, 1) && today < friday) {
+      const key = `${c.id}:teachers:${today}`;
+      if (!log[key]) {
+        const snap = await db.collection("data").where("value.role", "in", ["teacher", "admin"]).get();
+        const uids = new Set();
+        for (const classId of c.classIds || []) {
+          const d = await db.collection("data").doc(`tehillim:${c.id}:confirm:${classId}`).get(); // eslint-disable-line no-await-in-loop
+          if (d.exists) continue;
+          snap.forEach((doc) => { const t = doc.data().value; if (t && t.active !== false && t.uid && doc.id.startsWith("teacher:") && (t.assignedClassIds || []).includes(classId)) uids.add(t.uid); });
+        }
+        const sent = uids.size ? await pushToUids(db, [...uids], "Reminder: Tehillim quota", "Please confirm this month's Tehillim quota. It takes about a minute.", "/") : 0;
+        log[key] = new Date().toISOString();
+        done.push({ cycle: c.id, kind: "teachers", sent });
+      }
+    }
+  }
+
+  if (done.length) await logRef.set({ value: log });
+  return res.status(200).json({ ok: true, today, hour, done });
+}
+
 export default async function handler(req, res) {
+  if (req.method === "GET") {
+    try { return await runTehillimReminders(req, res); } catch (err) { return res.status(500).json({ error: err.message || "Reminder run failed." }); }
+  }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
