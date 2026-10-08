@@ -19422,12 +19422,6 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
     return () => { cancelled = true; };
   }, [classes.map((c) => c.id).join(",")]);
 
-  if (showComposer) {
-    return <MultiClassBlogComposer classes={classes} initialClassIds={filterClassId ? [filterClassId] : []}
-      config={DEFAULT_CONFIG} loggedInTeacher={loggedInTeacher}
-      onDone={() => { setShowComposer(false); setPosts(null); }} />;
-  }
-
   const visiblePosts = filterClassId ? (posts || []).filter((p) => p.classId === filterClassId) : posts;
 
   // Same reasoning as every other blog feed in this app: useLayoutEffect, not useEffect, is what
@@ -19436,6 +19430,15 @@ function AllClassesBlogView({ classes, currentUserId, loggedInTeacher }) {
   // or coming back from posting — so the newest post for whatever's currently showing is always
   // what's actually in view, not wherever the scroll happened to be left before.
   useLayoutEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [filterClassId, visiblePosts?.length]); // eslint-disable-line
+
+  // This early return MUST stay below every hook above — a hook that only runs on some renders
+  // (React counts them, in order) crashes the whole screen the moment this switches, which is
+  // exactly what happened to the admin and coordinator Blog tabs when "New post" was tapped.
+  if (showComposer) {
+    return <MultiClassBlogComposer classes={classes} initialClassIds={filterClassId ? [filterClassId] : []}
+      config={DEFAULT_CONFIG} loggedInTeacher={loggedInTeacher}
+      onDone={() => { setShowComposer(false); setPosts(null); }} />;
+  }
 
   return (
     <div>
