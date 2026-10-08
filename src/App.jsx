@@ -13535,7 +13535,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       case "points": {
         const openProgramRecord = programsInClass.find((p) => p.id === openProgramId);
         if (openProgramId && openProgramRecord?.programType === "tehillim") {
-          return <TehillimProgramView program={openProgramRecord} isAdmin={loggedInTeacher?.role === "admin"} loggedInTeacher={loggedInTeacher} onBack={closeProgram} />;
+          return <TehillimProgramView program={openProgramRecord} isAdmin={false} onlyClassId={classId} loggedInTeacher={loggedInTeacher} onBack={closeProgram} />;
         }
         return openProgramId ? (
         <PointsView
@@ -20786,7 +20786,7 @@ function tehillimNextCycleDefaults(existingCycles) {
 }
 
 // ---- Staff side: lives inside the existing Shared Programs area ----
-function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
+function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, onBack }) {
   const [cycles, setCycles] = useState(null);
   const [cycleId, setCycleId] = useState(null);
   const [groups, setGroups] = useState([]); // [{ classId, className, students: [{id, name}] }]
@@ -20837,7 +20837,8 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
     const cf = {};
     // A teacher sees only their own class(es); the office sees every class in the cycle.
     const mine = loggedInTeacher?.assignedClassIds || [];
-    const visibleIds = isAdmin || !(c.classIds || []).some((id) => mine.includes(id)) ? (c.classIds || []) : (c.classIds || []).filter((id) => mine.includes(id));
+    const visibleIds = onlyClassId ? (c.classIds || []).filter((id) => id === onlyClassId)
+      : isAdmin || !(c.classIds || []).some((id) => mine.includes(id)) ? (c.classIds || []) : (c.classIds || []).filter((id) => mine.includes(id));
     for (const classId of visibleIds) {
       const cdoc = await loadJSON(tehillimConfirmKey(c.id, classId), null, true); // eslint-disable-line no-await-in-loop
       if (cdoc) cf[classId] = cdoc;
