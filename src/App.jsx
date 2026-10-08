@@ -20950,7 +20950,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
       )}
 
       {!cycle ? (
-        <p className="text-sm text-stone-400">{isAdmin ? "No cycle yet — tap New cycle to start one." : "No cycle has been created yet."}</p>
+        <p className="text-sm text-stone-400">{isAdmin ? "No cycle yet — tap New cycle to start one." : "Nothing to do yet — the office hasn't started this month's Tehillim program. You'll see your students here when it starts."}</p>
       ) : (
         <>
           <div className="bg-white border border-stone-200 rounded-xl p-3 mb-4 md:max-w-xl">
@@ -20959,15 +20959,16 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
               <span className="text-[10px] font-semibold text-teal-700 bg-teal-50 border border-teal-200 rounded-full px-2 py-0.5">{statusLabel}</span>
             </div>
             <p className="text-xs text-stone-500">Shabbos: {cycle.shabbosDate} · Checkoff closes {formatLaDateTime(cycle.checkoffDeadline)}</p>
-            <p className="text-xs text-stone-500">Quotas set: {quotaCount} of {studentTotal} students{cycle.parentNotifiedAt ? ` · Sent to parents ${formatLaDateTime(cycle.parentNotifiedAt)}` : ""}</p>
-            {cycle.testMode && <p className="text-[11px] text-amber-700 mt-1">Test cycle — no real family will see or be notified about this.</p>}
+            <p className="text-xs text-stone-500">Quotas set: {quotaCount} of {studentTotal} students{isAdmin && cycle.parentNotifiedAt ? ` · Sent to parents ${formatLaDateTime(cycle.parentNotifiedAt)}` : ""}</p>
+            {!isAdmin && <p className="text-xs text-stone-500 mt-0.5">Your only job: choose each student's quota below and tap Save. The office handles everything else.</p>}
+            {isAdmin && cycle.testMode && <p className="text-[11px] text-amber-700 mt-1">Test cycle — no real family will see or be notified about this.</p>}
           </div>
 
-          <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
+          {isAdmin && <div className="flex gap-1 mb-4 bg-stone-100 rounded-lg p-1 md:w-96">
             {[["quotas", "Quotas"], ["progress", "Progress"], ["raffle", "Raffle"]].map(([id, label]) => (
               <button key={id} onClick={() => { setTab(id); if (id !== "quotas") loadCycleData(cycle); }} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${tab === id ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>{label}</button>
             ))}
-          </div>
+          </div>}
 
           {tab === "quotas" && (
             <div className="md:max-w-xl">
@@ -21011,7 +21012,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
                   <button onClick={savePending} disabled={busy} className="w-full bg-teal-700 text-white rounded-xl py-3 text-sm font-bold shadow-lg hover:bg-teal-800 disabled:opacity-50">{busy ? "Saving…" : `Save ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}</button>
                 </div>
               )}
-              {cycle.parentNotifiedAt && <p className="text-[11px] text-stone-400">Parents were already notified — saved changes send them an "Updated quota" notice automatically.</p>}
+              {cycle.parentNotifiedAt && <p className="text-[11px] text-stone-400">Families were already notified — any change you save reaches them automatically as an "Updated quota" notice.</p>}
 
               {isAdmin && cycle.introLetter && !cycle.parentNotifiedAt && (
                 <div className="bg-white border border-stone-200 rounded-xl p-3 mt-4">
@@ -21043,7 +21044,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
             </div>
           )}
 
-          {tab === "progress" && (
+          {isAdmin && tab === "progress" && (
             <div className="md:max-w-xl">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs text-stone-500">{eligibleIds.length} of {quotaCount} checked off complete{locked ? " (checkoff closed)" : ""}</p>
@@ -21070,7 +21071,7 @@ function TehillimProgramView({ program, isAdmin, loggedInTeacher, onBack }) {
             </div>
           )}
 
-          {tab === "raffle" && (
+          {isAdmin && tab === "raffle" && (
             <div className="md:max-w-xl">
               <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
                 <p className="text-sm font-bold text-stone-800 mb-1">Raffle pool: {eligibleRoster.length} student{eligibleRoster.length === 1 ? "" : "s"}</p>
