@@ -7568,7 +7568,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
     ]);
     const byGuardian = {};
     [...ownClassFamilies.flat(), ...reachable].forEach((f) => { byGuardian[f.uid] = true; });
-    const readState = await getReadState(currentTeacher.uid);
+    const readState = await getReadStateOrNull(currentTeacher.uid);
+    if (!readState) return; // could not load the read marks: leave the count as it is, never show everything as new
     let total = 0;
     for (const guardianUid of Object.keys(byGuardian)) {
       const thread = await loadJSON(`teacher-messages:${currentTeacher.uid}:${guardianUid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
@@ -12853,7 +12854,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   // Same reasoning as the equivalent state in TeacherMessagesView — captured right before
   // markThreadRead overwrites it, since opening a thread marks it read immediately.
   const [lastReadBeforeOpen, setLastReadBeforeOpen] = useState(null);
-  const [listReadState, setListReadState] = useState({});
+  const [listReadState, setListReadState] = useState(null); // null until the read marks have actually loaded (no counts shown before that)
   // Reported directly: Broadcasts and New broadcast used to live inside the old, separate
   // Classroom Messages screen (now Reports, and no longer about messaging at all) — moved here
   // instead, since sending a message to a group of families is exactly what this screen is for,
@@ -12894,7 +12895,8 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     setFamilies(groupList);
     const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
-    setListReadState(await getReadState(loggedInTeacher.uid));
+    const loadedMarks = await getReadStateOrNull(loggedInTeacher.uid);
+    if (loadedMarks) setListReadState(loadedMarks);
   }, [loggedInTeacher.uid, (loggedInTeacher.assignedClassIds || []).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -13149,7 +13151,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
           const last = thread?.messages?.[thread.messages.length - 1];
           const childNames = (g.studentLinks || []).map((l) => l.studentName).join(", ");
           const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-          const unreadCount = countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher");
+          const unreadCount = listReadState ? countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher") : 0;
           return (
             <button key={g.groupId} onClick={() => openThread(g)}
               className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
@@ -13756,7 +13758,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     // classroom thread this replaces used to need spelling out for.
     const byGuardian = {};
     relevant.forEach((f) => { if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f] }; });
-    const readState = await getReadState(loggedInTeacher.uid);
+    const readState = await getReadStateOrNull(loggedInTeacher.uid);
+    if (!readState) return; // could not load the read marks: leave the list as it is, never show everything as new
     const results = [];
     for (const g of Object.values(byGuardian)) {
       const thread = await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
@@ -13794,7 +13797,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     ]);
     const byGuardian = {};
     [...ownClassFamilies.flat(), ...reachable].forEach((f) => { byGuardian[f.uid] = true; });
-    const readState = await getReadState(loggedInTeacher.uid);
+    const readState = await getReadStateOrNull(loggedInTeacher.uid);
+    if (!readState) return; // could not load the read marks: leave the badge as it is, never show everything as new
     let total = 0;
     for (const guardianUid of Object.keys(byGuardian)) {
       const thread = await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${guardianUid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
@@ -24740,10 +24744,10 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   // For showing an actual unread count on each row in both inbox lists below, not just inside an
   // open conversation — refreshed on the same events that already change what's actually unread
   // (a thread being marked read, or the live thread data itself changing).
-  const [listReadState, setListReadState] = useState({});
+  const [listReadState, setListReadState] = useState(null); // null until the read marks have actually loaded (no counts shown before that)
   useEffect(() => {
     if (!loggedInTeacher) return;
-    getReadState(loggedInTeacher.uid).then(setListReadState);
+    getReadStateOrNull(loggedInTeacher.uid).then((marks) => { if (marks) setListReadState(marks); });
   }, [loggedInTeacher, threads, directThreads]);
 
   // Same reasoning as the class/tab history work — pushing a real entry here is what lets the
@@ -24954,7 +24958,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const last = thread?.messages?.[thread.messages.length - 1];
               const childNames = (g.studentLinks || []).filter((l) => assignedClassIds.includes(l.classId)).map((l) => l.studentName).join(", ");
               const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-              const unreadCount = countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher");
+              const unreadCount = listReadState ? countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher") : 0;
               return (
                 <button key={g.groupId} onClick={() => openDirectGroupThread(g)} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
                   <div className="flex items-center justify-between gap-2">
