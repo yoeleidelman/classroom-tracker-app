@@ -9334,60 +9334,51 @@ function WhatsAppIcon({ size = 16 }) {
 // small anchored popover, since a 3-icon grid needs real room to be comfortably tappable.
 function ContactOfficePanel({ onViewUpdates }) {
   const [officePhone, setOfficePhone] = useState(null);
-  const [state, setState] = useState("loading"); // loading | ready | failed
-  const [attempt, setAttempt] = useState(0);
+  const [note, setNote] = useState("");
 
-  // Remembers the last office number this phone successfully loaded, so the buttons still work if the
-  // school's settings cannot be loaded right now.
+  // The panel itself, with all three buttons and the link to the office's messages, ALWAYS opens. The number
+  // is only needed at the moment someone taps Call / Text / WhatsApp, so it loads quietly in the background,
+  // and again on the tap itself if it isn't there yet. The last number that loaded is also kept on the device.
   const readSaved = () => { try { return localStorage.getItem("office-phone-last-good") || null; } catch { return null; } };
   const writeSaved = (v) => { try { localStorage.setItem("office-phone-last-good", v); } catch { /* storage may be blocked */ } };
-
-  useEffect(() => {
-    let cancelled = false;
-    setState("loading");
-    loadJSON("schoolSettings", null, true, 2, true)
-      .then((st) => {
-        if (cancelled) return;
-        const phone = st?.officePhone || null;
-        if (phone) writeSaved(phone);
-        setOfficePhone(phone || readSaved());
-        setState("ready");
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setOfficePhone(readSaved());
-        setState("failed");
-      });
-    return () => { cancelled = true; };
-  }, [attempt]);
+  const fetchNumber = async () => {
+    try {
+      const st = await loadJSON("schoolSettings", null, true, 2, true);
+      const phone = st?.officePhone || null;
+      if (phone) { writeSaved(phone); setOfficePhone(phone); return phone; }
+      return readSaved();
+    } catch { return readSaved(); }
+  };
+  useEffect(() => { fetchNumber().then((p) => { if (p) setOfficePhone(p); }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
   const digits = (officePhone || "").replace(/[^\d]/g, "");
+  const goTo = async (kind) => {
+    let d = digits;
+    if (!d) { setNote("Getting the office number..."); d = ((await fetchNumber()) || "").replace(/[^\d]/g, ""); }
+    if (!d) { setNote("Couldn't get the office number right now. Please try again in a moment, or open the updates below."); return; }
+    setNote("");
+    window.location.href = kind === "call" ? `tel:${d}` : kind === "text" ? `sms:${d}` : `https://wa.me/${d}`;
+  };
+  const tile = "flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100";
 
-  // Always shows something when the icon is tapped: the buttons, a short "loading", or a plain reason.
   return (
     <div className="anim-expand-down bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3">
-      {digits ? (
-        <div className="grid grid-cols-3 gap-2 mb-2">
-          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-            <Phone size={18} className="text-[#5F9F9E]" />
-            <span className="text-[11px] font-semibold text-stone-700">Call</span>
-          </a>
-          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-            <MessageCircle size={18} className="text-[#5F9F9E]" />
-            <span className="text-[11px] font-semibold text-stone-700">Text</span>
-          </a>
-          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-            <WhatsAppIcon size={19} />
-            <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
-          </a>
-        </div>
-      ) : state === "loading" ? (
-        <p className="text-xs text-stone-400 mb-2">Loading the office number…</p>
-      ) : state === "failed" ? (
-        <p className="text-xs text-stone-600 mb-2">Couldn't load the office number right now. <button onClick={() => setAttempt((n) => n + 1)} className="font-semibold text-[#5F9F9E] underline">Try again</button></p>
-      ) : (
-        <p className="text-xs text-stone-600 mb-2">The school hasn't added a phone number yet. You can still see updates from the office below.</p>
-      )}
+      <div className="grid grid-cols-3 gap-2 mb-2">
+        {digits ? (
+          <>
+            <a href={`tel:${digits}`} className={tile}><Phone size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Call</span></a>
+            <a href={`sms:${digits}`} className={tile}><MessageCircle size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Text</span></a>
+            <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className={tile}><WhatsAppIcon size={19} /><span className="text-[11px] font-semibold text-stone-700">WhatsApp</span></a>
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={() => goTo("call")} className={tile}><Phone size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Call</span></button>
+            <button type="button" onClick={() => goTo("text")} className={tile}><MessageCircle size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Text</span></button>
+            <button type="button" onClick={() => goTo("whatsapp")} className={tile}><WhatsAppIcon size={19} /><span className="text-[11px] font-semibold text-stone-700">WhatsApp</span></button>
+          </>
+        )}
+      </div>
+      {note && <p className="text-xs text-stone-600 mb-2">{note}</p>}
       <button onClick={onViewUpdates} className="text-xs font-semibold text-[#5F9F9E] hover:text-[#447271]">See updates from the office →</button>
     </div>
   );
