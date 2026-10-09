@@ -2480,11 +2480,10 @@ async function markThreadRead(viewerId, threadKey) {
     await updateDoc(ref, new FieldPath("value", threadKey), readAt);
   } catch (err) {
     // updateDoc throws when the document doesn't exist yet (a family's very first-ever read
-    // mark) — this is the one case it genuinely can't handle on its own, not a sign of a deeper
-    // problem, so it isn't logged as an error the way an unexpected failure below would be.
-    const state = await getReadState(viewerId);
-    state[threadKey] = readAt;
-    await saveJSON(`read-state:${viewerId}`, state, true);
+    // mark). Add just this one mark with a merge — never read the whole record and write it back,
+    // because a read that failed or came back empty would then replace every other read mark with
+    // nothing, turning everything unread. A merge can only ever add or change this one thread.
+    try { await setDoc(ref, { value: { [threadKey]: readAt } }, { merge: true }); } catch (e) { console.error("Could not save read mark", e); }
   }
   recordLocalThreadRead(threadKey, readAt); // best-effort, see its own comment — never awaited or allowed to block the read itself
 }
@@ -2567,10 +2566,8 @@ async function snoozeThread(viewerId, threadKey, minutes) {
     await updateDoc(ref, new FieldPath("value", "snoozed", threadKey), until);
   } catch (err) {
     // updateDoc throws when the document doesn't exist yet — see markThreadRead's own comment
-    const state = await getReadState(viewerId);
-    state.snoozed = state.snoozed || {};
-    state.snoozed[threadKey] = until;
-    await saveJSON(`read-state:${viewerId}`, state, true);
+    // (a merge adds just this one snooze and can never wipe the other read marks)
+    try { await setDoc(ref, { value: { snoozed: { [threadKey]: until } } }, { merge: true }); } catch (e) { console.error("Could not save snooze", e); }
   }
 }
 // Whether a message counts as "mine" for whoever is viewing the thread. Staff (teacher or admin)
