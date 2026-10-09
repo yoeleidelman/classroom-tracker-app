@@ -20809,8 +20809,11 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
   const cycle = (cycles || []).find((c) => c.id === cycleId) || null;
   const whoName = loggedInTeacher?.name || "Staff";
 
+  const [loadFailed, setLoadFailed] = useState(false);
   const refreshCycles = async () => {
-    const all = (await tehillimLoadCycles()).filter((c) => c.programId === program.id).sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1));
+    let list;
+    try { list = (await loadJSON("tehillim:cycles", [], true, 3, true)) || []; setLoadFailed(false); } catch { setLoadFailed(true); list = []; }
+    const all = list.filter((c) => c.programId === program.id).sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1));
     setCycles(all);
     return all;
   };
@@ -20821,14 +20824,13 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
     setCycles(next.filter((c) => c.programId === program.id).sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1)));
   };
 
-  useEffect(() => {
-    (async () => {
-      const all = await refreshCycles();
-      if (all[0]) setCycleId(all[0].id);
-      setLoading(false);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const loadAll = async () => {
+    setLoading(true);
+    const all = await refreshCycles();
+    if (all[0]) setCycleId(all[0].id);
+    setLoading(false);
+  };
+  useEffect(() => { loadAll(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
   // Everyone in the cycle's classes (full-time only), grouped by class, plus their quotas/checkoffs.
   const loadCycleData = async (c) => {
@@ -20884,7 +20886,18 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
 
   // Read-modify-write on just the one class document, so two teachers editing different classes (or
   // different students) can never overwrite each other's work.
+  // The cycle on screen can be out of date (the office may have sent to parents after this page opened),
+  // so ask the database whether parents have been notified yet before deciding an edit is a change to
+  // something they already saw.
+  const parentsAlreadyNotified = async () => {
+    try {
+      const latest = (await loadJSON("tehillim:cycles", [], true, 2, true) || []).find((c) => c.id === cycleId);
+      if (latest?.parentNotifiedAt && !cycle?.parentNotifiedAt) setCycles((prev) => (prev || []).map((c) => (c.id === cycleId ? { ...c, ...latest } : c)));
+      return Boolean(latest?.parentNotifiedAt || cycle?.parentNotifiedAt);
+    } catch { return Boolean(cycle?.parentNotifiedAt); }
+  };
   const saveQuotaChanges = async (classId, changes) => {
+    const notified = await parentsAlreadyNotified();
     const key = `tehillim:${cycleId}:quotas:${classId}`;
     const fresh = (await loadJSON(key, {}, true)) || {};
     const now = new Date().toISOString();
@@ -20894,10 +20907,10 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       const student = groups.flatMap((g) => g.students).find((s) => s.id === sid);
       const prev = fresh[sid];
       const amount = Math.max(1, Math.round(Number(ch.amount) || 0));
-      fresh[sid] = { ...(prev || {}), unit: ch.unit || "chapters", amount, chaptersText: (ch.chaptersText || "").trim(), studentName: student?.name || prev?.studentName || "", className, classId, setBy: whoName, setAt: now, ...(prev && cycle?.parentNotifiedAt ? { updatedAt: now } : {}) };
+      fresh[sid] = { ...(prev || {}), unit: ch.unit || "chapters", amount, chaptersText: (ch.chaptersText || "").trim(), studentName: student?.name || prev?.studentName || "", className, classId, setBy: whoName, setAt: now, ...(prev && notified ? { updatedAt: now } : {}) };
       updatedStudentIds.push(sid);
     });
-    await saveJSON(key, fresh, true);
+    await saveJSON(key, fresh, true, 2, true);
     setQuotas((prev) => ({ ...prev, ...Object.fromEntries(updatedStudentIds.map((sid) => [sid, fresh[sid]])) }));
     setDrafts((prev) => { const n = { ...prev }; updatedStudentIds.forEach((sid) => delete n[sid]); return n; });
     return updatedStudentIds;
@@ -20930,12 +20943,12 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       const changedIds = [];
       for (const [classId, changes] of Object.entries(byClass)) changedIds.push(...(await saveQuotaChanges(classId, changes))); // eslint-disable-line no-await-in-loop
       // Edited after parents were already notified -> the family gets an "Updated quota" notice.
-      if (cycle?.parentNotifiedAt && changedIds.length > 0 && sendAllowed()) {
+      if (changedIds.length > 0 && sendAllowed() && (await parentsAlreadyNotified())) {
         const uids = await familiesFor(new Set(changedIds));
         await sendPushNotification(uids, "Updated Tehillim quota", "A child's Shabbos Mevarchim Tehillim quota was updated. Open the app to see it.", "/?portal=parent&tab=home");
       }
       setNotice(`Saved ${changedIds.length} quota${changedIds.length === 1 ? "" : "s"}.`);
-    } finally { setBusy(false); }
+    } catch { setNotice("That did not save — check your connection and try again."); } finally { setBusy(false); }
   };
 
   // What a student shows (and gets, if the teacher just confirms) when nothing was typed: the grade default.
@@ -20957,7 +20970,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       await saveJSON(tehillimConfirmKey(cycleId, g.classId), rec, true);
       setConfirms((prev) => ({ ...prev, [g.classId]: rec }));
       setNotice(`${g.className} confirmed. Thank you!`);
-    } finally { setBusy(false); }
+    } catch { setNotice("That did not save — check your connection and try again."); } finally { setBusy(false); }
   };
 
   const applyToClass = async (classId) => {
@@ -21088,7 +21101,12 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
         </div>
       )}
 
-      {!cycle ? (
+      {!cycle && loadFailed ? (
+        <div className="text-sm text-stone-600">
+          <p className="mb-2">Couldn't load this month's Tehillim program (the connection may be weak).</p>
+          <button onClick={loadAll} className="bg-teal-700 text-white rounded-lg px-4 py-2 text-sm font-semibold">Try again</button>
+        </div>
+      ) : !cycle ? (
         <p className="text-sm text-stone-400">{isAdmin ? "No cycle yet. This month's starts by itself on the Tuesday before Shabbos Mevarchim." : "Nothing to do yet — the office hasn't started this month's Tehillim program. You'll see your students here when it starts."}</p>
       ) : (
         <>
@@ -21391,6 +21409,16 @@ function TehillimFamilyCard({ family }) {
     })();
     return () => { cancelled = true; };
   }, [family.uid, tick]);
+
+  // Pick up changes the teacher or office made after this app was opened (an edited quota, a new cycle):
+  // look again whenever the app comes back to the front, and once a minute while it stays open.
+  useEffect(() => {
+    const again = () => { if (document.visibilityState === "visible") setTick((t) => t + 1); };
+    document.addEventListener("visibilitychange", again);
+    window.addEventListener("focus", again);
+    const timer = setInterval(again, 60000);
+    return () => { document.removeEventListener("visibilitychange", again); window.removeEventListener("focus", again); clearInterval(timer); };
+  }, []);
 
   if (!state) return null;
   const { cycle, children } = state;
