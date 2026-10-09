@@ -164,6 +164,10 @@ export default async function handler(req, res) {
       readSummary = {
         exists: Boolean(raw), valueType, topKeys: topKeys.slice(0, 15), dottedTopKeys: topKeys.filter((k) => k.includes(".")).slice(0, 10),
         markCount: marks.length, newestMark: marks[0]?.[1] || null, oldestMark: marks[marks.length - 1]?.[1] || null,
+        strayMarks: topKeys.filter((k) => k.startsWith("value.")).slice(0, 12).map((k) => {
+          const nm = k.slice(6);
+          return { name: nm, strayAt: typeof raw[k] === "string" ? raw[k] : null, properAt: valueType === "object" && typeof v[nm] === "string" ? v[nm] : null };
+        }),
         snoozedCount: valueType === "object" && v.snoozed ? Object.keys(v.snoozed).length : 0,
         sampleMarks: marks.slice(0, 8).map(([k, x]) => ({ key: k, at: x })),
       };

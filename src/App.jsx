@@ -6852,6 +6852,9 @@ function TeacherAccountChecker({ onCheck }) {
                   <p className="text-xs text-stone-700">Newest mark: {formatTime(result.readSummary.newestMark) || "none"} · oldest: {formatTime(result.readSummary.oldestMark) || "none"}</p>
                   <p className="text-xs text-stone-700">Top-level fields: {(result.readSummary.topKeys || []).join(", ") || "none"}</p>
                   {(result.readSummary.dottedTopKeys || []).length > 0 && <p className="text-xs font-bold text-amber-700">⚠ Fields with dots in their names: {result.readSummary.dottedTopKeys.join(", ")}</p>}
+                  {(result.readSummary.strayMarks || []).map((m) => (
+                    <p key={m.name} className="text-[11px] text-stone-600 break-all">Misplaced mark "{m.name}": {formatTime(m.strayAt) || "?"} · proper mark: {formatTime(m.properAt) || "NONE (so it counts as new)"}</p>
+                  ))}
                   {(result.threads || []).map((t) => (
                     <p key={t.thread} className="text-[11px] text-stone-600 break-all">{t.thread}: {"lastMessageAt" in t ? `last message ${formatTime(t.lastMessageAt) || "none"} (${t.lastFrom || "-"})` : `${t.homeworkPosts} homework post(s), ${t.postsNewerThanMark} newer than the mark`} · saved mark: {formatTime(t.savedReadMark) || "none"}</p>
                   ))}
