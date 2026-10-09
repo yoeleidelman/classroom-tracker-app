@@ -2412,8 +2412,43 @@ const inFlightClassAssignmentToggles = new Set();
 // this" belongs to the individual, not the conversation. Two guardians on one family, or two
 // co-teachers on one class, can each be at a different point in the exact same shared thread.
 // Keyed by the viewer's own login uid, never the shared family/class identity.
+// The last record successfully loaded for each person, kept in memory for this session.
+const readStateLastGood = {};
+// Loads a person's read marks, or returns null if they could not be loaded at all. Two protections the
+// plain loader never had:
+//  - A failed load is NOT the same as "nothing has been read." The old loader quietly returned an empty
+//    record on any failure, which made every conversation, homework post and badge look new again.
+//    Here a failure returns the last record that did load (or null), so callers can leave the screen
+//    alone instead of lighting up everything.
+//  - Marks that an earlier version of the app saved under a field literally named "value.<thread>" (a
+//    dot in the name, which the app never read back) are recovered, newest wins, so those threads
+//    stop showing as new.
+async function getReadStateOrNull(viewerId) {
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    try {
+      const snap = await getDoc(doc(db, "data", `read-state:${viewerId}`));
+      const data = snap.exists() ? snap.data() : null;
+      const state = data && data.value && typeof data.value === "object" && !Array.isArray(data.value) ? { ...data.value } : {};
+      if (data) {
+        for (const [k, v] of Object.entries(data)) {
+          if (k.startsWith("value.") && typeof v === "string") {
+            const name = k.slice(6);
+            if (!name.includes(".") && (typeof state[name] !== "string" || new Date(v) > new Date(state[name]))) state[name] = v;
+          }
+        }
+      }
+      readStateLastGood[viewerId] = state;
+      return { ...state };
+    } catch (e) {
+      if (attempt === 2) { console.error("Read marks could not be loaded", e); break; }
+      if (looksLikeStaleAuthError(e)) await refreshAuthTokenIfPossible();
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+  return readStateLastGood[viewerId] ? { ...readStateLastGood[viewerId] } : null;
+}
 async function getReadState(viewerId) {
-  return (await loadJSON(`read-state:${viewerId}`, {}, true)) || {};
+  return (await getReadStateOrNull(viewerId)) || {};
 }
 // A real, reported bug this fixes: markThreadRead used to read the whole read-state document,
 // change one thread's timestamp in that local copy, then write the entire document back — a
@@ -11486,7 +11521,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const refreshUnreadThreads = useCallback(async () => {
     const mySeq = ++refreshSeqRef.current;
     const classLinks = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()];
-    const readState = await getReadState(family.uid);
+    const readState = await getReadStateOrNull(family.uid);
+    if (!readState) return; // could not load the read marks: leave the screen as it is rather than showing everything as new
     // Takes the more recent of the server's own value and this device's own local record for
     // each key — never the other way around — so a thread genuinely still unread per the server
     // stays exactly that; this only ever pulls a thread's own effective read time forward to a
@@ -11629,7 +11665,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     if (!fullTimeStudentLinks) return;
     const mySeq = ++homeworkRefreshSeqRef.current;
     const uniqueClasses = [...new Map(fullTimeStudentLinks.filter((l) => l.classType !== "preschool").map((l) => [l.classId, l])).values()];
-    const readState = await getReadState(family.uid);
+    const readState = await getReadStateOrNull(family.uid);
+    if (!readState) return; // could not load the read marks: do not show every homework post as new
     let total = 0;
     for (const l of uniqueClasses) {
       const posts = await loadJSON(`class:${l.classId}:homework`, [], true); // eslint-disable-line no-await-in-loop
