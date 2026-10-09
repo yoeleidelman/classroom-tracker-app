@@ -244,13 +244,17 @@ export default async function handler(req, res) {
   const db = getFirestore();
 
   let uids = providedUids;
-  if (resolve?.type === "classTeachers" && resolve.classId) {
+  if (resolve?.type === "classTeachers" && (resolve.classId || (resolve.classIds || []).length)) {
+    // One class (classId) or several at once (classIds); each person gets a single notification even if
+    // they are assigned to more than one of the classes.
+    const wanted = resolve.classIds && resolve.classIds.length ? resolve.classIds : [resolve.classId];
     const snapshot = await db.collection("data").where("value.role", "in", ["teacher", "admin"]).get();
-    uids = [];
+    const found = new Set();
     snapshot.forEach((doc) => {
       const t = doc.data().value;
-      if (t && t.active !== false && (t.assignedClassIds || []).includes(resolve.classId)) uids.push(t.uid);
+      if (t && t.active !== false && t.uid && (t.assignedClassIds || []).some((cid) => wanted.includes(cid))) found.add(t.uid);
     });
+    uids = [...found];
   } else if (resolve?.type === "familyGroup" && resolve.groupId) {
     const snapshot = await db.collection("data").where("value.familyGroupId", "==", resolve.groupId).get();
     uids = [];

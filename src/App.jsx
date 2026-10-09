@@ -20731,7 +20731,24 @@ function tehillimUpcomingMevarchim(fromISO, count = 1) {
 // the id is fixed per program + Shabbos so it can never be created twice. A program made only of ZZZ test
 // classes gets a test cycle; anything else is a real cycle and is only ever started from the live site, so a
 // preview link can never start (or alert teachers about) a real month.
+const tehillimEnsureRunning = {};
+// One alert per cycle, ever: the first device to claim it sends a single push to the (de-duplicated) teachers of
+// all the cycle's classes. Anything that runs again, or runs at the same moment, finds the claim and stays quiet.
+async function tehillimAlertTeachersOnce(cycleId, classIds) {
+  const key = `tehillim:${cycleId}:teacher-alert`;
+  try {
+    if (!classIds || classIds.length === 0) return;
+    if (await loadJSON(key, null, true)) return;
+    const token = uid();
+    await saveJSON(key, { token, at: new Date().toISOString() }, true, 2, true);
+    const back = await loadJSON(key, null, true);
+    if (back?.token !== token) return; // another device claimed it first
+    await sendPushNotificationResolved({ type: "classTeachers", classIds }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/");
+  } catch (e) { console.error("Tehillim teacher alert skipped", e); }
+}
 async function tehillimEnsureCycle(program) {
+  if (!program || tehillimEnsureRunning[program.id]) return;
+  tehillimEnsureRunning[program.id] = true;
   try {
     if (!program || program.programType !== "tehillim") return;
     const classIds = program.memberClassIds || [];
@@ -20755,11 +20772,11 @@ async function tehillimEnsureCycle(program) {
       winnersCount: 3, prizeDescription: "", testMode: testOnly, introLetter: firstOne ? TEHILLIM_INTRO_LETTER : "",
       status: "confirming", createdAt: new Date().toISOString(), createdBy: "Automatic", auto: true,
     };
-    await saveJSON("tehillim:cycles", [...list, c], true);
-    for (const classId of classIds) {
-      await sendPushNotificationResolved({ type: "classTeachers", classId }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/"); // eslint-disable-line no-await-in-loop
-    }
+    // If this write fails we stop here: no saved cycle means no alert (and the next open simply tries again).
+    await saveJSON("tehillim:cycles", [...list, c], true, 2, true);
+    await tehillimAlertTeachersOnce(id, classIds);
   } catch (e) { console.error("Tehillim auto-start failed", e); }
+  finally { delete tehillimEnsureRunning[program.id]; }
 }
 // What the "New cycle" form should start with: the next Shabbos Mevarchim after any cycle already made.
 function tehillimNextCycleDefaults(existingCycles) {
@@ -20856,11 +20873,11 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
     // class, and a real cycle only pings from the live site, so a preview can never alert real teachers.
     try {
       const allClasses = (await loadJSON("schoolClasses", [], true)) || [];
-      for (const classId of c.classIds) {
+      const alertIds = c.classIds.filter((classId) => {
         const cls = allClasses.find((x) => x.id === classId);
-        if (c.testMode ? !isTestFamilyName(cls?.name) : !canSendRealTehillimNotices()) continue;
-        await sendPushNotificationResolved({ type: "classTeachers", classId }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/"); // eslint-disable-line no-await-in-loop
-      }
+        return c.testMode ? isTestFamilyName(cls?.name) : canSendRealTehillimNotices();
+      });
+      await tehillimAlertTeachersOnce(c.id, alertIds);
     } catch { /* teacher alerts are best-effort; the Home banner still shows */ }
     return all;
   };
