@@ -20911,6 +20911,16 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       updatedStudentIds.push(sid);
     });
     await saveJSON(key, fresh, true, 2, true);
+    // Read it back from the database. The check mark only shows if what is stored really matches.
+    const stored = (await loadJSON(key, null, true, 2, true)) || {};
+    for (const sid of updatedStudentIds) {
+      if (!stored[sid] || Number(stored[sid].amount) !== Number(fresh[sid].amount) || (stored[sid].unit || "") !== (fresh[sid].unit || "")) throw new Error("not-stored");
+    }
+    // Make sure parents are reading the same month this screen is editing.
+    if (notified) {
+      const parentsSee = (await tehillimLoadCycles()).filter((c) => c.parentNotifiedAt && (!c.testMode || cycle?.testMode)).sort((x, y) => (x.shabbosDate < y.shabbosDate ? 1 : -1))[0];
+      if (parentsSee && parentsSee.id !== cycleId) throw new Error(`parents-read-a-different-month (${parentsSee.hebrewMonth || parentsSee.id})`);
+    }
     setQuotas((prev) => ({ ...prev, ...Object.fromEntries(updatedStudentIds.map((sid) => [sid, fresh[sid]])) }));
     setDrafts((prev) => { const n = { ...prev }; updatedStudentIds.forEach((sid) => delete n[sid]); return n; });
     return updatedStudentIds;
@@ -21173,7 +21183,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
                   <button onClick={savePending} disabled={busy} className="w-full bg-teal-700 text-white rounded-xl py-3 text-sm font-bold shadow-lg hover:bg-teal-800 disabled:opacity-50">{busy ? "Saving…" : `Save ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}</button>
                 </div>
               )}
-              {cycle.parentNotifiedAt && <p className="text-[11px] text-stone-400">Families were already notified — any change you save reaches them automatically as an "Updated quota" notice.</p>}
+              {cycle.parentNotifiedAt && <p className="text-[11px] text-stone-400">Families were already notified. A change you save shows up quietly on the bar they already have. No new message is sent.</p>}
 
               {isAdmin && cycle.introLetter && !cycle.parentNotifiedAt && (
                 <div className="bg-white border border-stone-200 rounded-xl p-3 mt-4">
@@ -21448,10 +21458,9 @@ function TehillimFamilyCard({ family }) {
         {children.map((c) => {
           const first = (c.link.studentName || "").split(" ")[0] || "your child";
           const isDone = Boolean(c.done?.completed);
-          const updated = c.quota.updatedAt && c.quota.updatedAt > cycle.parentNotifiedAt;
           return (
             <div key={c.link.studentId} className="border border-stone-200 rounded-xl p-3 bg-white">
-              <p className="text-sm font-bold text-stone-900">{first} <span className="text-xs font-normal text-stone-400">{c.quota.className}</span>{updated && <span className="ml-2 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">Updated quota</span>}</p>
+              <p className="text-sm font-bold text-stone-900">{first} <span className="text-xs font-normal text-stone-400">{c.quota.className}</span></p>
               <p className="text-sm text-stone-700 mb-2">{tehillimQuotaLine(c.quota)}</p>
               {locked ? (
                 <p className="text-xs text-stone-500">{isDone ? `✓ ${first} was checked off — entered in the raffle.` : "Checkoff is closed for this month."}</p>
