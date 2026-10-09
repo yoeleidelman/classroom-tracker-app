@@ -26439,6 +26439,8 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const [progress, setProgress] = useState(null);
   const [bulkArmed, setBulkArmed] = useState(false);
   const [bulkSummary, setBulkSummary] = useState(null);
+  const [walkIdx, setWalkIdx] = useState(null); // "Email one by one" walkthrough: index into the ready students, or null
+  const [hintId, setHintId] = useState(null); // student whose "attach the PDF" tip is showing
   const familiesRef = useRef(null);
 
   const wantMessage = format === "message" || format === "both";
@@ -26588,6 +26590,26 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     setBulkSummary(summary);
   };
 
+  // A Gmail draft can't carry an attachment by itself, so this does the next best thing in one tap: saves the
+  // PDF to the phone under the child's name, and opens the draft (parent's address, subject, message already
+  // filled in) so the only step left is the paperclip, where the fresh file is the first one in Recent.
+  const gmailDraftUrl = (s) => {
+    const r = results[s.id];
+    const to = [r?.email || s.parentEmail, emailBoth && s.parent2Email].filter(Boolean).join(", ");
+    const body = applyMessageDisclaimer(r?.draft || "", config, null, loggedInTeacher?.messageSignOff);
+    return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(`Report — ${r?.label || ""}`)}&body=${encodeURIComponent(body)}`;
+  };
+  const emailWithPdf = (s) => {
+    const r = results[s.id];
+    if (!r) return;
+    if (r.pdfBlob) saveBlob(r.pdfBlob, r.pdfName);
+    window.open(gmailDraftUrl(s), "_blank", "noopener");
+    setHintId(s.id);
+  };
+  const readyStudents = chosen.filter((s) => results[s.id] && !results[s.id].loading);
+  const walkStudent = walkIdx !== null ? readyStudents[walkIdx] : null;
+  const walkNext = () => { setHintId(null); setWalkIdx((i) => (i !== null && i + 1 < readyStudents.length ? i + 1 : null)); };
+
   const generatedCount = chosen.filter((s) => results[s.id] && !results[s.id].loading).length;
   const pdfCount = chosen.filter((s) => results[s.id]?.pdfBlob).length;
   const canGenerate = chosen.length > 0 && sections.length > 0 && rangeValid && !running && (!wantMessage || messageHasContent);
@@ -26702,6 +26724,11 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                 <Download size={13} /> Download all PDFs (zip)
               </button>
             )}
+            {pdfCount > 0 && readyStudents.length > 1 && (
+              <button onClick={() => { setHintId(null); setWalkIdx(0); }} className="flex items-center gap-1 text-xs font-semibold text-teal-800 bg-teal-50 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-100">
+                <Mail size={13} /> Email one by one
+              </button>
+            )}
             {!bulkArmed ? (
               <button onClick={() => setBulkArmed(true)} disabled={running} className="flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800 disabled:opacity-40">
                 <MessageCircle size={13} /> Send all in-app
@@ -26718,6 +26745,36 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
               Sent {bulkSummary.sent}.{bulkSummary.noFamily ? ` ${bulkSummary.noFamily} had no parent account linked yet.` : ""}{bulkSummary.failed ? ` ${bulkSummary.failed} failed — try those again below.` : ""}{bulkSummary.skipped ? ` ${bulkSummary.skipped} skipped (already sent or not ready).` : ""}
             </p>
           )}
+
+          {walkStudent && (() => {
+            const wr = results[walkStudent.id];
+            const wEmail = (wr.email || walkStudent.parentEmail || "").trim();
+            return (
+              <div className="bg-teal-50 border border-teal-300 rounded-xl p-3 mb-3">
+                <p className="text-xs font-bold uppercase tracking-wide text-teal-700 mb-1">Child {walkIdx + 1} of {readyStudents.length}</p>
+                <p className="text-base font-bold text-stone-900 mb-1">{walkStudent.name}</p>
+                {!wEmail ? (
+                  <p className="text-xs text-amber-700 mb-2">No parent email on file. Type it in the box below this card, or skip to the next child.</p>
+                ) : (
+                  <p className="text-xs text-stone-600 mb-2">To: {wEmail}</p>
+                )}
+                <button onClick={() => emailWithPdf(walkStudent)} disabled={!wEmail}
+                  className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40 mb-2">
+                  <Mail size={15} /> Save PDF &amp; open email
+                </button>
+                {hintId === walkStudent.id && (
+                  <p className="text-xs text-teal-900 bg-white border border-teal-200 rounded-lg px-2.5 py-2 mb-2">
+                    PDF saved as <b>{wr.pdfName}</b>. In Gmail tap the <b>paperclip</b>, choose <b>Recent</b> (or Downloads), and pick the top file. Then send and come back here.
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <button onClick={() => { logSent(walkStudent, "email"); walkNext(); }} className="flex-1 bg-white border border-teal-400 text-teal-800 rounded-lg py-2 text-sm font-semibold">{walkIdx + 1 < readyStudents.length ? "Sent, next child" : "Sent, finish"}</button>
+                  <button onClick={walkNext} className="px-3 text-sm text-stone-500">Skip</button>
+                  <button onClick={() => { setHintId(null); setWalkIdx(null); }} className="px-3 text-sm text-stone-400">Close</button>
+                </div>
+              </div>
+            );
+          })()}
 
           <div className="space-y-3">
             {chosen.map((s) => {
@@ -26754,7 +26811,12 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                           </button>
                         )}
                         <button onClick={() => generateOne(s)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-2.5 py-1.5 hover:bg-stone-50"><RefreshCw size={12} /> Redo</button>
-                        {emails && <MailActionButtons email={emails} subject={`Report — ${r.label}`} body={applyMessageDisclaimer(r.draft, config, null, loggedInTeacher?.messageSignOff)} size="small" />}
+                        {emails && r.pdfBlob && (
+                          <button onClick={() => emailWithPdf(s)} className="flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg px-2.5 py-1.5 hover:bg-teal-800">
+                            <Mail size={12} /> Email with PDF
+                          </button>
+                        )}
+                        {emails && !r.pdfBlob && <MailActionButtons email={emails} subject={`Report — ${r.label}`} body={applyMessageDisclaimer(r.draft, config, null, loggedInTeacher?.messageSignOff)} size="small" />}
                         {r.sendState === "sent" ? (
                           <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><Check size={13} /> Sent in-app{r.pdfBlob ? " with PDF" : ""}</span>
                         ) : r.sendState === "no-family" ? (
@@ -26771,7 +26833,12 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                         </button>
                       </div>
                       {r.sendState === "failed" && <p className="text-xs text-rose-600 mt-1">Couldn't send — try again.</p>}
-                      {r.pdfBlob && emails && <p className="text-[10px] text-stone-400 mt-1">Email can't carry the PDF automatically — download it and attach it, or use Send in-app.</p>}
+                      {r.pdfBlob && emails && hintId === s.id && (
+                        <p className="text-xs text-teal-900 bg-teal-50 border border-teal-200 rounded-lg px-2.5 py-2 mt-2">
+                          PDF saved as <b>{r.pdfName}</b>. In Gmail tap the <b>paperclip</b>, choose <b>Recent</b> (or Downloads), and pick the top file.
+                        </p>
+                      )}
+                      {r.pdfBlob && emails && hintId !== s.id && <p className="text-[10px] text-stone-400 mt-1">"Email with PDF" saves the PDF to your phone and opens the email. Then tap the paperclip and pick the newest file.</p>}
                     </div>
                   )}
                 </div>
