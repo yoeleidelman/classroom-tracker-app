@@ -6878,6 +6878,19 @@ function TeacherAccountChecker({ onCheck }) {
           {result.familySummary && (
             <p className="text-xs text-stone-700"><span className="font-semibold">Parent profile:</span> {result.familySummary.name} · {result.familySummary.active ? "active" : "⚠ marked inactive"} · {result.familySummary.studentCount} child link(s) · {(result.familySummary.linkedClassIds || []).length} class(es)</p>
           )}
+          {result.teacherThreads && (
+            <div className="border-t border-stone-200 pt-1.5 mt-1.5">
+              <p className="text-xs font-semibold text-stone-700">Teacher side: parent conversations</p>
+              {result.teacherThreads.error ? <p className="text-xs text-rose-600">Could not read: {result.teacherThreads.error}</p> : (
+                <>
+                  <p className="text-xs text-stone-700">Families reached: {result.teacherThreads.familiesChecked} · with a parent message: {result.teacherThreads.withFamilyMessages} · counting as new: {result.teacherThreads.newByRule}</p>
+                  {(result.teacherThreads.rows || []).map((r, i) => (
+                    <p key={i} className="text-[11px] text-stone-600 break-all">{r.family || "?"}: newest parent message {formatTime(r.lastFromFamilyAt)} ({r.familyMessages} total) · mark: {formatTime(r.properMark) || "none"} · misplaced mark: {formatTime(r.strayMark) || "none"}</p>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
           {result.readSummary && (
             <div className="border-t border-stone-200 pt-1.5 mt-1.5">
               <p className="text-xs font-semibold text-stone-700">Saved read marks (why things show as new)</p>

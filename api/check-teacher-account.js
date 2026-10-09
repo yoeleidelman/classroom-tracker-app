@@ -192,11 +192,43 @@ export default async function handler(req, res) {
     } catch (e) { readSummary = { error: e.message || String(e) }; }
   }
 
+  // The teacher side: each parent conversation this teacher has, with the newest PARENT message next to
+  // the saved read mark for it (proper, and misplaced). Names and dates only, never message text.
+  let teacherThreads = null;
+  if (authAccount && firestoreRecord) {
+    try {
+      const uidX = authAccount.uid;
+      const rdoc = await db.collection("data").doc(`read-state:${uidX}`).get();
+      const raw = rdoc.exists ? rdoc.data() : null;
+      const v = raw && raw.value && typeof raw.value === "object" ? raw.value : {};
+      const markOf = (key) => (typeof v[key] === "string" ? v[key] : null);
+      const strayOf = (key) => (raw && typeof raw[`value.${key}`] === "string" ? raw[`value.${key}`] : null);
+      const famUids = new Map();
+      for (const cid of (firestoreRecord.assignedClassIds || []).slice(0, 8)) {
+        const q = await db.collection("data").where("value.linkedClassIds", "array-contains", cid).get(); // eslint-disable-line no-await-in-loop
+        q.forEach((d) => { if (d.id.startsWith("family:")) famUids.set(d.id.slice(7), d.data().value?.name || ""); });
+      }
+      const rows = [];
+      for (const [fuid, fname] of [...famUids.entries()].slice(0, 60)) {
+        const t = await db.collection("data").doc(`teacher-messages:${uidX}:${fuid}`).get(); // eslint-disable-line no-await-in-loop
+        const msgs = t.exists ? (t.data().value?.messages || []) : [];
+        const fromFamily = msgs.filter((m) => m.senderType === "family");
+        const lastFam = fromFamily[fromFamily.length - 1];
+        if (!lastFam) continue;
+        const proper = markOf(`teacher-direct-${fuid}`);
+        const stray = strayOf(`teacher-direct-${fuid}`);
+        const best = [proper, stray].filter(Boolean).sort().pop() || null;
+        rows.push({ family: fname, lastFromFamilyAt: lastFam.timestamp, familyMessages: fromFamily.length, properMark: proper, strayMark: stray, countsAsNew: !best || new Date(lastFam.timestamp) > new Date(best) });
+      }
+      teacherThreads = { familiesChecked: famUids.size, withFamilyMessages: rows.length, newByRule: rows.filter((r) => r.countsAsNew).length, rows: rows.filter((r) => r.countsAsNew).slice(0, 20) };
+    } catch (e) { teacherThreads = { error: e.message || String(e) }; }
+  }
+
   return res.status(200).json({
     ok: true,
     authAccount,
     authError,
-    familySummary, readSummary, threads,
+    familySummary, readSummary, threads, teacherThreads,
     firestoreRecord: firestoreRecord ? {
       name: firestoreRecord.name,
       email: firestoreRecord.email,
