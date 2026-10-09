@@ -20812,7 +20812,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
   const [loadFailed, setLoadFailed] = useState(false);
   const refreshCycles = async () => {
     let list;
-    try { list = (await loadJSON("tehillim:cycles", [], true, 3, true)) || []; setLoadFailed(false); } catch { setLoadFailed(true); list = []; }
+    try { list = (await loadJSON("tehillim:cycles", [], true, 3, true)) || []; setLoadFailed(false); } catch (e) { setLoadFailed(e?.code || e?.message || "error"); list = []; }
     const all = list.filter((c) => c.programId === program.id).sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1));
     setCycles(all);
     return all;
@@ -20942,13 +20942,9 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       });
       const changedIds = [];
       for (const [classId, changes] of Object.entries(byClass)) changedIds.push(...(await saveQuotaChanges(classId, changes))); // eslint-disable-line no-await-in-loop
-      // Edited after parents were already notified -> the family gets an "Updated quota" notice.
-      if (changedIds.length > 0 && sendAllowed() && (await parentsAlreadyNotified())) {
-        const uids = await familiesFor(new Set(changedIds));
-        await sendPushNotification(uids, "Updated Tehillim quota", "A child's Shabbos Mevarchim Tehillim quota was updated. Open the app to see it.", "/?portal=parent&tab=home");
-      }
+      // An edit after parents were notified sends NO new message: the parent's bar simply shows the new quota.
       setNotice(`Saved ${changedIds.length} quota${changedIds.length === 1 ? "" : "s"}.`);
-    } catch { setNotice("That did not save — check your connection and try again."); } finally { setBusy(false); }
+    } catch (e) { setNotice(`That did not save — check your connection and try again. (${e?.code || e?.message || "unknown error"})`); } finally { setBusy(false); }
   };
 
   // What a student shows (and gets, if the teacher just confirms) when nothing was typed: the grade default.
@@ -20970,7 +20966,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       await saveJSON(tehillimConfirmKey(cycleId, g.classId), rec, true);
       setConfirms((prev) => ({ ...prev, [g.classId]: rec }));
       setNotice(`${g.className} confirmed. Thank you!`);
-    } catch { setNotice("That did not save — check your connection and try again."); } finally { setBusy(false); }
+    } catch (e) { setNotice(`That did not save — check your connection and try again. (${e?.code || e?.message || "unknown error"})`); } finally { setBusy(false); }
   };
 
   const applyToClass = async (classId) => {
@@ -21103,7 +21099,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
 
       {!cycle && loadFailed ? (
         <div className="text-sm text-stone-600">
-          <p className="mb-2">Couldn't load this month's Tehillim program (the connection may be weak).</p>
+          <p className="mb-2">Couldn't load this month's Tehillim program (the connection may be weak). <span className="text-xs text-stone-400">{String(loadFailed)}</span></p>
           <button onClick={loadAll} className="bg-teal-700 text-white rounded-lg px-4 py-2 text-sm font-semibold">Try again</button>
         </div>
       ) : !cycle ? (
@@ -21397,8 +21393,8 @@ function TehillimFamilyCard({ family }) {
         if (cancelled) return;
         if (children.length === 0) { setState(null); return; }
         setState({ cycle: visible, children });
-        // Pop up once per device per version of the quotas (an edit counts as a new version).
-        const version = `${visible.id}:${children.map((c) => c.quota.updatedAt || c.quota.setAt).sort().pop()}`;
+        // Pop up once per device per cycle.
+        const version = visible.id; // an edited quota changes the bar quietly; it does not pop up again
         let seen = null;
         try { seen = localStorage.getItem(`tehillim-popup-seen:${family.uid}`); } catch { /* storage may be blocked */ }
         if (seen !== version) {
