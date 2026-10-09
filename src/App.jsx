@@ -6840,6 +6840,25 @@ function TeacherAccountChecker({ onCheck }) {
           ) : (
             <p className="text-xs font-bold text-amber-700">⚠ This is a real, valid sign-in account — but no teacher profile exists for it at all. They could sign in but would see nothing.</p>
           )}
+          {result.familySummary && (
+            <p className="text-xs text-stone-700"><span className="font-semibold">Parent profile:</span> {result.familySummary.name} · {result.familySummary.active ? "active" : "⚠ marked inactive"} · {result.familySummary.studentCount} child link(s) · {(result.familySummary.linkedClassIds || []).length} class(es)</p>
+          )}
+          {result.readSummary && (
+            <div className="border-t border-stone-200 pt-1.5 mt-1.5">
+              <p className="text-xs font-semibold text-stone-700">Saved read marks (why things show as new)</p>
+              {result.readSummary.error ? <p className="text-xs text-rose-600">Could not read: {result.readSummary.error}</p> : (
+                <>
+                  <p className="text-xs text-stone-700">Record: {result.readSummary.exists ? "exists" : "none"} · stored as: {result.readSummary.valueType} · marks: {result.readSummary.markCount} · snoozed: {result.readSummary.snoozedCount}</p>
+                  <p className="text-xs text-stone-700">Newest mark: {formatTime(result.readSummary.newestMark) || "none"} · oldest: {formatTime(result.readSummary.oldestMark) || "none"}</p>
+                  <p className="text-xs text-stone-700">Top-level fields: {(result.readSummary.topKeys || []).join(", ") || "none"}</p>
+                  {(result.readSummary.dottedTopKeys || []).length > 0 && <p className="text-xs font-bold text-amber-700">⚠ Fields with dots in their names: {result.readSummary.dottedTopKeys.join(", ")}</p>}
+                  {(result.threads || []).map((t) => (
+                    <p key={t.thread} className="text-[11px] text-stone-600 break-all">{t.thread}: {"lastMessageAt" in t ? `last message ${formatTime(t.lastMessageAt) || "none"} (${t.lastFrom || "-"})` : `${t.homeworkPosts} homework post(s), ${t.postsNewerThanMark} newer than the mark`} · saved mark: {formatTime(t.savedReadMark) || "none"}</p>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

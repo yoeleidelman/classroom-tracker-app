@@ -137,10 +137,62 @@ export default async function handler(req, res) {
     firestoreRecord = doc.exists ? doc.data().value : null;
   }
 
+  // READ-ONLY diagnosis of "everything shows as unread": what the person's family profile and saved
+  // read marks actually look like, and, per thread, the newest message versus the saved read mark.
+  // Shows shapes and timestamps only, never message text.
+  let familySummary = null;
+  let readSummary = null;
+  let threads = [];
+  if (authAccount) {
+    try {
+      const uidX = authAccount.uid;
+      const fdoc = await db.collection("data").doc(`family:${uidX}`).get();
+      const fam = fdoc.exists ? fdoc.data().value : null;
+      if (fam) {
+        familySummary = {
+          name: fam.name, active: fam.active !== false,
+          linkedClassIds: fam.linkedClassIds || [],
+          studentCount: (fam.studentLinks || []).length,
+        };
+      }
+      const rdoc = await db.collection("data").doc(`read-state:${uidX}`).get();
+      const raw = rdoc.exists ? rdoc.data() : null;
+      const v = raw ? raw.value : undefined;
+      const valueType = !raw ? "no record at all" : v === undefined ? "missing" : v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
+      const marks = valueType === "object" ? Object.entries(v).filter(([k, x]) => k !== "snoozed" && typeof x === "string").sort((x, y) => (x[1] < y[1] ? 1 : -1)) : [];
+      const topKeys = raw ? Object.keys(raw) : [];
+      readSummary = {
+        exists: Boolean(raw), valueType, topKeys: topKeys.slice(0, 15), dottedTopKeys: topKeys.filter((k) => k.includes(".")).slice(0, 10),
+        markCount: marks.length, newestMark: marks[0]?.[1] || null, oldestMark: marks[marks.length - 1]?.[1] || null,
+        snoozedCount: valueType === "object" && v.snoozed ? Object.keys(v.snoozed).length : 0,
+        sampleMarks: marks.slice(0, 8).map(([k, x]) => ({ key: k, at: x })),
+      };
+      const mark = (k) => (valueType === "object" && typeof v[k] === "string" ? v[k] : null);
+      if (fam) {
+        const classIds = [...new Set((fam.linkedClassIds || []).concat((fam.studentLinks || []).map((l) => l.classId)))].slice(0, 6);
+        for (const cid of classIds) {
+          const m = await db.collection("data").doc(`class:${cid}:messages:${uidX}`).get(); // eslint-disable-line no-await-in-loop
+          const msgs = m.exists ? (m.data().value?.messages || []) : [];
+          const last = msgs[msgs.length - 1];
+          threads.push({ thread: `class-${cid}`, lastMessageAt: last?.timestamp || null, lastFrom: last?.senderType || null, savedReadMark: mark(`class-${cid}`) });
+          const h = await db.collection("data").doc(`class:${cid}:homework`).get(); // eslint-disable-line no-await-in-loop
+          const posts = h.exists && Array.isArray(h.data().value) ? h.data().value : [];
+          const hm = mark(`homework-${cid}`);
+          threads.push({ thread: `homework-${cid}`, homeworkPosts: posts.length, savedReadMark: hm, postsNewerThanMark: posts.filter((x) => !hm || new Date(x.timestamp) > new Date(hm)).length });
+        }
+        const a = await db.collection("data").doc(`admin-messages:${uidX}`).get();
+        const am = a.exists ? (a.data().value?.messages || []) : [];
+        const al = am[am.length - 1];
+        threads.push({ thread: `admin-${uidX}`, lastMessageAt: al?.timestamp || null, lastFrom: al?.senderType || null, savedReadMark: mark(`admin-${uidX}`) });
+      }
+    } catch (e) { readSummary = { error: e.message || String(e) }; }
+  }
+
   return res.status(200).json({
     ok: true,
     authAccount,
     authError,
+    familySummary, readSummary, threads,
     firestoreRecord: firestoreRecord ? {
       name: firestoreRecord.name,
       email: firestoreRecord.email,
