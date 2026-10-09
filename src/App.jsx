@@ -7558,6 +7558,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [newPw, setNewPw] = useState("");
   const [newClassType, setNewClassType] = useState("elementary");
   const [showPwChange, setShowPwChange] = useState(false);
+  const [showAdminReports, setShowAdminReports] = useState(false);
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
   const [pwSaved, setPwSaved] = useState(false);
@@ -7644,7 +7645,6 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showArchivedStudents, setShowArchivedStudents] = useState(false);
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
-  const [showBulkReportExport, setShowBulkReportExport] = useState(false);
   const [showMessagesLookup, setShowMessagesLookup] = useState(false);
   const [showLabelsEditor, setShowLabelsEditor] = useState(false);
   const [showMyAccount, setShowMyAccount] = useState(false);
@@ -8118,15 +8118,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           )}
         </div>
         <div className="pt-1">
-          <p className="text-sm font-semibold text-stone-800 mb-1">Bulk student reports (elementary)</p>
-          <p className="text-xs text-stone-400 mb-3">The same "Export report" a teacher can generate for one student, at once for every elementary student across every elementary class — one real PDF per student, all bundled into a single zip download, grouped into a folder per class.</p>
-          {!showBulkReportExport ? (
-            <button onClick={() => setShowBulkReportExport(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
-              <Plus size={12} /> Build a bulk export
-            </button>
-          ) : (
-            <BulkStudentReportExportTool registry={registry} />
-          )}
+          <p className="text-sm font-semibold text-stone-800 mb-1">Reports for the whole school</p>
+          <p className="text-xs text-stone-400 mb-3">The same Create reports a teacher uses, for any elementary classes at once: a written message, a PDF, or both, for a month or custom dates. Send in-app to every family, email one by one, or download one zip.</p>
+          <button onClick={() => setShowAdminReports(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+            <Plus size={12} /> Create reports
+          </button>
         </div>
         </>
         )}
@@ -8738,6 +8734,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
             onUpdateFamily={onUpdateFamily} onBack={() => setViewingFamilyGroupId(null)} />
         );
       })()}
+
+      {showAdminReports && (
+        <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
+          <AdminCreateReportsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowAdminReports(false)} />
+        </div>
+      )}
 
       {openProgramId && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
@@ -26418,7 +26420,9 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
 // reports, custom-date-range text reports, and the per-student PDF export). The same date choices
 // (a whole month, or a custom start/end) and the same section checkboxes apply to every format, and
 // it works for one student, a few, or the whole class.
-function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily }) {
+function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title }) {
+  // contextFor (admin, several classes at once): student -> { incidents, classAssessments, config, classId, className }.
+  // Without it, everything comes from the single class this screen was opened in, exactly as before.
   const now = new Date();
   const isPreschool = classType === "preschool";
   const pad2 = (n) => String(n).padStart(2, "0");
@@ -26441,7 +26445,8 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const [bulkSummary, setBulkSummary] = useState(null);
   const [walkIdx, setWalkIdx] = useState(null); // "Email one by one" walkthrough: index into the ready students, or null
   const [hintId, setHintId] = useState(null); // student whose "attach the PDF" tip is showing
-  const familiesRef = useRef(null);
+  const familiesRef = useRef({}); // classId -> families (fetched once per class)
+  const ctxOf = (student) => (contextFor ? contextFor(student) : { incidents, classAssessments, config, classId, className });
 
   const wantMessage = format === "message" || format === "both";
   const wantPdf = format === "pdf" || format === "both";
@@ -26470,15 +26475,16 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const generateOne = async (student) => {
     patch(student.id, { loading: true, error: null, sendState: null });
     const data = studentData[student.id] || emptyStudentData();
+    const cx = ctxOf(student);
     let draft = `Hi! Attached is ${firstName(student)}'s report for ${label}.`;
     let dataUsed = null;
     let pdfBlob = null;
     let error = null;
     if (wantMessage) {
-      const facts = buildRangeFacts(student, data, incidents, classAssessments, config, rangeStart, rangeEnd, msgOpts);
+      const facts = buildRangeFacts(student, data, cx.incidents, cx.classAssessments, cx.config, rangeStart, rangeEnd, msgOpts);
       dataUsed = factsToPlainText(student, label, facts);
       try {
-        draft = await generateHybridReport(student, label, facts, config, loggedInTeacher);
+        draft = await generateHybridReport(student, label, facts, cx.config, loggedInTeacher);
       } catch (err) {
         console.error("Report text generation failed:", err);
         draft = "Could not generate — here's the raw data instead:\n\n" + dataUsed;
@@ -26486,7 +26492,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     }
     if (wantPdf) {
       try {
-        pdfBlob = buildStudentReportPdf(student, data, incidents, classAssessments, config, sections, className, rangeStart || null, rangeEnd || null);
+        pdfBlob = buildStudentReportPdf(student, data, cx.incidents, cx.classAssessments, cx.config, sections, cx.className, rangeStart || null, rangeEnd || null);
       } catch (err) {
         console.error("Report PDF generation failed:", err);
         error = "The PDF couldn't be created for this student.";
@@ -26506,7 +26512,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     setRunning(true);
     setBulkSummary(null);
     setBulkArmed(false);
-    familiesRef.current = null;
+    familiesRef.current = {};
     setResults({});
     setProgress({ done: 0, total: chosen.length });
     let done = 0;
@@ -26534,10 +26540,13 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     const zip = new JSZip();
     for (const s of chosen) {
       const r = results[s.id];
-      if (r?.pdfBlob) zip.file(r.pdfName, r.pdfBlob);
+      if (r?.pdfBlob) {
+        const folder = contextFor ? zip.folder(safeName(ctxOf(s).className || "Class")) : zip;
+        folder.file(r.pdfName, r.pdfBlob);
+      }
     }
     const blob = await zip.generateAsync({ type: "blob" });
-    saveBlob(blob, `${safeName(className || "Class")} Reports ${safeName(label)}.zip`);
+    saveBlob(blob, `${safeName(contextFor ? "All classes" : (className || "Class"))} Reports ${safeName(label)}.zip`);
   };
 
   const logSent = (student, channel) => {
@@ -26546,7 +26555,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     onLogSent(student.id, {
       date: todayISO(), channel: channel || "email", type: "automated", source: "report",
       subject: `Report — ${r.label}`, body: r.draft + (r.pdfBlob ? "\n\n[PDF report attached]" : ""),
-    });
+    }, student);
     patch(student.id, { logged: true });
   };
 
@@ -26556,13 +26565,14 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     if (!r || !(r.draft || "").trim() && !r.pdfBlob) return "empty";
     patch(student.id, { sendState: "sending" });
     try {
-      if (!familiesRef.current) familiesRef.current = await fetchClassFamilies(classId);
-      const match = familiesRef.current.find((f) => (f.studentLinks || []).some((l) => l.studentId === student.id && l.classId === classId));
+      const cid = ctxOf(student).classId;
+      if (!familiesRef.current[cid]) familiesRef.current[cid] = await fetchClassFamilies(cid);
+      const match = familiesRef.current[cid].find((f) => (f.studentLinks || []).some((l) => l.studentId === student.id && l.classId === cid));
       if (!match) { patch(student.id, { sendState: "no-family" }); return "no-family"; }
       let attachments;
       if (r.pdfBlob) {
         const file = new File([r.pdfBlob], r.pdfName, { type: "application/pdf" });
-        const url = await uploadOneFile(file, `message-attachments/report-${classId}/${uid()}.pdf`);
+        const url = await uploadOneFile(file, `message-attachments/report-${ctxOf(student).classId}/${uid()}.pdf`);
         attachments = [{ url, type: "file", name: r.pdfName }];
       }
       await sendDirectMessageToFamily(match.uid, (r.draft || "").trim(), attachments);
@@ -26596,7 +26606,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const gmailDraftUrl = (s) => {
     const r = results[s.id];
     const to = [r?.email || s.parentEmail, emailBoth && s.parent2Email].filter(Boolean).join(", ");
-    const body = applyMessageDisclaimer(r?.draft || "", config, null, loggedInTeacher?.messageSignOff);
+    const body = applyMessageDisclaimer(r?.draft || "", ctxOf(s).config, null, loggedInTeacher?.messageSignOff);
     return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(`Report — ${r?.label || ""}`)}&body=${encodeURIComponent(body)}`;
   };
   const emailWithPdf = (s) => {
@@ -26621,21 +26631,21 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Create reports</h1>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{title || "Create reports"}</h1>
       <p className="text-xs text-stone-400 mb-4">A written message, a PDF, or both — for one student, a few, or the whole class. Every figure comes only from what's logged in the dates you pick. Nothing sends until you press send.</p>
 
       <div className="md:max-w-xl">
         <div className={stepCard}>
           <p className={stepTitle}>1 · Who</p>
           <div className="flex items-center gap-2 mb-2">
-            <button onClick={() => setSelectedIds(roster.map((s) => s.id))} className={chip(selectedIds.length === roster.length)}>Whole class</button>
+            <button onClick={() => setSelectedIds(roster.map((s) => s.id))} className={chip(selectedIds.length === roster.length)}>{contextFor ? "Everyone" : "Whole class"}</button>
             <button onClick={() => setSelectedIds([])} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Clear</button>
             <span className="ml-auto text-xs text-stone-400">{chosen.length} of {roster.length} selected</span>
           </div>
           <div className="max-h-48 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1">
             {roster.map((s) => (
               <label key={s.id} className="flex items-center gap-2 text-sm text-stone-700 px-1 py-0.5">
-                <input type="checkbox" checked={selectedIds.includes(s.id)} onChange={() => toggleStudent(s.id)} /> {s.name}
+                <input type="checkbox" checked={selectedIds.includes(s.id)} onChange={() => toggleStudent(s.id)} /> {s.name}{contextFor && <span className="text-[10px] text-stone-400">{ctxOf(s).className}</span>}
               </label>
             ))}
           </div>
@@ -26784,13 +26794,13 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
               return (
                 <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="font-semibold text-stone-800 text-sm">{s.name}</span>
+                    <span className="font-semibold text-stone-800 text-sm">{s.name}{contextFor && <span className="ml-2 text-[10px] font-normal text-stone-400">{ctxOf(s).className}</span>}</span>
                     {r.loading && <Loader2 className="animate-spin text-teal-700" size={16} />}
                   </div>
                   {!r.loading && (
                     <div>
                       <label className="block text-[10px] text-stone-400 mb-0.5">Parent email</label>
-                      <input type="email" value={r.email} onChange={(e) => { const v = e.target.value; patch(s.id, { email: v }); onUpdateParentEmail(s.id, v); }}
+                      <input type="email" value={r.email} onChange={(e) => { const v = e.target.value; patch(s.id, { email: v }); onUpdateParentEmail(s.id, v, s); }}
                         placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
                       <label className="block text-[10px] text-stone-400 mb-0.5">{wantMessage ? "Message" : "Note to go with the PDF"}</label>
                       <div className="flex items-start gap-1.5 mb-2">
@@ -26816,7 +26826,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                             <Mail size={12} /> Email with PDF
                           </button>
                         )}
-                        {emails && !r.pdfBlob && <MailActionButtons email={emails} subject={`Report — ${r.label}`} body={applyMessageDisclaimer(r.draft, config, null, loggedInTeacher?.messageSignOff)} size="small" />}
+                        {emails && !r.pdfBlob && <MailActionButtons email={emails} subject={`Report — ${r.label}`} body={applyMessageDisclaimer(r.draft, ctxOf(s).config, null, loggedInTeacher?.messageSignOff)} size="small" />}
                         {r.sendState === "sent" ? (
                           <span className="flex items-center gap-1 text-xs font-semibold text-emerald-700"><Check size={13} /> Sent in-app{r.pdfBlob ? " with PDF" : ""}</span>
                         ) : r.sendState === "no-family" ? (
@@ -26855,149 +26865,100 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   );
 }
 
-function BulkStudentReportExportTool({ registry }) {
-  const [selected, setSelected] = useState(REPORT_SECTIONS.map((s) => s.id));
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState(todayISO());
-  const [status, setStatus] = useState("idle"); // "idle" | "counting" | "ready" | "running" | "done"
-  const [studentCount, setStudentCount] = useState(0);
-  const [classCount, setClassCount] = useState(0);
-  const [progress, setProgress] = useState(null); // { done, total }
+// ---- Admin: the same Create reports flow, across any elementary classes at once ----
+function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
+  const classes = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
+  const [picked, setPicked] = useState(() => classes.map((c) => c.id));
+  const [loaded, setLoaded] = useState(null); // { roster, studentData, ctxByClass }
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  const allSelected = selected.length === REPORT_SECTIONS.length;
-  const elementaryClasses = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
+  const toggle = (id) => setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const buildCount = async () => {
-    setStatus("counting");
-    setError(null);
+  const loadChosen = async () => {
+    setLoading(true); setError(null);
     try {
-      let total = 0;
-      for (const cls of elementaryClasses) {
-        const roster = await loadJSON(`class:${cls.id}:roster`, [], true);
-        // Reported directly: a student added here as a secondary, part-time enrollment (in for
-        // specific periods/subjects only, from their own primary class) never gets attendance —
-        // or most other data — actually logged against this class at all, so a report generated
-        // here for them would just be empty pages. Same enrollmentScope check already used
-        // elsewhere in this app (notifyClassFamilies) to make this same distinction.
-        total += roster.filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time").length;
-      }
-      setStudentCount(total);
-      setClassCount(elementaryClasses.length);
-      setStatus("ready");
-    } catch (e) {
-      console.error("Bulk report count failed", e);
-      setError("Something went wrong checking class rosters. Safe to try again.");
-      setStatus("idle");
-    }
-  };
-
-  const runExport = async () => {
-    setStatus("running");
-    setError(null);
-    setProgress({ done: 0, total: studentCount });
-    try {
-      const zip = new JSZip();
-      let done = 0;
-      for (const cls of elementaryClasses) {
-        const safeClassName = cls.name.replace(/[/\\?%*:|"<>]/g, "-");
-        const folder = zip.folder(safeClassName);
-        const [rawRoster, config, classAssessments, incidents] = await Promise.all([
+      const roster = [];
+      const studentData = {};
+      const ctxByClass = {};
+      for (const cls of classes.filter((c) => picked.includes(c.id))) {
+        const [rawRoster, config, classAssessments, incidents] = await Promise.all([ // eslint-disable-line no-await-in-loop
           loadJSON(`class:${cls.id}:roster`, [], true),
           loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true),
           loadJSON(`class:${cls.id}:classAssessments`, [], true),
           loadJSON(`class:${cls.id}:incidents`, [], true),
         ]);
-        // Same filter as the count step above — a part-time, secondary-enrollment student here
-        // never belongs in this class's own reports.
-        const roster = rawRoster.filter((s) => !s.enrollmentScope || s.enrollmentScope === "full-time");
-        for (const student of roster) {
-          const data = (await loadJSON(`class:${cls.id}:kriya:${student.id}`, null, true)) || emptyStudentData();
-          const blob = buildStudentReportPdf(student, data, incidents, classAssessments, config, selected, cls.name, startDate || null, endDate || null);
-          const safeStudentName = student.name.replace(/[/\\?%*:|"<>]/g, "-");
-          folder.file(`${safeStudentName}.pdf`, blob);
-          done++;
-          setProgress({ done, total: studentCount });
+        ctxByClass[cls.id] = { incidents, classAssessments, config, classId: cls.id, className: cls.name };
+        // Same rule as everywhere else: a part-time, secondary enrollment never has data logged in this class.
+        for (const st of (rawRoster || []).filter((x) => !x.enrollmentScope || x.enrollmentScope === "full-time")) {
+          roster.push({ ...st, __classId: cls.id });
+          studentData[st.id] = (await loadJSON(`class:${cls.id}:kriya:${st.id}`, null, true)) || emptyStudentData(); // eslint-disable-line no-await-in-loop
         }
       }
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `Student Reports ${startDate || "start"} to ${endDate || "today"}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setStatus("done");
+      if (roster.length === 0) { setError("None of the chosen classes have students."); setLoading(false); return; }
+      setLoaded({ roster, studentData, ctxByClass });
     } catch (e) {
-      console.error("Bulk report export failed", e);
-      setError("Something went wrong partway through generating reports. Safe to try again from the start.");
-      setStatus("ready");
+      console.error("Admin reports load failed", e);
+      setError("Something went wrong loading the classes. Safe to try again.");
     }
+    setLoading(false);
   };
 
-  if (status === "done") {
+  // In-app: arrives in each family's School Office thread, with the PDF attached.
+  const sendAsOffice = async (guardianUid, text, attachments) => {
+    const key = `admin-messages:${guardianUid}`;
+    const existing = (await loadJSON(key, null, true)) || { messages: [] };
+    const entry = { id: uid(), senderType: "admin", senderName: "School Office", text, timestamp: new Date().toISOString(), ...(attachments?.length ? { attachments } : {}) };
+    await saveJSON(key, { ...existing, messages: [...existing.messages, entry] }, true);
+    sendPushNotification([guardianUid], "Message from the School Office", text?.trim() || describeAttachmentsForNotification(attachments), "/?portal=parent&open=admin", { readStateKey: `admin-${guardianUid}`, timestamp: entry.timestamp });
+  };
+  const logSent = async (studentId, entry, student) => {
+    const cid = student?.__classId;
+    if (!cid) return;
+    const key = `class:${cid}:kriya:${studentId}`;
+    const fresh = (await loadJSON(key, null, true)) || emptyStudentData();
+    await saveJSON(key, { ...fresh, communications: [{ id: uid(), ...entry }, ...(fresh.communications || [])] }, true);
+  };
+  const updateEmail = async (studentId, email, student) => {
+    const cid = student?.__classId;
+    if (!cid) return;
+    const key = `class:${cid}:roster`;
+    const fresh = (await loadJSON(key, [], true)) || [];
+    await saveJSON(key, fresh.map((x) => (x.id === studentId ? { ...x, parentEmail: email } : x)), true);
+  };
+
+  if (loaded) {
     return (
-      <div>
-        <p className="text-xs font-semibold text-emerald-700 mb-2">Done — {studentCount} report{studentCount === 1 ? "" : "s"} across {classCount} class{classCount === 1 ? "" : "es"} downloaded as one zip file.</p>
-        <button onClick={() => setStatus("idle")} className="text-xs font-semibold text-teal-700 hover:text-teal-900">Start another export</button>
-      </div>
+      <CreateReportsView roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
+        title="Create reports: school"
+        contextFor={(st) => loaded.ctxByClass[st.__classId]} sendDirectMessageToFamily={sendAsOffice}
+        onBack={() => setLoaded(null)} onLogSent={logSent} onUpdateParentEmail={updateEmail} />
     );
   }
-
   return (
-    <div className="md:w-96">
-      <div className="flex items-center justify-between mb-2">
-        <label className="text-sm font-semibold text-stone-700">Include</label>
-        <button onClick={() => setSelected(allSelected ? [] : REPORT_SECTIONS.map((s) => s.id))} className="text-xs font-semibold text-teal-700 hover:text-teal-900">
-          {allSelected ? "Deselect all" : "Select all"}
-        </button>
-      </div>
-      <div className="space-y-1.5 mb-4">
-        {REPORT_SECTIONS.map((s) => (
-          <button key={s.id} onClick={() => toggle(s.id)}
-            className={`w-full flex items-center gap-2 rounded-lg border px-3 py-2.5 text-left ${selected.includes(s.id) ? "bg-teal-50 border-teal-300" : "bg-white border-stone-300"}`}>
-            <span className={`w-4 h-4 rounded border shrink-0 flex items-center justify-center ${selected.includes(s.id) ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
-              {selected.includes(s.id) && <Check size={11} className="text-white" />}
-            </span>
-            <span className={`text-sm font-medium ${selected.includes(s.id) ? "text-teal-800" : "text-stone-600"}`}>{s.label}</span>
-          </button>
-        ))}
-      </div>
-
-      <label className="block text-sm font-semibold text-stone-700 mb-1">Date range</label>
-      <p className="text-xs text-stone-400 mb-2">Applied the same way to every student's report. Leave the start blank for their full history.</p>
-      <div className="flex gap-2 mb-5">
-        <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-        <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="flex-1 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-      </div>
-
-      {status === "ready" ? (
-        <div>
-          <p className="text-xs text-stone-600 mb-3">{studentCount} student{studentCount === 1 ? "" : "s"} across {classCount} elementary class{classCount === 1 ? "" : "es"} — one PDF each, all bundled into one zip.</p>
-          <div className="flex gap-2">
-            <button onClick={runExport} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800">
-              <Printer size={16} /> Generate {studentCount} reports
-            </button>
-            <button onClick={() => setStatus("idle")} className="px-4 text-sm text-stone-500 border border-stone-300 rounded-lg hover:bg-stone-50">Cancel</button>
-          </div>
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Create reports: school</h1>
+      <p className="text-xs text-stone-400 mb-4">Choose the classes, then pick dates and format on the next screen. In-app reports arrive in each family's School Office messages.</p>
+      <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3 md:max-w-xl">
+        <div className="flex items-center gap-2 mb-2">
+          <p className="text-xs font-bold uppercase tracking-wide text-stone-400">Classes</p>
+          <button onClick={() => setPicked(picked.length === classes.length ? [] : classes.map((c) => c.id))} className="ml-auto text-xs font-semibold text-teal-700">{picked.length === classes.length ? "Clear" : "Select all"}</button>
         </div>
-      ) : status === "running" ? (
-        <p className="text-sm font-semibold text-teal-700">Generating… {progress ? `${progress.done}/${progress.total}` : ""}</p>
-      ) : (
-        <button onClick={buildCount} disabled={selected.length === 0 || status === "counting"}
-          className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
-          <Printer size={16} /> {status === "counting" ? "Checking rosters…" : "Check what this would generate"}
-        </button>
-      )}
+        <div className="space-y-1">
+          {classes.map((c) => (
+            <label key={c.id} className="flex items-center gap-2 text-sm text-stone-700"><input type="checkbox" checked={picked.includes(c.id)} onChange={() => toggle(c.id)} /> {c.name}</label>
+          ))}
+        </div>
+        <p className="text-[10px] text-stone-400 mt-2">Preschool rooms aren't included here. Open a preschool room to make its reports.</p>
+      </div>
+      <button onClick={loadChosen} disabled={picked.length === 0 || loading} className="md:max-w-xl w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40">
+        {loading ? <><Loader2 className="animate-spin" size={16} /> Loading classes…</> : "Continue"}
+      </button>
       {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
     </div>
   );
 }
-
-
 
 function IncidentDetailView({ incident, roster, classId, config, plannerDays, loggedInTeacher, sendMessageToFamily, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
