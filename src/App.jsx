@@ -20744,13 +20744,6 @@ const tehillimQuotaLine = (q) => {
   return `${q.amount} chapter${Number(q.amount) === 1 ? "" : "s"} (${range})`;
 };
 const tehillimIsLocked = (cycle, nowMs = Date.now()) => Boolean(cycle?.lockedAt) || nowMs > new Date(cycle?.checkoffDeadline || 0).getTime();
-// Shabbos itself: Friday 2:00 PM through Saturday 9:00 PM Pacific — checkoff waits until after.
-const tehillimInShabbosQuietWindow = (cycle, nowMs = Date.now()) => {
-  if (!cycle?.shabbosDate) return false;
-  const start = new Date(laTimeToISO(addDaysISO(cycle.shabbosDate, -1), "14:00")).getTime();
-  const end = new Date(laTimeToISO(cycle.shabbosDate, "21:00")).getTime();
-  return nowMs >= start && nowMs < end;
-};
 async function tehillimLoadCycles() { return (await loadJSON("tehillim:cycles", [], true)) || []; }
 const tehillimConfirmKey = (cycleId, classId) => `tehillim:${cycleId}:confirm:${classId}`;
 // Today's date in Pacific time as YYYY-MM-DD, whatever time zone the device is in.
@@ -21487,11 +21480,10 @@ function TehillimFamilyCard({ family }) {
   if (!state) return null;
   const { cycle, children } = state;
   const locked = tehillimIsLocked(cycle);
-  const quiet = tehillimInShabbosQuietWindow(cycle);
   const winnersVisible = cycle.draw && cycle.announcedAt;
 
   const setCompleted = async (child, completed) => {
-    if (tehillimIsLocked(cycle) || tehillimInShabbosQuietWindow(cycle)) return;
+    if (tehillimIsLocked(cycle)) return;
     setSaving(child.link.studentId);
     setSaveError(null);
     const doc = { completed, at: new Date().toISOString(), by: family.uid, byName: family.name || "" };
@@ -21522,11 +21514,9 @@ function TehillimFamilyCard({ family }) {
               <p className="text-sm text-stone-700 mb-2">{tehillimQuotaLine(c.quota)}</p>
               {locked ? (
                 <p className="text-xs text-stone-500">{isDone ? `✓ ${first} was checked off — entered in the raffle.` : "Checkoff is closed for this month."}</p>
-              ) : quiet ? (
-                <p className="text-xs text-stone-500">Check {first} off after Shabbos — this opens Saturday night.</p>
               ) : (
                 <>
-                  <p className="text-xs text-stone-500 mb-1.5">Did {first} complete their Tehillim quota? Check this off after they finish — after Shabbos.</p>
+                  <p className="text-xs text-stone-500 mb-1.5">Did {first} complete their Tehillim quota? Check this off once they finish.</p>
                   <div className="flex gap-2">
                     <button onClick={() => setCompleted(c, true)} disabled={saving === c.link.studentId}
                       className={`flex-1 rounded-lg py-2 text-sm font-semibold border ${isDone ? "bg-emerald-600 text-white border-emerald-600" : "text-emerald-700 border-emerald-300 bg-white"}`}>Completed</button>
@@ -21564,7 +21554,6 @@ function TehillimFamilyCard({ family }) {
         if (winnersVisible) { tag = "Raffle winners announced: tap Open"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; borderCls = "border-l-stone-400"; }
         else if (locked) { tag = allDone ? "Checkoff closed. Entered in the raffle!" : "Checkoff is closed for this month"; tagCls = "bg-stone-100 text-stone-500 border-stone-200"; borderCls = "border-l-stone-400"; }
         else if (allDone) { tag = children.length > 1 ? "All checked off. Entered in the raffle!" : "Checked off. Entered in the raffle!"; tagCls = "bg-emerald-50 text-emerald-700 border-emerald-200"; borderCls = "border-l-emerald-500"; }
-        else if (quiet) { tag = "Check off after Shabbos"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; }
         else { tag = doneCount > 0 ? `${doneCount} of ${children.length} checked off` : "Not checked off yet"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; }
         return (
           <button type="button" onClick={() => setPopupOpen(true)} className={`block w-full text-left mb-5 bg-white border border-stone-200 border-l-4 ${borderCls} rounded-xl p-3`}>
