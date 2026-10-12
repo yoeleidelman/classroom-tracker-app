@@ -2412,8 +2412,43 @@ const inFlightClassAssignmentToggles = new Set();
 // this" belongs to the individual, not the conversation. Two guardians on one family, or two
 // co-teachers on one class, can each be at a different point in the exact same shared thread.
 // Keyed by the viewer's own login uid, never the shared family/class identity.
+// The last record successfully loaded for each person, kept in memory for this session.
+const readStateLastGood = {};
+// Loads a person's read marks, or returns null if they could not be loaded at all. Two protections the
+// plain loader never had:
+//  - A failed load is NOT the same as "nothing has been read." The old loader quietly returned an empty
+//    record on any failure, which made every conversation, homework post and badge look new again.
+//    Here a failure returns the last record that did load (or null), so callers can leave the screen
+//    alone instead of lighting up everything.
+//  - Marks that an earlier version of the app saved under a field literally named "value.<thread>" (a
+//    dot in the name, which the app never read back) are recovered, newest wins, so those threads
+//    stop showing as new.
+async function getReadStateOrNull(viewerId) {
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    try {
+      const snap = await getDoc(doc(db, "data", `read-state:${viewerId}`));
+      const data = snap.exists() ? snap.data() : null;
+      const state = data && data.value && typeof data.value === "object" && !Array.isArray(data.value) ? { ...data.value } : {};
+      if (data) {
+        for (const [k, v] of Object.entries(data)) {
+          if (k.startsWith("value.") && typeof v === "string") {
+            const name = k.slice(6);
+            if (!name.includes(".") && (typeof state[name] !== "string" || new Date(v) > new Date(state[name]))) state[name] = v;
+          }
+        }
+      }
+      readStateLastGood[viewerId] = state;
+      return { ...state };
+    } catch (e) {
+      if (attempt === 2) { console.error("Read marks could not be loaded", e); break; }
+      if (looksLikeStaleAuthError(e)) await refreshAuthTokenIfPossible();
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
+  return readStateLastGood[viewerId] ? { ...readStateLastGood[viewerId] } : null;
+}
 async function getReadState(viewerId) {
-  return (await loadJSON(`read-state:${viewerId}`, {}, true)) || {};
+  return (await getReadStateOrNull(viewerId)) || {};
 }
 // A real, reported bug this fixes: markThreadRead used to read the whole read-state document,
 // change one thread's timestamp in that local copy, then write the entire document back — a
@@ -2480,11 +2515,10 @@ async function markThreadRead(viewerId, threadKey) {
     await updateDoc(ref, new FieldPath("value", threadKey), readAt);
   } catch (err) {
     // updateDoc throws when the document doesn't exist yet (a family's very first-ever read
-    // mark) — this is the one case it genuinely can't handle on its own, not a sign of a deeper
-    // problem, so it isn't logged as an error the way an unexpected failure below would be.
-    const state = await getReadState(viewerId);
-    state[threadKey] = readAt;
-    await saveJSON(`read-state:${viewerId}`, state, true);
+    // mark). Add just this one mark with a merge — never read the whole record and write it back,
+    // because a read that failed or came back empty would then replace every other read mark with
+    // nothing, turning everything unread. A merge can only ever add or change this one thread.
+    try { await setDoc(ref, { value: { [threadKey]: readAt } }, { merge: true }); } catch (e) { console.error("Could not save read mark", e); }
   }
   recordLocalThreadRead(threadKey, readAt); // best-effort, see its own comment — never awaited or allowed to block the read itself
 }
@@ -2567,10 +2601,8 @@ async function snoozeThread(viewerId, threadKey, minutes) {
     await updateDoc(ref, new FieldPath("value", "snoozed", threadKey), until);
   } catch (err) {
     // updateDoc throws when the document doesn't exist yet — see markThreadRead's own comment
-    const state = await getReadState(viewerId);
-    state.snoozed = state.snoozed || {};
-    state.snoozed[threadKey] = until;
-    await saveJSON(`read-state:${viewerId}`, state, true);
+    // (a merge adds just this one snooze and can never wipe the other read marks)
+    try { await setDoc(ref, { value: { snoozed: { [threadKey]: until } } }, { merge: true }); } catch (e) { console.error("Could not save snooze", e); }
   }
 }
 // Whether a message counts as "mine" for whoever is viewing the thread. Staff (teacher or admin)
@@ -7536,7 +7568,8 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
     ]);
     const byGuardian = {};
     [...ownClassFamilies.flat(), ...reachable].forEach((f) => { byGuardian[f.uid] = true; });
-    const readState = await getReadState(currentTeacher.uid);
+    const readState = await getReadStateOrNull(currentTeacher.uid);
+    if (!readState) return; // could not load the read marks: leave the count as it is, never show everything as new
     let total = 0;
     for (const guardianUid of Object.keys(byGuardian)) {
       const thread = await loadJSON(`teacher-messages:${currentTeacher.uid}:${guardianUid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
@@ -9303,31 +9336,51 @@ function WhatsAppIcon({ size = 16 }) {
 // small anchored popover, since a 3-icon grid needs real room to be comfortably tappable.
 function ContactOfficePanel({ onViewUpdates }) {
   const [officePhone, setOfficePhone] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [note, setNote] = useState("");
 
-  useEffect(() => {
-    loadJSON("schoolSettings", {}, true).then((s) => { setOfficePhone(s?.officePhone || null); setLoading(false); });
-  }, []);
+  // The panel itself, with all three buttons and the link to the office's messages, ALWAYS opens. The number
+  // is only needed at the moment someone taps Call / Text / WhatsApp, so it loads quietly in the background,
+  // and again on the tap itself if it isn't there yet. The last number that loaded is also kept on the device.
+  const readSaved = () => { try { return localStorage.getItem("office-phone-last-good") || null; } catch { return null; } };
+  const writeSaved = (v) => { try { localStorage.setItem("office-phone-last-good", v); } catch { /* storage may be blocked */ } };
+  const fetchNumber = async () => {
+    try {
+      const st = await loadJSON("schoolSettings", null, true, 2, true);
+      const phone = st?.officePhone || null;
+      if (phone) { writeSaved(phone); setOfficePhone(phone); return phone; }
+      return readSaved();
+    } catch { return readSaved(); }
+  };
+  useEffect(() => { fetchNumber().then((p) => { if (p) setOfficePhone(p); }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
   const digits = (officePhone || "").replace(/[^\d]/g, "");
-  if (loading || !digits) return null;
+  const goTo = async (kind) => {
+    let d = digits;
+    if (!d) { setNote("Getting the office number..."); d = ((await fetchNumber()) || "").replace(/[^\d]/g, ""); }
+    if (!d) { setNote("Couldn't get the office number right now. Please try again in a moment, or open the updates below."); return; }
+    setNote("");
+    window.location.href = kind === "call" ? `tel:${d}` : kind === "text" ? `sms:${d}` : `https://wa.me/${d}`;
+  };
+  const tile = "flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100";
 
   return (
     <div className="anim-expand-down bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3">
       <div className="grid grid-cols-3 gap-2 mb-2">
-        <a href={`tel:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <Phone size={18} className="text-[#5F9F9E]" />
-          <span className="text-[11px] font-semibold text-stone-700">Call</span>
-        </a>
-        <a href={`sms:${digits}`} className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <MessageCircle size={18} className="text-[#5F9F9E]" />
-          <span className="text-[11px] font-semibold text-stone-700">Text</span>
-        </a>
-        <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100">
-          <WhatsAppIcon size={19} />
-          <span className="text-[11px] font-semibold text-stone-700">WhatsApp</span>
-        </a>
+        {digits ? (
+          <>
+            <a href={`tel:${digits}`} className={tile}><Phone size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Call</span></a>
+            <a href={`sms:${digits}`} className={tile}><MessageCircle size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Text</span></a>
+            <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className={tile}><WhatsAppIcon size={19} /><span className="text-[11px] font-semibold text-stone-700">WhatsApp</span></a>
+          </>
+        ) : (
+          <>
+            <button type="button" onClick={() => goTo("call")} className={tile}><Phone size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Call</span></button>
+            <button type="button" onClick={() => goTo("text")} className={tile}><MessageCircle size={18} className="text-[#5F9F9E]" /><span className="text-[11px] font-semibold text-stone-700">Text</span></button>
+            <button type="button" onClick={() => goTo("whatsapp")} className={tile}><WhatsAppIcon size={19} /><span className="text-[11px] font-semibold text-stone-700">WhatsApp</span></button>
+          </>
+        )}
       </div>
+      {note && <p className="text-xs text-stone-600 mb-2">{note}</p>}
       <button onClick={onViewUpdates} className="text-xs font-semibold text-[#5F9F9E] hover:text-[#447271]">See updates from the office →</button>
     </div>
   );
@@ -11491,7 +11544,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
   const refreshUnreadThreads = useCallback(async () => {
     const mySeq = ++refreshSeqRef.current;
     const classLinks = [...new Map((family?.studentLinks || []).map((l) => [l.classId, l])).values()];
-    const readState = await getReadState(family.uid);
+    const readState = await getReadStateOrNull(family.uid);
+    if (!readState) return; // could not load the read marks: leave the screen as it is rather than showing everything as new
     // Takes the more recent of the server's own value and this device's own local record for
     // each key — never the other way around — so a thread genuinely still unread per the server
     // stays exactly that; this only ever pulls a thread's own effective read time forward to a
@@ -11634,7 +11688,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     if (!fullTimeStudentLinks) return;
     const mySeq = ++homeworkRefreshSeqRef.current;
     const uniqueClasses = [...new Map(fullTimeStudentLinks.filter((l) => l.classType !== "preschool").map((l) => [l.classId, l])).values()];
-    const readState = await getReadState(family.uid);
+    const readState = await getReadStateOrNull(family.uid);
+    if (!readState) return; // could not load the read marks: do not show every homework post as new
     let total = 0;
     for (const l of uniqueClasses) {
       const posts = await loadJSON(`class:${l.classId}:homework`, [], true); // eslint-disable-line no-await-in-loop
@@ -12821,7 +12876,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
   // Same reasoning as the equivalent state in TeacherMessagesView — captured right before
   // markThreadRead overwrites it, since opening a thread marks it read immediately.
   const [lastReadBeforeOpen, setLastReadBeforeOpen] = useState(null);
-  const [listReadState, setListReadState] = useState({});
+  const [listReadState, setListReadState] = useState(null); // null until the read marks have actually loaded (no counts shown before that)
   // Reported directly: Broadcasts and New broadcast used to live inside the old, separate
   // Classroom Messages screen (now Reports, and no longer about messaging at all) — moved here
   // instead, since sending a message to a group of families is exactly what this screen is for,
@@ -12862,7 +12917,8 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
     setFamilies(groupList);
     const entries = await Promise.all(groupList.map(async (g) => [g.groupId, await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true)]));
     setThreads(Object.fromEntries(entries));
-    setListReadState(await getReadState(loggedInTeacher.uid));
+    const loadedMarks = await getReadStateOrNull(loggedInTeacher.uid);
+    if (loadedMarks) setListReadState(loadedMarks);
   }, [loggedInTeacher.uid, (loggedInTeacher.assignedClassIds || []).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { refresh(); }, [refresh]);
@@ -13117,7 +13173,7 @@ function StaffMessagesHome({ loggedInTeacher, canSwitchToParent, onSwitchToParen
           const last = thread?.messages?.[thread.messages.length - 1];
           const childNames = (g.studentLinks || []).map((l) => l.studentName).join(", ");
           const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-          const unreadCount = countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher");
+          const unreadCount = listReadState ? countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher") : 0;
           return (
             <button key={g.groupId} onClick={() => openThread(g)}
               className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
@@ -13724,7 +13780,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     // classroom thread this replaces used to need spelling out for.
     const byGuardian = {};
     relevant.forEach((f) => { if (!byGuardian[f.uid]) byGuardian[f.uid] = { groupId: f.uid, guardians: [f] }; });
-    const readState = await getReadState(loggedInTeacher.uid);
+    const readState = await getReadStateOrNull(loggedInTeacher.uid);
+    if (!readState) return; // could not load the read marks: leave the list as it is, never show everything as new
     const results = [];
     for (const g of Object.values(byGuardian)) {
       const thread = await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${g.groupId}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
@@ -13762,7 +13819,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     ]);
     const byGuardian = {};
     [...ownClassFamilies.flat(), ...reachable].forEach((f) => { byGuardian[f.uid] = true; });
-    const readState = await getReadState(loggedInTeacher.uid);
+    const readState = await getReadStateOrNull(loggedInTeacher.uid);
+    if (!readState) return; // could not load the read marks: leave the badge as it is, never show everything as new
     let total = 0;
     for (const guardianUid of Object.keys(byGuardian)) {
       const thread = await loadJSON(`teacher-messages:${loggedInTeacher.uid}:${guardianUid}`, { messages: [] }, true); // eslint-disable-line no-await-in-loop
@@ -20688,13 +20746,6 @@ const tehillimQuotaLine = (q) => {
   return `${q.amount} chapter${Number(q.amount) === 1 ? "" : "s"} (${range})`;
 };
 const tehillimIsLocked = (cycle, nowMs = Date.now()) => Boolean(cycle?.lockedAt) || nowMs > new Date(cycle?.checkoffDeadline || 0).getTime();
-// Shabbos itself: Friday 2:00 PM through Saturday 9:00 PM Pacific — checkoff waits until after.
-const tehillimInShabbosQuietWindow = (cycle, nowMs = Date.now()) => {
-  if (!cycle?.shabbosDate) return false;
-  const start = new Date(laTimeToISO(addDaysISO(cycle.shabbosDate, -1), "14:00")).getTime();
-  const end = new Date(laTimeToISO(cycle.shabbosDate, "21:00")).getTime();
-  return nowMs >= start && nowMs < end;
-};
 async function tehillimLoadCycles() { return (await loadJSON("tehillim:cycles", [], true)) || []; }
 const tehillimConfirmKey = (cycleId, classId) => `tehillim:${cycleId}:confirm:${classId}`;
 // Today's date in Pacific time as YYYY-MM-DD, whatever time zone the device is in.
@@ -20733,7 +20784,24 @@ function tehillimUpcomingMevarchim(fromISO, count = 1) {
 // the id is fixed per program + Shabbos so it can never be created twice. A program made only of ZZZ test
 // classes gets a test cycle; anything else is a real cycle and is only ever started from the live site, so a
 // preview link can never start (or alert teachers about) a real month.
+const tehillimEnsureRunning = {};
+// One alert per cycle, ever: the first device to claim it sends a single push to the (de-duplicated) teachers of
+// all the cycle's classes. Anything that runs again, or runs at the same moment, finds the claim and stays quiet.
+async function tehillimAlertTeachersOnce(cycleId, classIds) {
+  const key = `tehillim:${cycleId}:teacher-alert`;
+  try {
+    if (!classIds || classIds.length === 0) return;
+    if (await loadJSON(key, null, true)) return;
+    const token = uid();
+    await saveJSON(key, { token, at: new Date().toISOString() }, true, 2, true);
+    const back = await loadJSON(key, null, true);
+    if (back?.token !== token) return; // another device claimed it first
+    await sendPushNotificationResolved({ type: "classTeachers", classIds }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/");
+  } catch (e) { console.error("Tehillim teacher alert skipped", e); }
+}
 async function tehillimEnsureCycle(program) {
+  if (!program || tehillimEnsureRunning[program.id]) return;
+  tehillimEnsureRunning[program.id] = true;
   try {
     if (!program || program.programType !== "tehillim") return;
     const classIds = program.memberClassIds || [];
@@ -20757,11 +20825,11 @@ async function tehillimEnsureCycle(program) {
       winnersCount: 3, prizeDescription: "", testMode: testOnly, introLetter: firstOne ? TEHILLIM_INTRO_LETTER : "",
       status: "confirming", createdAt: new Date().toISOString(), createdBy: "Automatic", auto: true,
     };
-    await saveJSON("tehillim:cycles", [...list, c], true);
-    for (const classId of classIds) {
-      await sendPushNotificationResolved({ type: "classTeachers", classId }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/"); // eslint-disable-line no-await-in-loop
-    }
+    // If this write fails we stop here: no saved cycle means no alert (and the next open simply tries again).
+    await saveJSON("tehillim:cycles", [...list, c], true, 2, true);
+    await tehillimAlertTeachersOnce(id, classIds);
   } catch (e) { console.error("Tehillim auto-start failed", e); }
+  finally { delete tehillimEnsureRunning[program.id]; }
 }
 // What the "New cycle" form should start with: the next Shabbos Mevarchim after any cycle already made.
 function tehillimNextCycleDefaults(existingCycles) {
@@ -20794,8 +20862,11 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
   const cycle = (cycles || []).find((c) => c.id === cycleId) || null;
   const whoName = loggedInTeacher?.name || "Staff";
 
+  const [loadFailed, setLoadFailed] = useState(false);
   const refreshCycles = async () => {
-    const all = (await tehillimLoadCycles()).filter((c) => c.programId === program.id).sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1));
+    let list;
+    try { list = (await loadJSON("tehillim:cycles", [], true, 3, true)) || []; setLoadFailed(false); } catch (e) { setLoadFailed(e?.code || e?.message || "error"); list = []; }
+    const all = list.filter((c) => c.programId === program.id).sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1));
     setCycles(all);
     return all;
   };
@@ -20806,14 +20877,13 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
     setCycles(next.filter((c) => c.programId === program.id).sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1)));
   };
 
-  useEffect(() => {
-    (async () => {
-      const all = await refreshCycles();
-      if (all[0]) setCycleId(all[0].id);
-      setLoading(false);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const loadAll = async () => {
+    setLoading(true);
+    const all = await refreshCycles();
+    if (all[0]) setCycleId(all[0].id);
+    setLoading(false);
+  };
+  useEffect(() => { loadAll(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
   // Everyone in the cycle's classes (full-time only), grouped by class, plus their quotas/checkoffs.
   const loadCycleData = async (c) => {
@@ -20858,18 +20928,29 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
     // class, and a real cycle only pings from the live site, so a preview can never alert real teachers.
     try {
       const allClasses = (await loadJSON("schoolClasses", [], true)) || [];
-      for (const classId of c.classIds) {
+      const alertIds = c.classIds.filter((classId) => {
         const cls = allClasses.find((x) => x.id === classId);
-        if (c.testMode ? !isTestFamilyName(cls?.name) : !canSendRealTehillimNotices()) continue;
-        await sendPushNotificationResolved({ type: "classTeachers", classId }, "Set this month's Tehillim quota", "Takes about a minute. Your grade's starting numbers are already filled in.", "/"); // eslint-disable-line no-await-in-loop
-      }
+        return c.testMode ? isTestFamilyName(cls?.name) : canSendRealTehillimNotices();
+      });
+      await tehillimAlertTeachersOnce(c.id, alertIds);
     } catch { /* teacher alerts are best-effort; the Home banner still shows */ }
     return all;
   };
 
   // Read-modify-write on just the one class document, so two teachers editing different classes (or
   // different students) can never overwrite each other's work.
+  // The cycle on screen can be out of date (the office may have sent to parents after this page opened),
+  // so ask the database whether parents have been notified yet before deciding an edit is a change to
+  // something they already saw.
+  const parentsAlreadyNotified = async () => {
+    try {
+      const latest = (await loadJSON("tehillim:cycles", [], true, 2, true) || []).find((c) => c.id === cycleId);
+      if (latest?.parentNotifiedAt && !cycle?.parentNotifiedAt) setCycles((prev) => (prev || []).map((c) => (c.id === cycleId ? { ...c, ...latest } : c)));
+      return Boolean(latest?.parentNotifiedAt || cycle?.parentNotifiedAt);
+    } catch { return Boolean(cycle?.parentNotifiedAt); }
+  };
   const saveQuotaChanges = async (classId, changes) => {
+    const notified = await parentsAlreadyNotified();
     const key = `tehillim:${cycleId}:quotas:${classId}`;
     const fresh = (await loadJSON(key, {}, true)) || {};
     const now = new Date().toISOString();
@@ -20879,10 +20960,20 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       const student = groups.flatMap((g) => g.students).find((s) => s.id === sid);
       const prev = fresh[sid];
       const amount = Math.max(1, Math.round(Number(ch.amount) || 0));
-      fresh[sid] = { ...(prev || {}), unit: ch.unit || "chapters", amount, chaptersText: (ch.chaptersText || "").trim(), studentName: student?.name || prev?.studentName || "", className, classId, setBy: whoName, setAt: now, ...(prev && cycle?.parentNotifiedAt ? { updatedAt: now } : {}) };
+      fresh[sid] = { ...(prev || {}), unit: ch.unit || "chapters", amount, chaptersText: (ch.chaptersText || "").trim(), studentName: student?.name || prev?.studentName || "", className, classId, setBy: whoName, setAt: now, ...(prev && notified ? { updatedAt: now } : {}) };
       updatedStudentIds.push(sid);
     });
-    await saveJSON(key, fresh, true);
+    await saveJSON(key, fresh, true, 2, true);
+    // Read it back from the database. The check mark only shows if what is stored really matches.
+    const stored = (await loadJSON(key, null, true, 2, true)) || {};
+    for (const sid of updatedStudentIds) {
+      if (!stored[sid] || Number(stored[sid].amount) !== Number(fresh[sid].amount) || (stored[sid].unit || "") !== (fresh[sid].unit || "")) throw new Error("not-stored");
+    }
+    // Make sure parents are reading the same month this screen is editing.
+    if (notified) {
+      const parentsSee = (await tehillimLoadCycles()).filter((c) => c.parentNotifiedAt && (!c.testMode || cycle?.testMode)).sort((x, y) => (x.shabbosDate < y.shabbosDate ? 1 : -1))[0];
+      if (parentsSee && parentsSee.id !== cycleId) throw new Error(`parents-read-a-different-month (${parentsSee.hebrewMonth || parentsSee.id})`);
+    }
     setQuotas((prev) => ({ ...prev, ...Object.fromEntries(updatedStudentIds.map((sid) => [sid, fresh[sid]])) }));
     setDrafts((prev) => { const n = { ...prev }; updatedStudentIds.forEach((sid) => delete n[sid]); return n; });
     return updatedStudentIds;
@@ -20914,13 +21005,9 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       });
       const changedIds = [];
       for (const [classId, changes] of Object.entries(byClass)) changedIds.push(...(await saveQuotaChanges(classId, changes))); // eslint-disable-line no-await-in-loop
-      // Edited after parents were already notified -> the family gets an "Updated quota" notice.
-      if (cycle?.parentNotifiedAt && changedIds.length > 0 && sendAllowed()) {
-        const uids = await familiesFor(new Set(changedIds));
-        await sendPushNotification(uids, "Updated Tehillim quota", "A child's Shabbos Mevarchim Tehillim quota was updated. Open the app to see it.", "/?portal=parent&tab=home");
-      }
+      // An edit after parents were notified sends NO new message: the parent's bar simply shows the new quota.
       setNotice(`Saved ${changedIds.length} quota${changedIds.length === 1 ? "" : "s"}.`);
-    } finally { setBusy(false); }
+    } catch (e) { setNotice(`That did not save — check your connection and try again. (${e?.code || e?.message || "unknown error"})`); } finally { setBusy(false); }
   };
 
   // What a student shows (and gets, if the teacher just confirms) when nothing was typed: the grade default.
@@ -20942,7 +21029,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
       await saveJSON(tehillimConfirmKey(cycleId, g.classId), rec, true);
       setConfirms((prev) => ({ ...prev, [g.classId]: rec }));
       setNotice(`${g.className} confirmed. Thank you!`);
-    } finally { setBusy(false); }
+    } catch (e) { setNotice(`That did not save — check your connection and try again. (${e?.code || e?.message || "unknown error"})`); } finally { setBusy(false); }
   };
 
   const applyToClass = async (classId) => {
@@ -21073,7 +21160,12 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
         </div>
       )}
 
-      {!cycle ? (
+      {!cycle && loadFailed ? (
+        <div className="text-sm text-stone-600">
+          <p className="mb-2">Couldn't load this month's Tehillim program (the connection may be weak). <span className="text-xs text-stone-400">{String(loadFailed)}</span></p>
+          <button onClick={loadAll} className="bg-teal-700 text-white rounded-lg px-4 py-2 text-sm font-semibold">Try again</button>
+        </div>
+      ) : !cycle ? (
         <p className="text-sm text-stone-400">{isAdmin ? "No cycle yet. This month's starts by itself on the Tuesday before Shabbos Mevarchim." : "Nothing to do yet — the office hasn't started this month's Tehillim program. You'll see your students here when it starts."}</p>
       ) : (
         <>
@@ -21144,7 +21236,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
                   <button onClick={savePending} disabled={busy} className="w-full bg-teal-700 text-white rounded-xl py-3 text-sm font-bold shadow-lg hover:bg-teal-800 disabled:opacity-50">{busy ? "Saving…" : `Save ${dirtyCount} change${dirtyCount === 1 ? "" : "s"}`}</button>
                 </div>
               )}
-              {cycle.parentNotifiedAt && <p className="text-[11px] text-stone-400">Families were already notified — any change you save reaches them automatically as an "Updated quota" notice.</p>}
+              {cycle.parentNotifiedAt && <p className="text-[11px] text-stone-400">Families were already notified. A change you save shows up quietly on the bar they already have. No new message is sent.</p>}
 
               {isAdmin && cycle.introLetter && !cycle.parentNotifiedAt && (
                 <div className="bg-white border border-stone-200 rounded-xl p-3 mt-4">
@@ -21350,8 +21442,8 @@ function TehillimFamilyCard({ family }) {
           .filter((c) => c.parentNotifiedAt && (!c.testMode || isTestFamilyName(family.name)))
           .sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1))[0];
         if (!visible) { if (!cancelled) setState(null); return; }
-        // Stays visible until about a week after the cutoff.
-        if (Date.now() > new Date(visible.checkoffDeadline).getTime() + 7 * 86400000) { if (!cancelled) setState(null); return; }
+        // Gone for parents the moment checkoff closes (the deadline passes or the office closes it early).
+        if (tehillimIsLocked(visible)) { if (!cancelled) setState(null); return; }
         const children = [];
         for (const link of family.studentLinks || []) {
           if (!(visible.classIds || []).includes(link.classId)) continue;
@@ -21364,8 +21456,8 @@ function TehillimFamilyCard({ family }) {
         if (cancelled) return;
         if (children.length === 0) { setState(null); return; }
         setState({ cycle: visible, children });
-        // Pop up once per device per version of the quotas (an edit counts as a new version).
-        const version = `${visible.id}:${children.map((c) => c.quota.updatedAt || c.quota.setAt).sort().pop()}`;
+        // Pop up once per device per cycle.
+        const version = visible.id; // an edited quota changes the bar quietly; it does not pop up again
         let seen = null;
         try { seen = localStorage.getItem(`tehillim-popup-seen:${family.uid}`); } catch { /* storage may be blocked */ }
         if (seen !== version) {
@@ -21377,14 +21469,23 @@ function TehillimFamilyCard({ family }) {
     return () => { cancelled = true; };
   }, [family.uid, tick]);
 
+  // Pick up changes the teacher or office made after this app was opened (an edited quota, a new cycle):
+  // look again whenever the app comes back to the front, and once a minute while it stays open.
+  useEffect(() => {
+    const again = () => { if (document.visibilityState === "visible") setTick((t) => t + 1); };
+    document.addEventListener("visibilitychange", again);
+    window.addEventListener("focus", again);
+    const timer = setInterval(again, 60000);
+    return () => { document.removeEventListener("visibilitychange", again); window.removeEventListener("focus", again); clearInterval(timer); };
+  }, []);
+
   if (!state) return null;
   const { cycle, children } = state;
   const locked = tehillimIsLocked(cycle);
-  const quiet = tehillimInShabbosQuietWindow(cycle);
   const winnersVisible = cycle.draw && cycle.announcedAt;
 
   const setCompleted = async (child, completed) => {
-    if (tehillimIsLocked(cycle) || tehillimInShabbosQuietWindow(cycle)) return;
+    if (tehillimIsLocked(cycle)) return;
     setSaving(child.link.studentId);
     setSaveError(null);
     const doc = { completed, at: new Date().toISOString(), by: family.uid, byName: family.name || "" };
@@ -21409,18 +21510,15 @@ function TehillimFamilyCard({ family }) {
         {children.map((c) => {
           const first = (c.link.studentName || "").split(" ")[0] || "your child";
           const isDone = Boolean(c.done?.completed);
-          const updated = c.quota.updatedAt && c.quota.updatedAt > cycle.parentNotifiedAt;
           return (
             <div key={c.link.studentId} className="border border-stone-200 rounded-xl p-3 bg-white">
-              <p className="text-sm font-bold text-stone-900">{first} <span className="text-xs font-normal text-stone-400">{c.quota.className}</span>{updated && <span className="ml-2 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">Updated quota</span>}</p>
+              <p className="text-sm font-bold text-stone-900">{first} <span className="text-xs font-normal text-stone-400">{c.quota.className}</span></p>
               <p className="text-sm text-stone-700 mb-2">{tehillimQuotaLine(c.quota)}</p>
               {locked ? (
                 <p className="text-xs text-stone-500">{isDone ? `✓ ${first} was checked off — entered in the raffle.` : "Checkoff is closed for this month."}</p>
-              ) : quiet ? (
-                <p className="text-xs text-stone-500">Check {first} off after Shabbos — this opens Saturday night.</p>
               ) : (
                 <>
-                  <p className="text-xs text-stone-500 mb-1.5">Did {first} complete their Tehillim quota? Check this off after they finish — after Shabbos.</p>
+                  <p className="text-xs text-stone-500 mb-1.5">Did {first} complete their Tehillim quota? Check this off once they finish.</p>
                   <div className="flex gap-2">
                     <button onClick={() => setCompleted(c, true)} disabled={saving === c.link.studentId}
                       className={`flex-1 rounded-lg py-2 text-sm font-semibold border ${isDone ? "bg-emerald-600 text-white border-emerald-600" : "text-emerald-700 border-emerald-300 bg-white"}`}>Completed</button>
@@ -21458,7 +21556,6 @@ function TehillimFamilyCard({ family }) {
         if (winnersVisible) { tag = "Raffle winners announced: tap Open"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; borderCls = "border-l-stone-400"; }
         else if (locked) { tag = allDone ? "Checkoff closed. Entered in the raffle!" : "Checkoff is closed for this month"; tagCls = "bg-stone-100 text-stone-500 border-stone-200"; borderCls = "border-l-stone-400"; }
         else if (allDone) { tag = children.length > 1 ? "All checked off. Entered in the raffle!" : "Checked off. Entered in the raffle!"; tagCls = "bg-emerald-50 text-emerald-700 border-emerald-200"; borderCls = "border-l-emerald-500"; }
-        else if (quiet) { tag = "Check off after Shabbos"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; }
         else { tag = doneCount > 0 ? `${doneCount} of ${children.length} checked off` : "Not checked off yet"; tagCls = "bg-amber-50 text-amber-800 border-amber-200"; }
         return (
           <button type="button" onClick={() => setPopupOpen(true)} className={`block w-full text-left mb-5 bg-white border border-stone-200 border-l-4 ${borderCls} rounded-xl p-3`}>
@@ -24658,10 +24755,10 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
   // For showing an actual unread count on each row in both inbox lists below, not just inside an
   // open conversation — refreshed on the same events that already change what's actually unread
   // (a thread being marked read, or the live thread data itself changing).
-  const [listReadState, setListReadState] = useState({});
+  const [listReadState, setListReadState] = useState(null); // null until the read marks have actually loaded (no counts shown before that)
   useEffect(() => {
     if (!loggedInTeacher) return;
-    getReadState(loggedInTeacher.uid).then(setListReadState);
+    getReadStateOrNull(loggedInTeacher.uid).then((marks) => { if (marks) setListReadState(marks); });
   }, [loggedInTeacher, threads, directThreads]);
 
   // Same reasoning as the class/tab history work — pushing a real entry here is what lets the
@@ -24872,7 +24969,7 @@ function TeacherMessagesView({ classId, roster, config, loggedInTeacher, sendMes
               const last = thread?.messages?.[thread.messages.length - 1];
               const childNames = (g.studentLinks || []).filter((l) => assignedClassIds.includes(l.classId)).map((l) => l.studentName).join(", ");
               const guardianNames = g.guardians.map((gu) => gu.name).join(" & ");
-              const unreadCount = countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher");
+              const unreadCount = listReadState ? countUnreadInThread(listReadState, `teacher-direct-${g.groupId}`, thread?.messages, "teacher") : 0;
               return (
                 <button key={g.groupId} onClick={() => openDirectGroupThread(g)} className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 hover:border-teal-700">
                   <div className="flex items-center justify-between gap-2">
