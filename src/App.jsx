@@ -26543,6 +26543,18 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const [bulkSummary, setBulkSummary] = useState(null);
   const [walkIdx, setWalkIdx] = useState(null); // "Email one by one" walkthrough: index into the ready students, or null
   const [hintId, setHintId] = useState(null); // student whose "attach the PDF" tip is showing
+  const awaitingReturn = useRef(null); // { id, away } set when an email was opened from the walkthrough
+  const advanceAfterEmail = useRef(() => {});
+  useEffect(() => {
+    const onVis = () => {
+      const a = awaitingReturn.current;
+      if (!a) return;
+      if (document.visibilityState === "hidden") a.away = true;
+      else if (a.away) advanceAfterEmail.current();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
   const familiesRef = useRef({}); // classId -> families (fetched once per class)
   const ctxOf = (student) => (contextFor ? contextFor(student) : { incidents, classAssessments, config, classId, className });
 
@@ -26716,10 +26728,21 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     if (r.pdfBlob) saveBlob(r.pdfBlob, r.pdfName);
     window.open(gmailDraftUrl(s), "_blank", "noopener");
     setHintId(s.id);
+    // In the one-by-one walkthrough: once they leave for Gmail and come back, move on to the next child by itself.
+    if (walkIdx !== null) awaitingReturn.current = { id: s.id, away: false };
   };
   const readyStudents = chosen.filter((s) => results[s.id] && !results[s.id].loading);
   const walkStudent = walkIdx !== null ? readyStudents[walkIdx] : null;
   const walkNext = () => { setHintId(null); setWalkIdx((i) => (i !== null && i + 1 < readyStudents.length ? i + 1 : null)); };
+  const walkPrev = () => { awaitingReturn.current = null; setHintId(null); setWalkIdx((i) => (i !== null && i > 0 ? i - 1 : i)); };
+  // Always points at the latest render's walkthrough state, so the listener below never acts on a stale child.
+  advanceAfterEmail.current = () => {
+    const a = awaitingReturn.current;
+    if (!a || !walkStudent || walkStudent.id !== a.id) return;
+    awaitingReturn.current = null;
+    logSent(walkStudent, "email");
+    walkNext();
+  };
 
   const generatedCount = chosen.filter((s) => results[s.id] && !results[s.id].loading).length;
   const pdfCount = chosen.filter((s) => results[s.id]?.pdfBlob).length;
@@ -26889,11 +26912,12 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                 </button>
                 {hintId === walkStudent.id && (
                   <p className="text-xs text-teal-900 bg-white border border-teal-200 rounded-lg px-2.5 py-2 mb-2">
-                    PDF saved as <b>{wr.pdfName}</b>. In Gmail tap the <b>paperclip</b>, choose <b>Recent</b> (or Downloads), and pick the top file. Then send and come back here.
+                    PDF saved as <b>{wr.pdfName}</b>. In Gmail tap the <b>paperclip</b>, choose <b>Recent</b> (or Downloads), and pick the top file. Then send, and come back here. The next child will come up by itself.
                   </p>
                 )}
                 <div className="flex gap-2">
                   <button onClick={() => { logSent(walkStudent, "email"); walkNext(); }} className="flex-1 bg-white border border-teal-400 text-teal-800 rounded-lg py-2 text-sm font-semibold">{walkIdx + 1 < readyStudents.length ? "Sent, next child" : "Sent, finish"}</button>
+                  {walkIdx > 0 && <button onClick={walkPrev} className="px-3 text-sm text-stone-500">Previous</button>}
                   <button onClick={walkNext} className="px-3 text-sm text-stone-500">Skip</button>
                   <button onClick={() => { setHintId(null); setWalkIdx(null); }} className="px-3 text-sm text-stone-400">Close</button>
                 </div>
