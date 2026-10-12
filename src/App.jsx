@@ -26535,7 +26535,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const [endDate, setEndDate] = useState(todayISO());
   const [sections, setSections] = useState(() => sectionList.map((s) => s.id));
   const [format, setFormat] = useState(sharedMessage ? "both" : "message"); // "message" | "pdf" | "both"
-  const [emailBoth, setEmailBoth] = useState(false);
+  const [emailBoth, setEmailBoth] = useState(true); // default: the email goes to both parents when two are on file
   const [results, setResults] = useState({}); // studentId -> { loading, draft, dataUsed, pdfBlob, pdfName, label, error, sendState, logged, showData }
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null);
@@ -26881,7 +26881,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                 {!wEmail ? (
                   <p className="text-xs text-amber-700 mb-2">No parent email on file. Type it in the box below this card, or skip to the next child.</p>
                 ) : (
-                  <p className="text-xs text-stone-600 mb-2">To: {wEmail}</p>
+                  <p className="text-xs text-stone-600 mb-2">To: {[wEmail, emailBoth && walkStudent.parent2Email].filter(Boolean).join(", ")}</p>
                 )}
                 <button onClick={() => emailWithPdf(walkStudent)} disabled={!wEmail}
                   className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40 mb-2">
@@ -26971,7 +26971,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
             })}
           </div>
           <label className="flex items-center gap-1.5 text-xs text-stone-500 mt-3">
-            <input type="checkbox" checked={emailBoth} onChange={(e) => setEmailBoth(e.target.checked)} /> Also email the second parent (when one is on file)
+            <input type="checkbox" checked={emailBoth} onChange={(e) => setEmailBoth(e.target.checked)} /> Email both parents (when a second parent's email is on file)
           </label>
           <p className="text-xs text-stone-400 text-center mt-4">Nothing sends automatically. Review each report first. In-app sends are logged for you automatically.</p>
         </div>
