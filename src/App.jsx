@@ -26442,17 +26442,8 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
       const counts = statusList.map((st) => ({ label: st.label, n: entries.filter((a) => a.status === st.id).length })).filter((c) => c.n > 0);
       const unknown = entries.filter((a) => !attStatusMap[a.status]).length;
       doc.setFont("helvetica", "normal"); doc.setFontSize(9);
-      doc.text(`${entries.length} days recorded${startDate || endDate ? " in this period" : ""}`, 14, y);
+      doc.text(`${entries.length} days recorded:  ${counts.map((c) => `${c.label} ${c.n}`).join("  |  ")}${unknown ? `  |  Other ${unknown}` : ""}`, 14, y);
       y += 5;
-      // Totals only: a box per status with its number of days (no day-by-day list)
-      const boxes = counts.map((c) => [c.label, String(c.n)]);
-      if (unknown) boxes.push(["Other", String(unknown)]);
-      autoTable(doc, {
-        startY: y, head: [boxes.map((b2) => b2[0])], body: [boxes.map((b2) => b2[1])], margin: { left: 14, right: 14 },
-        styles: { fontSize: 11, cellPadding: 3, halign: "center", fontStyle: "bold" }, headStyles: { fillColor: [15, 118, 110], fontSize: 8, fontStyle: "normal" },
-        tableWidth: Math.min(182, 36 * boxes.length),
-      });
-      y = doc.lastAutoTable.finalY + 6;
       // Total time late (arrival time minus class start time)
       const lateEntries = entries.filter((a) => attStatusMap[a.status]?.flagType === "late");
       if (lateEntries.length > 0) {
@@ -26474,7 +26465,37 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
         }
         doc.setFont("helvetica", "normal"); doc.setFontSize(9);
       }
-      y += 4;
+      y += 3;
+      // Every day, laid out in 4 side-by-side Date/Status columns (oldest first, reading down each column)
+      const fmtDate = (d) => { const [yy, mm, dd] = d.split("-").map(Number); return `${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][mm - 1]} ${dd}${yy !== new Date().getFullYear() ? `, ${yy}` : ""}`; };
+      const cellFor = (a) => {
+        const st = attStatusMap[a.status];
+        let text = st?.label || a.status || "";
+        const isLate = st?.flagType === "late";
+        if (isLate && a.time) {
+          const t = timeToMinutes(a.time);
+          text += ` ${formatTime12h(a.time)}${startMin != null && t != null && t > startMin ? ` (+${t - startMin}m)` : ""}`;
+        } else if (a.time) text += ` ${formatTime12h(a.time)}`;
+        const color = isLate ? [180, 100, 0] : st?.flagType === "absent" ? [185, 40, 40] : [0, 0, 0];
+        return { content: text, styles: { textColor: color, fontStyle: st?.flagType === "none" || !st ? "normal" : "bold" } };
+      };
+      const per = Math.ceil(entries.length / 4);
+      const body = [];
+      for (let i = 0; i < per; i++) {
+        const row = [];
+        for (let c = 0; c < 4; c++) {
+          const a = entries[c * per + i];
+          row.push(a ? fmtDate(a.date) : "", a ? cellFor(a) : "");
+        }
+        body.push(row);
+      }
+      autoTable(doc, {
+        startY: y, head: [["Date", "Status", "Date", "Status", "Date", "Status", "Date", "Status"]], body, margin: { left: 14, right: 14 },
+        styles: { fontSize: 7.5, cellPadding: 1.6 }, headStyles: { fillColor: [15, 118, 110] },
+        columnStyles: { 0: { cellWidth: 16 }, 2: { cellWidth: 16 }, 4: { cellWidth: 16 }, 6: { cellWidth: 16 } },
+        didDrawPage: () => {},
+      });
+      y = doc.lastAutoTable.finalY + 8;
     }
   }
 
