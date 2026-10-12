@@ -7593,6 +7593,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [showPwChange, setShowPwChange] = useState(false);
   const [showAdminReports, setShowAdminReports] = useState(false);
   const [showRoundsAdmin, setShowRoundsAdmin] = useState(false);
+  const [adminReportsRound, setAdminReportsRound] = useState(null);
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
   const [pwSaved, setPwSaved] = useState(false);
@@ -8778,12 +8779,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
       {showRoundsAdmin && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
-          <AdminReportRoundsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowRoundsAdmin(false)} />
+          <AdminReportRoundsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowRoundsAdmin(false)} onMakeReports={(r) => { setAdminReportsRound(r); setShowRoundsAdmin(false); setShowAdminReports(true); }} />
         </div>
       )}
       {showAdminReports && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
-          <AdminCreateReportsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowAdminReports(false)} />
+          <AdminCreateReportsView key={adminReportsRound?.id || "plain"} initialRound={adminReportsRound} registry={registry} loggedInTeacher={currentTeacher} onBack={() => { setShowAdminReports(false); setAdminReportsRound(null); }} />
         </div>
       )}
 
@@ -26627,7 +26628,7 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
 // reports, custom-date-range text reports, and the per-student PDF export). The same date choices
 // (a whole month, or a custom start/end) and the same section checkboxes apply to every format, and
 // it works for one student, a few, or the whole class.
-function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title, sharedMessage, rounds }) {
+function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title, sharedMessage, rounds, initialRoundId }) {
   // sharedMessage (admin only): { text, setText, save, saveState } — one message for every child, with {student} filled in.
   // contextFor (admin, several classes at once): student -> { incidents, classAssessments, config, classId, className }.
   // Without it, everything comes from the single class this screen was opened in, exactly as before.
@@ -26653,6 +26654,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     const r = (rounds || []).find((x) => x.id === id);
     if (r) { setWhenMode("range"); setStartDate(r.startDate || ""); setEndDate(r.endDate || todayISO()); setSections(["attendance"]); setFormat("both"); }
   };
+  useEffect(() => { if (initialRoundId && !roundId && rounds && rounds.length) pickRound(initialRoundId); }, [rounds]); // eslint-disable-line react-hooks/exhaustive-deps
   const [results, setResults] = useState({}); // studentId -> { loading, draft, dataUsed, pdfBlob, pdfName, label, error, sendState, logged, showData }
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null);
@@ -26687,6 +26689,11 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const safeName = (s) => String(s).replace(/[/\\?%*:|"<>]/g, "-");
   const firstName = (s) => (s.name || "").split(" ")[0] || "your child";
 
+  // A class that opted out of attendance in the round gets a report with no attendance section.
+  const secsFor = (cx) => {
+    const entry = activeRound ? ((cx && cx.rounds) || []).find((r) => r.id === activeRound.id) : null;
+    return entry?.attendanceOptOut ? sections.filter((x) => x !== "attendance") : sections;
+  };
   const generateOne = async (student) => {
     patch(student.id, { loading: true, error: null, sendState: null });
     const data = studentData[student.id] || emptyStudentData();
@@ -26710,7 +26717,8 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     }
     if (wantPdf) {
       try {
-        pdfBlob = buildStudentReportPdf(student, data, cx.incidents, cx.classAssessments, cx.config, sections, cx.className, rangeStart || null, rangeEnd || null, activeRound ? buildRoundPdfExtra(activeRound, cx, student) : null);
+        pdfBlob = buildStudentReportPdf(student, data, cx.incidents, cx.classAssessments, cx.config, secsFor(cx), cx.className, rangeStart || null, rangeEnd || null, activeRound ? buildRoundPdfExtra(activeRound, cx, student) : null);
+        // (sections used above already respect the class's attendance opt-out; see secsFor)
       } catch (err) {
         console.error("Report PDF generation failed:", err);
         error = "The PDF couldn't be created for this student.";
@@ -26860,6 +26868,10 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
               <option value="">None: a regular report</option>
               {rounds.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
+            {activeRound && contextFor && (() => {
+              const pending = [...new Set(roster.map((st) => ctxOf(st)))].filter((cx) => { const e = (cx.rounds || []).find((r) => r.id === activeRound.id); return !e || e.status !== "submitted"; }).map((cx) => cx.className);
+              return pending.length > 0 ? <p className="text-xs text-amber-700 mt-1">Not submitted yet: {pending.join(", ")}. Their PDFs will have no grades.</p> : <p className="text-xs text-emerald-700 mt-1">Every selected class has submitted.</p>;
+            })()}
             <p className="text-[10px] text-stone-400 mt-1">{activeRound ? "The dates are set from the round. Each PDF has attendance followed by the grades the teachers entered (a class that hasn't submitted yet shows no grades)." : "Pick a round to build the PDFs from what the teachers entered."}</p>
           </div>
         )}
@@ -27213,7 +27225,8 @@ function RoundGradeInput({ scale, value, onChange }) {
 
 // The teacher's guided walkthrough: attendance check, English, Math, two Judaic subjects, overall, review.
 function ReportRoundWalkthrough({ round, roster, studentData, config, classAssessments, benchmarkSubjects, loggedInTeacher, persistAssessments, updateRound, onBack }) {
-  const [step, setStep] = useState(0); // 0 attendance, 1-5 the subjects in ROUND_STEPS, 6 review
+  const [step, setStep] = useState(0); // 0 how it works, 1 attendance, 2-6 the subjects in ROUND_STEPS, 7 review
+  const [attOptOut, setAttOptOut] = useState(Boolean(round.attendanceOptOut));
   const [subs, setSubs] = useState(() => {
     const o = {};
     ROUND_STEPS.forEach((st) => { const e = round.entries?.[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped) }; });
@@ -27264,11 +27277,12 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
 
   const go = async (delta) => {
     setErr(null);
-    const cur = step >= 1 && step <= 5 ? ROUND_STEPS[step - 1] : null;
+    const cur = step >= 2 && step <= 6 ? ROUND_STEPS[step - 2] : null;
     if (cur && delta > 0 && !cur.optional && !(subs[cur.key].label || "").trim()) { setErr("Type the subject name first."); return; }
     setSaving(true);
     try {
       if (cur) await saveSubject(cur.key);
+      if (step === 1) await updateRound(round.id, (r) => ({ ...r, attendanceOptOut: attOptOut }));
       setStep((s) => s + delta);
     } catch (e) { console.error("Report round save failed", e); setErr("That didn't save. Check your connection and try again."); }
     setSaving(false);
@@ -27285,21 +27299,47 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
   const stepCard = "bg-white border border-stone-200 rounded-xl p-3 mb-3";
   const filledKeys = ROUND_STEPS.filter((st) => !subs[st.key].skipped && (subs[st.key].label || "").trim());
   const missingCount = filledKeys.reduce((n, st) => n + roster.filter((s) => !(grades[st.key]?.[s.id]?.grade || "").trim()).length, 0);
-  const total = 7;
+  const total = 8;
 
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back (progress is saved)</button>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{round.name}</h1>
-      <p className="text-xs text-stone-500 mb-1">{round.dueDate ? `Due ${roundDueText(round.dueDate)}.` : ""} Step {step + 1} of {total}</p>
+      <p className="text-xs text-stone-500 mb-1">{round.dueDate ? `Due ${roundDueText(round.dueDate)}. ` : ""}Step {step + 1} of {total}: {step === 0 ? "How this works" : step === 1 ? "Attendance" : step === 7 ? "Review and submit" : (subs[ROUND_STEPS[step - 2].key].label || ROUND_STEPS[step - 2].label || (ROUND_STEPS[step - 2].key === "judaic1" ? "Judaic subject #1" : "Judaic subject #2"))}</p>
       <div className="h-1.5 bg-stone-200 rounded-full mb-4 md:max-w-xl"><div className="h-1.5 bg-teal-600 rounded-full" style={{ width: `${((step + 1) / total) * 100}%` }} /></div>
 
       <div className="md:max-w-xl">
         {step === 0 && (
           <div className={stepCard}>
+            <p className="font-semibold text-stone-800 mb-1">Welcome. Here's what this report needs from you</p>
+            <p className="text-xs text-stone-500 mb-3">It takes about 10 to 15 minutes. You'll go through a few short screens, and your work is saved at every step, so you can stop and come back any time.</p>
+            <ol className="text-sm text-stone-700 space-y-2 list-decimal pl-5 mb-3">
+              <li><b>Attendance:</b> nothing to type. It's pulled from what you've logged. You just check it looks right (or leave it out of the report if your class didn't take attendance regularly).</li>
+              <li><b>English and Math:</b> pick how you want to grade (marks, letters or words) and enter one grade per student.</li>
+              <li><b>Two Judaic subjects:</b> choose the ones you teach, then grade them the same way. If you only teach one, skip the second.</li>
+              <li><b>Overall / participation:</b> one general grade per student. Optional.</li>
+              <li><b>Review and submit.</b> You'll see everything in one table before you send it to the office.</li>
+            </ol>
+            <div className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-xs text-stone-600 space-y-1">
+              <p><b>Good to know:</b></p>
+              <p>• You can use any grading style you like, and a different one for each subject.</p>
+              <p>• Leave a student blank if they have no grade for that subject.</p>
+              <p>• Comments are optional. Tap "+ comment" next to a student only if you want to add one. Nothing shows on the report unless you write something.</p>
+              <p>• Nothing goes to parents from this screen. The office puts the reports together and sends them.</p>
+              {round.dueDate && <p>• Please submit by <b>{roundDueText(round.dueDate)}</b>.</p>}
+            </div>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div className={stepCard}>
             <p className="font-semibold text-stone-800 mb-1">Check attendance</p>
-            <p className="text-xs text-stone-500 mb-3">This is pulled automatically from what you've logged{round.startDate || round.endDate ? ` (${round.startDate || "start"} to ${round.endDate || "today"})` : ""}. It goes straight onto the report. If a day is missing or wrong, fix it in Attendance first, then come back. You don't need to enter anything here.</p>
-            <div className="overflow-x-auto">
+            <p className="text-xs text-stone-500 mb-3">This is pulled automatically from what you've logged{round.startDate || round.endDate ? ` (${round.startDate || "start"} to ${round.endDate || "today"})` : ""}. It goes straight onto the report. If a day is missing or wrong, fix it in Attendance first (use Back to leave this screen, your progress is saved), then come back. You don't need to enter anything here.</p>
+            <label className="flex items-start gap-2 text-sm text-stone-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
+              <input type="checkbox" className="mt-0.5" checked={attOptOut} onChange={(e) => setAttOptOut(e.target.checked)} />
+              <span><b>Leave attendance out of my class's reports.</b><span className="block text-xs text-stone-500">Tick this if attendance wasn't taken consistently, so parents don't see misleading numbers. The report will simply have no attendance section.</span></span>
+            </label>
+            {!attOptOut && <div className="overflow-x-auto">
               <table className="text-xs w-full">
                 <thead><tr className="text-stone-400 text-left"><th className="pr-2 pb-1">Student</th>{(config.attendance?.statuses || []).map((st) => <th key={st.id} className="px-1 pb-1">{st.label}</th>)}<th className="px-1 pb-1">Time late</th></tr></thead>
                 <tbody>
@@ -27315,12 +27355,12 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
                   })}
                 </tbody>
               </table>
-            </div>
+            </div>}
           </div>
         )}
 
-        {step >= 1 && step <= 5 && (() => {
-          const st = ROUND_STEPS[step - 1];
+        {step >= 2 && step <= 6 && (() => {
+          const st = ROUND_STEPS[step - 2];
           const sub = subs[st.key];
           const skippedNow = sub.skipped;
           return (
@@ -27333,6 +27373,13 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
                 {st.key === "judaic2" && "A second Judaic subject, if you teach one. If not, tap Skip this subject."}
                 {st.key === "overall" && "A general grade for each student, for example overall participation, effort, or behavior. Skip it if you'd rather not include one."}
               </p>
+              <ol className="text-xs text-stone-600 list-decimal pl-5 mb-3 space-y-0.5">
+                {!st.fixed && <li>Type the subject name (or tap a suggestion).</li>}
+                <li>Choose how you want to grade this subject.</li>
+                <li>Enter a grade for each student.</li>
+                <li>Optional: tap "+ comment" to add a short note for one student.</li>
+                <li>Tap "Save &amp; next".</li>
+              </ol>
               {!st.fixed && (
                 <div className="mb-3">
                   <input value={sub.label} onChange={(e) => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], label: e.target.value, skipped: false } }))} placeholder="Subject name (e.g. Chumash)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
@@ -27380,7 +27427,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
           );
         })()}
 
-        {step === 6 && (
+        {step === 7 && (
           <div className={stepCard}>
             <p className="font-semibold text-stone-800 mb-1">Review</p>
             <p className="text-xs text-stone-500 mb-3">{missingCount > 0 ? `${missingCount} grade${missingCount === 1 ? " is" : "s are"} still blank. You can go back to fill them in, or submit as is.` : "Everything is filled in."}</p>
@@ -27397,16 +27444,17 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
                 </tbody>
               </table>
             </div>
-            <p className="text-[10px] text-stone-400 mt-3">These grades are saved in your class as assessments. They are not published to parents. The office will put the report together.</p>
+            <p className="text-xs text-stone-500 mt-3">Attendance: {attOptOut ? "not included in your class's reports" : "included (pulled from your logs)"}.</p>
+            <p className="text-[10px] text-stone-400 mt-2">Submitting sends this to the office. These grades are saved in your class as assessments but are not published to parents. If you need to change something after submitting, tell the office and they can send it back to you.</p>
           </div>
         )}
 
         {err && <p className="text-xs text-rose-600 mb-2">{err}</p>}
         <div className="flex gap-2">
           {step > 0 && <button onClick={() => go(-1)} disabled={saving} className="px-4 py-2.5 rounded-lg border border-stone-300 text-sm text-stone-600 disabled:opacity-50">Back</button>}
-          {step < 6 ? (
+          {step < 7 ? (
             <button onClick={() => go(1)} disabled={saving} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
-              {saving ? <Loader2 className="animate-spin" size={15} /> : null} {step === 0 ? "Looks right, start" : "Save & next"}
+              {saving ? <Loader2 className="animate-spin" size={15} /> : null} {step === 0 ? "Start" : step === 1 ? "Looks right, continue" : "Save & next"}
             </button>
           ) : (
             <button onClick={submit} disabled={saving} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
@@ -27420,7 +27468,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
 }
 
 // Admin: set up a round, and see which classes have finished.
-function AdminReportRoundsView({ registry, onBack, loggedInTeacher }) {
+function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReports }) {
   const classes = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
   const [rounds, setRounds] = useState(null);
   const [loadErr, setLoadErr] = useState(null);
@@ -27429,6 +27477,25 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher }) {
   const [formErr, setFormErr] = useState(null);
   const [openId, setOpenId] = useState(null);
   const [statusByRound, setStatusByRound] = useState({});
+  const [review, setReview] = useState(null); // { cid, round, loading, error, entry, roster, assessments }
+  const openReview = async (round, cid) => {
+    setReview({ cid, round, loading: true });
+    try {
+      const [rawRoster, assessments, list] = await Promise.all([
+        loadJSON(`class:${cid}:roster`, [], true, 2, true),
+        loadJSON(`class:${cid}:classAssessments`, [], true, 2, true),
+        loadJSON(`class:${cid}:reportRounds`, [], true, 2, true),
+      ]);
+      setReview({ cid, round, entry: (list || []).find((r) => r.id === round.id) || null, assessments: assessments || [], roster: (rawRoster || []).filter((x) => !x.enrollmentScope || x.enrollmentScope === "full-time") });
+    } catch (e) { console.error("Round review load failed", e); setReview({ cid, round, error: true }); }
+  };
+  const sendBack = async () => {
+    try {
+      await updateClassRoundEntry(review.cid, review.round.id, (r) => ({ ...r, status: "open", submittedAt: null }));
+      await openReview(review.round, review.cid);
+      loadStatus(review.round);
+    } catch (e) { console.error("Send back failed", e); setReview((p) => ({ ...p, sendBackError: true })); }
+  };
 
   const loadRounds = async () => {
     try { setRounds((await loadJSON("reportRounds", [], true, 3, true)) || []); setLoadErr(null); }
@@ -27528,10 +27595,11 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher }) {
               <div className="mt-2 border-t border-stone-100 pt-2">
                 {!statusByRound[r.id] ? <Loader2 className="animate-spin text-teal-700" size={16} /> : (
                   <div className="space-y-1">
-                    {(r.classIds || []).map((cid) => { const s = statusText(statusByRound[r.id][cid]); const cls = (registry || []).find((c) => c.id === cid); return (<div key={cid} className="flex items-center justify-between text-xs"><span className="text-stone-700">{cls?.name || cid}</span><span className={`font-semibold ${s.c}`}>{s.t}</span></div>); })}
+                    {(r.classIds || []).map((cid) => { const s = statusText(statusByRound[r.id][cid]); const cls = (registry || []).find((c) => c.id === cid); return (<div key={cid} className="flex items-center justify-between gap-2 text-xs"><span className="text-stone-700">{cls?.name || cid}</span><span className="flex items-center gap-2"><span className={`font-semibold ${s.c}`}>{s.t}</span>{statusByRound[r.id][cid] && statusByRound[r.id][cid] !== "error" && <button onClick={() => openReview(r, cid)} className="font-semibold text-teal-700 underline">Review</button>}</span></div>); })}
                   </div>
                 )}
-                <div className="flex gap-3 mt-3">
+                <div className="flex flex-wrap gap-3 mt-3 items-center">
+                  <button onClick={() => onMakeReports && onMakeReports(r)} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Make the PDFs and send</button>
                   <button onClick={() => loadStatus(r)} className="text-xs font-semibold text-teal-700">Refresh</button>
                   <button onClick={() => { setForm({ name: r.name, startDate: "", endDate: "", dueDate: nextWednesdayISO(), classIds: r.classIds || [] }); window.scrollTo({ top: 0, behavior: "smooth" }); }} className="text-xs font-semibold text-teal-700">Start another like this</button>
                 </div>
@@ -27540,14 +27608,67 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher }) {
           </div>
         ))}
       </div>
+
+      {review && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-end md:items-center justify-center" onClick={() => setReview(null)}>
+          <div className="bg-white rounded-t-2xl md:rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-2">
+              <p className="font-semibold text-stone-800">{review.round.name}: {(registry || []).find((c) => c.id === review.cid)?.name || ""}</p>
+              <button onClick={() => setReview(null)} className="text-stone-400 text-sm">Close</button>
+            </div>
+            {review.loading && <Loader2 className="animate-spin text-teal-700" size={18} />}
+            {review.error && <p className="text-xs text-rose-600">Couldn't load this class. Try again.</p>}
+            {review.roster && (() => {
+              const entry = review.entry;
+              const keys = ROUND_STEPS.filter((st) => { const e = entry?.entries?.[st.key]; return e && !e.skipped && (e.label || "").trim(); });
+              const cell = (st, sid) => {
+                const e = entry.entries[st.key];
+                const a = review.assessments.find((x) => x.id === e.assessmentId);
+                const r = a?.results?.[sid];
+                return { g: getResultGrade(r), n: getResultNote(r) };
+              };
+              return (
+                <>
+                  <p className="text-xs text-stone-500 mb-2">
+                    {!entry ? "This class has no copy of the round." : entry.status === "submitted" ? `Submitted${entry.submittedBy ? ` by ${entry.submittedBy}` : ""}${entry.submittedAt ? ` on ${new Date(entry.submittedAt).toLocaleDateString()}` : ""}.` : "Not submitted yet. This is what has been entered so far."}
+                    {entry?.attendanceOptOut ? " Attendance is left out of this class's reports." : ""}
+                  </p>
+                  {keys.length === 0 ? <p className="text-xs text-stone-400">No subjects entered yet.</p> : (
+                    <div className="overflow-x-auto">
+                      <table className="text-xs w-full">
+                        <thead><tr className="text-stone-400 text-left"><th className="pr-2 pb-1">Student</th>{keys.map((st) => <th key={st.key} className="px-1 pb-1">{entry.entries[st.key].label}</th>)}</tr></thead>
+                        <tbody>
+                          {review.roster.map((s) => (
+                            <tr key={s.id} className="border-t border-stone-100 align-top">
+                              <td className="pr-2 py-1 text-stone-800">{s.name}</td>
+                              {keys.map((st) => { const c = cell(st, s.id); return (<td key={st.key} className={`px-1 py-1 ${c.g ? "text-stone-700" : "text-amber-600"}`}>{c.g || "blank"}{c.n && <span className="block text-[10px] italic text-stone-400">{c.n}</span>}</td>); })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {entry?.status === "submitted" && (
+                    <div className="mt-3">
+                      <button onClick={sendBack} className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-50">Send back to the teacher to change</button>
+                      <p className="text-[10px] text-stone-400 mt-1">This reopens the report on the teacher's home screen. It does not send them a message, so let them know.</p>
+                      {review.sendBackError && <p className="text-xs text-rose-600 mt-1">That didn't save. Try again.</p>}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ---- Admin: the same Create reports flow, across any elementary classes at once ----
-function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
+function AdminCreateReportsView({ registry, loggedInTeacher, onBack, initialRound }) {
   const classes = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
-  const [picked, setPicked] = useState(() => classes.map((c) => c.id));
+  const [picked, setPicked] = useState(() => (initialRound?.classIds?.length ? classes.filter((c) => initialRound.classIds.includes(c.id)).map((c) => c.id) : classes.map((c) => c.id)));
   const [loaded, setLoaded] = useState(null); // { roster, studentData, ctxByClass }
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -27626,9 +27747,11 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
     await saveJSON(key, fresh.map((x) => (x.id === studentId ? { ...x, parentEmail: email } : x)), true);
   };
 
+  useEffect(() => { if (initialRound) loadChosen(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (loaded) {
     return (
-      <CreateReportsView rounds={roundsMeta} sharedMessage={{ text: sharedText, setText: setSharedText, save: saveSharedText, saveState: sharedSaveState }} roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
+      <CreateReportsView initialRoundId={initialRound?.id} rounds={roundsMeta} sharedMessage={{ text: sharedText, setText: setSharedText, save: saveSharedText, saveState: sharedSaveState }} roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
         title="Create reports: school"
         contextFor={(st) => loaded.ctxByClass[st.__classId]} sendDirectMessageToFamily={sendAsOffice}
         onBack={() => setLoaded(null)} onLogSent={logSent} onUpdateParentEmail={updateEmail} />
