@@ -7592,6 +7592,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
   const [newClassType, setNewClassType] = useState("elementary");
   const [showPwChange, setShowPwChange] = useState(false);
   const [showAdminReports, setShowAdminReports] = useState(false);
+  const [showRoundsAdmin, setShowRoundsAdmin] = useState(false);
   const [pw1, setPw1] = useState("");
   const [pw2, setPw2] = useState("");
   const [pwSaved, setPwSaved] = useState(false);
@@ -8155,6 +8156,13 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
           <p className="text-xs text-stone-400 mb-3">The same Create reports a teacher uses, for any elementary classes at once: a written message, a PDF, or both, for a month or custom dates. Send in-app to every family, email one by one, or download one zip.</p>
           <button onClick={() => setShowAdminReports(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
             <Plus size={12} /> Create reports
+          </button>
+        </div>
+        <div className="pt-1">
+          <p className="text-sm font-semibold text-stone-800 mb-1">Report rounds</p>
+          <p className="text-xs text-stone-400 mb-3">Set up one school-wide report that every teacher fills out through a guided walkthrough (attendance check, English, Math, Judaic subjects, overall). Set the dates and due date, then see who has finished.</p>
+          <button onClick={() => setShowRoundsAdmin(true)} className="text-xs font-semibold text-teal-700 flex items-center gap-1 mb-3">
+            <Plus size={12} /> Manage report rounds
           </button>
         </div>
         </>
@@ -8768,6 +8776,11 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
         );
       })()}
 
+      {showRoundsAdmin && (
+        <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
+          <AdminReportRoundsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowRoundsAdmin(false)} />
+        </div>
+      )}
       {showAdminReports && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
           <AdminCreateReportsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowAdminReports(false)} />
@@ -13397,6 +13410,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [plannerDays, setPlannerDays] = useState({});
   const [plannerEvents, setPlannerEvents] = useState([]);
   const [benchmarkSubjects, setBenchmarkSubjects] = useState([]);
+  const [reportRounds, setReportRounds] = useState([]); // this class's copies of the school-wide report rounds
+  const [activeRoundId, setActiveRoundId] = useState(null);
   const [segmentCelebrationDismissals, setSegmentCelebrationDismissals] = useState({}); // segmentId -> true, once dismissed
   const [behaviorLogData, setBehaviorLogData] = useState({});
   // Keyed by category id, then by date, then by student id — every "tracker"-type points category
@@ -13464,6 +13479,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
           openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
           openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
+          openRounds={reportRounds.filter((r) => r.status !== "submitted")} onOpenRound={(id) => { setActiveRoundId(id); navigateView("report-round"); }}
           monthlyReportState={monthlyReportState}
           onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
           reflectionState={reflectionState} reflections={reflections}
@@ -13870,6 +13886,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const pd = await loadC("plannerDays", {});
       const pe = await loadC("plannerEvents", []);
       const bs = await loadC("benchmarkSubjects", []);
+      const rr = await loadC("reportRounds", []);
       const scd = await loadC("segmentCelebrationDismissals", {});
       const bl = await loadC("behaviorLogData", {});
       const dl = await loadC("trackerLog", {});
@@ -13975,6 +13992,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setBlogDrafts(bDrafts);
       setHomeworkPosts(hw);
       setClassAssessments(finalCA);
+      setReportRounds(Array.isArray(rr) ? rr : []);
       setClassPoints(finalCP);
       setMonthlyReportState(mrs);
       setReflections(refl);
@@ -15639,6 +15657,17 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onBack={() => navigateView("communication")} onAddEntry={(entry) => addCommunication(currentId, entry)} />
       )}
 
+      {view === "report-round" && (() => {
+        const round = reportRounds.find((r) => r.id === activeRoundId);
+        if (!round) return <div className={PAGE}><button onClick={() => navigateView("home")} className="text-sm text-stone-500">Back</button><p className="text-sm text-stone-500 mt-3">That report isn't available.</p></div>;
+        return (
+          <ReportRoundWalkthrough key={round.id} round={round} roster={roster} studentData={studentData} config={config} classAssessments={classAssessments}
+            benchmarkSubjects={benchmarkSubjects} loggedInTeacher={loggedInTeacher} persistAssessments={persistClassAssessments}
+            updateRound={async (rid, mutate) => { const next = await updateClassRoundEntry(classId, rid, mutate); setReportRounds(next); }}
+            onBack={() => navigateView("home")} />
+        );
+      })()}
+
       {view === "create-reports" && (
         <CreateReportsView roster={roster} studentData={studentData} incidents={incidents} classAssessments={classAssessments} config={config} loggedInTeacher={loggedInTeacher} classType={classType} classId={classId} className={className}
           preselectedStudentId={createReportsStudentId} sendDirectMessageToFamily={sendDirectMessageToFamily}
@@ -15907,7 +15936,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture, logPrograms, onOpenProgram, tehillimBanner }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture, logPrograms, onOpenProgram, tehillimBanner, openRounds, onOpenRound }) {
   const [date, setDate] = useState(todayISO());
   const [multiSelect, setMultiSelect] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -16036,6 +16065,16 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
           </ul>
         </div>
       )}
+
+      {(openRounds || []).map((r) => (
+        <div key={r.id} className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="text-sm font-semibold text-amber-900">Report to complete: {r.name}</p>
+            <p className="text-xs text-amber-800">{r.dueDate ? `Due ${roundDueText(r.dueDate)}. ` : ""}A short guided walkthrough: attendance check, English, Math, two Judaic subjects and overall.</p>
+          </div>
+          <button onClick={() => onOpenRound(r.id)} className="shrink-0 text-xs font-semibold bg-amber-600 text-white rounded-lg px-3 py-1.5 hover:bg-amber-700">{Object.keys(r.entries || {}).length ? "Continue" : "Start"}</button>
+        </div>
+      ))}
 
       {reminderDue && (
         <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
@@ -26396,7 +26435,7 @@ const REPORT_SECTIONS = [
 // a bulk-exported PDF and a single-student one look and read the same way — just with a date
 // range added, since a bulk export needs one applied consistently across everyone at once rather
 // than left to whatever history happens to exist.
-function buildStudentReportPdf(student, data, incidents, classAssessments, config, sections, className, startDate, endDate) {
+function buildStudentReportPdf(student, data, incidents, classAssessments, config, sections, className, startDate, endDate, extra) {
   const inRange = (dateStr) => !dateStr || ((!startDate || dateStr >= startDate) && (!endDate || dateStr <= endDate));
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -26501,6 +26540,16 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
     }
   }
 
+  if (extra?.roundRows?.length) {
+    addSectionTitle(extra.roundTitle || "Report");
+    autoTable(doc, {
+      startY: y, head: [["Subject", "Grade"]], body: extra.roundRows, margin: { left: 14, right: 14 },
+      styles: { fontSize: 9, cellPadding: 2.5 }, headStyles: { fillColor: [15, 118, 110] },
+      columnStyles: { 0: { cellWidth: 60, fontStyle: "bold" } },
+    });
+    y = doc.lastAutoTable.finalY + 8;
+  }
+
   if (sections.includes("homework")) {
     addSectionTitle("Homework log");
     const rows = [...(data.homework || [])].filter((h) => inRange(h.date)).sort((a, b) => (a.date < b.date ? 1 : -1))
@@ -26578,7 +26627,7 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
 // reports, custom-date-range text reports, and the per-student PDF export). The same date choices
 // (a whole month, or a custom start/end) and the same section checkboxes apply to every format, and
 // it works for one student, a few, or the whole class.
-function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title, sharedMessage }) {
+function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title, sharedMessage, rounds }) {
   // sharedMessage (admin only): { text, setText, save, saveState } — one message for every child, with {student} filled in.
   // contextFor (admin, several classes at once): student -> { incidents, classAssessments, config, classId, className }.
   // Without it, everything comes from the single class this screen was opened in, exactly as before.
@@ -26596,7 +26645,14 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const [endDate, setEndDate] = useState(todayISO());
   const [sections, setSections] = useState(() => sectionList.map((s) => s.id));
   const [format, setFormat] = useState(sharedMessage ? "both" : "message"); // "message" | "pdf" | "both"
-  const [emailBoth, setEmailBoth] = useState(false);
+  const [emailBoth, setEmailBoth] = useState(true); // default: the email goes to both parents when two are on file
+  const [roundId, setRoundId] = useState(""); // admin: a report round whose grades go into the PDF
+  const activeRound = (rounds || []).find((r) => r.id === roundId) || null;
+  const pickRound = (id) => {
+    setRoundId(id);
+    const r = (rounds || []).find((x) => x.id === id);
+    if (r) { setWhenMode("range"); setStartDate(r.startDate || ""); setEndDate(r.endDate || todayISO()); setSections(["attendance"]); setFormat("both"); }
+  };
   const [results, setResults] = useState({}); // studentId -> { loading, draft, dataUsed, pdfBlob, pdfName, label, error, sendState, logged, showData }
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null);
@@ -26613,7 +26669,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const lastDay = new Date(year, monthIdx + 1, 0).getDate();
   const rangeStart = whenMode === "month" ? `${year}-${pad2(monthIdx + 1)}-01` : startDate;
   const rangeEnd = whenMode === "month" ? `${year}-${pad2(monthIdx + 1)}-${pad2(lastDay)}` : endDate;
-  const label = whenMode === "month" ? monthLabel(year, monthIdx) : `${rangeStart || "start"} to ${rangeEnd}`;
+  const label = activeRound ? activeRound.name : (whenMode === "month" ? monthLabel(year, monthIdx) : `${rangeStart || "start"} to ${rangeEnd}`);
   const rangeValid = whenMode === "month" || (Boolean(endDate) && (!startDate || startDate <= endDate));
   // What the written message can actually draw on: attendance, incidents, and assessment activity.
   const msgOpts = {
@@ -26654,7 +26710,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     }
     if (wantPdf) {
       try {
-        pdfBlob = buildStudentReportPdf(student, data, cx.incidents, cx.classAssessments, cx.config, sections, cx.className, rangeStart || null, rangeEnd || null);
+        pdfBlob = buildStudentReportPdf(student, data, cx.incidents, cx.classAssessments, cx.config, sections, cx.className, rangeStart || null, rangeEnd || null, activeRound ? buildRoundPdfExtra(activeRound, cx, student) : null);
       } catch (err) {
         console.error("Report PDF generation failed:", err);
         error = "The PDF couldn't be created for this student.";
@@ -26797,6 +26853,17 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
       <p className="text-xs text-stone-400 mb-4">A written message, a PDF, or both — for one student, a few, or the whole class. Every figure comes only from what's logged in the dates you pick. Nothing sends until you press send.</p>
 
       <div className="md:max-w-xl">
+        {rounds && rounds.length > 0 && (
+          <div className={stepCard}>
+            <p className={stepTitle}>Report round (optional)</p>
+            <select value={roundId} onChange={(e) => pickRound(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm">
+              <option value="">None: a regular report</option>
+              {rounds.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            </select>
+            <p className="text-[10px] text-stone-400 mt-1">{activeRound ? "The dates are set from the round. Each PDF has attendance followed by the grades the teachers entered (a class that hasn't submitted yet shows no grades)." : "Pick a round to build the PDFs from what the teachers entered."}</p>
+          </div>
+        )}
+
         <div className={stepCard}>
           <p className={stepTitle}>1 · Who</p>
           <div className="flex items-center gap-2 mb-2">
@@ -26942,7 +27009,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                 {!wEmail ? (
                   <p className="text-xs text-amber-700 mb-2">No parent email on file. Type it in the box below this card, or skip to the next child.</p>
                 ) : (
-                  <p className="text-xs text-stone-600 mb-2">To: {wEmail}</p>
+                  <p className="text-xs text-stone-600 mb-2">To: {[wEmail, emailBoth && walkStudent.parent2Email].filter(Boolean).join(", ")}</p>
                 )}
                 <button onClick={() => emailWithPdf(walkStudent)} disabled={!wEmail}
                   className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40 mb-2">
@@ -27032,11 +27099,447 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
             })}
           </div>
           <label className="flex items-center gap-1.5 text-xs text-stone-500 mt-3">
-            <input type="checkbox" checked={emailBoth} onChange={(e) => setEmailBoth(e.target.checked)} /> Also email the second parent (when one is on file)
+            <input type="checkbox" checked={emailBoth} onChange={(e) => setEmailBoth(e.target.checked)} /> Email both parents (when a second parent's email is on file)
           </label>
           <p className="text-xs text-stone-400 text-center mt-4">Nothing sends automatically. Review each report first. In-app sends are logged for you automatically.</p>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- Report rounds -------------------------------------------------------------------------
+// One school-wide report that every teacher fills out through a guided walkthrough. The admin sets
+// up a round (name, dates, due date) once; each selected class gets its own copy, stored inside the
+// class's own data (class:{id}:reportRounds) so teachers can read/write it with the access they
+// already have. Grades a teacher enters are saved as real (unpublished) class assessments, and the
+// round entry remembers which assessment belongs to which subject. Rounds stay in the admin's list,
+// so the same framework can be started again later ("Start another like this").
+const ROUND_LETTERS = ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D", "F"];
+const ROUND_JUDAIC_IDEAS = ["Chumash", "Navi", "Halacha", "Hebrew Reading", "Tefillah", "Parsha", "Mishnah", "Dinim"];
+// key, default label, whether the teacher can rename it, whether it can be skipped
+const ROUND_STEPS = [
+  { key: "english", label: "English", fixed: true, optional: false },
+  { key: "math", label: "Math", fixed: true, optional: false },
+  { key: "judaic1", label: "", fixed: false, optional: false },
+  { key: "judaic2", label: "", fixed: false, optional: true },
+  { key: "overall", label: "Overall / participation", fixed: true, optional: true },
+];
+const ROUND_SCALES = [
+  { id: "percent", label: "Marks (%)" },
+  { id: "letter", label: "Letters (A–F)" },
+  { id: "words", label: "Words (e.g. Excellent)" },
+];
+function roundDueText(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(`${dateStr}T12:00:00`);
+  return Number.isNaN(d.getTime()) ? dateStr : d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+}
+function nextWednesdayISO() {
+  const d = new Date();
+  const add = (3 - d.getDay() + 7) % 7;
+  d.setDate(d.getDate() + add);
+  return isoDate(d);
+}
+function fmtLateMinutes(m) { return m >= 60 ? `${Math.floor(m / 60)} hr ${m % 60} min` : `${m} min`; }
+function newClassRoundEntry(round) {
+  return { id: round.id, name: round.name, startDate: round.startDate || "", endDate: round.endDate || "", dueDate: round.dueDate || "", createdAt: round.createdAt, status: "open", entries: {} };
+}
+// Loads the class's round list fresh, changes one round, and saves it — so two people's edits never overwrite each other with stale data.
+async function updateClassRoundEntry(classId, roundId, mutate) {
+  const key = `class:${classId}:reportRounds`;
+  const list = (await loadJSON(key, [], true, 3, true)) || [];
+  const next = list.map((r) => (r.id === roundId ? mutate(r) : r));
+  await saveJSON(key, next, true, 2, true);
+  return next;
+}
+// Rows for the PDF's grades block, from one class's saved round entry. A comment only appears when the teacher wrote one.
+function buildRoundPdfExtra(roundMeta, cx, student) {
+  const entry = ((cx && cx.rounds) || []).find((r) => r.id === roundMeta.id);
+  const rows = [];
+  if (entry) {
+    for (const st of ROUND_STEPS) {
+      const e = entry.entries?.[st.key];
+      if (!e || e.skipped || !(e.label || "").trim()) continue; // eslint-disable-line no-continue
+      const a = (cx.classAssessments || []).find((x) => x.id === e.assessmentId);
+      const r = a?.results?.[student.id];
+      const grade = getResultGrade(r);
+      const note = getResultNote(r);
+      rows.push([e.label, grade ? (note ? `${grade}\n${note}` : grade) : "—"]);
+    }
+  }
+  return { roundTitle: roundMeta.name || "Report", roundRows: rows };
+}
+function summarizeAttendanceForRound(data, config, startDate, endDate) {
+  const statuses = config.attendance?.statuses || [];
+  const entries = (data?.attendance || []).filter((a) => (!startDate || a.date >= startDate) && (!endDate || a.date <= endDate));
+  const counts = {};
+  statuses.forEach((st) => { counts[st.id] = 0; });
+  entries.forEach((a) => { counts[a.status] = (counts[a.status] || 0) + 1; });
+  const startMin = timeToMinutes(config.attendance?.classStartTime);
+  let lateMin = 0;
+  entries.forEach((a) => {
+    if (statuses.find((s) => s.id === a.status)?.flagType === "late" && startMin != null) {
+      const t = timeToMinutes(a.time);
+      if (t != null && t > startMin) lateMin += t - startMin;
+    }
+  });
+  return { counts, lateMin, total: entries.length };
+}
+
+function RoundGradeInput({ scale, value, onChange }) {
+  const cls = "w-24 rounded-lg border border-stone-300 px-2 py-1.5 text-sm";
+  if (scale === "letter") {
+    return (
+      <select value={value || ""} onChange={(e) => onChange(e.target.value)} className={cls}>
+        <option value="">—</option>
+        {ROUND_LETTERS.map((l) => <option key={l} value={l}>{l}</option>)}
+      </select>
+    );
+  }
+  if (scale === "percent") {
+    return (
+      <input inputMode="decimal" value={String(value || "").replace(/%$/, "")} placeholder="e.g. 92"
+        onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); onChange(v ? `${v}%` : ""); }} className={cls} />
+    );
+  }
+  return (
+    <>
+      <input list="round-words" value={value || ""} onChange={(e) => onChange(e.target.value)} placeholder="e.g. Good" className="w-32 rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+      <datalist id="round-words">{["Excellent", "Very Good", "Good", "Satisfactory", "Needs Improvement"].map((w) => <option key={w} value={w} />)}</datalist>
+    </>
+  );
+}
+
+// The teacher's guided walkthrough: attendance check, English, Math, two Judaic subjects, overall, review.
+function ReportRoundWalkthrough({ round, roster, studentData, config, classAssessments, benchmarkSubjects, loggedInTeacher, persistAssessments, updateRound, onBack }) {
+  const [step, setStep] = useState(0); // 0 attendance, 1-5 the subjects in ROUND_STEPS, 6 review
+  const [subs, setSubs] = useState(() => {
+    const o = {};
+    ROUND_STEPS.forEach((st) => { const e = round.entries?.[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped) }; });
+    return o;
+  });
+  const [grades, setGrades] = useState(() => {
+    const g = {};
+    ROUND_STEPS.forEach((st) => {
+      g[st.key] = {};
+      const e = round.entries?.[st.key];
+      const a = e?.assessmentId ? classAssessments.find((x) => x.id === e.assessmentId) : null;
+      if (a) roster.forEach((s) => { const r = a.results?.[s.id]; g[st.key][s.id] = { grade: getResultGrade(r), note: getResultNote(r) }; });
+    });
+    return g;
+  });
+  const [openNotes, setOpenNotes] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  const assessmentIds = useRef({});
+
+  const setGrade = (key, sid, patchObj) => setGrades((prev) => ({ ...prev, [key]: { ...prev[key], [sid]: { ...(prev[key][sid] || {}), ...patchObj } } }));
+  const matchSubjectId = (label) => (benchmarkSubjects || []).find((b) => (b.label || "").trim().toLowerCase() === label.trim().toLowerCase())?.id;
+
+  // Saves one subject: the class assessment (unpublished, so nothing reaches parents) and the round's own record of it.
+  const saveSubject = async (key) => {
+    const sub = subs[key];
+    const label = (sub.label || "").trim();
+    if (sub.skipped || !label) {
+      await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { label: "", skipped: true } } }));
+      return;
+    }
+    const assessmentId = round.entries?.[key]?.assessmentId || assessmentIds.current[key] || uid();
+    assessmentIds.current[key] = assessmentId;
+    const existing = classAssessments.find((a) => a.id === assessmentId);
+    const results = { ...(existing?.results || {}) };
+    roster.forEach((s) => {
+      const g = (grades[key]?.[s.id]?.grade || "").trim();
+      const note = (grades[key]?.[s.id]?.note || "").trim();
+      if (g) {
+        const prev = normalizeAssessmentResult(results[s.id]);
+        results[s.id] = { grade: g, ...(note ? { note } : {}), published: prev ? prev.published : false };
+      } else delete results[s.id];
+    });
+    const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO(), subjectId: matchSubjectId(label) }), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key };
+    persistAssessments(existing ? classAssessments.map((a) => (a.id === assessmentId ? assessment : a)) : [...classAssessments, assessment]);
+    await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { label, scale: sub.scale, assessmentId } } }));
+  };
+
+  const go = async (delta) => {
+    setErr(null);
+    const cur = step >= 1 && step <= 5 ? ROUND_STEPS[step - 1] : null;
+    if (cur && delta > 0 && !cur.optional && !(subs[cur.key].label || "").trim()) { setErr("Type the subject name first."); return; }
+    setSaving(true);
+    try {
+      if (cur) await saveSubject(cur.key);
+      setStep((s) => s + delta);
+    } catch (e) { console.error("Report round save failed", e); setErr("That didn't save. Check your connection and try again."); }
+    setSaving(false);
+  };
+  const submit = async () => {
+    setSaving(true); setErr(null);
+    try {
+      await updateRound(round.id, (r) => ({ ...r, status: "submitted", submittedAt: new Date().toISOString(), submittedBy: loggedInTeacher?.name || "" }));
+      onBack();
+    } catch (e) { console.error("Report round submit failed", e); setErr("That didn't save. Check your connection and try again."); }
+    setSaving(false);
+  };
+
+  const stepCard = "bg-white border border-stone-200 rounded-xl p-3 mb-3";
+  const filledKeys = ROUND_STEPS.filter((st) => !subs[st.key].skipped && (subs[st.key].label || "").trim());
+  const missingCount = filledKeys.reduce((n, st) => n + roster.filter((s) => !(grades[st.key]?.[s.id]?.grade || "").trim()).length, 0);
+  const total = 7;
+
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back (progress is saved)</button>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{round.name}</h1>
+      <p className="text-xs text-stone-500 mb-1">{round.dueDate ? `Due ${roundDueText(round.dueDate)}.` : ""} Step {step + 1} of {total}</p>
+      <div className="h-1.5 bg-stone-200 rounded-full mb-4 md:max-w-xl"><div className="h-1.5 bg-teal-600 rounded-full" style={{ width: `${((step + 1) / total) * 100}%` }} /></div>
+
+      <div className="md:max-w-xl">
+        {step === 0 && (
+          <div className={stepCard}>
+            <p className="font-semibold text-stone-800 mb-1">Check attendance</p>
+            <p className="text-xs text-stone-500 mb-3">This is pulled automatically from what you've logged{round.startDate || round.endDate ? ` (${round.startDate || "start"} to ${round.endDate || "today"})` : ""}. It goes straight onto the report. If a day is missing or wrong, fix it in Attendance first, then come back. You don't need to enter anything here.</p>
+            <div className="overflow-x-auto">
+              <table className="text-xs w-full">
+                <thead><tr className="text-stone-400 text-left"><th className="pr-2 pb-1">Student</th>{(config.attendance?.statuses || []).map((st) => <th key={st.id} className="px-1 pb-1">{st.label}</th>)}<th className="px-1 pb-1">Time late</th></tr></thead>
+                <tbody>
+                  {roster.map((s) => {
+                    const sum = summarizeAttendanceForRound(studentData[s.id], config, round.startDate, round.endDate);
+                    return (
+                      <tr key={s.id} className="border-t border-stone-100">
+                        <td className="pr-2 py-1 text-stone-800">{s.name}</td>
+                        {(config.attendance?.statuses || []).map((st) => <td key={st.id} className="px-1 py-1 text-stone-600">{sum.counts[st.id] || 0}</td>)}
+                        <td className="px-1 py-1 text-stone-600">{sum.lateMin ? fmtLateMinutes(sum.lateMin) : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {step >= 1 && step <= 5 && (() => {
+          const st = ROUND_STEPS[step - 1];
+          const sub = subs[st.key];
+          const skippedNow = sub.skipped;
+          return (
+            <div className={stepCard}>
+              <p className="font-semibold text-stone-800 mb-1">{st.fixed ? st.label : (st.key === "judaic1" ? "Judaic subject #1" : "Judaic subject #2 (optional)")}</p>
+              <p className="text-xs text-stone-500 mb-3">
+                {st.key === "english" && "Enter a grade for each student for this report. It can come from a test, a project, or your overall judgment for the period."}
+                {st.key === "math" && "Enter a grade for each student for this report. It can come from a test, a project, or your overall judgment for the period."}
+                {st.key === "judaic1" && "Pick the Judaic subject you teach that you most want parents to hear about, or type your own."}
+                {st.key === "judaic2" && "A second Judaic subject, if you teach one. If not, tap Skip this subject."}
+                {st.key === "overall" && "A general grade for each student, for example overall participation, effort, or behavior. Skip it if you'd rather not include one."}
+              </p>
+              {!st.fixed && (
+                <div className="mb-3">
+                  <input value={sub.label} onChange={(e) => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], label: e.target.value, skipped: false } }))} placeholder="Subject name (e.g. Chumash)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
+                  <div className="flex flex-wrap gap-1">
+                    {ROUND_JUDAIC_IDEAS.map((idea) => (
+                      <button key={idea} onClick={() => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], label: idea, skipped: false } }))} className="text-[11px] px-2 py-0.5 rounded-full border border-stone-300 text-stone-600 hover:bg-stone-50">{idea}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {skippedNow ? (
+                <p className="text-xs text-stone-500">This subject is skipped. <button onClick={() => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], skipped: false } }))} className="text-teal-700 font-semibold">Add it back</button></p>
+              ) : (
+                <>
+                  <p className="text-xs font-semibold text-stone-600 mb-1">How do you want to grade?</p>
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    {ROUND_SCALES.map((sc) => (
+                      <button key={sc.id} onClick={() => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], scale: sc.id } }))}
+                        className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${sub.scale === sc.id ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{sc.label}</button>
+                    ))}
+                  </div>
+                  <div className="space-y-2">
+                    {roster.map((s) => {
+                      const cell = grades[st.key]?.[s.id] || {};
+                      const showNote = openNotes[`${st.key}:${s.id}`] || cell.note;
+                      return (
+                        <div key={s.id}>
+                          <div className="flex items-center gap-2">
+                            <span className="flex-1 text-sm text-stone-800">{s.name}</span>
+                            <RoundGradeInput scale={sub.scale} value={cell.grade} onChange={(v) => setGrade(st.key, s.id, { grade: v })} />
+                            {!showNote && <button onClick={() => setOpenNotes((p) => ({ ...p, [`${st.key}:${s.id}`]: true }))} className="text-[11px] text-teal-700 font-semibold whitespace-nowrap">+ comment</button>}
+                          </div>
+                          {showNote && (
+                            <input value={cell.note || ""} onChange={(e) => setGrade(st.key, s.id, { note: e.target.value })} placeholder={`Comment for ${s.name} (optional)`} className="w-full mt-1 rounded-lg border border-stone-200 px-2 py-1 text-xs" />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10px] text-stone-400 mt-3">Leave a student blank if they have no grade. Comments are optional and only appear on the report when you write one.</p>
+                  {st.optional && <button onClick={() => { setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], skipped: true } })); }} className="mt-2 text-xs text-stone-500 underline">Skip this subject</button>}
+                </>
+              )}
+            </div>
+          );
+        })()}
+
+        {step === 6 && (
+          <div className={stepCard}>
+            <p className="font-semibold text-stone-800 mb-1">Review</p>
+            <p className="text-xs text-stone-500 mb-3">{missingCount > 0 ? `${missingCount} grade${missingCount === 1 ? " is" : "s are"} still blank. You can go back to fill them in, or submit as is.` : "Everything is filled in."}</p>
+            <div className="overflow-x-auto">
+              <table className="text-xs w-full">
+                <thead><tr className="text-stone-400 text-left"><th className="pr-2 pb-1">Student</th>{filledKeys.map((st) => <th key={st.key} className="px-1 pb-1">{subs[st.key].label}</th>)}</tr></thead>
+                <tbody>
+                  {roster.map((s) => (
+                    <tr key={s.id} className="border-t border-stone-100">
+                      <td className="pr-2 py-1 text-stone-800">{s.name}</td>
+                      {filledKeys.map((st) => { const g = (grades[st.key]?.[s.id]?.grade || "").trim(); return <td key={st.key} className={`px-1 py-1 ${g ? "text-stone-700" : "text-amber-600"}`}>{g || "blank"}</td>; })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-[10px] text-stone-400 mt-3">These grades are saved in your class as assessments. They are not published to parents. The office will put the report together.</p>
+          </div>
+        )}
+
+        {err && <p className="text-xs text-rose-600 mb-2">{err}</p>}
+        <div className="flex gap-2">
+          {step > 0 && <button onClick={() => go(-1)} disabled={saving} className="px-4 py-2.5 rounded-lg border border-stone-300 text-sm text-stone-600 disabled:opacity-50">Back</button>}
+          {step < 6 ? (
+            <button onClick={() => go(1)} disabled={saving} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
+              {saving ? <Loader2 className="animate-spin" size={15} /> : null} {step === 0 ? "Looks right, start" : "Save & next"}
+            </button>
+          ) : (
+            <button onClick={submit} disabled={saving} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
+              {saving ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Submit my report
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Admin: set up a round, and see which classes have finished.
+function AdminReportRoundsView({ registry, onBack, loggedInTeacher }) {
+  const classes = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
+  const [rounds, setRounds] = useState(null);
+  const [loadErr, setLoadErr] = useState(null);
+  const [form, setForm] = useState({ name: "", startDate: "", endDate: "", dueDate: nextWednesdayISO(), classIds: classes.map((c) => c.id) });
+  const [creating, setCreating] = useState(false);
+  const [formErr, setFormErr] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  const [statusByRound, setStatusByRound] = useState({});
+
+  const loadRounds = async () => {
+    try { setRounds((await loadJSON("reportRounds", [], true, 3, true)) || []); setLoadErr(null); }
+    catch (e) { console.error("Rounds load failed", e); setLoadErr("Couldn't load the saved rounds. Try again."); setRounds([]); }
+  };
+  useEffect(() => { loadRounds(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadStatus = async (round) => {
+    const out = {};
+    for (const cid of round.classIds || []) {
+      try {
+        const list = (await loadJSON(`class:${cid}:reportRounds`, [], true, 2, true)) || []; // eslint-disable-line no-await-in-loop
+        out[cid] = list.find((r) => r.id === round.id) || null;
+      } catch (e) { out[cid] = "error"; }
+    }
+    setStatusByRound((p) => ({ ...p, [round.id]: out }));
+  };
+  const toggleOpen = (round) => { if (openId === round.id) { setOpenId(null); return; } setOpenId(round.id); loadStatus(round); };
+
+  const create = async () => {
+    setFormErr(null);
+    if (!form.name.trim()) { setFormErr("Give the report a name."); return; }
+    if (!form.endDate) { setFormErr("Pick the last date the report should cover."); return; }
+    if (form.startDate && form.startDate > form.endDate) { setFormErr("The start date is after the end date."); return; }
+    if (form.classIds.length === 0) { setFormErr("Pick at least one class."); return; }
+    setCreating(true);
+    try {
+      const round = { id: uid(), name: form.name.trim(), startDate: form.startDate, endDate: form.endDate, dueDate: form.dueDate, classIds: form.classIds, createdAt: new Date().toISOString(), createdBy: loggedInTeacher?.name || "" };
+      for (const cid of form.classIds) {
+        const key = `class:${cid}:reportRounds`;
+        const list = (await loadJSON(key, [], true, 3, true)) || []; // eslint-disable-line no-await-in-loop
+        if (!list.some((r) => r.id === round.id)) await saveJSON(key, [...list, newClassRoundEntry(round)], true, 2, true); // eslint-disable-line no-await-in-loop
+      }
+      const all = [...(rounds || []), round];
+      await saveJSON("reportRounds", all, true, 2, true);
+      setRounds(all);
+      setOpenId(round.id);
+      loadStatus(round);
+      setForm((f) => ({ ...f, name: "", startDate: "", endDate: "" }));
+    } catch (e) { console.error("Round create failed", e); setFormErr("That didn't save everywhere. Check your connection and try again."); }
+    setCreating(false);
+  };
+
+  const statusText = (entry) => {
+    if (entry === "error") return { t: "Couldn't load", c: "text-rose-600" };
+    if (!entry) return { t: "Not set up", c: "text-stone-400" };
+    if (entry.status === "submitted") return { t: `Submitted${entry.submittedBy ? ` by ${entry.submittedBy}` : ""}`, c: "text-emerald-700" };
+    const n = Object.values(entry.entries || {}).filter((e) => e && e.label).length;
+    return n > 0 ? { t: `In progress (${n} subject${n === 1 ? "" : "s"} entered)`, c: "text-amber-700" } : { t: "Not started", c: "text-amber-700" };
+  };
+
+  const input = "w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm";
+  return (
+    <div className={PAGE}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Report rounds</h1>
+      <p className="text-xs text-stone-400 mb-4">Set up one school-wide report. Each selected class's teacher gets a "Complete your report" card on their home screen and is guided through attendance, English, Math, two Judaic subjects and overall. When they're done, make the PDFs from Create reports. Nothing is sent to anyone from here.</p>
+
+      <div className="bg-white border border-stone-200 rounded-xl p-3 mb-4 md:max-w-xl">
+        <p className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">New round</p>
+        <label className="block text-xs text-stone-500 mb-0.5">Report name</label>
+        <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Term 1 Report" className={`${input} mb-2`} />
+        <div className="grid grid-cols-2 gap-2 mb-2">
+          <div><label className="block text-xs text-stone-500 mb-0.5">Covers from (optional)</label><input type="date" value={form.startDate} onChange={(e) => setForm((f) => ({ ...f, startDate: e.target.value }))} className={input} /></div>
+          <div><label className="block text-xs text-stone-500 mb-0.5">Covers until</label><input type="date" value={form.endDate} onChange={(e) => setForm((f) => ({ ...f, endDate: e.target.value }))} className={input} /></div>
+        </div>
+        <label className="block text-xs text-stone-500 mb-0.5">Teachers' due date</label>
+        <input type="date" value={form.dueDate} onChange={(e) => setForm((f) => ({ ...f, dueDate: e.target.value }))} className={`${input} mb-2`} />
+        {form.dueDate && <p className="text-[11px] text-stone-400 -mt-1 mb-2">Teachers will see: Due {roundDueText(form.dueDate)}.</p>}
+        <div className="flex items-center gap-2 mb-1">
+          <p className="text-xs text-stone-500">Classes</p>
+          <button onClick={() => setForm((f) => ({ ...f, classIds: f.classIds.length === classes.length ? [] : classes.map((c) => c.id) }))} className="ml-auto text-xs font-semibold text-teal-700">{form.classIds.length === classes.length ? "Clear" : "Select all"}</button>
+        </div>
+        <div className="space-y-1 mb-3">
+          {classes.map((c) => (
+            <label key={c.id} className="flex items-center gap-2 text-sm text-stone-700"><input type="checkbox" checked={form.classIds.includes(c.id)} onChange={() => setForm((f) => ({ ...f, classIds: f.classIds.includes(c.id) ? f.classIds.filter((x) => x !== c.id) : [...f.classIds, c.id] }))} /> {c.name}</label>
+          ))}
+        </div>
+        {formErr && <p className="text-xs text-rose-600 mb-2">{formErr}</p>}
+        <button onClick={create} disabled={creating} className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
+          {creating ? <><Loader2 className="animate-spin" size={15} /> Setting up…</> : "Open this round for teachers"}
+        </button>
+      </div>
+
+      <p className="text-xs font-bold uppercase tracking-wide text-stone-400 mb-2">Your rounds</p>
+      {rounds === null && <Loader2 className="animate-spin text-teal-700" size={18} />}
+      {loadErr && <p className="text-xs text-rose-600 mb-2">{loadErr}</p>}
+      {rounds && rounds.length === 0 && !loadErr && <p className="text-xs text-stone-400">No rounds yet.</p>}
+      <div className="space-y-2 md:max-w-xl">
+        {(rounds || []).slice().reverse().map((r) => (
+          <div key={r.id} className="bg-white border border-stone-200 rounded-xl p-3">
+            <button onClick={() => toggleOpen(r)} className="w-full text-left flex items-center justify-between gap-2">
+              <span><span className="font-semibold text-stone-800 text-sm">{r.name}</span><span className="block text-[11px] text-stone-400">Due {roundDueText(r.dueDate) || "—"} · {(r.classIds || []).length} classes</span></span>
+              <ChevronRight size={16} className={`text-stone-400 transition-transform ${openId === r.id ? "rotate-90" : ""}`} />
+            </button>
+            {openId === r.id && (
+              <div className="mt-2 border-t border-stone-100 pt-2">
+                {!statusByRound[r.id] ? <Loader2 className="animate-spin text-teal-700" size={16} /> : (
+                  <div className="space-y-1">
+                    {(r.classIds || []).map((cid) => { const s = statusText(statusByRound[r.id][cid]); const cls = (registry || []).find((c) => c.id === cid); return (<div key={cid} className="flex items-center justify-between text-xs"><span className="text-stone-700">{cls?.name || cid}</span><span className={`font-semibold ${s.c}`}>{s.t}</span></div>); })}
+                  </div>
+                )}
+                <div className="flex gap-3 mt-3">
+                  <button onClick={() => loadStatus(r)} className="text-xs font-semibold text-teal-700">Refresh</button>
+                  <button onClick={() => { setForm({ name: r.name, startDate: "", endDate: "", dueDate: nextWednesdayISO(), classIds: r.classIds || [] }); window.scrollTo({ top: 0, behavior: "smooth" }); }} className="text-xs font-semibold text-teal-700">Start another like this</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -27051,6 +27554,8 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
   // The one message used for every child's email. Remembered between visits (admin-only document).
   const [sharedText, setSharedText] = useState("");
   const [sharedSaveState, setSharedSaveState] = useState(null);
+  const [roundsMeta, setRoundsMeta] = useState([]);
+  useEffect(() => { (async () => { try { setRoundsMeta((await loadJSON("reportRounds", [], true)) || []); } catch (e) { console.error("Rounds list load failed", e); } })(); }, []);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -27075,13 +27580,14 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
       const studentData = {};
       const ctxByClass = {};
       for (const cls of classes.filter((c) => picked.includes(c.id))) {
-        const [rawRoster, config, classAssessments, incidents] = await Promise.all([ // eslint-disable-line no-await-in-loop
+        const [rawRoster, config, classAssessments, incidents, classRounds] = await Promise.all([ // eslint-disable-line no-await-in-loop
           loadJSON(`class:${cls.id}:roster`, [], true),
           loadJSON(`class:${cls.id}:config`, DEFAULT_CONFIG, true),
           loadJSON(`class:${cls.id}:classAssessments`, [], true),
           loadJSON(`class:${cls.id}:incidents`, [], true),
+          loadJSON(`class:${cls.id}:reportRounds`, [], true),
         ]);
-        ctxByClass[cls.id] = { incidents, classAssessments, config, classId: cls.id, className: cls.name };
+        ctxByClass[cls.id] = { incidents, classAssessments, config, classId: cls.id, className: cls.name, rounds: classRounds || [] };
         // Same rule as everywhere else: a part-time, secondary enrollment never has data logged in this class.
         for (const st of (rawRoster || []).filter((x) => !x.enrollmentScope || x.enrollmentScope === "full-time")) {
           roster.push({ ...st, __classId: cls.id });
@@ -27122,7 +27628,7 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
 
   if (loaded) {
     return (
-      <CreateReportsView sharedMessage={{ text: sharedText, setText: setSharedText, save: saveSharedText, saveState: sharedSaveState }} roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
+      <CreateReportsView rounds={roundsMeta} sharedMessage={{ text: sharedText, setText: setSharedText, save: saveSharedText, saveState: sharedSaveState }} roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
         title="Create reports: school"
         contextFor={(st) => loaded.ctxByClass[st.__classId]} sendDirectMessageToFamily={sendAsOffice}
         onBack={() => setLoaded(null)} onLogSent={logSent} onUpdateParentEmail={updateEmail} />
