@@ -26420,7 +26420,8 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
 // reports, custom-date-range text reports, and the per-student PDF export). The same date choices
 // (a whole month, or a custom start/end) and the same section checkboxes apply to every format, and
 // it works for one student, a few, or the whole class.
-function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title }) {
+function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title, sharedMessage }) {
+  // sharedMessage (admin only): { text, setText, save, saveState } — one message for every child, with {student} filled in.
   // contextFor (admin, several classes at once): student -> { incidents, classAssessments, config, classId, className }.
   // Without it, everything comes from the single class this screen was opened in, exactly as before.
   const now = new Date();
@@ -26436,7 +26437,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const [startDate, setStartDate] = useState(addDaysISO(todayISO(), -13));
   const [endDate, setEndDate] = useState(todayISO());
   const [sections, setSections] = useState(() => sectionList.map((s) => s.id));
-  const [format, setFormat] = useState("message"); // "message" | "pdf" | "both"
+  const [format, setFormat] = useState(sharedMessage ? "both" : "message"); // "message" | "pdf" | "both"
   const [emailBoth, setEmailBoth] = useState(false);
   const [results, setResults] = useState({}); // studentId -> { loading, draft, dataUsed, pdfBlob, pdfName, label, error, sendState, logged, showData }
   const [running, setRunning] = useState(false);
@@ -26480,7 +26481,10 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     let dataUsed = null;
     let pdfBlob = null;
     let error = null;
-    if (wantMessage) {
+    if (sharedMessage) {
+      // Admin: the same message for every child, with the child's first name dropped in. No AI text.
+      if ((sharedMessage.text || "").trim()) draft = sharedMessage.text.replace(/\{student\}/gi, firstName(student));
+    } else if (wantMessage) {
       const facts = buildRangeFacts(student, data, cx.incidents, cx.classAssessments, cx.config, rangeStart, rangeEnd, msgOpts);
       dataUsed = factsToPlainText(student, label, facts);
       try {
@@ -26622,7 +26626,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
 
   const generatedCount = chosen.filter((s) => results[s.id] && !results[s.id].loading).length;
   const pdfCount = chosen.filter((s) => results[s.id]?.pdfBlob).length;
-  const canGenerate = chosen.length > 0 && sections.length > 0 && rangeValid && !running && (!wantMessage || messageHasContent);
+  const canGenerate = chosen.length > 0 && sections.length > 0 && rangeValid && !running && (!wantMessage || messageHasContent || Boolean(sharedMessage));
 
   const stepCard = "bg-white border border-stone-200 rounded-xl p-3 mb-3";
   const stepTitle = "text-xs font-bold uppercase tracking-wide text-stone-400 mb-2";
@@ -26716,8 +26720,22 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
             {format === "pdf" && "A professional PDF per student. You can add a short note to go with it."}
             {format === "both" && "A written summary plus the PDF. In-app, the PDF is attached to the message."}
           </p>
-          {wantMessage && !messageHasContent && <p className="text-xs text-rose-600 mt-1">A written message needs attendance, incidents or an assessment section checked.</p>}
+          {wantMessage && !messageHasContent && !sharedMessage && <p className="text-xs text-rose-600 mt-1">A written message needs attendance, incidents or an assessment section checked.</p>}
         </div>
+
+        {sharedMessage && (
+          <div className={stepCard}>
+            <p className={stepTitle}>5 · Message for everyone</p>
+            <p className="text-xs text-stone-500 mb-2">This same message goes in every parent's email. Type <b>{"{student}"}</b> wherever the child's first name should go. You can still change any one email in Gmail before sending.</p>
+            <textarea value={sharedMessage.text} onChange={(e) => sharedMessage.setText(e.target.value)} onBlur={() => sharedMessage.save()} rows={5}
+              placeholder={"Hi! Attached is {student}'s report. Please take a look and reach out with any questions."}
+              className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            <p className="text-[10px] text-stone-400 mt-1">
+              {sharedMessage.saveState === "failed" ? "Couldn't save this message — it will still be used on this screen." : "Saved automatically, so it's here next time."}
+              {!(sharedMessage.text || "").trim() && " Leave it empty to use a short default line."}
+            </p>
+          </div>
+        )}
 
         <button onClick={generateAll} disabled={!canGenerate}
           className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-40 mb-2">
@@ -26872,6 +26890,23 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
   const [loaded, setLoaded] = useState(null); // { roster, studentData, ctxByClass }
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // The one message used for every child's email. Remembered between visits (admin-only document).
+  const [sharedText, setSharedText] = useState("");
+  const [sharedSaveState, setSharedSaveState] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = await loadJSON("adminReportMessage", null, true);
+        if (!cancelled && saved && typeof saved.text === "string") setSharedText((cur) => cur || saved.text);
+      } catch (e) { console.error("Report message load failed", e); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const saveSharedText = async () => {
+    try { await saveJSON("adminReportMessage", { text: sharedText, by: loggedInTeacher?.name || "", at: new Date().toISOString() }, true, 2, true); setSharedSaveState("saved"); }
+    catch (e) { console.error("Report message save failed", e); setSharedSaveState("failed"); }
+  };
 
   const toggle = (id) => setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
@@ -26929,7 +26964,7 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack }) {
 
   if (loaded) {
     return (
-      <CreateReportsView roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
+      <CreateReportsView sharedMessage={{ text: sharedText, setText: setSharedText, save: saveSharedText, saveState: sharedSaveState }} roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
         title="Create reports: school"
         contextFor={(st) => loaded.ctxByClass[st.__classId]} sendDirectMessageToFamily={sendAsOffice}
         onBack={() => setLoaded(null)} onLogSent={logSent} onUpdateParentEmail={updateEmail} />
