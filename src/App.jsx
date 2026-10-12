@@ -21440,8 +21440,8 @@ function TehillimFamilyCard({ family }) {
           .filter((c) => c.parentNotifiedAt && (!c.testMode || isTestFamilyName(family.name)))
           .sort((a, b) => (a.shabbosDate < b.shabbosDate ? 1 : -1))[0];
         if (!visible) { if (!cancelled) setState(null); return; }
-        // Stays visible until about a week after the cutoff.
-        if (Date.now() > new Date(visible.checkoffDeadline).getTime() + 7 * 86400000) { if (!cancelled) setState(null); return; }
+        // Gone for parents the moment checkoff closes (the deadline passes or the office closes it early).
+        if (tehillimIsLocked(visible)) { if (!cancelled) setState(null); return; }
         const children = [];
         for (const link of family.studentLinks || []) {
           if (!(visible.classIds || []).includes(link.classId)) continue;
