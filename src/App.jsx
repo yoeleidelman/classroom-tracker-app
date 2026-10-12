@@ -26432,10 +26432,71 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
 
   if (sections.includes("attendance")) {
     addSectionTitle("Attendance history");
-    const attStatusMap = {}; (config.attendance?.statuses || []).forEach((s) => (attStatusMap[s.id] = s.label));
-    const rows = [...(data.attendance || [])].filter((a) => inRange(a.date)).sort((a, b) => (a.date < b.date ? 1 : -1))
-      .map((a) => [a.date, attStatusMap[a.status] || a.status, a.time || ""]);
-    if (rows.length === 0) addEmpty(); else addTable(["Date", "Status", "Time"], rows);
+    const statusList = config.attendance?.statuses || [];
+    const attStatusMap = {}; statusList.forEach((st) => (attStatusMap[st.id] = st));
+    const entries = [...(data.attendance || [])].filter((a) => inRange(a.date)).sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (entries.length === 0) { addEmpty(); }
+    else {
+      const startMin = timeToMinutes(config.attendance?.classStartTime);
+      // Summary line: a count for each status that has days
+      const counts = statusList.map((st) => ({ label: st.label, n: entries.filter((a) => a.status === st.id).length })).filter((c) => c.n > 0);
+      const unknown = entries.filter((a) => !attStatusMap[a.status]).length;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+      doc.text(`${entries.length} days recorded:  ${counts.map((c) => `${c.label} ${c.n}`).join("  |  ")}${unknown ? `  |  Other ${unknown}` : ""}`, 14, y);
+      y += 5;
+      // Total time late (arrival time minus class start time)
+      const lateEntries = entries.filter((a) => attStatusMap[a.status]?.flagType === "late");
+      if (lateEntries.length > 0) {
+        let totalLate = 0, counted = 0;
+        if (startMin != null) lateEntries.forEach((a) => { const t = timeToMinutes(a.time); if (t != null && t > startMin) { totalLate += t - startMin; counted += 1; } });
+        const fmt = (m) => (m >= 60 ? `${Math.floor(m / 60)} hr ${m % 60} min` : `${m} min`);
+        doc.setFont("helvetica", "bold");
+        if (startMin != null) {
+          doc.text(`Total time late: ${fmt(totalLate)}  (class starts ${formatTime12h(config.attendance.classStartTime)})`, 14, y);
+          y += 4;
+          if (counted < lateEntries.length) {
+            doc.setFont("helvetica", "italic"); doc.setFontSize(8); doc.setTextColor(120);
+            doc.text(`${lateEntries.length - counted} late day(s) had no arrival time recorded and are not in the total.`, 14, y);
+            doc.setTextColor(0); y += 4;
+          }
+        } else {
+          doc.text(`Late days: ${lateEntries.length}  (total minutes not available: no class start time is set)`, 14, y);
+          y += 4;
+        }
+        doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+      }
+      y += 3;
+      // Every day, laid out in 4 side-by-side Date/Status columns (oldest first, reading down each column)
+      const fmtDate = (d) => { const [yy, mm, dd] = d.split("-").map(Number); return `${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][mm - 1]} ${dd}${yy !== new Date().getFullYear() ? `, ${yy}` : ""}`; };
+      const cellFor = (a) => {
+        const st = attStatusMap[a.status];
+        let text = st?.label || a.status || "";
+        const isLate = st?.flagType === "late";
+        if (isLate && a.time) {
+          const t = timeToMinutes(a.time);
+          text += ` ${formatTime12h(a.time)}${startMin != null && t != null && t > startMin ? ` (+${t - startMin}m)` : ""}`;
+        } else if (a.time) text += ` ${formatTime12h(a.time)}`;
+        const color = isLate ? [180, 100, 0] : st?.flagType === "absent" ? [185, 40, 40] : [0, 0, 0];
+        return { content: text, styles: { textColor: color, fontStyle: st?.flagType === "none" || !st ? "normal" : "bold" } };
+      };
+      const per = Math.ceil(entries.length / 4);
+      const body = [];
+      for (let i = 0; i < per; i++) {
+        const row = [];
+        for (let c = 0; c < 4; c++) {
+          const a = entries[c * per + i];
+          row.push(a ? fmtDate(a.date) : "", a ? cellFor(a) : "");
+        }
+        body.push(row);
+      }
+      autoTable(doc, {
+        startY: y, head: [["Date", "Status", "Date", "Status", "Date", "Status", "Date", "Status"]], body, margin: { left: 14, right: 14 },
+        styles: { fontSize: 7.5, cellPadding: 1.6 }, headStyles: { fillColor: [15, 118, 110] },
+        columnStyles: { 0: { cellWidth: 16 }, 2: { cellWidth: 16 }, 4: { cellWidth: 16 }, 6: { cellWidth: 16 } },
+        didDrawPage: () => {},
+      });
+      y = doc.lastAutoTable.finalY + 8;
+    }
   }
 
   if (sections.includes("homework")) {
