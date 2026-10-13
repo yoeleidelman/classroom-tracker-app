@@ -15672,7 +15672,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
             saveAssessment={async (a) => {
               // Re-read the class's assessments first, so another teacher's grades saved a moment ago are never overwritten.
               const fresh = (await loadJSON(`class:${classId}:classAssessments`, [], true, 3, true)) || [];
-              const next = fresh.some((x) => x.id === a.id) ? fresh.map((x) => (x.id === a.id ? a : x)) : [...fresh, a];
+              const next = JSON.parse(JSON.stringify(fresh.some((x) => x.id === a.id) ? fresh.map((x) => (x.id === a.id ? a : x)) : [...fresh, a])); // no undefined values for Firestore
               await saveJSON(`class:${classId}:classAssessments`, next, true, 2, true);
               setClassAssessments(next);
             }}
@@ -27217,7 +27217,7 @@ function newClassRoundEntry(round) {
 async function updateClassRoundEntry(classId, roundId, mutate) {
   const key = `class:${classId}:reportRounds`;
   const list = (await loadJSON(key, [], true, 3, true)) || [];
-  const next = list.map((r) => (r.id === roundId ? mutate(r) : r));
+  const next = JSON.parse(JSON.stringify(list.map((r) => (r.id === roundId ? mutate(r) : r)))); // Firestore rejects undefined values; this drops them
   await saveJSON(key, next, true, 2, true);
   return next;
 }
@@ -27351,7 +27351,8 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
         results[s.id] = { grade: g, ...(note ? { note } : {}), published: prev ? prev.published : false };
       } else delete results[s.id];
     });
-    const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO(), subjectId: matchSubjectId(label) }), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key };
+    const matchedSubject = matchSubjectId(label);
+    const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO(), ...(matchedSubject ? { subjectId: matchedSubject } : {}) }), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key };
     await saveAssessment(assessment);
     await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label, scale: sub.scale, assessmentId, claimedBy: myName, claimedByUid: myId, doneAt: null, ...(info.extra ? { group: sub.group } : {}) } } }));
   };
@@ -27381,7 +27382,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
       if (cur.type === "subject") await saveSubject(cur.key);
       if (cur.type === "attendance") await updateRound(round.id, (r) => ({ ...r, attendanceOptOut: attOptOut }));
       setStep((s) => s + delta);
-    } catch (e) { console.error("Report round save failed", e); setErr("That didn't save. Check your connection and try again."); }
+    } catch (e) { console.error("Report round save failed", e); setErr(`That didn't save. Check your connection and try again. (${e?.code || e?.message || "unknown"})`); }
     setSaving(false);
   };
   const addExtra = () => {
@@ -27401,7 +27402,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
         return { ...r, entries: e };
       });
       onBack();
-    } catch (e) { console.error("Report round submit failed", e); setErr("That didn't save. Check your connection and try again."); }
+    } catch (e) { console.error("Report round submit failed", e); setErr(`That didn't save. Check your connection and try again. (${e?.code || e?.message || "unknown"})`); }
     setSaving(false);
   };
 
