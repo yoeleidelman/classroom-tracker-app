@@ -27177,6 +27177,12 @@ const ROUND_STEPS = [
 // A class's report counts as complete once these parts have been submitted by their teachers.
 const ROUND_REQUIRED = ["judaic1", "english", "math"];
 const ROUND_GROUP_TITLES = { judaic: "Judaic Studies", general: "General Studies", overall: "Overall" };
+const ROUND_DEFAULT_PARTS = { english: ["Reading", "Writing", "Spelling"], math: ["Computation", "Problem solving"], other: ["Reading", "Understanding"] };
+// One student's result for a "comprehensive" subject (graded in several parts), as plain text: "Reading: 90%, Writing: B+".
+function roundPartsText(parts, result) {
+  const vals = (result && typeof result === "object" && result.parts) || {};
+  return (parts || []).filter((pt) => (vals[pt.id] || "").toString().trim()).map((pt) => `${pt.label}: ${vals[pt.id]}`).join(", ");
+}
 function roundGroupOf(key, entry) { const std = ROUND_STEPS.find((x) => x.key === key); return std ? std.group : (entry?.group === "judaic" ? "judaic" : "general"); }
 // Keys of a class's entries in report order: Judaic (standard, then extra), General, Overall.
 function orderedRoundKeys(entries) {
@@ -27234,7 +27240,11 @@ function buildRoundPdfExtra(roundMeta, cx, student) {
       const r = a?.results?.[student.id];
       const grade = getResultGrade(r);
       const note = getResultNote(r);
-      byGroup[roundGroupOf(key, e)].push([e.label, grade ? (note ? `${grade}\n${note}` : grade) : "—"]);
+      const partRows = e.comprehensive ? (e.parts || []).map((pt) => [{ content: `     ${pt.label}`, styles: { fontStyle: "normal", textColor: [90, 90, 90] } }, (r && r.parts && r.parts[pt.id]) || "—"]) : [];
+      const hasAny = grade || (r && r.parts && Object.keys(r.parts).length > 0);
+      const mainCell = grade ? (note ? `${grade}\n${note}` : grade) : (note || (partRows.length > 0 && hasAny ? "" : "—"));
+      byGroup[roundGroupOf(key, e)].push([e.label, mainCell]);
+      if (hasAny) partRows.forEach((pr) => byGroup[roundGroupOf(key, e)].push(pr));
     }
   }
   const rows = [];
@@ -27297,8 +27307,8 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
   const [attOptOut, setAttOptOut] = useState(Boolean(round.attendanceOptOut));
   const [subs, setSubs] = useState(() => {
     const o = {};
-    ROUND_STEPS.forEach((st) => { const e = entries[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped), group: st.group }; });
-    Object.keys(entries).filter((k) => k.startsWith("extra-")).forEach((k) => { const e = entries[k]; o[k] = { label: e.label || "", scale: e.scale || "percent", skipped: false, group: e.group === "judaic" ? "judaic" : "general" }; });
+    ROUND_STEPS.forEach((st) => { const e = entries[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped), group: st.group, comprehensive: Boolean(e?.comprehensive), parts: e?.parts || [] }; });
+    Object.keys(entries).filter((k) => k.startsWith("extra-")).forEach((k) => { const e = entries[k]; o[k] = { label: e.label || "", scale: e.scale || "percent", skipped: false, group: e.group === "judaic" ? "judaic" : "general", comprehensive: Boolean(e.comprehensive), parts: e.parts || [] }; });
     return o;
   });
   const [grades, setGrades] = useState(() => {
@@ -27306,7 +27316,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
     Object.keys(entries).forEach((k) => {
       g[k] = {};
       const a = entries[k]?.assessmentId ? classAssessments.find((x) => x.id === entries[k].assessmentId) : null;
-      if (a) roster.forEach((s) => { const r = a.results?.[s.id]; g[k][s.id] = { grade: getResultGrade(r), note: getResultNote(r) }; });
+      if (a) roster.forEach((s) => { const r = a.results?.[s.id]; g[k][s.id] = { grade: getResultGrade(r), note: getResultNote(r), parts: (r && typeof r === "object" && r.parts) || {} }; });
     });
     ROUND_STEPS.forEach((st) => { if (!g[st.key]) g[st.key] = {}; });
     return g;
@@ -27343,18 +27353,22 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
     assessmentIds.current[key] = assessmentId;
     const existing = classAssessments.find((a) => a.id === assessmentId);
     const results = { ...(existing?.results || {}) };
+    const partDefs = sub.comprehensive ? (sub.parts || []).filter((pt) => (pt.label || "").trim()).map((pt) => ({ id: pt.id, label: pt.label.trim() })) : [];
     roster.forEach((s) => {
       const g = (grades[key]?.[s.id]?.grade || "").trim();
       const note = (grades[key]?.[s.id]?.note || "").trim();
-      if (g) {
+      const pv = {};
+      partDefs.forEach((pt) => { const v = ((grades[key]?.[s.id]?.parts || {})[pt.id] || "").toString().trim(); if (v) pv[pt.id] = v; });
+      if (g || Object.keys(pv).length > 0) {
         const prev = normalizeAssessmentResult(results[s.id]);
-        results[s.id] = { grade: g, ...(note ? { note } : {}), published: prev ? prev.published : false };
+        results[s.id] = { ...(g ? { grade: g } : {}), ...(Object.keys(pv).length > 0 ? { parts: pv } : {}), ...(note ? { note } : {}), published: prev ? prev.published : false };
       } else delete results[s.id];
     });
     const matchedSubject = matchSubjectId(label);
-    const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO(), ...(matchedSubject ? { subjectId: matchedSubject } : {}) }), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key };
+    const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO(), ...(matchedSubject ? { subjectId: matchedSubject } : {}) }), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, ...(partDefs.length > 0 ? { parts: partDefs } : {}) };
+    if (partDefs.length === 0) delete assessment.parts;
     await saveAssessment(assessment);
-    await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label, scale: sub.scale, assessmentId, claimedBy: myName, claimedByUid: myId, doneAt: null, ...(info.extra ? { group: sub.group } : {}) } } }));
+    await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label, scale: sub.scale, assessmentId, claimedBy: myName, claimedByUid: myId, doneAt: null, comprehensive: partDefs.length > 0, parts: partDefs, ...(info.extra ? { group: sub.group } : {}) } } }));
   };
 
   const go = async (delta) => {
@@ -27387,7 +27401,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
   };
   const addExtra = () => {
     const key = `extra-${uid().slice(0, 6)}`;
-    setSubs((p) => ({ ...p, [key]: { label: "", scale: "percent", skipped: false, group: "general" } }));
+    setSubs((p) => ({ ...p, [key]: { label: "", scale: "percent", skipped: false, group: "general", comprehensive: false, parts: [] } }));
     setGrades((p) => ({ ...p, [key]: {} }));
     setStep(3 + mine.length); // the new part lands last, right after my other subjects
     setMySections((p) => [...p, key]);
@@ -27408,7 +27422,13 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
 
   const stepCard = "bg-white border border-stone-200 rounded-xl p-3 mb-3";
   const filledKeys = mine.filter((k) => !subs[k]?.skipped && (subs[k]?.label || "").trim());
-  const missingCount = filledKeys.reduce((n, k) => n + roster.filter((s) => !(grades[k]?.[s.id]?.grade || "").trim()).length, 0);
+  const cellText = (k, sid) => {
+    const c = grades[k]?.[sid] || {};
+    const g = (c.grade || "").trim();
+    if (subs[k]?.comprehensive) { const pt = roundPartsText(subs[k].parts, { parts: c.parts }); return [pt, g && `Overall: ${g}`].filter(Boolean).join(", "); }
+    return g;
+  };
+  const missingCount = filledKeys.reduce((n, k) => n + roster.filter((s) => !cellText(k, s.id)).length, 0);
   const othersParts = ROUND_STEPS.filter((st) => !mySections.includes(st.key) && entries[st.key]?.claimedByUid && entries[st.key].claimedByUid !== myId);
   const unclaimedRequired = ROUND_REQUIRED.filter((k) => !mySections.includes(k) && !entries[k]?.claimedByUid);
 
@@ -27543,17 +27563,50 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
                         className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${sub.scale === sc.id ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{sc.label}</button>
                     ))}
                   </div>
+                  <p className="text-xs font-semibold text-stone-600 mb-1">Single grade, or a comprehensive report?</p>
+                  <div className="flex flex-wrap gap-2 mb-1">
+                    <button onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], comprehensive: false } }))} className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${!sub.comprehensive ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>One grade</button>
+                    <button onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], comprehensive: true, parts: (p[key].parts && p[key].parts.length) ? p[key].parts : (ROUND_DEFAULT_PARTS[key] || ROUND_DEFAULT_PARTS.other).map((lb) => ({ id: uid(), label: lb })) } }))} className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${sub.comprehensive ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>Comprehensive (several parts)</button>
+                  </div>
+                  <p className="text-[11px] text-stone-400 mb-3">{sub.comprehensive ? "Break this subject into parts (for example Reading, Writing, Spelling) and grade each part for every student. You can also give an optional overall grade. Parents see each part on the report." : "One grade per student for this subject. Choose Comprehensive if you want to report on several parts of it."}</p>
+                  {sub.comprehensive && (
+                    <div className="mb-3 bg-stone-50 border border-stone-200 rounded-lg p-2">
+                      <p className="text-xs font-semibold text-stone-600 mb-1">Parts of this subject</p>
+                      {(sub.parts || []).map((pt, pi) => (
+                        <div key={pt.id} className="flex items-center gap-2 mb-1">
+                          <input value={pt.label} onChange={(e) => setSubs((p) => ({ ...p, [key]: { ...p[key], parts: p[key].parts.map((x) => (x.id === pt.id ? { ...x, label: e.target.value } : x)) } }))} placeholder={`Part ${pi + 1} name`} className="flex-1 rounded-lg border border-stone-300 px-2 py-1 text-sm" />
+                          <button onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], parts: p[key].parts.filter((x) => x.id !== pt.id) } }))} className="text-xs text-stone-400" aria-label="Remove part">Remove</button>
+                        </div>
+                      ))}
+                      <button onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], parts: [...(p[key].parts || []), { id: uid(), label: "" }] } }))} className="text-xs font-semibold text-teal-700">+ Add a part</button>
+                    </div>
+                  )}
                   <div className="space-y-2">
                     {roster.map((s) => {
                       const cell = grades[key]?.[s.id] || {};
                       const showNote = openNotes[`${key}:${s.id}`] || cell.note;
+                      const liveParts = (sub.parts || []).filter((pt) => (pt.label || "").trim());
                       return (
-                        <div key={s.id}>
+                        <div key={s.id} className={sub.comprehensive ? "border border-stone-200 rounded-lg p-2" : ""}>
                           <div className="flex items-center gap-2">
-                            <span className="flex-1 text-sm text-stone-800">{s.name}</span>
-                            <RoundGradeInput scale={sub.scale} value={cell.grade} onChange={(v) => setGrade(key, s.id, { grade: v })} />
+                            <span className={`flex-1 text-sm text-stone-800 ${sub.comprehensive ? "font-semibold" : ""}`}>{s.name}</span>
+                            {!sub.comprehensive && <RoundGradeInput scale={sub.scale} value={cell.grade} onChange={(v) => setGrade(key, s.id, { grade: v })} />}
                             {!showNote && <button onClick={() => setOpenNotes((p) => ({ ...p, [`${key}:${s.id}`]: true }))} className="text-[11px] text-teal-700 font-semibold whitespace-nowrap">+ comment</button>}
                           </div>
+                          {sub.comprehensive && (
+                            <div className="mt-1 space-y-1">
+                              {liveParts.map((pt) => (
+                                <div key={pt.id} className="flex items-center gap-2 pl-2">
+                                  <span className="flex-1 text-xs text-stone-600">{pt.label}</span>
+                                  <RoundGradeInput scale={sub.scale} value={(cell.parts || {})[pt.id]} onChange={(v) => setGrade(key, s.id, { parts: { ...(cell.parts || {}), [pt.id]: v } })} />
+                                </div>
+                              ))}
+                              <div className="flex items-center gap-2 pl-2">
+                                <span className="flex-1 text-xs text-stone-400">Overall for this subject (optional)</span>
+                                <RoundGradeInput scale={sub.scale} value={cell.grade} onChange={(v) => setGrade(key, s.id, { grade: v })} />
+                              </div>
+                            </div>
+                          )}
                           {showNote && (
                             <input value={cell.note || ""} onChange={(e) => setGrade(key, s.id, { note: e.target.value })} placeholder={`Comment for ${s.name} (optional)`} className="w-full mt-1 rounded-lg border border-stone-200 px-2 py-1 text-xs" />
                           )}
@@ -27581,7 +27634,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
                     {roster.map((s) => (
                       <tr key={s.id} className="border-t border-stone-100">
                         <td className="pr-2 py-1 text-stone-800">{s.name}</td>
-                        {filledKeys.map((k) => { const g = (grades[k]?.[s.id]?.grade || "").trim(); return <td key={k} className={`px-1 py-1 ${g ? "text-stone-700" : "text-amber-600"}`}>{g || "blank"}</td>; })}
+                        {filledKeys.map((k) => { const g = cellText(k, s.id); return <td key={k} className={`px-1 py-1 ${g ? "text-stone-700" : "text-amber-600"}`}>{g || "blank"}</td>; })}
                       </tr>
                     ))}
                   </tbody>
@@ -27779,7 +27832,9 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
                 const e = entry.entries[k];
                 const a = review.assessments.find((x) => x.id === e.assessmentId);
                 const r = a?.results?.[sid];
-                return { g: getResultGrade(r), n: getResultNote(r) };
+                const pt = roundPartsText(e.parts, r);
+                const og = getResultGrade(r);
+                return { g: e.comprehensive ? [pt, og && `Overall: ${og}`].filter(Boolean).join(", ") : og, n: getResultNote(r) };
               };
               return (
                 <>
