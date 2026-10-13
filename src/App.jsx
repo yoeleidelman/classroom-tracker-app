@@ -13343,6 +13343,8 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const saveC = useCallback((key, value) => saveJSON(`class:${classId}:${key}`, value, true), [classId]);
 
   const [loading, setLoading] = useState(true);
+  const [classLoadError, setClassLoadError] = useState(null); // set if opening this class crashes partway, so a retry screen shows instead of an endless spinner
+  const [classLoadAttempt, setClassLoadAttempt] = useState(0);
   const [roster, setRoster] = useState([]);
   const [studentData, setStudentData] = useState({});
   // Reported live, directly, and traced to an actual, confirmed root cause: a parent checking a
@@ -13871,7 +13873,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   const [celebratingSegment, setCelebratingSegment] = useState(null); // { subjectLabel, segment } — which completed benchmark segment is being announced
 
   useEffect(() => {
+    let cancelled = false;
+    setClassLoadError(null);
     (async () => {
+      try {
       const r = await loadC("roster", []);
       const c = await loadC("config", DEFAULT_CONFIG);
       const inc = await loadC("incidents", []);
@@ -13901,9 +13906,9 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       const st = await loadJSON("schoolTools", DEFAULT_SCHOOL_TOOLS, true);
       setSchoolToolsInClass(st);
       const progs = await loadJSON("programs", [], true);
-      setProgramsInClass(progs.filter((p) => (p.memberClassIds || []).includes(classId)));
+      setProgramsInClass((Array.isArray(progs) ? progs : []).filter((p) => (p?.memberClassIds || []).includes(classId)));
 
-      let finalRoster = r, finalConfig = c, finalIncidents = inc, finalReminders = rem, finalCA = ca, finalCP = cp, finalPD = pd, finalPE = pe, finalBS = bs;
+      let finalRoster = r, finalConfig = (c && typeof c === "object" ? c : DEFAULT_CONFIG), finalIncidents = inc, finalReminders = rem, finalCA = ca, finalCP = cp, finalPD = pd, finalPE = pe, finalBS = bs;
       let sampleStudentData = null;
       // New classes now start completely empty by default — no more automatic sample data.
       // Teachers who want a sample roster/config to explore the app can still load one
@@ -13942,7 +13947,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       // list existed get those same subject names folded into it automatically — nothing to
       // re-type, nothing lost. Idempotent (checks for an existing match first), so it's safe to
       // run on every load rather than needing a one-time flag.
-      const existingSubjectLabels = new Set((finalConfig.subjects || []).map((s) => s.label.trim().toLowerCase()));
+      const existingSubjectLabels = new Set((finalConfig.subjects || []).map((s) => (s?.label || "").trim().toLowerCase()));
       const subjectsToAdd = (finalBS || [])
         .map((bs) => bs.label)
         .filter((label) => label && !existingSubjectLabels.has(label.trim().toLowerCase()))
@@ -14008,21 +14013,33 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
       setRandomPickerData(rp);
       setAlerts(al);
       const dataMap = {};
-      for (const s of finalRoster) {
-        if (sampleStudentData && sampleStudentData[s.id]) { dataMap[s.id] = sampleStudentData[s.id]; continue; }
+      // One bad or oddly shaped record for a single child used to crash this whole step and leave
+      // the class on the loading spinner forever. Each child is now read on their own (all at once,
+      // which is also faster), and if one child's record can't be tidied up it is used as it is
+      // instead of stopping everything.
+      await Promise.all((Array.isArray(finalRoster) ? finalRoster : []).map(async (s) => {
+        if (sampleStudentData && sampleStudentData[s.id]) { dataMap[s.id] = sampleStudentData[s.id]; return; }
         const raw = await loadC(`kriya:${s.id}`, emptyStudentData());
+        const base = raw && typeof raw === "object" ? raw : emptyStudentData();
         // display-only now — no write-back. See ChildDailyLogView's own matching comment for the
         // full reasoning: even a one-time read can fall back to a stale local cache on a spotty
         // connection, and writing a "cleaned" result back from a stale read risks permanently
         // overwriting real, current data with an incomplete snapshot — a real, reported case of
         // exactly that. This still shows a clean, deduplicated view either way.
-        const { data: d } = dedupeDailyLogData(raw);
+        let d = base;
+        try { d = dedupeDailyLogData(base).data; } catch (e) { console.error("Could not tidy daily log for", s.id, e); }
         dataMap[s.id] = { ...emptyStudentData(), ...d };
-      }
+      }));
+      if (cancelled) return;
       setStudentData(dataMap);
       setLoading(false);
+      } catch (e) {
+        console.error("Opening this class failed", e);
+        if (!cancelled) setClassLoadError(e?.message || String(e));
+      }
     })();
-  }, [classId]);
+    return () => { cancelled = true; };
+  }, [classId, classLoadAttempt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reported live as inaccurate: "Seen by" on a homework post kept showing just the one person
   // who happened to have viewed it at the exact moment this class was first entered — because
@@ -15530,6 +15547,19 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     .map((e) => ({ ...e, source: "admin" }));
   const effectivePlannerEvents = [...plannerEvents, ...applicableAdminEvents];
 
+  if (classLoadError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-stone-50 px-6">
+        <div className="max-w-sm w-full bg-white border border-stone-200 rounded-2xl p-5 text-center shadow-sm">
+          <p className="text-sm font-semibold text-stone-800 mb-1">This class didn't finish opening</p>
+          <p className="text-xs text-stone-500 mb-4">Tap Try again. If it keeps happening, send a screenshot of this screen to your admin.</p>
+          <button onClick={() => { setLoading(true); setClassLoadAttempt((n) => n + 1); }} className="w-full bg-teal-700 text-white rounded-lg py-2 text-sm font-semibold hover:bg-teal-800 mb-2">Try again</button>
+          <button onClick={onSwitchClass} className="w-full text-xs font-semibold text-stone-500 hover:text-stone-700 py-1">Back</button>
+          <p className="text-[10px] text-stone-400 mt-3 break-words">{classLoadError}</p>
+        </div>
+      </div>
+    );
+  }
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-stone-50"><Loader2 className="animate-spin text-teal-700" size={28} /></div>;
   }
