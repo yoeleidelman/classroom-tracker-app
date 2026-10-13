@@ -9388,22 +9388,27 @@ function ContactOfficePanel({ onViewUpdates, inline = false }) {
 
 function ContactOfficeView({ adminThread, onBack }) {
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
-  const [showContact, setShowContact] = useState(false);
-  const messages = [...(adminThread?.messages || [])].reverse();
+  // Oldest first, newest at the bottom, like the other conversations.
+  const messages = adminThread?.messages || [];
+  const viewportHeight = useVisualViewportHeight();
+  const scrollContainerRef = useRef(null);
+  const contentRef = useRef(null);
+  useStickToBottom(scrollContainerRef, contentRef, "admin");
 
   return (
-    <div className="app-page" style={{ paddingBottom: showContact ? "13rem" : "7.5rem" }}>
-      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
-      <h1 className="display-font text-lg font-bold text-stone-900 mb-1">School Office</h1>
-      <p className="text-xs text-stone-400 mb-4">Updates and announcements from the school.</p>
+    <div className="app-page flex flex-col" style={{ height: viewportHeight ? `${viewportHeight}px` : "100vh" }}>
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-2 shrink-0"><ChevronLeft size={16} /> Back</button>
+      <div className="shrink-0 mb-2">
+        <h1 className="display-font text-lg font-bold text-stone-900">School Office</h1>
+        <p className="text-xs text-stone-400">Updates and announcements from the school.</p>
+      </div>
+      <div className="shrink-0 -mt-2 mb-2"><ContactOfficePanel inline /></div>
 
-      {messages.length === 0 && (
-        <p className="text-sm text-stone-400 text-center py-8">No updates from the office yet.</p>
-      )}
-
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto no-scrollbar mb-3">
+        <div ref={contentRef}>
+      {messages.length === 0 && <p className="text-sm text-stone-400 text-center py-8">No updates from the office yet.</p>}
       {messages.length > 0 && (
         <>
-          <p className="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-2">From the office</p>
           <div className="space-y-2">
             {messages.map((m) => {
               // Same normalization as the admin's own composer view (ConversationThreadView) —
@@ -9458,19 +9463,15 @@ function ContactOfficeView({ adminThread, onBack }) {
           </div>
         </>
       )}
-      {lightboxPhoto && <PhotoLightbox url={lightboxPhoto.url} type={lightboxPhoto.type} onClose={() => setLightboxPhoto(null)} />}
-      {/* Office messages are one-way, so there's no message box here. This note sits at the bottom
-          where a message box would be, and tells parents where to go instead. */}
-      <div className="fixed bottom-0 inset-x-0 bg-white border-t border-stone-200 z-20" style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
-        <div className="max-w-lg mx-auto px-4 py-3">
-          <p className="text-xs text-stone-600 text-center">
-            This is a one-way message board, so you can't reply here. To contact the office, tap the <Phone size={12} className="inline -mt-0.5 text-[#5F9F9E]" /> phone icon at the top of the screen, or use the button below.
-          </p>
-          <button onClick={() => setShowContact((v) => !v)} className="mt-2 w-full flex items-center justify-center gap-1.5 bg-[#5F9F9E] text-white rounded-lg py-2 text-xs font-bold hover:bg-[#508786]">
-            <Phone size={14} /> Contact office
-          </button>
-          {showContact && <ContactOfficePanel inline />}
         </div>
+      </div>
+      {lightboxPhoto && <PhotoLightbox url={lightboxPhoto.url} type={lightboxPhoto.type} onClose={() => setLightboxPhoto(null)} />}
+      {/* Office messages are one-way, so there's no message box here. This note sits where a
+          message box would be and tells parents where to go instead. */}
+      <div className="shrink-0 bg-stone-100 border border-stone-200 rounded-xl px-3 py-2.5" style={{ marginBottom: "env(safe-area-inset-bottom, 0px)" }}>
+        <p className="text-xs text-stone-600 text-center">
+          This is a one-way message board, so you can't reply here. To contact the office, tap the <Phone size={12} className="inline -mt-0.5 text-[#5F9F9E]" /> phone icon at the top of the screen, or use Call / Text / WhatsApp above.
+        </p>
       </div>
     </div>
   );
@@ -11364,7 +11365,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
 
   const [showScanner, setShowScanner] = useState(false);
   const [contactPanelOpen, setContactPanelOpen] = useState(false);
-  const [messagesContactOpen, setMessagesContactOpen] = useState(false);
   // Starts active on this account's first-ever login (no separate wizard, no explicit "start
   // tour" step) and never again once dismissed — tracked per individual guardian login, not
   // shared across a family group, since a newly-added second guardian should still get their own
@@ -12480,15 +12480,6 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 <ChevronRight size={16} className="text-stone-300" />
               </div>
             </button>
-            {/* Contact office: the same call / text / WhatsApp choices as the phone icon in the header,
-                so parents can find it right here in Messages too. */}
-            <div className="bg-white border-2 border-teal-700/15 rounded-xl px-4 py-3">
-              <button onClick={() => setMessagesContactOpen((v) => !v)} className="w-full flex items-center justify-between text-left">
-                <span className="flex items-center gap-2 font-semibold text-stone-900"><Phone size={16} className="text-[#5F9F9E]" /> Contact office</span>
-                <ChevronRight size={16} className={`text-stone-300 transition-transform ${messagesContactOpen ? "rotate-90" : ""}`} />
-              </button>
-              {messagesContactOpen && <ContactOfficePanel inline />}
-            </div>
             {eligibleTeachers === null ? (
               // A real, honest loading state — not hidden behind a timer, and not simply absent
               // while the request is in flight.
