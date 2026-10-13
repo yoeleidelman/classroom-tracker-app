@@ -13480,7 +13480,12 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
           openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
           openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
-          openRounds={reportRounds.filter((r) => r.status !== "submitted")} onOpenRound={(id) => { setActiveRoundId(id); navigateView("report-round"); }}
+          openRounds={reportRounds.filter((r) => {
+            if (roundClassStatus(r).complete) return false;
+            const myId = loggedInTeacher?.uid || loggedInTeacher?.id || loggedInTeacher?.name || "me";
+            const myParts = Object.values(r.entries || {}).filter((e) => e && e.claimedByUid === myId);
+            return !(myParts.length > 0 && myParts.every((e) => e.doneAt)); // hide once my own parts are submitted
+          })} onOpenRound={(id) => { setActiveRoundId(id); navigateView("report-round"); }}
           monthlyReportState={monthlyReportState}
           onDismissMonthlyReminder={(key) => persistMonthlyReportState({ ...monthlyReportState, dismissedMonth: key })}
           reflectionState={reflectionState} reflections={reflections}
@@ -15663,7 +15668,14 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         if (!round) return <div className={PAGE}><button onClick={() => navigateView("home")} className="text-sm text-stone-500">Back</button><p className="text-sm text-stone-500 mt-3">That report isn't available.</p></div>;
         return (
           <ReportRoundWalkthrough key={round.id} round={round} roster={roster} studentData={studentData} config={config} classAssessments={classAssessments}
-            benchmarkSubjects={benchmarkSubjects} loggedInTeacher={loggedInTeacher} persistAssessments={persistClassAssessments}
+            benchmarkSubjects={benchmarkSubjects} loggedInTeacher={loggedInTeacher}
+            saveAssessment={async (a) => {
+              // Re-read the class's assessments first, so another teacher's grades saved a moment ago are never overwritten.
+              const fresh = (await loadJSON(`class:${classId}:classAssessments`, [], true, 3, true)) || [];
+              const next = fresh.some((x) => x.id === a.id) ? fresh.map((x) => (x.id === a.id ? a : x)) : [...fresh, a];
+              await saveJSON(`class:${classId}:classAssessments`, next, true, 2, true);
+              setClassAssessments(next);
+            }}
             updateRound={async (rid, mutate) => { const next = await updateClassRoundEntry(classId, rid, mutate); setReportRounds(next); }}
             onBack={() => navigateView("home")} />
         );
@@ -16071,7 +16083,7 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
         <div key={r.id} className="bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
           <div>
             <p className="text-sm font-semibold text-amber-900">Report to complete: {r.name}</p>
-            <p className="text-xs text-amber-800">{r.dueDate ? `Due ${roundDueText(r.dueDate)}. ` : ""}A short guided walkthrough: attendance check, English, Math, two Judaic subjects and overall.</p>
+            <p className="text-xs text-amber-800">{r.dueDate ? `Due ${roundDueText(r.dueDate)}. ` : ""}A short guided walkthrough. If other teachers share your class, you each fill out only your own parts.</p>
           </div>
           <button onClick={() => onOpenRound(r.id)} className="shrink-0 text-xs font-semibold bg-amber-600 text-white rounded-lg px-3 py-1.5 hover:bg-amber-700">{Object.keys(r.entries || {}).length ? "Continue" : "Start"}</button>
         </div>
@@ -26892,7 +26904,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
               {rounds.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
             {activeRound && contextFor && (() => {
-              const pending = [...new Set(roster.map((st) => ctxOf(st)))].filter((cx) => { const e = (cx.rounds || []).find((r) => r.id === activeRound.id); return !e || e.status !== "submitted"; }).map((cx) => cx.className);
+              const pending = [...new Set(roster.map((st) => ctxOf(st)))].filter((cx) => { const e = (cx.rounds || []).find((r) => r.id === activeRound.id); return !roundClassStatus(e).complete; }).map((cx) => cx.className);
               return pending.length > 0 ? <p className="text-xs text-amber-700 mt-1">Not submitted yet: {pending.join(", ")}. Their PDFs will have no grades.</p> : <p className="text-xs text-emerald-700 mt-1">Every selected class has submitted.</p>;
             })()}
             <p className="text-[10px] text-stone-400 mt-1">{activeRound ? "The dates are set from the round. Each PDF has attendance followed by the grades the teachers entered (a class that hasn't submitted yet shows no grades)." : "Pick a round to build the PDFs from what the teachers entered."}</p>
@@ -27153,14 +27165,34 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
 // so the same framework can be started again later ("Start another like this").
 const ROUND_LETTERS = ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D", "F"];
 const ROUND_JUDAIC_IDEAS = ["Chumash", "Navi", "Halacha", "Hebrew Reading", "Tefillah", "Parsha", "Mishnah", "Dinim"];
-// key, default label, whether the teacher can rename it, whether it can be skipped
+// key, default label, whether the teacher can rename it, whether it can be skipped, and where it sits on the report.
+// The report order is Judaic Studies first, then General Studies, then Overall.
 const ROUND_STEPS = [
-  { key: "english", label: "English", fixed: true, optional: false },
-  { key: "math", label: "Math", fixed: true, optional: false },
-  { key: "judaic1", label: "", fixed: false, optional: false },
-  { key: "judaic2", label: "", fixed: false, optional: true },
-  { key: "overall", label: "Overall / participation", fixed: true, optional: true },
+  { key: "judaic1", label: "", fixed: false, optional: false, group: "judaic", title: "Judaic subject #1" },
+  { key: "judaic2", label: "", fixed: false, optional: true, group: "judaic", title: "Judaic subject #2 (optional)" },
+  { key: "english", label: "English", fixed: true, optional: false, group: "general", title: "English" },
+  { key: "math", label: "Math", fixed: true, optional: false, group: "general", title: "Math" },
+  { key: "overall", label: "Overall / participation", fixed: true, optional: true, group: "overall", title: "Overall / participation" },
 ];
+// A class's report counts as complete once these parts have been submitted by their teachers.
+const ROUND_REQUIRED = ["judaic1", "english", "math"];
+const ROUND_GROUP_TITLES = { judaic: "Judaic Studies", general: "General Studies", overall: "Overall" };
+function roundGroupOf(key, entry) { const std = ROUND_STEPS.find((x) => x.key === key); return std ? std.group : (entry?.group === "judaic" ? "judaic" : "general"); }
+// Keys of a class's entries in report order: Judaic (standard, then extra), General, Overall.
+function orderedRoundKeys(entries) {
+  const keys = Object.keys(entries || {});
+  const out = [];
+  for (const grp of ["judaic", "general", "overall"]) {
+    ROUND_STEPS.filter((x) => x.group === grp && keys.includes(x.key)).forEach((x) => out.push(x.key));
+    keys.filter((k) => k.startsWith("extra-") && roundGroupOf(k, entries[k]) === grp).sort().forEach((k) => out.push(k));
+  }
+  return out;
+}
+function roundClassStatus(entry) {
+  if (!entry) return { complete: false, started: false };
+  const e = entry.entries || {};
+  return { complete: ROUND_REQUIRED.every((k) => e[k] && e[k].doneAt), started: Object.values(e).some((x) => x && (x.label || x.claimedBy)) };
+}
 const ROUND_SCALES = [
   { id: "percent", label: "Marks (%)" },
   { id: "letter", label: "Letters (A–F)" },
@@ -27189,20 +27221,27 @@ async function updateClassRoundEntry(classId, roundId, mutate) {
   await saveJSON(key, next, true, 2, true);
   return next;
 }
-// Rows for the PDF's grades block, from one class's saved round entry. A comment only appears when the teacher wrote one.
+// Rows for the PDF's grades block, from one class's saved round entry: Judaic Studies, then General Studies, then Overall.
+// A comment only appears when the teacher wrote one.
 function buildRoundPdfExtra(roundMeta, cx, student) {
   const entry = ((cx && cx.rounds) || []).find((r) => r.id === roundMeta.id);
-  const rows = [];
+  const byGroup = { judaic: [], general: [], overall: [] };
   if (entry) {
-    for (const st of ROUND_STEPS) {
-      const e = entry.entries?.[st.key];
+    for (const key of orderedRoundKeys(entry.entries)) {
+      const e = entry.entries[key];
       if (!e || e.skipped || !(e.label || "").trim()) continue; // eslint-disable-line no-continue
       const a = (cx.classAssessments || []).find((x) => x.id === e.assessmentId);
       const r = a?.results?.[student.id];
       const grade = getResultGrade(r);
       const note = getResultNote(r);
-      rows.push([e.label, grade ? (note ? `${grade}\n${note}` : grade) : "—"]);
+      byGroup[roundGroupOf(key, e)].push([e.label, grade ? (note ? `${grade}\n${note}` : grade) : "—"]);
     }
+  }
+  const rows = [];
+  for (const grp of ["judaic", "general", "overall"]) {
+    if (byGroup[grp].length === 0) continue; // eslint-disable-line no-continue
+    rows.push([{ content: ROUND_GROUP_TITLES[grp], colSpan: 2, styles: { fontStyle: "bold", fillColor: [226, 240, 238], textColor: [15, 80, 75] } }]);
+    byGroup[grp].forEach((r) => rows.push(r));
   }
   return { roundTitle: roundMeta.name || "Report", roundRows: rows };
 }
@@ -27247,23 +27286,29 @@ function RoundGradeInput({ scale, value, onChange }) {
   );
 }
 
-// The teacher's guided walkthrough: attendance check, English, Math, two Judaic subjects, overall, review.
-function ReportRoundWalkthrough({ round, roster, studentData, config, classAssessments, benchmarkSubjects, loggedInTeacher, persistAssessments, updateRound, onBack }) {
-  const [step, setStep] = useState(0); // 0 how it works, 1 attendance, 2-6 the subjects in ROUND_STEPS, 7 review
+// The teacher's guided walkthrough. Several teachers can share one class's report: each ticks the parts that are
+// theirs, fills them in, and submits only those parts. Extra subjects can be added with "+ Add another subject".
+function ReportRoundWalkthrough({ round, roster, studentData, config, classAssessments, benchmarkSubjects, loggedInTeacher, saveAssessment, updateRound, onBack }) {
+  const myId = loggedInTeacher?.uid || loggedInTeacher?.id || loggedInTeacher?.name || "me";
+  const myName = loggedInTeacher?.name || "A teacher";
+  const entries = round.entries || {};
+  const [mySections, setMySections] = useState(() => Object.keys(entries).filter((k) => entries[k] && entries[k].claimedByUid === myId));
+  const [step, setStep] = useState(0);
   const [attOptOut, setAttOptOut] = useState(Boolean(round.attendanceOptOut));
   const [subs, setSubs] = useState(() => {
     const o = {};
-    ROUND_STEPS.forEach((st) => { const e = round.entries?.[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped) }; });
+    ROUND_STEPS.forEach((st) => { const e = entries[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped), group: st.group }; });
+    Object.keys(entries).filter((k) => k.startsWith("extra-")).forEach((k) => { const e = entries[k]; o[k] = { label: e.label || "", scale: e.scale || "percent", skipped: false, group: e.group === "judaic" ? "judaic" : "general" }; });
     return o;
   });
   const [grades, setGrades] = useState(() => {
     const g = {};
-    ROUND_STEPS.forEach((st) => {
-      g[st.key] = {};
-      const e = round.entries?.[st.key];
-      const a = e?.assessmentId ? classAssessments.find((x) => x.id === e.assessmentId) : null;
-      if (a) roster.forEach((s) => { const r = a.results?.[s.id]; g[st.key][s.id] = { grade: getResultGrade(r), note: getResultNote(r) }; });
+    Object.keys(entries).forEach((k) => {
+      g[k] = {};
+      const a = entries[k]?.assessmentId ? classAssessments.find((x) => x.id === entries[k].assessmentId) : null;
+      if (a) roster.forEach((s) => { const r = a.results?.[s.id]; g[k][s.id] = { grade: getResultGrade(r), note: getResultNote(r) }; });
     });
+    ROUND_STEPS.forEach((st) => { if (!g[st.key]) g[st.key] = {}; });
     return g;
   });
   const [openNotes, setOpenNotes] = useState({});
@@ -27271,18 +27316,30 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
   const [err, setErr] = useState(null);
   const assessmentIds = useRef({});
 
-  const setGrade = (key, sid, patchObj) => setGrades((prev) => ({ ...prev, [key]: { ...prev[key], [sid]: { ...(prev[key][sid] || {}), ...patchObj } } }));
-  const matchSubjectId = (label) => (benchmarkSubjects || []).find((b) => (b.label || "").trim().toLowerCase() === label.trim().toLowerCase())?.id;
+  // My parts, in report order: the standard ones, then any extras I added.
+  const mine = [...ROUND_STEPS.map((x) => x.key).filter((k) => mySections.includes(k)), ...mySections.filter((k) => k.startsWith("extra-"))];
+  const steps = [{ type: "intro" }, { type: "pick" }, { type: "attendance" }, ...mine.map((k) => ({ type: "subject", key: k })), { type: "review" }];
+  const cur = steps[step] || steps[0];
+  const total = steps.length;
+  const infoOf = (k) => (k.startsWith("extra-") ? { key: k, label: "", fixed: false, optional: true, group: subs[k]?.group || "general", title: "Extra subject", extra: true } : ROUND_STEPS.find((x) => x.key === k));
+  const stepTitle = (c) => (c.type === "intro" ? "How this works" : c.type === "pick" ? "Your parts" : c.type === "attendance" ? "Attendance" : c.type === "review" ? "Review and submit" : (subs[c.key]?.label || "").trim() || infoOf(c.key).title);
 
-  // Saves one subject: the class assessment (unpublished, so nothing reaches parents) and the round's own record of it.
+  const setGrade = (key, sid, patchObj) => setGrades((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), [sid]: { ...((prev[key] || {})[sid] || {}), ...patchObj } } }));
+  const matchSubjectId = (label) => (benchmarkSubjects || []).find((b) => (b.label || "").trim().toLowerCase() === label.trim().toLowerCase())?.id;
+  const claimed = (k) => entries[k] && entries[k].claimedByUid && entries[k].claimedByUid !== myId ? entries[k].claimedBy || "another teacher" : null;
+  const toggleMine = (k) => setMySections((p) => (p.includes(k) ? p.filter((x) => x !== k) : [...p, k]));
+
+  // Saves one of my subjects: the class assessment (unpublished, so nothing reaches parents) and the round's own record of it.
   const saveSubject = async (key) => {
     const sub = subs[key];
+    const info = infoOf(key);
     const label = (sub.label || "").trim();
     if (sub.skipped || !label) {
-      await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { label: "", skipped: true } } }));
+      if (info.extra) await updateRound(round.id, (r) => { const e = { ...(r.entries || {}) }; delete e[key]; return { ...r, entries: e }; });
+      else await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label: "", skipped: true, claimedBy: myName, claimedByUid: myId, doneAt: null } } }));
       return;
     }
-    const assessmentId = round.entries?.[key]?.assessmentId || assessmentIds.current[key] || uid();
+    const assessmentId = entries[key]?.assessmentId || assessmentIds.current[key] || uid();
     assessmentIds.current[key] = assessmentId;
     const existing = classAssessments.find((a) => a.id === assessmentId);
     const results = { ...(existing?.results || {}) };
@@ -27295,54 +27352,83 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
       } else delete results[s.id];
     });
     const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO(), subjectId: matchSubjectId(label) }), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key };
-    persistAssessments(existing ? classAssessments.map((a) => (a.id === assessmentId ? assessment : a)) : [...classAssessments, assessment]);
-    await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { label, scale: sub.scale, assessmentId } } }));
+    await saveAssessment(assessment);
+    await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label, scale: sub.scale, assessmentId, claimedBy: myName, claimedByUid: myId, doneAt: null, ...(info.extra ? { group: sub.group } : {}) } } }));
   };
 
   const go = async (delta) => {
     setErr(null);
-    const cur = step >= 2 && step <= 6 ? ROUND_STEPS[step - 2] : null;
-    if (cur && delta > 0 && !cur.optional && !(subs[cur.key].label || "").trim()) { setErr("Type the subject name first."); return; }
+    if (delta > 0 && cur.type === "pick" && mySections.length === 0) { setErr("Tick at least one part of the report that is yours."); return; }
+    if (delta > 0 && cur.type === "subject") {
+      const info = infoOf(cur.key);
+      if (!info.optional && !(subs[cur.key].label || "").trim()) { setErr("Type the subject name first."); return; }
+    }
     setSaving(true);
     try {
-      if (cur) await saveSubject(cur.key);
-      if (step === 1) await updateRound(round.id, (r) => ({ ...r, attendanceOptOut: attOptOut }));
+      if (cur.type === "pick" && delta > 0) {
+        const keep = mySections;
+        await updateRound(round.id, (r) => {
+          const e = { ...(r.entries || {}) };
+          ROUND_STEPS.forEach((st) => {
+            const mineNow = keep.includes(st.key);
+            const was = e[st.key];
+            if (mineNow && (!was || !was.claimedByUid || was.claimedByUid === myId)) e[st.key] = { ...(was || {}), claimedBy: myName, claimedByUid: myId };
+            else if (!mineNow && was && was.claimedByUid === myId && !was.assessmentId) delete e[st.key];
+          });
+          return { ...r, entries: e };
+        });
+      }
+      if (cur.type === "subject") await saveSubject(cur.key);
+      if (cur.type === "attendance") await updateRound(round.id, (r) => ({ ...r, attendanceOptOut: attOptOut }));
       setStep((s) => s + delta);
     } catch (e) { console.error("Report round save failed", e); setErr("That didn't save. Check your connection and try again."); }
     setSaving(false);
   };
+  const addExtra = () => {
+    const key = `extra-${uid().slice(0, 6)}`;
+    setSubs((p) => ({ ...p, [key]: { label: "", scale: "percent", skipped: false, group: "general" } }));
+    setGrades((p) => ({ ...p, [key]: {} }));
+    setStep(3 + mine.length); // the new part lands last, right after my other subjects
+    setMySections((p) => [...p, key]);
+  };
   const submit = async () => {
     setSaving(true); setErr(null);
     try {
-      await updateRound(round.id, (r) => ({ ...r, status: "submitted", submittedAt: new Date().toISOString(), submittedBy: loggedInTeacher?.name || "" }));
+      const now = new Date().toISOString();
+      await updateRound(round.id, (r) => {
+        const e = { ...(r.entries || {}) };
+        mine.forEach((k) => { if (e[k]) e[k] = { ...e[k], doneAt: now, doneBy: myName }; });
+        return { ...r, entries: e };
+      });
       onBack();
     } catch (e) { console.error("Report round submit failed", e); setErr("That didn't save. Check your connection and try again."); }
     setSaving(false);
   };
 
   const stepCard = "bg-white border border-stone-200 rounded-xl p-3 mb-3";
-  const filledKeys = ROUND_STEPS.filter((st) => !subs[st.key].skipped && (subs[st.key].label || "").trim());
-  const missingCount = filledKeys.reduce((n, st) => n + roster.filter((s) => !(grades[st.key]?.[s.id]?.grade || "").trim()).length, 0);
-  const total = 8;
+  const filledKeys = mine.filter((k) => !subs[k]?.skipped && (subs[k]?.label || "").trim());
+  const missingCount = filledKeys.reduce((n, k) => n + roster.filter((s) => !(grades[k]?.[s.id]?.grade || "").trim()).length, 0);
+  const othersParts = ROUND_STEPS.filter((st) => !mySections.includes(st.key) && entries[st.key]?.claimedByUid && entries[st.key].claimedByUid !== myId);
+  const unclaimedRequired = ROUND_REQUIRED.filter((k) => !mySections.includes(k) && !entries[k]?.claimedByUid);
 
   return (
     <div className={PAGE}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back (progress is saved)</button>
       <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{round.name}</h1>
-      <p className="text-xs text-stone-500 mb-1">{round.dueDate ? `Due ${roundDueText(round.dueDate)}. ` : ""}Step {step + 1} of {total}: {step === 0 ? "How this works" : step === 1 ? "Attendance" : step === 7 ? "Review and submit" : (subs[ROUND_STEPS[step - 2].key].label || ROUND_STEPS[step - 2].label || (ROUND_STEPS[step - 2].key === "judaic1" ? "Judaic subject #1" : "Judaic subject #2"))}</p>
+      <p className="text-xs text-stone-500 mb-1">{round.dueDate ? `Due ${roundDueText(round.dueDate)}. ` : ""}Step {step + 1} of {total}: {stepTitle(cur)}</p>
       <div className="h-1.5 bg-stone-200 rounded-full mb-4 md:max-w-xl"><div className="h-1.5 bg-teal-600 rounded-full" style={{ width: `${((step + 1) / total) * 100}%` }} /></div>
 
       <div className="md:max-w-xl">
-        {step === 0 && (
+        {cur.type === "intro" && (
           <div className={stepCard}>
             <p className="font-semibold text-stone-800 mb-1">Welcome. Here's what this report needs from you</p>
-            <p className="text-xs text-stone-500 mb-3">It takes about 10 to 15 minutes. You'll go through a few short screens, and your work is saved at every step, so you can stop and come back any time.</p>
+            <p className="text-xs text-stone-500 mb-3">It takes about 10 to 15 minutes. You'll go through a few short screens, and your work is saved at every step, so you can stop and come back any time. If other teachers share your class, each of you fills out only your own parts.</p>
             <ol className="text-sm text-stone-700 space-y-2 list-decimal pl-5 mb-3">
-              <li><b>Attendance:</b> nothing to type. It's pulled from what you've logged. You just check it looks right (or leave it out of the report if your class didn't take attendance regularly).</li>
-              <li><b>English and Math:</b> pick how you want to grade (marks, letters or words) and enter one grade per student.</li>
-              <li><b>Two Judaic subjects:</b> choose the ones you teach, then grade them the same way. If you only teach one, skip the second.</li>
-              <li><b>Overall / participation:</b> one general grade per student. Optional.</li>
-              <li><b>Review and submit.</b> You'll see everything in one table before you send it to the office.</li>
+              <li><b>Pick your parts:</b> tick the parts of the report that are yours (a Judaic subject, English, Math, or Overall).</li>
+              <li><b>Attendance:</b> nothing to type. It's pulled from what you've logged. Check it looks right, or leave it out if your class didn't take attendance regularly.</li>
+              <li><b>Each of your subjects:</b> choose how to grade (marks, letters or words) and enter one grade per student.</li>
+              <li><b>Anything else to report?</b> At the end you can add another subject.</li>
+              <li><b>Review and submit</b> your parts to the office.</li>
             </ol>
             <div className="bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-xs text-stone-600 space-y-1">
               <p><b>Good to know:</b></p>
@@ -27355,13 +27441,33 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
           </div>
         )}
 
-        {step === 1 && (
+        {cur.type === "pick" && (
+          <div className={stepCard}>
+            <p className="font-semibold text-stone-800 mb-1">Which parts of the report are yours?</p>
+            <p className="text-xs text-stone-500 mb-3">Tick everything you will fill in for this class. Parts another teacher already took are greyed out, so nothing gets entered twice. Judaic subjects appear first on the report, then General Studies.</p>
+            <div className="space-y-2">
+              {ROUND_STEPS.map((st) => {
+                const other = claimed(st.key);
+                const labelText = st.key === "judaic1" ? "Judaic subject #1 (you choose the name)" : st.key === "judaic2" ? "Judaic subject #2 (optional)" : st.title;
+                return (
+                  <label key={st.key} className={`flex items-start gap-2 text-sm rounded-lg border px-3 py-2 ${other ? "bg-stone-50 border-stone-200 text-stone-400" : mySections.includes(st.key) ? "bg-teal-50 border-teal-300 text-stone-800" : "border-stone-300 text-stone-700"}`}>
+                    <input type="checkbox" className="mt-0.5" disabled={Boolean(other)} checked={mySections.includes(st.key)} onChange={() => toggleMine(st.key)} />
+                    <span>{labelText}{other && <span className="block text-xs">Taken by {other}</span>}{!other && ROUND_REQUIRED.includes(st.key) && <span className="block text-[11px] text-stone-400">Needed for the report</span>}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-stone-400 mt-3">If you're the only teacher for this class, tick them all. You can add another subject after your last one.</p>
+          </div>
+        )}
+
+        {cur.type === "attendance" && (
           <div className={stepCard}>
             <p className="font-semibold text-stone-800 mb-1">Check attendance</p>
-            <p className="text-xs text-stone-500 mb-3">This is pulled automatically from what you've logged{round.startDate || round.endDate ? ` (${round.startDate || "start"} to ${round.endDate || "today"})` : ""}. It goes straight onto the report. If a day is missing or wrong, fix it in Attendance first (use Back to leave this screen, your progress is saved), then come back. You don't need to enter anything here.</p>
+            <p className="text-xs text-stone-500 mb-3">This is pulled automatically from what you've logged{round.startDate || round.endDate ? ` (${round.startDate || "start"} to ${round.endDate || "today"})` : ""}. It goes straight onto the report. If a day is missing or wrong, fix it in Attendance first (use Back to leave this screen, your progress is saved), then come back. You don't need to enter anything here. If another teacher in your class already checked it, just continue.</p>
             <label className="flex items-start gap-2 text-sm text-stone-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">
               <input type="checkbox" className="mt-0.5" checked={attOptOut} onChange={(e) => setAttOptOut(e.target.checked)} />
-              <span><b>Leave attendance out of my class's reports.</b><span className="block text-xs text-stone-500">Tick this if attendance wasn't taken consistently, so parents don't see misleading numbers. The report will simply have no attendance section.</span></span>
+              <span><b>Leave attendance out of this class's reports.</b><span className="block text-xs text-stone-500">Tick this if attendance wasn't taken consistently, so parents don't see misleading numbers. The report will simply have no attendance section.</span></span>
             </label>
             {!attOptOut && <div className="overflow-x-auto">
               <table className="text-xs w-full">
@@ -27383,22 +27489,23 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
           </div>
         )}
 
-        {step >= 2 && step <= 6 && (() => {
-          const st = ROUND_STEPS[step - 2];
-          const sub = subs[st.key];
-          const skippedNow = sub.skipped;
+        {cur.type === "subject" && (() => {
+          const st = infoOf(cur.key);
+          const sub = subs[cur.key] || { label: "", scale: "percent", skipped: false, group: "general" };
+          const key = cur.key;
+          const isJudaic = st.group === "judaic";
           return (
             <div className={stepCard}>
-              <p className="font-semibold text-stone-800 mb-1">{st.fixed ? st.label : (st.key === "judaic1" ? "Judaic subject #1" : "Judaic subject #2 (optional)")}</p>
+              <p className="font-semibold text-stone-800 mb-1">{st.fixed ? st.title : st.extra ? "Another subject" : st.key === "judaic1" ? "Judaic subject #1" : "Judaic subject #2 (optional)"}</p>
               <p className="text-xs text-stone-500 mb-3">
-                {st.key === "english" && "Enter a grade for each student for this report. It can come from a test, a project, or your overall judgment for the period."}
-                {st.key === "math" && "Enter a grade for each student for this report. It can come from a test, a project, or your overall judgment for the period."}
+                {(st.key === "english" || st.key === "math") && "Enter a grade for each student for this report. It can come from a test, a project, or your overall judgment for the period."}
                 {st.key === "judaic1" && "Pick the Judaic subject you teach that you most want parents to hear about, or type your own."}
                 {st.key === "judaic2" && "A second Judaic subject, if you teach one. If not, tap Skip this subject."}
                 {st.key === "overall" && "A general grade for each student, for example overall participation, effort, or behavior. Skip it if you'd rather not include one."}
+                {st.extra && "Anything else you want to report on. Name it, say whether it's a Judaic or General subject (that decides where it appears on the report), then grade it."}
               </p>
               <ol className="text-xs text-stone-600 list-decimal pl-5 mb-3 space-y-0.5">
-                {!st.fixed && <li>Type the subject name (or tap a suggestion).</li>}
+                {!st.fixed && <li>Type the subject name{st.extra ? "" : " (or tap a suggestion)"}.</li>}
                 <li>Choose how you want to grade this subject.</li>
                 <li>Enter a grade for each student.</li>
                 <li>Optional: tap "+ comment" to add a short note for one student.</li>
@@ -27406,83 +27513,103 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
               </ol>
               {!st.fixed && (
                 <div className="mb-3">
-                  <input value={sub.label} onChange={(e) => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], label: e.target.value, skipped: false } }))} placeholder="Subject name (e.g. Chumash)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
-                  <div className="flex flex-wrap gap-1">
-                    {ROUND_JUDAIC_IDEAS.map((idea) => (
-                      <button key={idea} onClick={() => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], label: idea, skipped: false } }))} className="text-[11px] px-2 py-0.5 rounded-full border border-stone-300 text-stone-600 hover:bg-stone-50">{idea}</button>
-                    ))}
-                  </div>
+                  <input value={sub.label} onChange={(e) => setSubs((p) => ({ ...p, [key]: { ...p[key], label: e.target.value, skipped: false } }))} placeholder="Subject name (e.g. Chumash)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
+                  {(isJudaic || st.extra) && (
+                    <div className="flex flex-wrap gap-1">
+                      {ROUND_JUDAIC_IDEAS.map((idea) => (
+                        <button key={idea} onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], label: idea, skipped: false, ...(st.extra ? { group: "judaic" } : {}) } }))} className="text-[11px] px-2 py-0.5 rounded-full border border-stone-300 text-stone-600 hover:bg-stone-50">{idea}</button>
+                      ))}
+                    </div>
+                  )}
+                  {st.extra && (
+                    <div className="flex items-center gap-2 mt-2">
+                      <span className="text-xs text-stone-500">This is a:</span>
+                      {[["judaic", "Judaic subject"], ["general", "General subject"]].map(([g, lbl]) => (
+                        <button key={g} onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], group: g } }))} className={`text-xs font-semibold px-3 py-1 rounded-full border ${sub.group === g ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{lbl}</button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
-              {skippedNow ? (
-                <p className="text-xs text-stone-500">This subject is skipped. <button onClick={() => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], skipped: false } }))} className="text-teal-700 font-semibold">Add it back</button></p>
+              {sub.skipped ? (
+                <p className="text-xs text-stone-500">This subject is skipped. <button onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], skipped: false } }))} className="text-teal-700 font-semibold">Add it back</button></p>
               ) : (
                 <>
                   <p className="text-xs font-semibold text-stone-600 mb-1">How do you want to grade?</p>
                   <div className="flex flex-wrap gap-2 mb-3">
                     {ROUND_SCALES.map((sc) => (
-                      <button key={sc.id} onClick={() => setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], scale: sc.id } }))}
+                      <button key={sc.id} onClick={() => setSubs((p) => ({ ...p, [key]: { ...p[key], scale: sc.id } }))}
                         className={`text-xs font-semibold px-3 py-1.5 rounded-full border ${sub.scale === sc.id ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{sc.label}</button>
                     ))}
                   </div>
                   <div className="space-y-2">
                     {roster.map((s) => {
-                      const cell = grades[st.key]?.[s.id] || {};
-                      const showNote = openNotes[`${st.key}:${s.id}`] || cell.note;
+                      const cell = grades[key]?.[s.id] || {};
+                      const showNote = openNotes[`${key}:${s.id}`] || cell.note;
                       return (
                         <div key={s.id}>
                           <div className="flex items-center gap-2">
                             <span className="flex-1 text-sm text-stone-800">{s.name}</span>
-                            <RoundGradeInput scale={sub.scale} value={cell.grade} onChange={(v) => setGrade(st.key, s.id, { grade: v })} />
-                            {!showNote && <button onClick={() => setOpenNotes((p) => ({ ...p, [`${st.key}:${s.id}`]: true }))} className="text-[11px] text-teal-700 font-semibold whitespace-nowrap">+ comment</button>}
+                            <RoundGradeInput scale={sub.scale} value={cell.grade} onChange={(v) => setGrade(key, s.id, { grade: v })} />
+                            {!showNote && <button onClick={() => setOpenNotes((p) => ({ ...p, [`${key}:${s.id}`]: true }))} className="text-[11px] text-teal-700 font-semibold whitespace-nowrap">+ comment</button>}
                           </div>
                           {showNote && (
-                            <input value={cell.note || ""} onChange={(e) => setGrade(st.key, s.id, { note: e.target.value })} placeholder={`Comment for ${s.name} (optional)`} className="w-full mt-1 rounded-lg border border-stone-200 px-2 py-1 text-xs" />
+                            <input value={cell.note || ""} onChange={(e) => setGrade(key, s.id, { note: e.target.value })} placeholder={`Comment for ${s.name} (optional)`} className="w-full mt-1 rounded-lg border border-stone-200 px-2 py-1 text-xs" />
                           )}
                         </div>
                       );
                     })}
                   </div>
                   <p className="text-[10px] text-stone-400 mt-3">Leave a student blank if they have no grade. Comments are optional and only appear on the report when you write one.</p>
-                  {st.optional && <button onClick={() => { setSubs((p) => ({ ...p, [st.key]: { ...p[st.key], skipped: true } })); }} className="mt-2 text-xs text-stone-500 underline">Skip this subject</button>}
+                  {st.optional && !st.extra && <button onClick={() => { setSubs((p) => ({ ...p, [key]: { ...p[key], skipped: true } })); }} className="mt-2 text-xs text-stone-500 underline">Skip this subject</button>}
                 </>
               )}
             </div>
           );
         })()}
 
-        {step === 7 && (
+        {cur.type === "review" && (
           <div className={stepCard}>
-            <p className="font-semibold text-stone-800 mb-1">Review</p>
-            <p className="text-xs text-stone-500 mb-3">{missingCount > 0 ? `${missingCount} grade${missingCount === 1 ? " is" : "s are"} still blank. You can go back to fill them in, or submit as is.` : "Everything is filled in."}</p>
-            <div className="overflow-x-auto">
-              <table className="text-xs w-full">
-                <thead><tr className="text-stone-400 text-left"><th className="pr-2 pb-1">Student</th>{filledKeys.map((st) => <th key={st.key} className="px-1 pb-1">{subs[st.key].label}</th>)}</tr></thead>
-                <tbody>
-                  {roster.map((s) => (
-                    <tr key={s.id} className="border-t border-stone-100">
-                      <td className="pr-2 py-1 text-stone-800">{s.name}</td>
-                      {filledKeys.map((st) => { const g = (grades[st.key]?.[s.id]?.grade || "").trim(); return <td key={st.key} className={`px-1 py-1 ${g ? "text-stone-700" : "text-amber-600"}`}>{g || "blank"}</td>; })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="text-xs text-stone-500 mt-3">Attendance: {attOptOut ? "not included in your class's reports" : "included (pulled from your logs)"}.</p>
-            <p className="text-[10px] text-stone-400 mt-2">Submitting sends this to the office. These grades are saved in your class as assessments but are not published to parents. If you need to change something after submitting, tell the office and they can send it back to you.</p>
+            <p className="font-semibold text-stone-800 mb-1">Review your parts</p>
+            <p className="text-xs text-stone-500 mb-3">{filledKeys.length === 0 ? "You haven't entered any subjects yet." : missingCount > 0 ? `${missingCount} grade${missingCount === 1 ? " is" : "s are"} still blank. You can go back to fill them in, or submit as is.` : "Everything is filled in."}</p>
+            {filledKeys.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="text-xs w-full">
+                  <thead><tr className="text-stone-400 text-left"><th className="pr-2 pb-1">Student</th>{filledKeys.map((k) => <th key={k} className="px-1 pb-1">{subs[k].label}</th>)}</tr></thead>
+                  <tbody>
+                    {roster.map((s) => (
+                      <tr key={s.id} className="border-t border-stone-100">
+                        <td className="pr-2 py-1 text-stone-800">{s.name}</td>
+                        {filledKeys.map((k) => { const g = (grades[k]?.[s.id]?.grade || "").trim(); return <td key={k} className={`px-1 py-1 ${g ? "text-stone-700" : "text-amber-600"}`}>{g || "blank"}</td>; })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-xs text-stone-500 mt-3">Attendance: {attOptOut ? "left out of this class's reports" : "included (pulled from your logs)"}.</p>
+            <button onClick={addExtra} disabled={saving} className="mt-3 text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-50">+ Add another subject (something else you want to report on)</button>
+            {(othersParts.length > 0 || unclaimedRequired.length > 0) && (
+              <div className="mt-3 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-xs text-stone-600 space-y-0.5">
+                <p className="font-semibold">Other parts of this class's report</p>
+                {othersParts.map((st) => <p key={st.key}>• {st.title.replace(" (optional)", "")}: {entries[st.key].claimedBy}{entries[st.key].doneAt ? " (submitted)" : " (in progress)"}</p>)}
+                {unclaimedRequired.map((k) => <p key={k} className="text-amber-700">• {ROUND_STEPS.find((x) => x.key === k).title}: nobody has taken this yet</p>)}
+              </div>
+            )}
+            <p className="text-[10px] text-stone-400 mt-3">Submitting sends your parts to the office. These grades are saved in your class as assessments but are not published to parents. If you need to change something after submitting, tell the office and they can send it back to you.</p>
           </div>
         )}
 
         {err && <p className="text-xs text-rose-600 mb-2">{err}</p>}
         <div className="flex gap-2">
           {step > 0 && <button onClick={() => go(-1)} disabled={saving} className="px-4 py-2.5 rounded-lg border border-stone-300 text-sm text-stone-600 disabled:opacity-50">Back</button>}
-          {step < 7 ? (
+          {cur.type !== "review" ? (
             <button onClick={() => go(1)} disabled={saving} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
-              {saving ? <Loader2 className="animate-spin" size={15} /> : null} {step === 0 ? "Start" : step === 1 ? "Looks right, continue" : "Save & next"}
+              {saving ? <Loader2 className="animate-spin" size={15} /> : null} {cur.type === "intro" ? "Start" : cur.type === "pick" || cur.type === "attendance" ? "Continue" : "Save & next"}
             </button>
           ) : (
-            <button onClick={submit} disabled={saving} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
-              {saving ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Submit my report
+            <button onClick={submit} disabled={saving || filledKeys.length === 0} className="flex-1 flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-2.5 text-sm font-semibold hover:bg-teal-800 disabled:opacity-50">
+              {saving ? <Loader2 className="animate-spin" size={15} /> : <Check size={15} />} Submit my parts
             </button>
           )}
         </div>
@@ -27513,14 +27640,13 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
       setReview({ cid, round, entry: (list || []).find((r) => r.id === round.id) || null, assessments: assessments || [], roster: (rawRoster || []).filter((x) => !x.enrollmentScope || x.enrollmentScope === "full-time") });
     } catch (e) { console.error("Round review load failed", e); setReview({ cid, round, error: true }); }
   };
-  const sendBack = async () => {
+  const sendBack = async (key) => {
     try {
-      await updateClassRoundEntry(review.cid, review.round.id, (r) => ({ ...r, status: "open", submittedAt: null }));
+      await updateClassRoundEntry(review.cid, review.round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), doneAt: null, doneBy: null } } }));
       await openReview(review.round, review.cid);
       loadStatus(review.round);
     } catch (e) { console.error("Send back failed", e); setReview((p) => ({ ...p, sendBackError: true })); }
   };
-
   const loadRounds = async () => {
     try { setRounds((await loadJSON("reportRounds", [], true, 3, true)) || []); setLoadErr(null); }
     catch (e) { console.error("Rounds load failed", e); setLoadErr("Couldn't load the saved rounds. Try again."); setRounds([]); }
@@ -27566,9 +27692,12 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
   const statusText = (entry) => {
     if (entry === "error") return { t: "Couldn't load", c: "text-rose-600" };
     if (!entry) return { t: "Not set up", c: "text-stone-400" };
-    if (entry.status === "submitted") return { t: `Submitted${entry.submittedBy ? ` by ${entry.submittedBy}` : ""}`, c: "text-emerald-700" };
-    const n = Object.values(entry.entries || {}).filter((e) => e && e.label).length;
-    return n > 0 ? { t: `In progress (${n} subject${n === 1 ? "" : "s"} entered)`, c: "text-amber-700" } : { t: "Not started", c: "text-amber-700" };
+    const st = roundClassStatus(entry);
+    if (st.complete) return { t: "Complete", c: "text-emerald-700" };
+    if (!st.started) return { t: "Not started", c: "text-amber-700" };
+    const e = entry.entries || {};
+    const missing = ROUND_REQUIRED.filter((k) => !(e[k] && e[k].doneAt)).map((k) => ROUND_STEPS.find((x) => x.key === k).title.replace(/ #1/, ""));
+    return { t: `In progress. Still needed: ${missing.join(", ")}`, c: "text-amber-700" };
   };
 
   const input = "w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm";
@@ -27644,9 +27773,9 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
             {review.error && <p className="text-xs text-rose-600">Couldn't load this class. Try again.</p>}
             {review.roster && (() => {
               const entry = review.entry;
-              const keys = ROUND_STEPS.filter((st) => { const e = entry?.entries?.[st.key]; return e && !e.skipped && (e.label || "").trim(); });
-              const cell = (st, sid) => {
-                const e = entry.entries[st.key];
+              const keys = orderedRoundKeys(entry?.entries).filter((k) => { const e = entry.entries[k]; return e && !e.skipped && (e.label || "").trim(); });
+              const cell = (k, sid) => {
+                const e = entry.entries[k];
                 const a = review.assessments.find((x) => x.id === e.assessmentId);
                 const r = a?.results?.[sid];
                 return { g: getResultGrade(r), n: getResultNote(r) };
@@ -27654,31 +27783,33 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
               return (
                 <>
                   <p className="text-xs text-stone-500 mb-2">
-                    {!entry ? "This class has no copy of the round." : entry.status === "submitted" ? `Submitted${entry.submittedBy ? ` by ${entry.submittedBy}` : ""}${entry.submittedAt ? ` on ${new Date(entry.submittedAt).toLocaleDateString()}` : ""}.` : "Not submitted yet. This is what has been entered so far."}
+                    {!entry ? "This class has no copy of the round." : roundClassStatus(entry).complete ? "Every required part has been submitted." : "Not complete yet. This is what has been entered so far."}
                     {entry?.attendanceOptOut ? " Attendance is left out of this class's reports." : ""}
                   </p>
                   {keys.length === 0 ? <p className="text-xs text-stone-400">No subjects entered yet.</p> : (
                     <div className="overflow-x-auto">
                       <table className="text-xs w-full">
-                        <thead><tr className="text-stone-400 text-left"><th className="pr-2 pb-1">Student</th>{keys.map((st) => <th key={st.key} className="px-1 pb-1">{entry.entries[st.key].label}</th>)}</tr></thead>
+                        <thead>
+                          <tr className="text-stone-400 text-left align-top"><th className="pr-2 pb-1">Student</th>{keys.map((k) => { const e = entry.entries[k]; return (
+                            <th key={k} className="px-1 pb-1 font-semibold">
+                              <span className="block text-stone-700">{e.label}</span>
+                              <span className="block text-[10px] font-normal">{ROUND_GROUP_TITLES[roundGroupOf(k, e)]}{e.claimedBy ? ` · ${e.claimedBy}` : ""}</span>
+                              <span className={`block text-[10px] font-normal ${e.doneAt ? "text-emerald-700" : "text-amber-700"}`}>{e.doneAt ? "Submitted" : "In progress"}</span>
+                              {e.doneAt && <button onClick={() => sendBack(k)} className="block text-[10px] font-semibold text-amber-700 underline">Send back</button>}
+                            </th>); })}</tr>
+                        </thead>
                         <tbody>
                           {review.roster.map((s) => (
                             <tr key={s.id} className="border-t border-stone-100 align-top">
                               <td className="pr-2 py-1 text-stone-800">{s.name}</td>
-                              {keys.map((st) => { const c = cell(st, s.id); return (<td key={st.key} className={`px-1 py-1 ${c.g ? "text-stone-700" : "text-amber-600"}`}>{c.g || "blank"}{c.n && <span className="block text-[10px] italic text-stone-400">{c.n}</span>}</td>); })}
+                              {keys.map((k) => { const c = cell(k, s.id); return (<td key={k} className={`px-1 py-1 ${c.g ? "text-stone-700" : "text-amber-600"}`}>{c.g || "blank"}{c.n && <span className="block text-[10px] italic text-stone-400">{c.n}</span>}</td>); })}
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
                   )}
-                  {entry?.status === "submitted" && (
-                    <div className="mt-3">
-                      <button onClick={sendBack} className="text-xs font-semibold text-amber-700 border border-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-50">Send back to the teacher to change</button>
-                      <p className="text-[10px] text-stone-400 mt-1">This reopens the report on the teacher's home screen. It does not send them a message, so let them know.</p>
-                      {review.sendBackError && <p className="text-xs text-rose-600 mt-1">That didn't save. Try again.</p>}
-                    </div>
-                  )}
+                  <p className="text-[10px] text-stone-400 mt-3">"Send back" reopens just that part for its teacher to change. It does not send them a message, so let them know.{review.sendBackError ? " That didn't save. Try again." : ""}</p>
                 </>
               );
             })()}
