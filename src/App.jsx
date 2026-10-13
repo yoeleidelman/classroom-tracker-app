@@ -9334,7 +9334,7 @@ function WhatsAppIcon({ size = 16 }) {
 // Controlled from the header's own Contact Office icon now, not a self-managed inline toggle —
 // renders as a full-width panel spanning the same width as the rest of the page content, not a
 // small anchored popover, since a 3-icon grid needs real room to be comfortably tappable.
-function ContactOfficePanel({ onViewUpdates }) {
+function ContactOfficePanel({ onViewUpdates, inline = false }) {
   const [officePhone, setOfficePhone] = useState(null);
   const [note, setNote] = useState("");
 
@@ -9357,14 +9357,14 @@ function ContactOfficePanel({ onViewUpdates }) {
   const goTo = async (kind) => {
     let d = digits;
     if (!d) { setNote("Getting the office number..."); d = ((await fetchNumber()) || "").replace(/[^\d]/g, ""); }
-    if (!d) { setNote("Couldn't get the office number right now. Please try again in a moment, or open the updates below."); return; }
+    if (!d) { setNote("Couldn't get the office number right now. Please try again in a moment."); return; }
     setNote("");
     window.location.href = kind === "call" ? `tel:${d}` : kind === "text" ? `sms:${d}` : `https://wa.me/${d}`;
   };
   const tile = "flex flex-col items-center gap-1 bg-stone-50 rounded-lg py-2.5 hover:bg-stone-100";
 
   return (
-    <div className="anim-expand-down bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3">
+    <div className={inline ? "anim-expand-down pt-2" : "anim-expand-down bg-white border-b border-stone-200 max-w-lg mx-auto px-4 py-3"}>
       <div className="grid grid-cols-3 gap-2 mb-2">
         {digits ? (
           <>
@@ -9381,48 +9381,24 @@ function ContactOfficePanel({ onViewUpdates }) {
         )}
       </div>
       {note && <p className="text-xs text-stone-600 mb-2">{note}</p>}
-      <button onClick={onViewUpdates} className="text-xs font-semibold text-[#5F9F9E] hover:text-[#447271]">See updates from the office →</button>
+      {onViewUpdates && <button onClick={onViewUpdates} className="text-xs font-semibold text-[#5F9F9E] hover:text-[#447271]">See updates from the office →</button>}
     </div>
   );
 }
 
 function ContactOfficeView({ adminThread, onBack }) {
-  const [officePhone, setOfficePhone] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
-
-  useEffect(() => {
-    loadJSON("schoolSettings", {}, true).then((s) => { setOfficePhone(s?.officePhone || null); setLoading(false); });
-  }, []);
-
-  const digits = (officePhone || "").replace(/[^\d]/g, "");
+  const [showContact, setShowContact] = useState(false);
   const messages = [...(adminThread?.messages || [])].reverse();
 
   return (
-    <div className="app-page">
+    <div className="app-page" style={{ paddingBottom: showContact ? "13rem" : "7.5rem" }}>
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-lg font-bold text-stone-900 mb-1">School Office</h1>
-      <p className="text-xs text-stone-400 mb-4">Reach the office directly — the same number you'd already call or text.</p>
+      <p className="text-xs text-stone-400 mb-4">Updates and announcements from the school.</p>
 
-      {loading && <p className="text-sm text-stone-400">Loading…</p>}
-      {!loading && !digits && (
-        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">The school hasn't added a phone number yet — check with them directly for now.</p>
-      )}
-      {!loading && digits && (
-        <div className="grid grid-cols-3 gap-2 mb-6">
-          <a href={`tel:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#5F9F9E]">
-            <Phone size={22} className="text-[#5F9F9E]" />
-            <span className="text-xs font-semibold text-stone-700">Call</span>
-          </a>
-          <a href={`sms:${digits}`} className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#5F9F9E]">
-            <MessageCircle size={22} className="text-[#5F9F9E]" />
-            <span className="text-xs font-semibold text-stone-700">Text</span>
-          </a>
-          <a href={`https://wa.me/${digits}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-1.5 bg-white border border-stone-200 rounded-xl py-4 hover:border-[#5F9F9E]">
-            <MessageCircle size={22} className="text-emerald-600" />
-            <span className="text-xs font-semibold text-stone-700">WhatsApp</span>
-          </a>
-        </div>
+      {messages.length === 0 && (
+        <p className="text-sm text-stone-400 text-center py-8">No updates from the office yet.</p>
       )}
 
       {messages.length > 0 && (
@@ -9483,6 +9459,19 @@ function ContactOfficeView({ adminThread, onBack }) {
         </>
       )}
       {lightboxPhoto && <PhotoLightbox url={lightboxPhoto.url} type={lightboxPhoto.type} onClose={() => setLightboxPhoto(null)} />}
+      {/* Office messages are one-way, so there's no message box here. This note sits at the bottom
+          where a message box would be, and tells parents where to go instead. */}
+      <div className="fixed bottom-0 inset-x-0 bg-white border-t border-stone-200 z-20" style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
+        <div className="max-w-lg mx-auto px-4 py-3">
+          <p className="text-xs text-stone-600 text-center">
+            This is a one-way message board, so you can't reply here. To contact the office, tap the <Phone size={12} className="inline -mt-0.5 text-[#5F9F9E]" /> phone icon at the top of the screen, or use the button below.
+          </p>
+          <button onClick={() => setShowContact((v) => !v)} className="mt-2 w-full flex items-center justify-center gap-1.5 bg-[#5F9F9E] text-white rounded-lg py-2 text-xs font-bold hover:bg-[#508786]">
+            <Phone size={14} /> Contact office
+          </button>
+          {showContact && <ContactOfficePanel inline />}
+        </div>
+      </div>
     </div>
   );
 }
@@ -11375,6 +11364,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
 
   const [showScanner, setShowScanner] = useState(false);
   const [contactPanelOpen, setContactPanelOpen] = useState(false);
+  const [messagesContactOpen, setMessagesContactOpen] = useState(false);
   // Starts active on this account's first-ever login (no separate wizard, no explicit "start
   // tour" step) and never again once dismissed — tracked per individual guardian login, not
   // shared across a family group, since a newly-added second guardian should still get their own
@@ -12470,6 +12460,35 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                 <button onClick={onDismissMessagingOnboarding} className="text-teal-700 hover:text-teal-900 shrink-0"><X size={16} /></button>
               </div>
             )}
+            {/* The school office: updates from the office, shown as a bar like the teachers below.
+                Always pinned at the top, whether or not there is anything new. */}
+            <button onClick={() => openAdminMessages().then(refreshUnreadThreads)}
+              className="w-full text-left bg-white border-2 border-teal-700/15 rounded-xl p-4 flex items-center justify-between hover:border-teal-700">
+              <div className="min-w-0">
+                <p className="font-semibold text-stone-900 truncate">School Office</p>
+                <p className="text-xs font-semibold text-[#5F9F9E]">Updates from the school</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0 ml-2">
+                {(() => {
+                  const count = unreadThreads.find((th) => th.threadKey === `admin-${family.uid}`)?.unreadCount;
+                  return count > 0 && (
+                    <span className="min-w-[20px] h-5 px-1.5 flex items-center justify-center rounded-full bg-teal-700 text-white text-[11px] font-bold leading-none">
+                      {count > 9 ? "9+" : count}
+                    </span>
+                  );
+                })()}
+                <ChevronRight size={16} className="text-stone-300" />
+              </div>
+            </button>
+            {/* Contact office: the same call / text / WhatsApp choices as the phone icon in the header,
+                so parents can find it right here in Messages too. */}
+            <div className="bg-white border-2 border-teal-700/15 rounded-xl px-4 py-3">
+              <button onClick={() => setMessagesContactOpen((v) => !v)} className="w-full flex items-center justify-between text-left">
+                <span className="flex items-center gap-2 font-semibold text-stone-900"><Phone size={16} className="text-[#5F9F9E]" /> Contact office</span>
+                <ChevronRight size={16} className={`text-stone-300 transition-transform ${messagesContactOpen ? "rotate-90" : ""}`} />
+              </button>
+              {messagesContactOpen && <ContactOfficePanel inline />}
+            </div>
             {eligibleTeachers === null ? (
               // A real, honest loading state — not hidden behind a timer, and not simply absent
               // while the request is in flight.
@@ -12708,7 +12727,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
           </div>
         </div>
         {contactPanelOpen && (
-          <ContactOfficePanel onViewUpdates={() => { setContactPanelOpen(false); openAdminMessages().then(refreshUnreadThreads); }} />
+          <ContactOfficePanel />
         )}
         {parentTab !== "settings" && (
           <TourHint active={tourStep === 0} step={1} total={TOUR_TOTAL_STEPS} align="left"
