@@ -10844,7 +10844,7 @@ function ParentBlogTabContent({ links, selectedStudentId, family, onRead, onOpti
 // What parents (and teachers) have marked lives in one document per assignment,
 // class:{classId}:homeworkChecks:{postId}, shaped { [studentId]: { [partId]: { parent?, teacher? } } }
 // where partId is "all" for a once-at-the-end assignment. A parent's tap is written by
-// api/homework-checkoff.js; a teacher's mark is written straight from the teacher's screen.
+// the homework check-off actions in api/blog-react.js; a teacher's mark is written straight from the teacher's screen.
 const HW_GRACE_DAYS = 1; // a parent can still tick/undo this many days after the last date (matches the server)
 function hwAppliesTo(post, studentId) {
   if (!post?.audience || post.audience === "class") return true;
@@ -10894,7 +10894,7 @@ function ParentHomeworkView({ link }) {
   const posts = (allPosts || []).filter((p) => hwAppliesTo(p, link.studentId));
 
   // What has been marked for this child, per assignment and part. Parents can't read these
-  // documents directly, so they come through api/homework-checkoff.js.
+  // documents directly, so they come through api/blog-react.js (actions hwChecksGet / hwChecksSet).
   const [checks, setChecks] = useState({}); // { [postId]: { [partId]: { parent: bool, teacher: "done"|"missed"|null } } }
   const [checkError, setCheckError] = useState(null);
   const checkPostIds = posts.filter((p) => p.checkoff === "end" || p.checkoff === "parts").map((p) => p.id).join(",");
@@ -10904,7 +10904,7 @@ function ParentHomeworkView({ link }) {
     (async () => {
       try {
         const headers = await authHeaders();
-        const res = await fetch("/api/homework-checkoff", { method: "POST", headers, body: JSON.stringify({ action: "get", classId: link.classId, studentId: link.studentId, postIds: checkPostIds.split(",") }) });
+        const res = await fetch("/api/blog-react", { method: "POST", headers, body: JSON.stringify({ action: "hwChecksGet", classId: link.classId, studentId: link.studentId, postIds: checkPostIds.split(",") }) });
         const data = await res.json();
         if (!cancelled && res.ok) setChecks(data.checks || {});
       } catch { /* the boxes simply show as not ticked until the next try */ }
@@ -10919,7 +10919,7 @@ function ParentHomeworkView({ link }) {
     setLocal(!was); // shows right away; put back below if it didn't save
     try {
       const headers = await authHeaders();
-      const res = await fetch("/api/homework-checkoff", { method: "POST", headers, body: JSON.stringify({ action: "set", classId: link.classId, studentId: link.studentId, postId: post.id, partId, done: !was }) });
+      const res = await fetch("/api/blog-react", { method: "POST", headers, body: JSON.stringify({ action: "hwChecksSet", classId: link.classId, studentId: link.studentId, postId: post.id, partId, done: !was }) });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setLocal(was);
