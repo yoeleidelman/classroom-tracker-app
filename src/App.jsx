@@ -3347,6 +3347,15 @@ function AppInner() {
             effectiveFamily = { ...myFamily, linkedClassIds, familyGroupId, linkedClassTypes };
             saveJSON(`family:${user.uid}`, effectiveFamily, true);
           }
+          // The class list is first read when the app opens, before anyone has signed in, and that
+          // early read can come back empty. A sign-in that happens afterwards (rather than a fresh
+          // page load) never re-read it, so a teacher with a class assigned landed on "No classes are
+          // assigned to you yet" with the school showing 0 classes. Re-reading it here, now that this
+          // account is signed in, fixes that.
+          if (mine) {
+            const freshClasses = await loadJSON("schoolClasses", [], true);
+            if (Array.isArray(freshClasses) && freshClasses.length > 0) setRegistry(freshClasses);
+          }
           setCurrentTeacher(mine);
           setAuthResolvedFamily(effectiveFamily);
           // Reported directly, and confirmed as too fragile: the cleanup previously only fired
