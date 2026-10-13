@@ -16,7 +16,7 @@
 
 import { db, auth, storage, messagingPromise } from "./firebase";
 import { getToken, onMessage } from "firebase/messaging";
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, getDocs, documentId, onSnapshot, FieldPath } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, deleteField, collection, query, where, getDocs, documentId, onSnapshot, FieldPath } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signInWithCustomToken, signOut, setPersistence, browserLocalPersistence, browserSessionPersistence, updatePassword, reauthenticateWithCredential, EmailAuthProvider, sendPasswordResetEmail, verifyPasswordResetCode, confirmPasswordReset, GoogleAuthProvider, signInWithPopup, linkWithCredential } from "firebase/auth";
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, createContext, useContext, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
@@ -10835,10 +10835,101 @@ function ParentBlogTabContent({ links, selectedStudentId, family, onRead, onOpti
 // Same fix, same reasoning as ChildDailyLogView's own — a teacher posting homework should reach
 // a parent automatically, not only the next time this screen happens to remount. Live-subscribed
 // rather than one-time loaded.
+// ---- Homework assignments: who it's for, which dates, and how parents check it off ----
+// A homework post (class:{id}:homework) can now also carry: audience ("class" | "some") with
+// studentIds, a length ("day" | "week" | "month" | "dates"), startDate / endDate (plain YYYY-MM-DD
+// dates the teacher chose, no school calendar involved), and checkoff ("none" | "end" | "parts")
+// with parts [{id, label}]. Posts made before this existed have none of these and behave exactly
+// as they always did: for the whole class, no parent check-off.
+// What parents (and teachers) have marked lives in one document per assignment,
+// class:{classId}:homeworkChecks:{postId}, shaped { [studentId]: { [partId]: { parent?, teacher? } } }
+// where partId is "all" for a once-at-the-end assignment. A parent's tap is written by
+// api/homework-checkoff.js; a teacher's mark is written straight from the teacher's screen.
+const HW_GRACE_DAYS = 1; // a parent can still tick/undo this many days after the last date (matches the server)
+function hwAppliesTo(post, studentId) {
+  if (!post?.audience || post.audience === "class") return true;
+  return Array.isArray(post.studentIds) && post.studentIds.includes(studentId);
+}
+function hwParts(post) {
+  if (post?.checkoff === "end") return [{ id: "all", label: "Finished" }];
+  if (post?.checkoff === "parts") return post.parts || [];
+  return [];
+}
+function hwShortDate(iso) {
+  if (!iso) return "";
+  return new Date(`${iso}T00:00:00`).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+function hwDatesText(post) {
+  if (!post?.endDate) return "";
+  if (post.length === "dates" && post.startDate) return `${hwShortDate(post.startDate)} to ${hwShortDate(post.endDate)}`;
+  return `Due ${new Date(`${post.endDate}T00:00:00`).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}`;
+}
+function hwHeading(post) {
+  if (post?.length === "day") return "Today's homework";
+  if (post?.length === "week") return "This week's homework";
+  if (post?.length === "month" || post?.length === "dates") return "Homework";
+  return post?.cadence === "weekly" ? "This week's homework" : "Today's homework";
+}
+function hwIsOpen(post) {
+  return !post?.endDate || todayISO() <= addDaysISO(post.endDate, HW_GRACE_DAYS);
+}
+// The next Monday strictly after the given date (a Monday itself gives the Monday a week later).
+function hwNextMonday(iso) {
+  const d = new Date(`${iso}T00:00:00`);
+  const add = ((8 - d.getDay()) % 7) || 7;
+  return addDaysISO(iso, add);
+}
+// What counts for a part, given what's been recorded: a teacher's mark always wins; otherwise a
+// parent's tap counts as done.
+function hwEffective(rec) {
+  if (rec?.teacher?.status) return rec.teacher.status; // "done" | "missed"
+  return rec?.parent ? "done" : null;
+}
+
 function ParentHomeworkView({ link }) {
-  const { value: posts, loaded } = useLiveJSONLoaded(`class:${link.classId}:homework`, []);
+  const { value: allPosts, loaded } = useLiveJSONLoaded(`class:${link.classId}:homework`, []);
   const config = useLiveJSON(`class:${link.classId}:config`, {});
   const pinnedLink = config?.homework?.pinnedLink;
+  // Only homework meant for this child: class homework, plus anything assigned to just them.
+  const posts = (allPosts || []).filter((p) => hwAppliesTo(p, link.studentId));
+
+  // What has been marked for this child, per assignment and part. Parents can't read these
+  // documents directly, so they come through api/homework-checkoff.js.
+  const [checks, setChecks] = useState({}); // { [postId]: { [partId]: { parent: bool, teacher: "done"|"missed"|null } } }
+  const [checkError, setCheckError] = useState(null);
+  const checkPostIds = posts.filter((p) => p.checkoff === "end" || p.checkoff === "parts").map((p) => p.id).join(",");
+  useEffect(() => {
+    if (!checkPostIds) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const headers = await authHeaders();
+        const res = await fetch("/api/homework-checkoff", { method: "POST", headers, body: JSON.stringify({ action: "get", classId: link.classId, studentId: link.studentId, postIds: checkPostIds.split(",") }) });
+        const data = await res.json();
+        if (!cancelled && res.ok) setChecks(data.checks || {});
+      } catch { /* the boxes simply show as not ticked until the next try */ }
+    })();
+    return () => { cancelled = true; };
+  }, [checkPostIds, link.classId, link.studentId]);
+
+  const toggleCheck = async (post, partId) => {
+    const was = !!checks[post.id]?.[partId]?.parent;
+    const setLocal = (val) => setChecks((prev) => ({ ...prev, [post.id]: { ...(prev[post.id] || {}), [partId]: { ...(prev[post.id]?.[partId] || { teacher: null }), parent: val } } }));
+    setCheckError(null);
+    setLocal(!was); // shows right away; put back below if it didn't save
+    try {
+      const headers = await authHeaders();
+      const res = await fetch("/api/homework-checkoff", { method: "POST", headers, body: JSON.stringify({ action: "set", classId: link.classId, studentId: link.studentId, postId: post.id, partId, done: !was }) });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setLocal(was);
+        setCheckError(data.error || "Couldn't save that. Please try again.");
+      }
+    } catch {
+      setLocal(was);
+      setCheckError("Couldn't save that. Check your connection and try again.");
+    }
+  };
 
   if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)); // newest first — homework is "what's due," not a scrollable history
@@ -10853,16 +10944,24 @@ function ParentHomeworkView({ link }) {
           <ExternalLink size={13} className="text-amber-600 shrink-0" />
         </a>
       )}
+      {checkError && <p className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 mb-3">{checkError}</p>}
       {sorted.length === 0 ? (
         <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">No homework posted yet.</p>
       ) : (
         <div className="space-y-3">
-          {sorted.map((post) => (
+          {sorted.map((post) => {
+            const parts = hwParts(post);
+            const open = hwIsOpen(post);
+            const doneCount = parts.filter((p) => checks[post.id]?.[p.id]?.parent).length;
+            return (
             <div key={post.id} className="bg-white border border-stone-200 border-l-4 border-l-[#5F9F9E] rounded-xl p-4">
               <p className="text-sm font-bold text-[#4a8483] mb-1.5">
-                {post.cadence === "weekly" ? "This week's homework" : "Today's homework"}
+                {hwHeading(post)}
                 <span className="ml-2 text-[10px] font-semibold text-stone-400">{new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
               </p>
+              {post.audience === "some" && (
+                <span className="inline-block text-[10px] font-bold text-amber-700 bg-amber-50 rounded-full px-2 py-0.5 mb-1.5">Just for {link.studentName ? link.studentName.split(" ")[0] : "your child"}</span>
+              )}
               {post.text && <p className="text-sm text-stone-700 whitespace-pre-wrap mb-2"><LinkifiedText text={post.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
               {post.text && extractFirstUrl(post.text) && <LinkPreviewCard url={extractFirstUrl(post.text)} />}
               {post.attachmentType === "photo" && post.attachmentUrl && (
@@ -10885,8 +10984,50 @@ function ParentHomeworkView({ link }) {
                   <span className="text-xs font-semibold text-stone-700 truncate">{post.attachmentName || "Attached file"}</span>
                 </a>
               )}
+              {post.endDate && <p className="text-[11px] text-stone-500 mt-2">{hwDatesText(post)}</p>}
+              {post.checkoff === "end" && (
+                <div className="mt-2">
+                  {(() => {
+                    const rec = checks[post.id]?.all;
+                    const on = !!rec?.parent;
+                    return (
+                      <>
+                        <button onClick={() => toggleCheck(post, "all")} disabled={!open}
+                          className={`w-full rounded-lg py-2.5 text-sm font-bold disabled:opacity-60 ${on ? "bg-[#e3f0ef] text-[#3b7473] border border-[#5F9F9E]" : "bg-[#5F9F9E] text-white hover:bg-[#508786]"}`}>
+                          {on ? "✓ Marked done (tap to undo)" : "We finished this"}
+                        </button>
+                        {rec?.teacher && <p className="text-[11px] text-stone-500 mt-1">{rec.teacher === "done" ? "Your teacher marked this done." : "Your teacher marked this as not done."}</p>}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+              {post.checkoff === "parts" && parts.length > 0 && (
+                <div className="mt-2">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {parts.map((part) => {
+                      const rec = checks[post.id]?.[part.id];
+                      const on = !!rec?.parent;
+                      return (
+                        <button key={part.id} onClick={() => toggleCheck(post, part.id)} disabled={!open}
+                          className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs font-medium disabled:opacity-60 ${on ? "bg-[#e3f0ef] border-[#5F9F9E]" : "bg-stone-50 border-stone-200 hover:bg-stone-100"}`}>
+                          <span className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 text-white text-[10px] ${on ? "bg-[#5F9F9E] border-[#5F9F9E]" : "border-stone-400"}`}>{on ? "✓" : ""}</span>
+                          <span className="flex-1 text-stone-700 truncate">{part.label}</span>
+                          {rec?.teacher && <span className={`text-[10px] font-bold ${rec.teacher === "done" ? "text-emerald-700" : "text-rose-600"}`}>{rec.teacher === "done" ? "✓" : "×"}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <div className="flex-1 h-1.5 bg-stone-200 rounded-full overflow-hidden"><div className="h-full bg-[#5F9F9E]" style={{ width: `${Math.round((doneCount / parts.length) * 100)}%` }} /></div>
+                    <span className="text-[11px] text-stone-500">{doneCount} of {parts.length}</span>
+                  </div>
+                </div>
+              )}
+              {post.checkoff && post.checkoff !== "none" && !open && <p className="text-[11px] text-stone-400 mt-2">This homework is closed.</p>}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -10905,7 +11046,8 @@ function ParentHomeworkView({ link }) {
 // independently of the full Homework tab. A card shown first, checked most often, is exactly
 // where a gap like this would be noticed fastest — and exactly where it was still there.
 function HomeworkPreviewCard({ link, onSeeAll }) {
-  const { value: posts, loaded } = useLiveJSONLoaded(`class:${link.classId}:homework`, []);
+  const { value: allPosts, loaded } = useLiveJSONLoaded(`class:${link.classId}:homework`, []);
+  const posts = (allPosts || []).filter((p) => hwAppliesTo(p, link.studentId));
 
   if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
@@ -10924,12 +11066,16 @@ function HomeworkPreviewCard({ link, onSeeAll }) {
       ) : (
         <div>
           <p className="text-sm font-bold text-stone-900 mb-1">
-            {latest.cadence === "weekly" ? "This week's homework" : "Today's homework"}
+            {hwHeading(latest)}
             <span className="ml-2 text-[10px] font-semibold text-stone-400">{new Date(latest.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
           </p>
           {latest.text && <p className="text-sm text-stone-700 whitespace-pre-wrap line-clamp-3"><LinkifiedText text={latest.text} linkClassName="underline text-teal-700 hover:text-teal-900" /></p>}
           {latest.attachmentType === "photo" && latest.attachmentUrl && (
             <img src={latest.attachmentUrl} alt="" className="w-full max-h-40 object-cover rounded-lg mt-2" />
+          )}
+          {latest.endDate && <p className="text-[11px] text-stone-500 mt-2">{hwDatesText(latest)}</p>}
+          {(latest.checkoff === "end" || latest.checkoff === "parts") && hwIsOpen(latest) && (
+            <button onClick={onSeeAll} className="mt-2 text-xs font-bold text-[#4a8483] bg-[#e3f0ef] rounded-lg px-3 py-1.5 hover:bg-[#d3e8e7]">Mark it done →</button>
           )}
         </div>
       )}
@@ -11160,7 +11306,7 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher, siblingLi
 function ParentHomeworkTabContent({ links, selectedIndex, onMarkRead }) {
   const selectedLink = links[selectedIndex] || links[0];
   useEffect(() => {
-    if (selectedLink) onMarkRead(selectedLink.classId);
+    if (selectedLink) onMarkRead(selectedLink.classId, selectedLink.studentId);
   }, [selectedLink?.classId, selectedLink?.studentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <ParentHomeworkView link={selectedLink} />;
@@ -11693,7 +11839,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     for (const l of uniqueClasses) {
       const posts = await loadJSON(`class:${l.classId}:homework`, [], true); // eslint-disable-line no-await-in-loop
       const lastRead = readState[`homework-${l.classId}`];
-      total += posts.filter((p) => !lastRead || new Date(p.timestamp) > new Date(lastRead)).length;
+      const myKidsHere = fullTimeStudentLinks.filter((x) => x.classId === l.classId).map((x) => x.studentId);
+      total += posts.filter((p) => (!lastRead || new Date(p.timestamp) > new Date(lastRead)) && myKidsHere.some((sid) => hwAppliesTo(p, sid))).length;
     }
     if (homeworkRefreshSeqRef.current === mySeq) setUnreadHomeworkCount(total);
   }, [family, fullTimeStudentLinks]);
@@ -11731,8 +11878,8 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
     return () => { document.removeEventListener("visibilitychange", onVisible); window.removeEventListener("focus", onVisible); };
   }, [refreshUnreadThreads, refreshUnreadBlogCount, refreshUnreadHomeworkCount]);
 
-  const markHomeworkRead = async (classId) => {
-    const posts = await loadJSON(`class:${classId}:homework`, [], true);
+  const markHomeworkRead = async (classId, studentId) => {
+    const posts = (await loadJSON(`class:${classId}:homework`, [], true)).filter((p) => !studentId || hwAppliesTo(p, studentId)); // homework meant for another child isn't "seen" just because this page was opened
     const latest = posts[posts.length - 1];
     if (latest) await markThreadRead(family.uid, `homework-${classId}`);
     refreshUnreadHomeworkCount();
@@ -13590,7 +13737,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         );
       case "homework":
         return (
-        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} config={config} persistConfig={persistConfig} />
+        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} config={config} persistConfig={persistConfig} roster={roster} classId={classId} loggedInTeacher={loggedInTeacher} />
         );
       case "tools":
         return (
@@ -14319,7 +14466,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
   // ("This week's homework" vs "Today's homework") without the teacher needing to type a title
   // every single time. The attachment reuses the exact same upload pipeline as messages, since a
   // homework post is really just a specialized, class-wide post with a cadence attached.
-  const submitHomework = async (cadence, text, attachFile, attachType) => {
+  const submitHomework = async (cadence, text, attachFile, attachType, extras = {}) => {
     const postId = uid();
     let attachmentUrl = null;
     let attachmentName = null;
@@ -14336,10 +14483,15 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
     const entry = withLogger({
       id: postId, timestamp: new Date().toISOString(), cadence, text: (text || "").trim(),
       ...(attachmentUrl ? { attachmentUrl, attachmentType: attachType, attachmentName } : {}),
+      ...extras,
     });
     persistHomeworkPosts([...homeworkPosts, entry]);
-    const heading = cadence === "weekly" ? "This week's homework" : "Today's homework";
-    notifyClassFamilies(classId, `${heading} — ${className}`, text?.trim() || "Check the homework section", `/?portal=parent&open=homework&classId=${classId}`);
+    const heading = hwHeading(entry);
+    const body = text?.trim() || "Check the homework section";
+    const link = `/?portal=parent&open=homework&classId=${classId}`;
+    // Homework for certain students only reaches those students' families, never the whole class.
+    if (entry.audience === "some" && (entry.studentIds || []).length > 0) notifySpecificStudentFamilies(classId, entry.studentIds, `${heading} — ${className}`, body, link);
+    else notifyClassFamilies(classId, `${heading} — ${className}`, body, link);
     return entry;
   };
   // Same single-reaction-per-person-or-per-block logic as the parent-side version — see that one
@@ -15679,7 +15831,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
 
 
       {view === "homework-compose" && (
-        <HomeworkComposeScreen classId={classId} onSubmit={submitHomework} onBack={() => navigateView("homework")} />
+        <HomeworkComposeScreen classId={classId} roster={roster} onSubmit={submitHomework} onBack={() => navigateView("homework")} />
       )}
 
 
@@ -19879,8 +20031,9 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
 
 // Same reasoning as the blog feed's own compose button — placed at the bottom, right after the
 // newest post, so it's the next thing in view rather than requiring a scroll back to the top.
-function TeacherHomeworkView({ posts, navigate, config, persistConfig }) {
+function TeacherHomeworkView({ posts, navigate, config, persistConfig, roster = [], classId, loggedInTeacher }) {
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  const [trackingPostId, setTrackingPostId] = useState(null); // which assignment's completion grid is open
   // Which post's "Seen by" sheet is currently open, if any — holds the post itself (not just an
   // id) so the sheet has its own current readBy to show without needing a second lookup back into
   // sorted/posts.
@@ -19940,8 +20093,13 @@ function TeacherHomeworkView({ posts, navigate, config, persistConfig }) {
             {sorted.map((post) => (
               <div key={post.id} className="bg-white border border-stone-200 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wide text-teal-700 bg-teal-50 px-2 py-0.5 rounded-full">
-                    {post.cadence === "weekly" ? "Weekly" : "Daily"}
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-teal-700 bg-teal-50 px-2 py-0.5 rounded-full">
+                      {post.length === "month" ? "Month" : post.length === "dates" ? "Dates" : post.length === "week" || post.cadence === "weekly" ? "Weekly" : "Daily"}
+                    </span>
+                    {post.audience === "some" && (
+                      <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">{(post.studentIds || []).length} student{(post.studentIds || []).length === 1 ? "" : "s"}</span>
+                    )}
                   </span>
                   <span className="text-[10px] text-stone-400">{new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}</span>
                 </div>
@@ -19967,9 +20125,20 @@ function TeacherHomeworkView({ posts, navigate, config, persistConfig }) {
                     <span className="text-xs font-semibold text-stone-700 truncate">{post.attachmentName || "Attached file"}</span>
                   </a>
                 )}
-                <button onClick={() => setShowReadByFor(post)} className="text-xs font-semibold text-stone-400 hover:text-teal-700 mt-2">
-                  Seen by {(post.readBy || []).length}
-                </button>
+                {post.endDate && <p className="text-[11px] text-stone-500 mt-2">{hwDatesText(post)}{post.checkoff === "parts" ? ` · ${(post.parts || []).length} parts` : post.checkoff === "end" ? " · parents tick once" : ""}</p>}
+                <div className="flex items-center gap-4 mt-2">
+                  <button onClick={() => setShowReadByFor(post)} className="text-xs font-semibold text-stone-400 hover:text-teal-700">
+                    Seen by {(post.readBy || []).length}
+                  </button>
+                  {(post.checkoff === "end" || post.checkoff === "parts") && (
+                    <button onClick={() => setTrackingPostId(trackingPostId === post.id ? null : post.id)} className="text-xs font-bold text-teal-700 hover:text-teal-900">
+                      {trackingPostId === post.id ? "Hide who finished" : "Who finished?"}
+                    </button>
+                  )}
+                </div>
+                {trackingPostId === post.id && (
+                  <HomeworkTrackingGrid post={post} roster={roster} classId={classId} teacherName={loggedInTeacher?.name || null} />
+                )}
               </div>
             ))}
           </div>
@@ -19983,8 +20152,116 @@ function TeacherHomeworkView({ posts, navigate, config, persistConfig }) {
   );
 }
 
-function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
-  const [cadence, setCadence] = useState("daily");
+// Who has finished a homework assignment, per student and per part. A parent's tap shows in
+// green; the teacher can tap any square to mark it themselves (blue = done, red = not done), and a
+// teacher's mark always wins over the parent's. Tapping again moves through: done -> not done ->
+// cleared (back to whatever the parent tapped, or empty). A teacher's mark and a parent's tap are
+// stored separately, so neither ever erases the other.
+function HomeworkTrackingGrid({ post, roster, classId, teacherName }) {
+  const key = `class:${classId}:homeworkChecks:${post.id}`;
+  const checks = useLiveJSON(key, {}) || {};
+  const [saveError, setSaveError] = useState(null);
+  const parts = hwParts(post);
+  const students = roster.filter((st) => hwAppliesTo(post, st.id));
+
+  const cycle = async (studentId, partId) => {
+    const rec = checks[studentId]?.[partId];
+    const cur = rec?.teacher?.status || null;
+    setSaveError(null);
+    try {
+      const ref = doc(db, "data", key);
+      if (cur === null) {
+        await setDoc(ref, { value: { [studentId]: { [partId]: { teacher: { status: "done", at: new Date().toISOString(), ...(teacherName ? { by: teacherName } : {}) } } } } }, { merge: true });
+      } else if (cur === "done") {
+        await setDoc(ref, { value: { [studentId]: { [partId]: { teacher: { status: "missed", at: new Date().toISOString(), ...(teacherName ? { by: teacherName } : {}) } } } } }, { merge: true });
+      } else {
+        await setDoc(ref, { value: { [studentId]: { [partId]: { teacher: deleteField() } } } }, { merge: true });
+      }
+    } catch {
+      setSaveError("Couldn't save that. Check your connection and try again.");
+    }
+  };
+
+  let doneCells = 0;
+  const totalCells = students.length * parts.length;
+  students.forEach((st) => parts.forEach((pt) => { if (hwEffective(checks[st.id]?.[pt.id]) === "done") doneCells += 1; }));
+
+  if (students.length === 0) return <p className="text-xs text-stone-400 mt-3">No students to show.</p>;
+  return (
+    <div className="mt-3 border-t border-stone-200 pt-3">
+      <div className="overflow-x-auto no-scrollbar">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-stone-400">
+              <th className="text-left font-semibold pb-1.5 pr-2">Student</th>
+              {parts.map((pt) => <th key={pt.id} className="font-semibold pb-1.5 px-1 whitespace-nowrap max-w-[5rem] truncate">{post.checkoff === "end" ? "Done" : pt.label}</th>)}
+              <th className="font-semibold pb-1.5 pl-2">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {students.map((st) => {
+              const n = parts.filter((pt) => hwEffective(checks[st.id]?.[pt.id]) === "done").length;
+              return (
+                <tr key={st.id} className="border-t border-stone-100">
+                  <td className="py-1.5 pr-2 font-semibold text-stone-700 whitespace-nowrap">{st.name}</td>
+                  {parts.map((pt) => {
+                    const rec = checks[st.id]?.[pt.id];
+                    const eff = hwEffective(rec);
+                    const byTeacher = !!rec?.teacher?.status;
+                    const cls = eff === "missed" ? "bg-rose-50 text-rose-600 border-rose-300"
+                      : eff === "done" && byTeacher ? "bg-sky-50 text-sky-700 border-sky-300"
+                      : eff === "done" ? "bg-emerald-50 text-emerald-700 border-emerald-400"
+                      : "bg-stone-50 text-stone-300 border-stone-200";
+                    return (
+                      <td key={pt.id} className="px-1 py-1 text-center">
+                        <button onClick={() => cycle(st.id, pt.id)} title={rec?.parent ? "A parent marked this" : ""}
+                          className={`w-8 h-7 rounded-lg border font-bold ${cls}`}>
+                          {eff === "missed" ? "×" : eff === "done" ? "✓" : "·"}
+                        </button>
+                      </td>
+                    );
+                  })}
+                  <td className="py-1 pl-2 font-bold text-stone-700 whitespace-nowrap">{n}/{parts.length}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-stone-500 mt-2">
+        <span><b className="text-emerald-700">✓</b> parent marked</span>
+        <span><b className="text-sky-700">✓</b> you marked</span>
+        <span><b className="text-rose-600">×</b> not done</span>
+        <span>tap a square to mark it yourself</span>
+      </div>
+      <p className="text-xs font-semibold text-stone-600 mt-1.5">{doneCells} of {totalCells} done so far</p>
+      {saveError && <p className="text-xs text-rose-600 mt-1">{saveError}</p>}
+    </div>
+  );
+}
+
+function HomeworkComposeScreen({ classId, roster = [], onSubmit, onBack }) {
+  // Who it's for, which dates it covers, and how parents check it off. The defaults reproduce
+  // exactly what this screen did before (whole class, no parent check-off).
+  const [who, setWho] = useState("class"); // "class" | "some"
+  const [kidIds, setKidIds] = useState([]);
+  const [length, setLength] = useState("day"); // "day" | "week" | "month" | "dates"
+  const [startDate, setStartDate] = useState(() => todayISO());
+  const [endDate, setEndDate] = useState(() => addDaysISO(todayISO(), 1));
+  const [checkoff, setCheckoff] = useState("none"); // "none" | "end" | "parts"
+  const [partLabels, setPartLabels] = useState(["Page 1", "Page 2", "Page 3", "Page 4", "Page 5"]);
+  const pickLength = (next) => {
+    const today = todayISO();
+    setLength(next);
+    setStartDate(today);
+    setEndDate(next === "day" ? addDaysISO(today, 1) : next === "week" ? hwNextMonday(today) : next === "month" ? addDaysISO(today, 30) : addDaysISO(today, 7));
+  };
+  const setPartCount = (n) => setPartLabels((prev) => {
+    const count = Math.max(2, Math.min(10, n));
+    return Array.from({ length: count }, (_, i) => prev[i] || `Page ${i + 1}`);
+  });
+  const datesBad = !endDate || !startDate || endDate < startDate;
+  const cadence = length === "week" ? "weekly" : "daily"; // kept so older parts of the app that read it still work
   const [text, setText] = useState("");
   const [attachFile, setAttachFile] = useState(null);
   const [attachPreview, setAttachPreview] = useState(null);
@@ -20014,10 +20291,17 @@ function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
 
   const submit = async () => {
     if (!text.trim() && !attachFile) return;
+    if (datesBad || (who === "some" && kidIds.length === 0)) return;
     setPosting(true);
     setAttachError(null);
     try {
-      await onSubmit(cadence, text, attachFile, attachType);
+      const extras = {
+        length, startDate, endDate,
+        audience: who, ...(who === "some" ? { studentIds: kidIds } : {}),
+        checkoff,
+        ...(checkoff === "parts" ? { parts: partLabels.map((label, i) => ({ id: `p${i + 1}`, label: (label || "").trim() || `Part ${i + 1}` })) } : {}),
+      };
+      await onSubmit(cadence, text, attachFile, attachType, extras);
       onBack();
     } catch (err) {
       setAttachError(describeUploadError(err));
@@ -20030,12 +20314,72 @@ function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
       <button onClick={onBack} className="flex items-center gap-1 text-sm text-stone-500 mb-3"><ChevronLeft size={16} /> Back</button>
       <h1 className="display-font text-xl font-bold text-stone-900 mb-4">New homework</h1>
 
-      <label className="block text-xs font-medium text-stone-500 mb-1">How often does this repeat?</label>
-      <div className="flex gap-2 mb-4">
-        <button onClick={() => setCadence("daily")} className={`flex-1 text-sm font-semibold rounded-lg py-2 border ${cadence === "daily" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Daily</button>
-        <button onClick={() => setCadence("weekly")} className={`flex-1 text-sm font-semibold rounded-lg py-2 border ${cadence === "weekly" ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>Weekly</button>
+      {/* One compact card for the three choices, instead of three tall stacked sections. */}
+      <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3 space-y-3">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-wide text-stone-400 mb-1">Who</p>
+          <div className="grid grid-cols-2 gap-1.5">
+            {[["class", "Whole class"], ["some", "Certain students"]].map(([v, label]) => (
+              <button key={v} onClick={() => setWho(v)} className={`text-xs font-semibold rounded-lg py-1.5 border ${who === v ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>{label}</button>
+            ))}
+          </div>
+          {who === "some" && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {roster.map((st) => {
+                const on = kidIds.includes(st.id);
+                return <button key={st.id} onClick={() => setKidIds((prev) => (on ? prev.filter((x) => x !== st.id) : [...prev, st.id]))}
+                  className={`text-[11px] font-semibold rounded-full px-2.5 py-1 border ${on ? "bg-teal-50 text-teal-800 border-teal-600" : "bg-white text-stone-600 border-stone-300"}`}>{st.name}</button>;
+              })}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-wide text-stone-400 mb-1">How long</p>
+          <div className="grid grid-cols-4 gap-1.5">
+            {[["day", "Day"], ["week", "Week"], ["month", "Month"], ["dates", "Dates"]].map(([v, label]) => (
+              <button key={v} onClick={() => pickLength(v)} className={`text-xs font-semibold rounded-lg py-1.5 border ${length === v ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>{label}</button>
+            ))}
+          </div>
+          <div className="flex gap-1.5 mt-1.5 items-end">
+            {length === "dates" && (
+              <label className="flex-1 text-[11px] text-stone-500">From<input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1 text-xs text-stone-800" /></label>
+            )}
+            <label className="flex-1 text-[11px] text-stone-500">{length === "dates" ? "To" : "Due"}<input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full rounded-lg border border-stone-300 px-2 py-1 text-xs text-stone-800" /></label>
+          </div>
+          {datesBad && <p className="text-[11px] text-rose-600 mt-1">The last date can't be before the first date.</p>}
+        </div>
+
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-wide text-stone-400 mb-1">Parents check it off</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            {[["none", "Don't"], ["end", "At the end"], ["parts", "Each part"]].map(([v, label]) => (
+              <button key={v} onClick={() => setCheckoff(v)} className={`text-xs font-semibold rounded-lg py-1.5 border ${checkoff === v ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>{label}</button>
+            ))}
+          </div>
+          {checkoff === "parts" && (
+            <div className="mt-1.5">
+              <div className="flex items-center gap-2 mb-1.5">
+                <button onClick={() => setPartCount(partLabels.length - 1)} className="w-7 h-7 rounded-full border border-stone-300 bg-white leading-none">&minus;</button>
+                <span className="text-xs font-bold w-5 text-center">{partLabels.length}</span>
+                <button onClick={() => setPartCount(partLabels.length + 1)} className="w-7 h-7 rounded-full border border-stone-300 bg-white leading-none">+</button>
+                <span className="text-[11px] text-stone-400">parts. Tap a name to rename it.</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {partLabels.map((label, i) => (
+                  <input key={i} value={label} onChange={(e) => setPartLabels((prev) => prev.map((x, j) => (j === i ? e.target.value : x)))}
+                    className="w-full rounded-lg border border-stone-300 px-2 py-1 text-xs" />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <p className="text-[11px] text-stone-400">
+          {who === "some" ? "Only those families see it, on top of any class homework. " : ""}
+          {length === "week" ? "A week is due the next Monday. " : length === "dates" ? "You choose the dates, even over a break. " : ""}
+          {checkoff === "none" ? "You mark it yourself, as you do now." : checkoff === "end" ? "Parents tap one button when it's done." : "Parents tap each part as it's finished."}
+        </p>
       </div>
-      <p className="text-xs text-stone-400 mb-4">Families will see this as "{cadence === "weekly" ? "This week's homework" : "Today's homework"}" — no need to type a title.</p>
 
       <label className="block text-xs font-medium text-stone-500 mb-1">What's the homework?</label>
       <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5} placeholder="e.g. Read chapter 4 and answer the review questions."
@@ -20066,7 +20410,7 @@ function HomeworkComposeScreen({ classId, onSubmit, onBack }) {
       </div>
       {attachError && <p className="text-xs text-rose-600 mb-3">{attachError}</p>}
 
-      <button onClick={submit} disabled={posting || (!text.trim() && !attachFile)} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">
+      <button onClick={submit} disabled={posting || (!text.trim() && !attachFile) || datesBad || (who === "some" && kidIds.length === 0)} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">
         {posting ? "Posting…" : "Post homework"}
       </button>
     </div>
