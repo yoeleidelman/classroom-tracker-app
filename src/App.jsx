@@ -11240,7 +11240,6 @@ STRICT RULES:
     setDrafts((p) => ({ ...p, [s.id]: { text: "", sent: true } }));
   };
 
-  const pill = (active) => `w-10 h-10 rounded-lg border text-sm font-bold ${active ? "bg-teal-700 border-teal-700 text-white" : "bg-white border-stone-300 text-stone-600 hover:bg-teal-50"}`;
   return (
     <div className={`${PAGE} pb-16`}>
       <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
@@ -11261,21 +11260,23 @@ STRICT RULES:
           {roster.map((s) => (
             <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
               <p className="font-semibold text-stone-800 mb-2">{s.name}</p>
-              {SCORE_FIELDS.map((f) => (
-                <div key={f.key} className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
-                  <span className="text-xs font-medium text-stone-600 w-40">{f.label}</span>
-                  <div className="flex gap-1">
-                    {[1, 2, 3, 4, 5].map((n) => (
-                      <button key={n} onClick={() => setField(s.id, f.key, row(s.id)[f.key] === n ? null : n)} className={pill(row(s.id)[f.key] === n)} aria-label={`${s.name} ${f.label} ${n}`}>{n}</button>
-                    ))}
-                  </div>
-                </div>
-              ))}
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                {SCORE_FIELDS.map((f) => (
+                  <label key={f.key} className="block">
+                    <span className="block text-[11px] font-medium text-stone-500 mb-0.5">{f.label}</span>
+                    <select value={row(s.id)[f.key] || ""} onChange={(e) => setField(s.id, f.key, e.target.value ? Number(e.target.value) : null)}
+                      className={`w-full rounded-lg border px-2 py-2 text-base font-bold ${row(s.id)[f.key] ? "bg-teal-50 border-teal-300 text-teal-800" : "bg-white border-stone-300 text-stone-400"}`} aria-label={`${s.name} ${f.label}`}>
+                      <option value="">Tap to score</option>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </label>
+                ))}
+              </div>
               <input key={`${date}-${s.id}`} defaultValue={row(s.id).note || ""} onBlur={(e) => { const v = e.target.value.trim(); if (v !== (row(s.id).note || "")) setField(s.id, "note", v || null); }}
                 placeholder="Quick note (optional)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mt-1" />
             </div>
           ))}
-          <p className="text-xs text-stone-400">Scores save as you tap. Tap the same number again to clear it.</p>
+          <p className="text-xs text-stone-400">Scores save as you pick them. Choose "Tap to score" to clear one.</p>
         </>
       )}
 
@@ -16533,13 +16534,10 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
       )}
 
       {scoringOn && (
-        <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <p className="text-sm font-semibold text-teal-900">Class scores</p>
-            <p className="text-xs text-teal-700">Score today's class, and send the two-week parent updates.</p>
-          </div>
-          <button onClick={onOpenScores} className="shrink-0 text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-1.5 hover:bg-teal-800">Open</button>
-        </div>
+        <button onClick={onOpenScores} className="w-full flex items-center justify-between bg-teal-50 border border-teal-200 rounded-lg px-3 py-1.5 mb-3 text-left hover:bg-teal-100">
+          <span className="text-sm font-semibold text-teal-800">Class scores</span>
+          <span className="text-teal-700 text-sm">›</span>
+        </button>
       )}
 
       {(openRounds || []).map((r) => (
