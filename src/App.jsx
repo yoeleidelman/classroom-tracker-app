@@ -314,17 +314,19 @@ function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
 // existing assessment already stores it) or, once a note is added, an object of
 // {grade, note} — these two helpers read either shape the same way so nothing needs migrating.
 function getResultGrade(r) { return r == null ? "" : (typeof r === "object" ? (r.grade || "") : String(r)); }
-// Finds this class's subject with that name (any capitalisation) or creates it, so a report grade always lands under a subject.
+// Finds this class's subject with that name (any capitalisation) in its Settings subject list, or adds it, so a report grade always lands under a subject.
 async function ensureClassSubject(classId, label) {
   const t = (label || "").trim();
-  if (!t) return { id: null, list: null };
-  const list = (await loadJSON(`class:${classId}:benchmarkSubjects`, [], true, 3, true)) || [];
+  if (!t) return { id: null, config: null };
+  const cfg = await loadJSON(`class:${classId}:config`, null, true, 3, true);
+  if (!cfg) return { id: null, config: null };
+  const list = cfg.subjects || [];
   const hit = list.find((x) => (x.label || "").trim().toLowerCase() === t.toLowerCase());
-  if (hit) return { id: hit.id, list };
-  const created = { id: uid(), label: t, segments: [] };
-  const next = [...list, created];
-  await saveJSON(`class:${classId}:benchmarkSubjects`, next, true, 2, true);
-  return { id: created.id, list: next };
+  if (hit) return { id: hit.id, config: cfg };
+  const created = { id: uid(), label: t };
+  const next = { ...cfg, subjects: [...list, created] };
+  await saveJSON(`class:${classId}:config`, next, true, 2, true);
+  return { id: created.id, config: next };
 }
 // What a multi-part assessment cell shows in the class chart: the overall result (if there is one) and each part by name.
 function MultiPartCellContent({ assessment, result }) {
@@ -15906,7 +15908,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
               await saveJSON(`class:${classId}:classAssessments`, next, true, 2, true);
               setClassAssessments(next);
             }}
-            ensureSubject={async (label) => { const r = await ensureClassSubject(classId, label); if (r.list) setBenchmarkSubjects(r.list); return r.id; }}
+            ensureSubject={async (label) => { const r = await ensureClassSubject(classId, label); if (r.config) setConfig(r.config); return r.id; }}
             updateRound={async (rid, mutate) => { const next = await updateClassRoundEntry(classId, rid, mutate); setReportRounds(next); }}
             onBack={() => navigateView("home")} />
         );
@@ -27770,7 +27772,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
   const stepTitle = (c) => (c.type === "intro" ? "How this works" : c.type === "pick" ? "Your parts" : c.type === "attendance" ? "Attendance" : c.type === "review" ? "Review and submit" : (subs[c.key]?.label || "").trim() || infoOf(c.key).title);
 
   const setGrade = (key, sid, patchObj) => setGrades((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), [sid]: { ...((prev[key] || {})[sid] || {}), ...patchObj } } }));
-  const matchSubjectId = (label) => (benchmarkSubjects || []).find((b) => (b.label || "").trim().toLowerCase() === label.trim().toLowerCase())?.id;
+  const matchSubjectId = (label) => ((config && config.subjects) || []).find((b) => (b.label || "").trim().toLowerCase() === label.trim().toLowerCase())?.id;
   const claimed = (k) => entries[k] && entries[k].claimedByUid && entries[k].claimedByUid !== myId ? entries[k].claimedBy || "another teacher" : null;
   const toggleMine = (k) => setMySections((p) => (p.includes(k) ? p.filter((x) => x !== k) : [...p, k]));
 
