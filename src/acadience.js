@@ -108,7 +108,8 @@ export function matchAcadienceToRoster(results, roster) {
     let hit = byName.get(k);
     let how = "name";
     if (!hit) {
-      const near = [...byName.entries()].filter(([fk]) => !used.has(fk) && editDistance(fk, k) <= 1);
+      const maxEdits = k.length >= 15 ? 2 : 1; // long names can differ by two letters ("Breina" / "Bryna") and still be the same child
+      const near = [...byName.entries()].filter(([fk]) => !used.has(fk) && editDistance(fk, k) <= maxEdits);
       if (near.length === 1) { hit = near[0][1]; how = "close spelling"; }
     }
     if (hit) { used.add(normalizeName(hit.name)); matched.push({ student: s, result: hit, how }); } else missing.push(s);

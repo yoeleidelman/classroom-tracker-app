@@ -28084,6 +28084,7 @@ function AcadienceLoadModal({ round, registry, onClose, onDone }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const [saved, setSaved] = useState(null);
+  const [replace, setReplace] = useState({}); // "classId:subject" -> true when the admin chose to replace a teacher's own entries
   const windowLabel = (ACADIENCE_WINDOWS.find((w) => w.id === windowId) || ACADIENCE_WINDOWS[0]).label;
   const readFile = async (kind, file) => {
     setErr(null); setPlan(null); setSaved(null);
@@ -28121,7 +28122,8 @@ function AcadienceLoadModal({ round, registry, onClose, onDone }) {
     } catch (e) { console.error("Acadience plan failed", e); setErr("Couldn't load the classes. Check your connection and try again."); }
     setBusy(false);
   };
-  const willSave = (plan || []).reduce((n, c) => n + (c.hasEntry ? SUBJECTS.filter(([key]) => c.subjects[key] && !c.subjects[key].blockedBy && c.subjects[key].matched.length > 0).length : 0), 0);
+  const isBlocked = (c, key) => Boolean(c.subjects[key]?.blockedBy) && !replace[`${c.cid}:${key}`];
+  const willSave = (plan || []).reduce((n, c) => n + (c.hasEntry ? SUBJECTS.filter(([key]) => c.subjects[key] && !isBlocked(c, key) && c.subjects[key].matched.length > 0).length : 0), 0);
   const save = async () => {
     setBusy(true); setErr(null);
     try {
@@ -28131,14 +28133,14 @@ function AcadienceLoadModal({ round, registry, onClose, onDone }) {
         if (!c.hasEntry) continue; // eslint-disable-line no-continue
         for (const [key, kind] of SUBJECTS) {
           const sj = c.subjects[key];
-          if (!sj || sj.blockedBy || sj.matched.length === 0) continue; // eslint-disable-line no-continue
+          if (!sj || isBlocked(c, key) || sj.matched.length === 0) continue; // eslint-disable-line no-continue
           const label = acadienceReportLabel(kind, windowId);
           const partDefs = acadienceParts(sj.matched, kind).map((p) => ({ id: `acad-${p.abbr}`, label: p.label, abbr: p.abbr }));
           const aKey = `class:${c.cid}:classAssessments`;
           const fresh = (await loadJSON(aKey, [], true, 3, true)) || []; // eslint-disable-line no-await-in-loop
           const list = (await loadJSON(`class:${c.cid}:reportRounds`, [], true, 3, true)) || []; // eslint-disable-line no-await-in-loop
           const prevEntry = (list.find((r) => r.id === round.id)?.entries || {})[key];
-          const assessmentId = prevEntry && prevEntry.claimedByUid === ACAD_UID && prevEntry.assessmentId ? prevEntry.assessmentId : uid();
+          const assessmentId = prevEntry && prevEntry.assessmentId && (prevEntry.claimedByUid === ACAD_UID || replace[`${c.cid}:${key}`]) ? prevEntry.assessmentId : uid(); // replacing a teacher's entries reuses their record, so no leftover copy stays behind
           const results = {};
           sj.matched.forEach((m) => {
             const pv = {};
@@ -28195,9 +28197,15 @@ function AcadienceLoadModal({ round, registry, onClose, onDone }) {
                   if (!sj) return null;
                   return (
                     <div key={key} className="mb-2">
-                      <p className="text-xs font-semibold text-stone-600">{title}: {sj.matched.length} student{sj.matched.length === 1 ? "" : "s"} found{sj.blockedBy ? ` (skipped, already taken by ${sj.blockedBy})` : ""}</p>
-                      {!sj.blockedBy && sj.matched.length > 0 && <p className="text-[11px] text-stone-500">{sj.matched.map((m) => `${m.student.name}${m.how !== "name" ? ` (file: ${m.result.name})` : ""}${m.result.compositeStatus ? ` – ${m.result.compositeStatus}` : ""}`).join(" · ")}</p>}
-                      {!sj.blockedBy && sj.missing.length > 0 && <p className="text-[11px] text-amber-700">Not in the file, will stay blank: {sj.missing.map((m) => m.name).join(", ")}</p>}
+                      <p className="text-xs font-semibold text-stone-600">{title}: {sj.matched.length} student{sj.matched.length === 1 ? "" : "s"} found{isBlocked(c, key) ? ` (skipped, already taken by ${sj.blockedBy})` : ""}</p>
+                      {sj.blockedBy && (
+                        <label className="flex items-start gap-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 my-1">
+                          <input type="checkbox" className="mt-0.5" checked={Boolean(replace[`${c.cid}:${key}`])} onChange={(e) => setReplace((p) => ({ ...p, [`${c.cid}:${key}`]: e.target.checked }))} />
+                          <span>Replace what {sj.blockedBy} already entered for {title} with the Acadience results. Anything they typed for {title} in this report will be overwritten.</span>
+                        </label>
+                      )}
+                      {!isBlocked(c, key) && sj.matched.length > 0 && <p className="text-[11px] text-stone-500">{sj.matched.map((m) => `${m.student.name}${m.how !== "name" ? ` (file: ${m.result.name})` : ""}${m.result.compositeStatus ? ` – ${m.result.compositeStatus}` : ""}`).join(" · ")}</p>}
+                      {!isBlocked(c, key) && sj.missing.length > 0 && <p className="text-[11px] text-amber-700">Not in the file, will stay blank: {sj.missing.map((m) => m.name).join(", ")}</p>}
                     </div>
                   );
                 })}
