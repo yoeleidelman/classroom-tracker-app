@@ -8896,12 +8896,12 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
       {showRoundsAdmin && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
-          <AdminReportRoundsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowRoundsAdmin(false)} onMakeReports={(r) => { setAdminReportsRound(r); setShowRoundsAdmin(false); setShowAdminReports(true); }} />
+          <AdminReportRoundsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowRoundsAdmin(false)} onMakeReports={(r, onlyClassId) => { setAdminReportsRound(onlyClassId ? { ...r, classIds: [onlyClassId] } : r); setShowRoundsAdmin(false); setShowAdminReports(true); }} />
         </div>
       )}
       {showAdminReports && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
-          <AdminCreateReportsView key={adminReportsRound?.id || "plain"} initialRound={adminReportsRound} registry={registry} loggedInTeacher={currentTeacher} onBack={() => { setShowAdminReports(false); setAdminReportsRound(null); }} />
+          <AdminCreateReportsView key={`${adminReportsRound?.id || "plain"}:${(adminReportsRound?.classIds || []).join(",")}`} initialRound={adminReportsRound} registry={registry} loggedInTeacher={currentTeacher} onBack={() => { setShowAdminReports(false); setAdminReportsRound(null); }} />
         </div>
       )}
 
@@ -28484,7 +28484,7 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
               <div className="mt-2 border-t border-stone-100 pt-2">
                 {!statusByRound[r.id] ? <Loader2 className="animate-spin text-teal-700" size={16} /> : (
                   <div className="space-y-1">
-                    {(r.classIds || []).map((cid) => { const s = statusText(statusByRound[r.id][cid]); const cls = (registry || []).find((c) => c.id === cid); return (<div key={cid} className="flex items-center justify-between gap-2 text-xs"><span className="text-stone-700">{cls?.name || cid}</span><span className="flex items-center gap-2"><span className={`font-semibold ${s.c}`}>{s.t}</span>{statusByRound[r.id][cid] && statusByRound[r.id][cid] !== "error" && <button onClick={() => openReview(r, cid)} className="font-semibold text-teal-700 underline">Review</button>}</span></div>); })}
+                    {(r.classIds || []).map((cid) => { const s = statusText(statusByRound[r.id][cid]); const cls = (registry || []).find((c) => c.id === cid); return (<div key={cid} className="flex items-center justify-between gap-2 text-xs"><span className="text-stone-700">{cls?.name || cid}</span><span className="flex items-center gap-2"><span className={`font-semibold ${s.c}`}>{s.t}</span>{statusByRound[r.id][cid] && statusByRound[r.id][cid] !== "error" && <button onClick={() => openReview(r, cid)} className="font-semibold text-teal-700 underline">Review</button>}{statusByRound[r.id][cid] && statusByRound[r.id][cid] !== "error" && roundClassStatus(statusByRound[r.id][cid]).complete && onMakeReports && <button onClick={() => onMakeReports(r, cid)} className="font-semibold text-teal-700 underline">PDFs</button>}</span></div>); })}
                   </div>
                 )}
                 <div className="flex flex-wrap gap-3 mt-3 items-center">
