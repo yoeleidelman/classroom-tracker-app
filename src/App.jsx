@@ -11139,6 +11139,12 @@ const SCORE_FIELDS = [
   { key: "ep", label: "English participation" },
   { key: "eb", label: "English behavior" },
 ];
+// What the parent sees: three averages.
+const AVG_FIELDS = [
+  { key: "mp", label: "Math participation" },
+  { key: "ep", label: "English participation" },
+  { key: "beh", label: "Behavior" },
+];
 // Averages for one student over every scored day after `afterDate` (all days if none).
 function scoreSummary(days, studentId, afterDate) {
   const dates = Object.keys(days || {}).filter((d) => !afterDate || d > afterDate).sort();
@@ -11152,7 +11158,11 @@ function scoreSummary(days, studentId, afterDate) {
     if ((row.note || "").trim()) notes.push({ date: d, text: row.note.trim() });
   });
   const avgs = {};
-  SCORE_FIELDS.forEach((f) => { if (counts[f.key]) avgs[f.key] = Math.round((sums[f.key] / counts[f.key]) * 10) / 10; });
+  const r1 = (x) => Math.round(x * 10) / 10;
+  if (counts.mp) avgs.mp = r1(sums.mp / counts.mp);
+  if (counts.ep) avgs.ep = r1(sums.ep / counts.ep);
+  const behCount = (counts.mb || 0) + (counts.eb || 0);
+  if (behCount) avgs.beh = r1(((sums.mb || 0) + (sums.eb || 0)) / behCount); // behavior is scored in both subjects; one average across both
   return { avgs, scoredDays, notes, from: dates[0] || null, to: dates[dates.length - 1] || null };
 }
 const scoreDateText = (iso) => (iso ? new Date(`${iso}T12:00:00`).toLocaleDateString([], { month: "short", day: "numeric" }) : "");
@@ -11190,7 +11200,7 @@ function ClassScoresView({ roster, classId, className, config, loggedInTeacher, 
   const writeDraft = async (s) => {
     const sm = summaryFor(s.id);
     setDrafts((p) => ({ ...p, [s.id]: { ...(p[s.id] || {}), busy: true, err: null } }));
-    const scoreLines = SCORE_FIELDS.filter((f) => sm.avgs[f.key] != null).map((f) => `${f.label}: ${sm.avgs[f.key]} out of 5`).join("\n");
+    const scoreLines = AVG_FIELDS.filter((f) => sm.avgs[f.key] != null).map((f) => `${f.label}: ${sm.avgs[f.key]} out of 5`).join("\n");
     const noteLines = sm.notes.map((n) => `${scoreDateText(n.date)}: ${n.text}`).join("\n") || "(no notes)";
     const prompt = `${buildStyleInstructions(config, teacherName)}
 
@@ -11283,7 +11293,7 @@ STRICT RULES:
                 </div>
                 {sm.scoredDays > 0 && (
                   <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-stone-700 mb-2">
-                    {SCORE_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{sm.avgs[f.key] != null ? sm.avgs[f.key] : "—"}</span></div>)}
+                    {AVG_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{sm.avgs[f.key] != null ? sm.avgs[f.key] : "—"}</span></div>)}
                   </div>
                 )}
                 {dr.sent && <p className="text-xs font-semibold text-emerald-700">Sent to {s.name}'s parent home page.</p>}
@@ -11327,7 +11337,7 @@ function ClassUpdatesCard({ link }) {
         <div key={m.id} className="mb-3 last:mb-0">
           <p className="text-xs text-stone-400 mb-1">{scoreDateText(m.from)} to {scoreDateText(m.to)} · {m.days} class day{m.days === 1 ? "" : "s"} · from {m.sentBy}</p>
           <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-stone-700 mb-2">
-            {SCORE_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{m.avgs?.[f.key] != null ? `${m.avgs[f.key]} / 5` : "—"}</span></div>)}
+            {AVG_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{m.avgs?.[f.key] != null ? `${m.avgs[f.key]} / 5` : "—"}</span></div>)}
           </div>
           <p className="text-sm text-stone-800 whitespace-pre-wrap">{m.text}</p>
         </div>
