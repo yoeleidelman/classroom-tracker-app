@@ -27754,7 +27754,7 @@ function buildRoundPdfExtra(roundMeta, cx, student) {
   if (entry) {
     for (const key of orderedRoundKeys(entry.entries)) {
       const e = entry.entries[key];
-      if (!e || e.skipped || !(e.label || "").trim()) continue; // eslint-disable-line no-continue
+      if (!e || !(e.label || "").trim()) continue; // eslint-disable-line no-continue
       const a = (cx.classAssessments || []).find((x) => x.id === e.assessmentId);
       const r = a?.results?.[student.id];
       const grade = getResultGrade(r);
@@ -27770,7 +27770,7 @@ function buildRoundPdfExtra(roundMeta, cx, student) {
     }
   }
   // A short key under the General Studies grades when the Acadience results are on the report, so parents know what the levels mean.
-  const acadEntry = entry && Object.values(entry.entries || {}).find((e) => e && !e.skipped && e.source === "acadience");
+  const acadEntry = entry && Object.values(entry.entries || {}).find((e) => e && (e.label || "").trim() && e.source === "acadience");
   if (acadEntry && byGroup.general.length > 0) {
     const when = acadEntry.period === "EOY" ? "end-of-year" : acadEntry.period === "MOY" ? "middle-of-year" : "beginning-of-year";
     const caution = acadEntry.period === "EOY" ? "" : " They don't necessarily reflect your child's current progress.";
@@ -27836,7 +27836,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
   const [attOptOut, setAttOptOut] = useState(Boolean(round.attendanceOptOut));
   const [subs, setSubs] = useState(() => {
     const o = {};
-    ROUND_STEPS.forEach((st) => { const e = entries[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped), group: st.group, comprehensive: Boolean(e?.comprehensive), parts: e?.parts || [] }; });
+    ROUND_STEPS.forEach((st) => { const e = entries[st.key]; o[st.key] = { label: e?.label ?? st.label, scale: e?.scale || "percent", skipped: Boolean(e?.skipped) && !(e?.label || "").trim(), group: st.group, comprehensive: Boolean(e?.comprehensive), parts: e?.parts || [] }; });
     Object.keys(entries).filter((k) => k.startsWith("extra-")).forEach((k) => { const e = entries[k]; o[k] = { label: e.label || "", scale: e.scale || "percent", skipped: false, group: e.group === "judaic" ? "judaic" : "general", comprehensive: Boolean(e.comprehensive), parts: e.parts || [] }; });
     return o;
   });
@@ -27874,6 +27874,8 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
     const info = infoOf(key);
     const label = (sub.label || "").trim();
     if (sub.skipped || !label) {
+      if (!info.optional && !sub.skipped) return; // a required subject left blank (e.g. pressing Back) is never recorded as skipped, and never touches saved work
+      if (entries[key]?.assessmentId && !sub.skipped) return; // blank label but saved work exists: leave it alone
       if (info.extra) await updateRound(round.id, (r) => { const e = { ...(r.entries || {}) }; delete e[key]; return { ...r, entries: e }; });
       else await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label: "", skipped: true, claimedBy: myName, claimedByUid: myId, doneAt: null } } }));
       return;
@@ -27897,7 +27899,7 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
     const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO() }), ...(subjectId ? { subjectId } : {}), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, ...(partDefs.length > 0 ? { parts: partDefs } : {}) };
     if (partDefs.length === 0) delete assessment.parts;
     await saveAssessment(assessment);
-    await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label, scale: sub.scale, assessmentId, claimedBy: myName, claimedByUid: myId, doneAt: null, comprehensive: partDefs.length > 0, parts: partDefs, ...(info.extra ? { group: sub.group } : {}) } } }));
+    await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), skipped: false, label, scale: sub.scale, assessmentId, claimedBy: myName, claimedByUid: myId, doneAt: null, comprehensive: partDefs.length > 0, parts: partDefs, ...(info.extra ? { group: sub.group } : {}) } } }));
   };
 
   const go = async (delta) => {
@@ -28508,7 +28510,7 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
             {review.error && <p className="text-xs text-rose-600">Couldn't load this class. Try again.</p>}
             {review.roster && (() => {
               const entry = review.entry;
-              const keys = orderedRoundKeys(entry?.entries).filter((k) => { const e = entry.entries[k]; return e && !e.skipped && (e.label || "").trim(); });
+              const keys = orderedRoundKeys(entry?.entries).filter((k) => { const e = entry.entries[k]; return e && (e.label || "").trim(); });
               const cell = (k, sid) => {
                 const e = entry.entries[k];
                 const a = review.assessments.find((x) => x.id === e.assessmentId);
