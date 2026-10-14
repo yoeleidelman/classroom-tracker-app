@@ -27641,6 +27641,10 @@ function buildRoundPdfExtra(roundMeta, cx, student) {
       if (hasAny) partRows.forEach((pr) => byGroup[roundGroupOf(key, e)].push(pr));
     }
   }
+  // A short key under the General Studies grades when the Acadience results are on the report, so parents know what the levels mean.
+  if (entry && Object.values(entry.entries || {}).some((e) => e && !e.skipped && e.source === "acadience") && byGroup.general.length > 0) {
+    byGroup.general.push([{ content: "Levels (Well Below, Below, At, Above) show how your child's results compare to the Acadience goal for this time of year.", colSpan: 2, styles: { fontStyle: "italic", fontSize: 8, textColor: [110, 110, 110] } }]);
+  }
   const rows = [];
   for (const grp of ["judaic", "general", "overall"]) {
     if (byGroup[grp].length === 0) continue; // eslint-disable-line no-continue
@@ -28139,7 +28143,7 @@ function AcadienceLoadModal({ round, registry, onClose, onDone }) {
           sj.matched.forEach((m) => {
             const pv = {};
             m.result.measures.forEach((ms) => { const pd = partDefs.find((x) => x.abbr === ms.abbr); if (pd) pv[pd.id] = ms.status; });
-            results[m.student.id] = { grade: m.result.compositeStatus, ...(Object.keys(pv).length > 0 ? { parts: pv } : {}), published: false };
+            results[m.student.id] = { ...(m.result.compositeStatus ? { grade: m.result.compositeStatus } : {}), ...(Object.keys(pv).length > 0 ? { parts: pv } : {}), published: false };
           });
           const assessment = { id: assessmentId, date: round.endDate || todayISO(), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, parts: partDefs.map((p) => ({ id: p.id, label: p.label })) };
           const next = fresh.some((a) => a.id === assessmentId) ? fresh.map((a) => (a.id === assessmentId ? { ...a, ...assessment } : a)) : [...fresh, assessment];
@@ -28192,7 +28196,7 @@ function AcadienceLoadModal({ round, registry, onClose, onDone }) {
                   return (
                     <div key={key} className="mb-2">
                       <p className="text-xs font-semibold text-stone-600">{title}: {sj.matched.length} student{sj.matched.length === 1 ? "" : "s"} found{sj.blockedBy ? ` (skipped, already taken by ${sj.blockedBy})` : ""}</p>
-                      {!sj.blockedBy && sj.matched.length > 0 && <p className="text-[11px] text-stone-500">{sj.matched.map((m) => `${m.student.name}${m.how !== "name" ? ` (file: ${m.result.name})` : ""} – ${m.result.compositeStatus}`).join(" · ")}</p>}
+                      {!sj.blockedBy && sj.matched.length > 0 && <p className="text-[11px] text-stone-500">{sj.matched.map((m) => `${m.student.name}${m.how !== "name" ? ` (file: ${m.result.name})` : ""}${m.result.compositeStatus ? ` – ${m.result.compositeStatus}` : ""}`).join(" · ")}</p>}
                       {!sj.blockedBy && sj.missing.length > 0 && <p className="text-[11px] text-amber-700">Not in the file, will stay blank: {sj.missing.map((m) => m.name).join(", ")}</p>}
                     </div>
                   );

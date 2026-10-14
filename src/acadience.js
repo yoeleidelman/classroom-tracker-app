@@ -13,6 +13,7 @@ export const ACADIENCE_WINDOWS = [
 // Plain-language names for the measures, in the order a parent should read them.
 const MEASURE_NAMES = {
   reading: {
+    FSF: "First sounds in words",
     PSF: "Sounds in words",
     "NWF-CLS": "Letter sounds",
     "NWF-WWR": "Reading whole words",
@@ -20,6 +21,9 @@ const MEASURE_NAMES = {
     "ORF-Acc%": "Reading accuracy",
     Retell: "Retelling what was read",
     RetellQ: "Answering questions about what was read",
+    Maze: "Reading comprehension",
+    "Silent Rdg": "Silent reading",
+    Comprehension: "Answering comprehension questions",
   },
   math: {
     BQD: "Comparing quantities",
@@ -32,10 +36,10 @@ const MEASURE_NAMES = {
   },
 };
 const MEASURE_ORDER = {
-  reading: ["PSF", "NWF-CLS", "NWF-WWR", "ORF-WC", "ORF-Acc%", "Retell", "RetellQ"],
+  reading: ["FSF", "PSF", "NWF-CLS", "NWF-WWR", "ORF-WC", "ORF-Acc%", "Retell", "RetellQ", "Maze", "Silent Rdg", "Comprehension"],
   math: ["BQD", "NIF", "NNF", "AQD", "MNF", "Comp", "C&A"],
 };
-const STATUS_OK = ["Well Below", "Below", "At", "Above"];
+const STATUS_OK = ["Well Below", "Below", "At", "Above", "At or Above"];
 
 const clean = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 
@@ -58,13 +62,13 @@ export function parseAcadienceSheets(sheets, kind, windowId) {
     const winCol = 1;
     const compCol = headers.findIndex((h) => /^composite score$/i.test(h));
     const compStatCol = headers.findIndex((h) => /^composite status$/i.test(h));
-    if (compStatCol < 0) return;
+    // Grades 7 and 8 (reading) have no composite score, only the individual measures.
     const measureCols = [];
     headers.forEach((h, i) => {
       const m = /^(.+) Raw$/.exec(h);
       if (!m) return;
       const abbr = m[1];
-      if (clean(headers[i + 1]) === `${abbr} Status`) measureCols.push({ abbr, statusCol: i + 1 }); // measures with no level (like letter names) are left out
+      if (clean(headers[i + 1]) === `${abbr} Status` && names[abbr]) measureCols.push({ abbr, statusCol: i + 1 }); // measures with no level, or no plain-language name, are left out
     });
     let current = "";
     for (let r = hi + 1; r < rows.length; r += 1) {
@@ -72,11 +76,12 @@ export function parseAcadienceSheets(sheets, kind, windowId) {
       if (clean(row[0])) current = clean(row[0]);
       if (!current || /^new student\b/i.test(current)) continue; // eslint-disable-line no-continue
       if (clean(row[winCol]).toUpperCase() !== windowId) continue; // eslint-disable-line no-continue
-      const compositeStatus = clean(row[compStatCol]);
-      if (!STATUS_OK.includes(compositeStatus)) continue; // eslint-disable-line no-continue
+      const rawComposite = compStatCol >= 0 ? clean(row[compStatCol]) : "";
+      const compositeStatus = STATUS_OK.includes(rawComposite) ? rawComposite : "";
       const measures = measureCols
-        .map((m) => ({ abbr: m.abbr, label: names[m.abbr] || m.abbr, status: clean(row[m.statusCol]) }))
+        .map((m) => ({ abbr: m.abbr, label: names[m.abbr], status: clean(row[m.statusCol]) }))
         .filter((m) => STATUS_OK.includes(m.status));
+      if (!compositeStatus && measures.length === 0) continue; // eslint-disable-line no-continue
       out.push({ name: current, tab: tab.trim(), composite: compCol >= 0 ? row[compCol] : null, compositeStatus, measures });
     }
   });
