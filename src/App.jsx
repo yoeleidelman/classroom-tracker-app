@@ -7349,7 +7349,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
         <table className="border-collapse text-sm w-full">
           <thead>
             <tr>
-              <th className="sticky top-0 left-0 z-20 bg-stone-50 border-b border-r border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 min-w-[170px]">
+              <th className="sticky top-0 md:left-0 z-20 bg-stone-50 border-b border-r border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 min-w-[150px] md:min-w-[170px]">
                 Assessment
               </th>
               {roster.map((s) => (
@@ -7367,7 +7367,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
               const rowFullySelected = rowKeys.length > 0 && rowKeys.every((k) => selectedCells.has(k));
               return (
                 <tr key={a.id} className={isNewGroup && i > 0 ? "border-t-2 border-t-stone-300" : ""}>
-                  <td className="sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
+                  <td className="md:sticky md:left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-normal md:whitespace-nowrap">
                     <div className="flex items-start gap-1.5">
                       {selectMode && rowKeys.length > 0 && (
                         <button onClick={() => toggleRow(a)} className={`mt-0.5 w-3.5 h-3.5 rounded border shrink-0 flex items-center justify-center ${rowFullySelected ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
@@ -23327,7 +23327,7 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
         <table className="border-collapse text-sm w-full">
           <thead>
             <tr>
-              <th className="sticky top-0 left-0 z-20 bg-stone-50 border-b border-r border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 min-w-[170px]">
+              <th className="sticky top-0 md:left-0 z-20 bg-stone-50 border-b border-r border-stone-200 px-3 py-2 text-left text-xs font-semibold text-stone-500 min-w-[150px] md:min-w-[170px]">
                 Assessment
               </th>
               {roster.map((s) => (
@@ -23347,7 +23347,7 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
               const rowFullySelected = rowKeys.length > 0 && rowKeys.every((k) => selectedCells.has(k));
               return (
                 <tr key={ca.id} className={isNewGroup && i > 0 ? "border-t-2 border-t-stone-300" : ""}>
-                  <td className="group sticky left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-nowrap">
+                  <td className="group md:sticky md:left-0 z-10 bg-white border-b border-r border-stone-200 px-3 py-2 whitespace-normal md:whitespace-nowrap">
                     <div className="flex items-start gap-1.5">
                       {selectMode && rowKeys.length > 0 && (
                         <button onClick={() => toggleRow(ca)} className={`mt-0.5 w-3.5 h-3.5 rounded border shrink-0 flex items-center justify-center ${rowFullySelected ? "bg-teal-700 border-teal-700" : "border-stone-300"}`}>
