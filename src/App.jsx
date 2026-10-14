@@ -13757,9 +13757,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
           openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
           openRounds={reportRounds.filter((r) => {
-            if (roundClassStatus(r).complete) return false;
             const myId = loggedInTeacher?.uid || loggedInTeacher?.id || loggedInTeacher?.name || "me";
             const myParts = Object.values(r.entries || {}).filter((e) => e && e.claimedByUid === myId);
+            if (myParts.some((e) => !e.doneAt && (e.label || "").trim())) return true; // a part the office sent back (or unfinished) always stays reachable, even when the class's report is otherwise complete
+            if (roundClassStatus(r).complete) return false;
             return !(myParts.length > 0 && myParts.every((e) => e.doneAt)); // hide once my own parts are submitted
           })} onOpenRound={(id) => { setActiveRoundId(id); navigateView("report-round"); }}
           monthlyReportState={monthlyReportState}
