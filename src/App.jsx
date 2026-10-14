@@ -314,6 +314,21 @@ function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
 // existing assessment already stores it) or, once a note is added, an object of
 // {grade, note} — these two helpers read either shape the same way so nothing needs migrating.
 function getResultGrade(r) { return r == null ? "" : (typeof r === "object" ? (r.grade || "") : String(r)); }
+// What a multi-part assessment cell shows in the class chart: the overall result (if there is one) and each part by name.
+function MultiPartCellContent({ assessment, result }) {
+  const n = normalizeAssessmentResult(result);
+  const overall = getResultGrade(result);
+  const lines = (assessment.parts || []).filter((p) => n?.parts && n.parts[p.id]).map((p) => ({ id: p.id, label: p.label, value: n.parts[p.id] }));
+  if (!overall && lines.length === 0) return null;
+  return (
+    <div className="text-left leading-tight inline-block">
+      {overall && <div className="font-semibold text-stone-800 text-xs">{overall}</div>}
+      {lines.map((l) => (
+        <div key={l.id} className="text-[10px] text-stone-500 whitespace-nowrap">{l.label}: <span className="font-semibold text-stone-700">{l.value}</span></div>
+      ))}
+    </div>
+  );
+}
 function getResultNote(r) { return r != null && typeof r === "object" ? (r.note || "") : ""; }
 // A result from before draft/publish existed is treated as already published — see
 // normalizeAssessmentResult's own comment for the full reasoning.
@@ -7348,6 +7363,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                       <div>
                         <div className="font-semibold text-stone-800 text-xs">{subjectLabel(a.subjectId)}</div>
                         <div className="text-[11px] text-stone-400">{a.title ? `${a.title} · ` : ""}{a.date}</div>
+                        {a.parts && a.parts.length > 0 && <div className="text-[10px] text-teal-700">{a.parts.length} parts: {a.parts.map((p) => p.label).join(", ")}</div>}
                         {unpublishedCount > 0 && (
                           <button onClick={() => setPublishAllFor(a)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
                             Publish all ({unpublishedCount})
@@ -7360,7 +7376,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                     const normalized = normalizeAssessmentResult(a.results?.[s.id]);
                     const isMultiPart = !!a.parts;
                     const filledCount = isMultiPart ? Object.keys(normalized?.parts || {}).length : 0;
-                    const grade = isMultiPart ? (filledCount > 0 ? `${filledCount}/${a.parts.length}` : "") : getResultGrade(a.results?.[s.id]);
+                    const grade = isMultiPart ? ((filledCount > 0 || getResultGrade(a.results?.[s.id])) ? "x" : "") : getResultGrade(a.results?.[s.id]);
                     const hasNote = !!getResultNote(a.results?.[s.id]);
                     const isPublished = getResultPublished(a.results?.[s.id]);
                     const hasResult = a.results?.[s.id] !== undefined;
@@ -7368,7 +7384,7 @@ function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, o
                     return (
                       <td key={s.id} onClick={() => (selectMode ? (hasResult && toggleCell(a.id, s.id)) : setActiveCell({ assessmentId: a.id, studentId: s.id }))}
                         className={`border-b border-stone-100 px-3 py-2 text-center text-xs ${selectMode ? (hasResult ? "cursor-pointer" : "cursor-default") : "cursor-pointer hover:bg-teal-50"} ${isSelected ? "bg-teal-100" : ""}`}>
-                        {grade || <span className="text-stone-300">—</span>}
+                        {grade ? (isMultiPart ? <MultiPartCellContent assessment={a} result={a.results?.[s.id]} /> : grade) : <span className="text-stone-300">—</span>}
                         {hasNote && <span className="ml-1 text-amber-500" title="Has a note">●</span>}
                         {grade && !isPublished && <span className="ml-1 text-amber-600" title="Draft — not yet published to parents">✎</span>}
                       </td>
@@ -23326,6 +23342,7 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
                       <div>
                         <div className="font-semibold text-stone-800 text-xs">{subjectLabel(ca.subjectId)}</div>
                         <div className="text-[11px] text-stone-400">{ca.title ? `${ca.title} · ` : ""}{ca.date}</div>
+                        {ca.parts && ca.parts.length > 0 && <div className="text-[10px] text-teal-700">{ca.parts.length} parts: {ca.parts.map((p) => p.label).join(", ")}</div>}
                         <div className="flex items-center gap-2">
                           {unpublishedCount > 0 && (
                             <button onClick={() => setPublishAllFor(ca)} className="text-[10px] font-semibold text-amber-700 hover:text-amber-900">
@@ -23340,7 +23357,7 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
                     const normalized = normalizeAssessmentResult(ca.results?.[s.id]);
                     const isMultiPart = !!ca.parts;
                     const filledCount = isMultiPart ? Object.keys(normalized?.parts || {}).length : 0;
-                    const grade = isMultiPart ? (filledCount > 0 ? `${filledCount}/${ca.parts.length}` : "") : getResultGrade(ca.results?.[s.id]);
+                    const grade = isMultiPart ? ((filledCount > 0 || getResultGrade(ca.results?.[s.id])) ? "x" : "") : getResultGrade(ca.results?.[s.id]);
                     const hasNote = !!getResultNote(ca.results?.[s.id]);
                     const isPublished = getResultPublished(ca.results?.[s.id]);
                     const hasResult = ca.results?.[s.id] !== undefined;
@@ -23348,7 +23365,7 @@ function AssessmentGridView({ roster, studentData, classAssessments, config, onU
                     return (
                       <td key={s.id} onClick={() => (selectMode ? (hasResult && toggleCell(ca.id, s.id)) : setActiveCell({ assessmentId: ca.id, studentId: s.id }))}
                         className={`border-b border-stone-100 px-3 py-2 text-center text-xs ${selectMode ? (hasResult ? "cursor-pointer" : "cursor-default") : "cursor-pointer hover:bg-teal-50"} ${isSelected ? "bg-teal-100" : ""}`}>
-                        {grade || <span className="text-stone-300">—</span>}
+                        {grade ? (isMultiPart ? <MultiPartCellContent assessment={ca} result={ca.results?.[s.id]} /> : grade) : <span className="text-stone-300">—</span>}
                         {hasNote && <span className="ml-1 text-amber-500" title="Has a note">●</span>}
                         {grade && !isPublished && <span className="ml-1 text-amber-600" title="Draft — not yet published to parents">✎</span>}
                       </td>
@@ -23691,6 +23708,7 @@ function AssessmentCellDetail({ assessment, student, subjectLabel, value, onSave
             {/* Reported directly: one input per defined part instead of a single grade box —
                 each saved live on its own, the same way the coordinator's grid handles it, rather
                 than one combined "Save" for the whole assessment. */}
+            {getResultGrade(value) && <p className="text-xs font-semibold text-stone-700 mb-2">Overall: {getResultGrade(value)}</p>}
             <div className="space-y-2 mb-3">
               {assessment.parts.map((p) => (
                 <div key={p.id} className="flex items-center gap-2">
