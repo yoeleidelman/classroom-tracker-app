@@ -27645,8 +27645,11 @@ function buildRoundPdfExtra(roundMeta, cx, student) {
     }
   }
   // A short key under the General Studies grades when the Acadience results are on the report, so parents know what the levels mean.
-  if (entry && Object.values(entry.entries || {}).some((e) => e && !e.skipped && e.source === "acadience") && byGroup.general.length > 0) {
-    byGroup.general.push([{ content: "Levels (Well Below, Below, At, Above) show how your child's results compare to the Acadience goal for this time of year.", colSpan: 2, styles: { fontStyle: "italic", fontSize: 8, textColor: [110, 110, 110] } }]);
+  const acadEntry = entry && Object.values(entry.entries || {}).find((e) => e && !e.skipped && e.source === "acadience");
+  if (acadEntry && byGroup.general.length > 0) {
+    const when = acadEntry.period === "EOY" ? "end-of-year" : acadEntry.period === "MOY" ? "middle-of-year" : "beginning-of-year";
+    const caution = acadEntry.period === "EOY" ? "" : " They don't necessarily reflect your child's current progress.";
+    byGroup.general.push([{ content: `English and Math are from the ${when} assessments.${caution} Levels (Well Below, Below, At, Above) show how your child's results compare to the Acadience goal for this time of year.`, colSpan: 2, styles: { fontStyle: "italic", fontSize: 8, textColor: [110, 110, 110] } }]);
   }
   const rows = [];
   for (const grp of ["judaic", "general", "overall"]) {
