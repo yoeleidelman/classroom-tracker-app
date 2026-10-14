@@ -11132,6 +11132,210 @@ function HomeworkPreviewCard({ link, onSeeAll }) {
 // General Studies both, unlike the coordinator's own page which is deliberately scoped to General
 // Studies only. Same "top of Home, below homework" placement the preschool daily log already gets
 // for that age group, since an elementary child had nothing equivalent shown here before this.
+// ---- Class scoring: score each student after class, average every two weeks, teacher approves a message to the parent's home page ----
+const SCORE_FIELDS = [
+  { key: "mp", label: "Math participation" },
+  { key: "mb", label: "Math behavior" },
+  { key: "ep", label: "English participation" },
+  { key: "eb", label: "English behavior" },
+];
+// Averages for one student over every scored day after `afterDate` (all days if none).
+function scoreSummary(days, studentId, afterDate) {
+  const dates = Object.keys(days || {}).filter((d) => !afterDate || d > afterDate).sort();
+  const sums = {}; const counts = {}; const notes = []; let scoredDays = 0;
+  dates.forEach((d) => {
+    const row = days[d]?.[studentId];
+    if (!row) return;
+    let any = false;
+    SCORE_FIELDS.forEach((f) => { const v = Number(row[f.key]); if (v >= 1 && v <= 5) { sums[f.key] = (sums[f.key] || 0) + v; counts[f.key] = (counts[f.key] || 0) + 1; any = true; } });
+    if (any) scoredDays += 1;
+    if ((row.note || "").trim()) notes.push({ date: d, text: row.note.trim() });
+  });
+  const avgs = {};
+  SCORE_FIELDS.forEach((f) => { if (counts[f.key]) avgs[f.key] = Math.round((sums[f.key] / counts[f.key]) * 10) / 10; });
+  return { avgs, scoredDays, notes, from: dates[0] || null, to: dates[dates.length - 1] || null };
+}
+const scoreDateText = (iso) => (iso ? new Date(`${iso}T12:00:00`).toLocaleDateString([], { month: "short", day: "numeric" }) : "");
+
+function ClassScoresView({ roster, classId, className, config, loggedInTeacher, onBack }) {
+  const dataKey = `class:${classId}:classScores`;
+  const [data, setData] = useState(null); // { days: { date: { studentId: {mp,mb,ep,eb,note} } }, lastSent: { studentId: date } }
+  const [date, setDate] = useState(todayISO());
+  const [tab, setTab] = useState("score");
+  const [drafts, setDrafts] = useState({}); // studentId -> { text, busy, err, sent }
+  useEffect(() => { let on = true; loadJSON(dataKey, { days: {}, lastSent: {} }, true).then((d) => { if (on) setData({ days: d?.days || {}, lastSent: d?.lastSent || {} }); }); return () => { on = false; }; }, [dataKey]);
+  if (!data) return <div className={PAGE}><p className="text-sm text-stone-400 text-center py-12">Loading…</p></div>;
+
+  const persist = async (mutate) => {
+    const fresh = (await loadJSON(dataKey, { days: {}, lastSent: {} }, true, 3, true)) || { days: {}, lastSent: {} };
+    const next = JSON.parse(JSON.stringify(mutate({ days: fresh.days || {}, lastSent: fresh.lastSent || {} })));
+    await saveJSON(dataKey, next, true, 2, true);
+    setData(next);
+  };
+  const setField = (sid, key, value) => persist((d) => {
+    const day = { ...(d.days[date] || {}) };
+    const row = { ...(day[sid] || {}) };
+    if (value == null || value === "") delete row[key]; else row[key] = value;
+    if (Object.keys(row).length === 0) delete day[sid]; else day[sid] = row;
+    if (Object.keys(day).length === 0) delete d.days[date]; else d.days[date] = day;
+    return d;
+  });
+  const row = (sid) => data.days[date]?.[sid] || {};
+
+  const summaryFor = (sid) => scoreSummary(data.days, sid, data.lastSent[sid]);
+  const daysSince = (iso) => Math.floor((Date.now() - new Date(`${iso}T12:00:00`).getTime()) / 86400000);
+  const due = roster.some((s) => { const sm = summaryFor(s.id); return sm.scoredDays > 0 && sm.from && daysSince(sm.from) >= 13; });
+
+  const teacherName = loggedInTeacher?.name || "your teacher";
+  const writeDraft = async (s) => {
+    const sm = summaryFor(s.id);
+    setDrafts((p) => ({ ...p, [s.id]: { ...(p[s.id] || {}), busy: true, err: null } }));
+    const scoreLines = SCORE_FIELDS.filter((f) => sm.avgs[f.key] != null).map((f) => `${f.label}: ${sm.avgs[f.key]} out of 5`).join("\n");
+    const noteLines = sm.notes.map((n) => `${scoreDateText(n.date)}: ${n.text}`).join("\n") || "(no notes)";
+    const prompt = `${buildStyleInstructions(config, teacherName)}
+
+Write a short, warm update (3-5 sentences) from the teacher to a parent about how their child has been doing in class, from ${scoreDateText(sm.from)} to ${scoreDateText(sm.to)} (${sm.scoredDays} class days). This IS a real message that will be sent to the parent.
+
+Student: ${s.name}
+Average scores (1 to 5, where 5 is excellent):
+${scoreLines}
+
+Teacher's notes from those days:
+${noteLines}
+
+STRICT RULES:
+- Use ONLY the information above. Do not invent events, details or causes.
+- Do not list the scores as numbers; they are shown separately above your message. Describe how things are going in words.
+- If there are no notes, keep it short and general, based only on the averages.
+- Output only the message text, nothing else, no greeting line with a name placeholder.`;
+    try {
+      const response = await fetch("/api/generate", { method: "POST", headers: await authHeaders(), body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 400, messages: [{ role: "user", content: prompt }] }) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const j = await response.json();
+      const text = (j.content || []).map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
+      setDrafts((p) => ({ ...p, [s.id]: { text, busy: false, err: null } }));
+    } catch (e) {
+      setDrafts((p) => ({ ...p, [s.id]: { ...(p[s.id] || {}), busy: false, err: `Couldn't write the draft (${e?.message || "error"}). You can type it yourself or try again.` } }));
+    }
+  };
+  const sendUpdate = async (s) => {
+    const dr = drafts[s.id];
+    if (!dr?.text?.trim()) return;
+    const sm = summaryFor(s.id);
+    const key = `class:${classId}:scoreUpdates:${s.id}`;
+    const existing = (await loadJSON(key, null, true, 3, true)) || { messages: [] };
+    const entry = { id: uid(), from: sm.from, to: sm.to, days: sm.scoredDays, avgs: sm.avgs, text: dr.text.trim(), sentAt: new Date().toISOString(), sentBy: teacherName };
+    await saveJSON(key, { ...existing, messages: [...(existing.messages || []), entry] }, true, 2, true);
+    await persist((d) => { d.lastSent[s.id] = sm.to || todayISO(); return d; });
+    setDrafts((p) => ({ ...p, [s.id]: { text: "", sent: true } }));
+  };
+
+  const pill = (active) => `w-10 h-10 rounded-lg border text-sm font-bold ${active ? "bg-teal-700 border-teal-700 text-white" : "bg-white border-stone-300 text-stone-600 hover:bg-teal-50"}`;
+  return (
+    <div className={`${PAGE} pb-16`}>
+      <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-4 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+      <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">Class scores</h1>
+      <p className="text-xs text-stone-400 mb-4">Score each student 1 to 5 after class. Every two weeks you can send each parent a short update.</p>
+      <div className="flex gap-2 mb-4">
+        <button onClick={() => setTab("score")} className={`text-sm font-semibold rounded-full px-4 py-1.5 border ${tab === "score" ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>Score a day</button>
+        <button onClick={() => setTab("updates")} className={`text-sm font-semibold rounded-full px-4 py-1.5 border ${tab === "updates" ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>Parent updates{due ? " •" : ""}</button>
+      </div>
+
+      {tab === "score" && (
+        <>
+          <div className="flex items-center gap-2 mb-3">
+            <label className="text-xs font-medium text-stone-500">Day</label>
+            <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+          </div>
+          {due && <button onClick={() => setTab("updates")} className="w-full text-left bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 mb-3 text-sm font-semibold text-amber-900">It's been two weeks. Time to send the parent updates →</button>}
+          {roster.map((s) => (
+            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
+              <p className="font-semibold text-stone-800 mb-2">{s.name}</p>
+              {SCORE_FIELDS.map((f) => (
+                <div key={f.key} className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+                  <span className="text-xs font-medium text-stone-600 w-40">{f.label}</span>
+                  <div className="flex gap-1">
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button key={n} onClick={() => setField(s.id, f.key, row(s.id)[f.key] === n ? null : n)} className={pill(row(s.id)[f.key] === n)} aria-label={`${s.name} ${f.label} ${n}`}>{n}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <input key={`${date}-${s.id}`} defaultValue={row(s.id).note || ""} onBlur={(e) => { const v = e.target.value.trim(); if (v !== (row(s.id).note || "")) setField(s.id, "note", v || null); }}
+                placeholder="Quick note (optional)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mt-1" />
+            </div>
+          ))}
+          <p className="text-xs text-stone-400">Scores save as you tap. Tap the same number again to clear it.</p>
+        </>
+      )}
+
+      {tab === "updates" && (
+        <>
+          <p className="text-xs text-stone-400 mb-3">Each update covers the scored days since the last one sent to that parent. Nothing is sent until you tap Send.</p>
+          {roster.map((s) => {
+            const sm = summaryFor(s.id);
+            const dr = drafts[s.id] || {};
+            return (
+              <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <p className="font-semibold text-stone-800">{s.name}</p>
+                  <p className="text-[11px] text-stone-400">{sm.scoredDays > 0 ? `${sm.scoredDays} day${sm.scoredDays === 1 ? "" : "s"} · ${scoreDateText(sm.from)} to ${scoreDateText(sm.to)}` : "Nothing new to send"}</p>
+                </div>
+                {sm.scoredDays > 0 && (
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-stone-700 mb-2">
+                    {SCORE_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{sm.avgs[f.key] != null ? sm.avgs[f.key] : "—"}</span></div>)}
+                  </div>
+                )}
+                {dr.sent && <p className="text-xs font-semibold text-emerald-700">Sent to {s.name}'s parent home page.</p>}
+                {sm.scoredDays > 0 && (dr.text == null || dr.text === "") && !dr.sent && (
+                  <button onClick={() => writeDraft(s)} disabled={dr.busy} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-lg px-3 py-1.5 hover:bg-teal-50 disabled:opacity-50">{dr.busy ? "Writing…" : "Write the update"}</button>
+                )}
+                {dr.err && <p className="text-xs text-rose-600 mt-1">{dr.err}</p>}
+                {dr.text != null && dr.text !== "" && (
+                  <>
+                    <textarea value={dr.text} onChange={(e) => setDrafts((p) => ({ ...p, [s.id]: { ...p[s.id], text: e.target.value } }))} rows={5} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
+                    <div className="flex gap-2">
+                      <button onClick={() => sendUpdate(s)} className="text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-1.5 hover:bg-teal-800">Approve and send</button>
+                      <button onClick={() => writeDraft(s)} disabled={dr.busy} className="text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-1.5">{dr.busy ? "Writing…" : "Write again"}</button>
+                      <button onClick={() => setDrafts((p) => ({ ...p, [s.id]: {} }))} className="text-xs text-stone-500 px-2">Cancel</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
+}
+
+// On a parent's child home page: the latest class-score update from the teacher, with earlier ones underneath.
+function ClassUpdatesCard({ link }) {
+  const { value, loaded } = useLiveJSONLoaded(`class:${link.classId}:scoreUpdates:${link.studentId}`, { messages: [] });
+  const [all, setAll] = useState(false);
+  const msgs = loaded ? [...(value?.messages || [])].sort((a, b) => (b.sentAt || "").localeCompare(a.sentAt || "")) : [];
+  if (msgs.length === 0) return null;
+  const show = all ? msgs : msgs.slice(0, 1);
+  return (
+    <div className="bg-white border-2 border-stone-200 rounded-xl p-4 mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-bold uppercase tracking-wide text-stone-400">Class update</p>
+        {msgs.length > 1 && <button onClick={() => setAll(!all)} className="text-xs font-semibold text-teal-700">{all ? "Show latest only" : `Earlier updates (${msgs.length - 1})`}</button>}
+      </div>
+      {show.map((m) => (
+        <div key={m.id} className="mb-3 last:mb-0">
+          <p className="text-xs text-stone-400 mb-1">{scoreDateText(m.from)} to {scoreDateText(m.to)} · {m.days} class day{m.days === 1 ? "" : "s"} · from {m.sentBy}</p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-stone-700 mb-2">
+            {SCORE_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{m.avgs?.[f.key] != null ? `${m.avgs[f.key]} / 5` : "—"}</span></div>)}
+          </div>
+          <p className="text-sm text-stone-800 whitespace-pre-wrap">{m.text}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AssessmentsPreviewCard({ link, onSeeAll }) {
   const { value: assessments, loaded } = useLiveJSONLoaded(`class:${link.classId}:classAssessments`, []);
   if (!loaded) return <p className="text-sm text-stone-400 text-center py-8">Loading…</p>;
@@ -12803,6 +13007,7 @@ function ParentPortalApp({ family, onSignOut, onUpdateName, onChangeMyPassword, 
                     return (
                       <>
                         <HomeworkPreviewCard link={link} onSeeAll={() => navigateParentTab("homework")} />
+                        <ClassUpdatesCard link={link} />
                         <AssessmentsPreviewCard link={link} onSeeAll={() => setShowAssessmentsFor(link)} />
                         {/* Reported directly, and pushed back on for good reason: "See all" tucked
                             inside the preview card above isn't a real, obvious front door on its
@@ -13679,6 +13884,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           setHomework={setHomework} markNoHomeworkToday={markNoHomeworkToday}
           openDetail={(id) => { setCurrentId(id); navigateView("detail"); }}
           openIncidentForm={(id) => openIncidentForm(id, "home")} openPeriodAttendance={(id) => openPeriodAttendanceForm(id, "home")} navigate={navigateView}
+          scoringOn={Boolean(config.classScoring?.enabled)} onOpenScores={() => navigateView("class-scores")}
           openRounds={reportRounds.filter((r) => {
             if (roundClassStatus(r).complete) return false;
             const myId = loggedInTeacher?.uid || loggedInTeacher?.id || loggedInTeacher?.name || "me";
@@ -15895,6 +16101,10 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
           onBack={() => navigateView("communication")} onAddEntry={(entry) => addCommunication(currentId, entry)} />
       )}
 
+      {view === "class-scores" && (
+        <ClassScoresView roster={roster} classId={classId} className={className} config={config} loggedInTeacher={loggedInTeacher} onBack={() => navigateView("home")} />
+      )}
+
       {view === "report-round" && (() => {
         const round = reportRounds.find((r) => r.id === activeRoundId);
         if (!round) return <div className={PAGE}><button onClick={() => navigateView("home")} className="text-sm text-stone-500">Back</button><p className="text-sm text-stone-500 mt-3">That report isn't available.</p></div>;
@@ -16182,7 +16392,7 @@ function MainTabs({ active, navigate }) {
 
 // ---------- Home ----------
 
-function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture, logPrograms, onOpenProgram, tehillimBanner, openRounds, onOpenRound }) {
+function HomeView({ roster, studentData, incidents, config, removeStudent, setAttendance, setAttendanceTime, setHomework, markNoHomeworkToday, openDetail, openIncidentForm, openPeriodAttendance, navigate, monthlyReportState, onDismissMonthlyReminder, reflectionState, onDismissReflectionReminder, onOpenReflection, reflections, plannerDays, plannerEvents, setPlannerDay, addPoints, behaviorLogData, birthdayDismissals, onDismissBirthday, onCreateBirthdayEvent, benchmarkSubjects, segmentCelebrationDismissals, onDismissSegmentCelebration, onCelebrateSegment, onAddPlannerEvent, randomPickerData, onRandomPick, onResetRandomPicker, alerts, dismissAlert, showPlan, setShowPlan, openCameraCapture, logPrograms, onOpenProgram, tehillimBanner, openRounds, onOpenRound, scoringOn, onOpenScores }) {
   const [date, setDate] = useState(todayISO());
   const [multiSelect, setMultiSelect] = useState(false);
   const [selectedIds, setSelectedIds] = useState([]);
@@ -16309,6 +16519,16 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {scoringOn && (
+        <div className="bg-teal-50 border border-teal-200 rounded-xl px-4 py-3 mb-3 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="text-sm font-semibold text-teal-900">Class scores</p>
+            <p className="text-xs text-teal-700">Score today's class, and send the two-week parent updates.</p>
+          </div>
+          <button onClick={onOpenScores} className="shrink-0 text-xs font-semibold bg-teal-700 text-white rounded-lg px-3 py-1.5 hover:bg-teal-800">Open</button>
         </div>
       )}
 
@@ -32733,6 +32953,12 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
 
       <div className="md:grid md:grid-cols-2 md:gap-x-6 md:items-start">
         <div className="md:col-span-2">
+          <Section title="Class scores">
+            <label className="flex items-start gap-2 text-sm text-stone-700">
+              <input type="checkbox" checked={Boolean(config.classScoring?.enabled)} onChange={(e) => update((c) => { c.classScoring = { ...(c.classScoring || {}), enabled: e.target.checked }; return c; })} className="mt-1 rounded border-stone-300" />
+              <span>Turn on class scores for this class<span className="block text-xs text-stone-400">Score students 1 to 5 for participation and behavior in Math and English after each class. Every two weeks, send parents an update you approve first.</span></span>
+            </label>
+          </Section>
           {loggedInTeacher && (
             <Section title="My account">
               <p className="text-xs text-stone-400 mb-2">This is your own sign-in — separate from this class's password below.</p>
