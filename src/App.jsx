@@ -7193,13 +7193,16 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
         </div>
         <p className="text-stone-500 text-sm mb-4">English, Math, and STEM assessments across every elementary class.</p>
 
-        <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-96">
+        <div className="flex gap-1 mb-5 bg-stone-100 rounded-lg p-1 md:w-[30rem]">
           <button onClick={() => setView("grid")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "grid" || view === "create" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>This class</button>
           <button onClick={() => setView("browse")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "browse" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Browse all classes</button>
+          <button onClick={() => setView("homework")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "homework" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Homework</button>
           <button onClick={() => setView("blog")} className={`flex-1 rounded-md py-1.5 text-xs font-semibold ${view === "blog" ? "bg-white text-teal-700 shadow-sm" : "text-stone-500"}`}>Blog</button>
         </div>
 
-        {view === "blog" ? (
+        {view === "homework" ? (
+          <GeneralStudiesHomeworkView classes={elementaryClasses} />
+        ) : view === "blog" ? (
           <AllClassesBlogView classes={elementaryClasses} currentUserId={loggedInTeacher?.uid} loggedInTeacher={loggedInTeacher} />
         ) : view === "browse" ? (
           <GeneralStudiesBrowseAllView registry={elementaryClasses} onOpenClass={(id) => { setSelectedClassId(id); setView("grid"); }} />
@@ -7274,6 +7277,80 @@ function GeneralStudiesCoordinatorPage({ loggedInTeacher, registry, canSwitchToP
 // already uses: assessments as rows (grouped by subject), students as columns, one cell per
 // result — click a cell to open the same detail/publish/message flow, all in one place, nothing to
 // search through.
+// General Studies coordinator: who has done each General Studies homework, and when the parent ticked it. Read-only.
+function GeneralStudiesHomeworkView({ classes }) {
+  const [classId, setClassId] = useState(classes[0]?.id || null);
+  const [roster, setRoster] = useState(null);
+  const [posts, setPosts] = useState(null);
+  const [openPost, setOpenPost] = useState(null);
+  useEffect(() => {
+    if (!classId) return undefined;
+    let on = true;
+    setRoster(null); setPosts(null); setOpenPost(null);
+    Promise.all([loadJSON(`class:${classId}:roster`, [], true), loadJSON(`class:${classId}:homework`, [], true)]).then(([r, h]) => { if (on) { setRoster(r || []); setPosts(h || []); } });
+    return () => { on = false; };
+  }, [classId]);
+  const general = (posts || []).filter((p) => p.area !== "judaic").sort((a, b) => ((a.timestamp || "") < (b.timestamp || "") ? 1 : -1));
+  return (
+    <>
+      <select value={classId || ""} onChange={(e) => setClassId(e.target.value)} className="w-full md:w-96 rounded-lg border border-stone-300 px-3 py-2 text-sm mb-4">
+        {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+      </select>
+      {posts === null ? <p className="text-sm text-stone-400 text-center py-12">Loading…</p>
+        : general.length === 0 ? <p className="text-sm text-stone-400 bg-stone-100 rounded-lg px-3 py-8 text-center">No General Studies homework posted in this class yet.</p>
+        : general.map((post) => (
+          <div key={post.id} className="bg-white border border-stone-200 rounded-xl p-4 mb-3">
+            <button onClick={() => setOpenPost(openPost === post.id ? null : post.id)} className="w-full text-left">
+              <p className="text-sm font-semibold text-stone-800">{hwHeading(post)}{post.endDate ? ` · ${hwDatesText(post)}` : ""}</p>
+              <p className="text-xs text-stone-500 line-clamp-2">{post.text || "(attachment only)"}</p>
+              <p className="text-[11px] text-stone-400 mt-1">Posted {new Date(post.timestamp).toLocaleDateString([], { month: "short", day: "numeric" })}{post.loggedBy ? ` by ${post.loggedBy}` : ""} · {openPost === post.id ? "Hide" : "Show who did it"}</p>
+            </button>
+            {openPost === post.id && (hwParts(post).length > 0 ? <CoordinatorHomeworkGrid post={post} roster={roster || []} classId={classId} /> : <p className="text-xs text-stone-400 mt-3">Parents can't tick this one off. The teacher didn't turn on check-off when posting it.</p>)}
+          </div>
+        ))}
+    </>
+  );
+}
+function CoordinatorHomeworkGrid({ post, roster, classId }) {
+  const checks = useLiveJSON(`class:${classId}:homeworkChecks:${post.id}`, {}) || {};
+  const parts = hwParts(post);
+  const students = roster.filter((st) => hwAppliesTo(post, st.id));
+  const when = (iso) => (iso ? new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+  const doneCount = (st) => parts.filter((pt) => hwEffective(checks[st.id]?.[pt.id]) === "done").length;
+  return (
+    <div className="mt-3 border-t border-stone-200 pt-3 overflow-x-auto no-scrollbar">
+      <table className="w-full text-xs">
+        <thead><tr className="text-stone-400">
+          <th className="text-left font-semibold pb-1.5 pr-2">Student</th>
+          {parts.map((pt) => <th key={pt.id} className="font-semibold pb-1.5 px-1 text-left">{post.checkoff === "end" ? "Finished" : pt.label}</th>)}
+          <th className="font-semibold pb-1.5 pl-2">Total</th>
+        </tr></thead>
+        <tbody>
+          {students.map((st) => (
+            <tr key={st.id} className="border-t border-stone-100 align-top">
+              <td className="py-1.5 pr-2 font-semibold text-stone-700 whitespace-nowrap">{st.name}</td>
+              {parts.map((pt) => {
+                const rec = checks[st.id]?.[pt.id];
+                const eff = hwEffective(rec);
+                const at = rec?.teacher?.status ? rec.teacher.at : rec?.parent?.at;
+                const who = rec?.teacher?.status ? "teacher" : "parent";
+                return (
+                  <td key={pt.id} className="px-1 py-1.5">
+                    {eff === "done" ? <span className="text-emerald-700 font-semibold">✓<span className="block text-[10px] font-normal text-stone-500">{when(at)} ({who})</span></span>
+                      : eff === "missed" ? <span className="text-rose-600 font-semibold">Not done<span className="block text-[10px] font-normal text-stone-500">{when(at)} (teacher)</span></span>
+                      : <span className="text-stone-300">—</span>}
+                  </td>
+                );
+              })}
+              <td className="py-1.5 pl-2 text-center font-semibold text-stone-700 whitespace-nowrap">{doneCount(st)}/{parts.length}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function GeneralStudiesAssessmentGrid({ roster, assessments, subjects, config, onUpdateResult, onUpdatePartResult, onUpdateNote, onPublishResult, onPublishAll, onMessageAboutAssessment, onMessageAboutAssessments }) {
   const subjectLabel = (id) => subjects.find((s) => s.id === id)?.label || "No subject";
   const [activeCell, setActiveCell] = useState(null); // { assessmentId, studentId }
@@ -13790,7 +13867,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
         );
       case "homework":
         return (
-        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} config={config} persistConfig={persistConfig} roster={roster} classId={classId} loggedInTeacher={loggedInTeacher} />
+        <TeacherHomeworkView posts={homeworkPosts} navigate={navigateView} config={config} persistConfig={persistConfig} roster={roster} classId={classId} loggedInTeacher={loggedInTeacher} onSetArea={(id, area) => persistHomeworkPosts(homeworkPosts.map((h) => (h.id === id ? { ...h, area } : h)))} />
         );
       case "tools":
         return (
@@ -20115,7 +20192,7 @@ function BlogComposeScreen({ config, loggedInTeacher, onSubmit, onSubmitEdit, ed
 
 // Same reasoning as the blog feed's own compose button — placed at the bottom, right after the
 // newest post, so it's the next thing in view rather than requiring a scroll back to the top.
-function TeacherHomeworkView({ posts, navigate, config, persistConfig, roster = [], classId, loggedInTeacher }) {
+function TeacherHomeworkView({ posts, navigate, config, persistConfig, roster = [], classId, loggedInTeacher, onSetArea }) {
   const sorted = [...posts].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
   const [trackingPostId, setTrackingPostId] = useState(null); // which assignment's completion grid is open
   // Which post's "Seen by" sheet is currently open, if any — holds the post itself (not just an
@@ -20219,6 +20296,10 @@ function TeacherHomeworkView({ posts, navigate, config, persistConfig, roster = 
                       {trackingPostId === post.id ? "Hide who finished" : "Who finished?"}
                     </button>
                   )}
+                </div>
+                <div className="flex items-center gap-2 mt-2 text-[11px] text-stone-500">
+                  <span>{post.area === "judaic" ? "Judaic Studies" : "General Studies"}</span>
+                  {onSetArea && <button onClick={() => onSetArea(post.id, post.area === "judaic" ? "general" : "judaic")} className="font-semibold text-teal-700">Change to {post.area === "judaic" ? "General Studies" : "Judaic Studies"}</button>}
                 </div>
                 {trackingPostId === post.id && (
                   <HomeworkTrackingGrid post={post} roster={roster} classId={classId} teacherName={loggedInTeacher?.name || null} />
@@ -20333,6 +20414,7 @@ function HomeworkComposeScreen({ classId, roster = [], onSubmit, onBack }) {
   const [startDate, setStartDate] = useState(() => todayISO());
   const [endDate, setEndDate] = useState(() => addDaysISO(todayISO(), 1));
   const [checkoff, setCheckoff] = useState("none"); // "none" | "end" | "parts"
+  const [area, setArea] = useState(null); // "general" | "judaic" — which part of the school day this homework is for
   const [partLabels, setPartLabels] = useState(["Page 1", "Page 2", "Page 3", "Page 4", "Page 5"]);
   const pickLength = (next) => {
     const today = todayISO();
@@ -20376,12 +20458,14 @@ function HomeworkComposeScreen({ classId, roster = [], onSubmit, onBack }) {
   const submit = async () => {
     if (!text.trim() && !attachFile) return;
     if (datesBad || (who === "some" && kidIds.length === 0)) return;
+    if (!area) { setAttachError("Choose Judaic Studies or General Studies first."); return; }
     setPosting(true);
     setAttachError(null);
     try {
       const extras = {
         length, startDate, endDate,
         audience: who, ...(who === "some" ? { studentIds: kidIds } : {}),
+        area,
         checkoff,
         ...(checkoff === "parts" ? { parts: partLabels.map((label, i) => ({ id: `p${i + 1}`, label: (label || "").trim() || `Part ${i + 1}` })) } : {}),
       };
@@ -20400,6 +20484,14 @@ function HomeworkComposeScreen({ classId, roster = [], onSubmit, onBack }) {
 
       {/* One compact card for the three choices, instead of three tall stacked sections. */}
       <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3 space-y-3">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-wide text-stone-400 mb-1">Subject area</p>
+          <div className="grid grid-cols-2 gap-1.5">
+            {[["judaic", "Judaic Studies"], ["general", "General Studies"]].map(([v, label]) => (
+              <button key={v} onClick={() => setArea(v)} className={`text-xs font-semibold rounded-lg py-1.5 border ${area === v ? "bg-teal-700 text-white border-teal-700" : "bg-white text-stone-600 border-stone-300"}`}>{label}</button>
+            ))}
+          </div>
+        </div>
         <div>
           <p className="text-[11px] font-bold uppercase tracking-wide text-stone-400 mb-1">Who</p>
           <div className="grid grid-cols-2 gap-1.5">
