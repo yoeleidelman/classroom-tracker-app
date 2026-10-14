@@ -11172,6 +11172,7 @@ function ClassScoresView({ roster, classId, className, config, loggedInTeacher, 
   const [data, setData] = useState(null); // { days: { date: { studentId: {mp,mb,ep,eb,note} } }, lastSent: { studentId: date } }
   const [date, setDate] = useState(todayISO());
   const [tab, setTab] = useState("score");
+  const [noteOpen, setNoteOpen] = useState({});
   const [drafts, setDrafts] = useState({}); // studentId -> { text, busy, err, sent }
   useEffect(() => { let on = true; loadJSON(dataKey, { days: {}, lastSent: {} }, true).then((d) => { if (on) setData({ days: d?.days || {}, lastSent: d?.lastSent || {} }); }); return () => { on = false; }; }, [dataKey]);
   if (!data) return <div className={PAGE}><p className="text-sm text-stone-400 text-center py-12">Loading…</p></div>;
@@ -11191,6 +11192,12 @@ function ClassScoresView({ roster, classId, className, config, loggedInTeacher, 
     return d;
   });
   const row = (sid) => data.days[date]?.[sid] || {};
+  const fillColumn = (key, value) => persist((d) => {
+    const day = { ...(d.days[date] || {}) };
+    roster.forEach((st) => { day[st.id] = { ...(day[st.id] || {}), [key]: value }; });
+    d.days[date] = day;
+    return d;
+  });
 
   const summaryFor = (sid) => scoreSummary(data.days, sid, data.lastSent[sid]);
   const daysSince = (iso) => Math.floor((Date.now() - new Date(`${iso}T12:00:00`).getTime()) / 86400000);
@@ -11257,26 +11264,38 @@ STRICT RULES:
             <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
           </div>
           {due && <button onClick={() => setTab("updates")} className="w-full text-left bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 mb-3 text-sm font-semibold text-amber-900">It's been two weeks. Time to send the parent updates →</button>}
-          {roster.map((s) => (
-            <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
-              <p className="font-semibold text-stone-800 mb-2">{s.name}</p>
-              <div className="grid grid-cols-2 gap-2 mb-2">
-                {SCORE_FIELDS.map((f) => (
-                  <label key={f.key} className="block">
-                    <span className="block text-[11px] font-medium text-stone-500 mb-0.5">{f.label}</span>
-                    <select value={row(s.id)[f.key] || ""} onChange={(e) => setField(s.id, f.key, e.target.value ? Number(e.target.value) : null)}
-                      className={`w-full rounded-lg border px-2 py-2 text-base font-bold ${row(s.id)[f.key] ? "bg-teal-50 border-teal-300 text-teal-800" : "bg-white border-stone-300 text-stone-400"}`} aria-label={`${s.name} ${f.label}`}>
-                      <option value="">Tap to score</option>
+          <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
+            <div className="flex items-end gap-1.5 mb-1">
+              <span className="w-[76px] shrink-0" />
+              {SCORE_FIELDS.map((f) => <span key={f.key} className="flex-1 text-center text-[10px] font-semibold text-stone-500 leading-tight whitespace-pre-line">{f.label.replace(" ", "\n")}</span>)}
+              <span className="w-7" />
+            </div>
+            <div className="flex items-center gap-1.5 mb-1">
+              <span className="w-[76px] shrink-0 text-[10px] text-stone-400">Fill everyone</span>
+              {SCORE_FIELDS.map((f) => <button key={f.key} onClick={() => fillColumn(f.key, 5)} className="flex-1 text-[11px] font-semibold text-teal-700 border border-teal-300 rounded-lg py-1 hover:bg-teal-50">All 5</button>)}
+              <span className="w-7" />
+            </div>
+            {roster.map((s) => (
+              <div key={s.id} className="border-t border-stone-100">
+                <div className="flex items-center gap-1.5 py-1.5">
+                  <span className="w-[76px] shrink-0 text-sm font-semibold text-stone-800 truncate">{s.name}</span>
+                  {SCORE_FIELDS.map((f) => (
+                    <select key={f.key} value={row(s.id)[f.key] || ""} onChange={(e) => setField(s.id, f.key, e.target.value ? Number(e.target.value) : null)} aria-label={`${s.name} ${f.label}`}
+                      className={`flex-1 min-w-0 appearance-none text-center rounded-lg border px-1 py-2 text-base font-bold ${row(s.id)[f.key] ? "bg-teal-50 border-teal-300 text-teal-800" : "bg-white border-stone-300 text-stone-300"}`}>
+                      <option value="">–</option>
                       {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
                     </select>
-                  </label>
-                ))}
+                  ))}
+                  <button onClick={() => setNoteOpen((p) => ({ ...p, [s.id]: !p[s.id] }))} aria-label={`Note for ${s.name}`} className={`w-7 text-center text-base ${row(s.id).note ? "text-teal-700" : "text-stone-400"}`}>{row(s.id).note ? "\u270e" : "\u25ef"}</button>
+                </div>
+                {(noteOpen[s.id] || row(s.id).note) && (
+                  <input key={`${date}-${s.id}`} defaultValue={row(s.id).note || ""} onBlur={(e) => { const v = e.target.value.trim(); if (v !== (row(s.id).note || "")) setField(s.id, "note", v || null); }}
+                    placeholder="Quick note (optional)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1.5" />
+                )}
               </div>
-              <input key={`${date}-${s.id}`} defaultValue={row(s.id).note || ""} onBlur={(e) => { const v = e.target.value.trim(); if (v !== (row(s.id).note || "")) setField(s.id, "note", v || null); }}
-                placeholder="Quick note (optional)" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mt-1" />
-            </div>
-          ))}
-          <p className="text-xs text-stone-400">Scores save as you pick them. Choose "Tap to score" to clear one.</p>
+            ))}
+          </div>
+          <p className="text-xs text-stone-400">Tap a box to pick 1 to 5. Pick the dash to clear one. Tap the circle to add a note.</p>
         </>
       )}
 
@@ -21552,6 +21571,7 @@ function TehillimProgramView({ program, isAdmin, onlyClassId, loggedInTeacher, o
   const [groups, setGroups] = useState([]); // [{ classId, className, students: [{id, name}] }]
   const [quotas, setQuotas] = useState({}); // studentId -> quota
   const [done, setDone] = useState({}); // studentId -> done doc
+  const [noteOpen, setNoteOpen] = useState({});
   const [drafts, setDrafts] = useState({}); // studentId -> unsaved edits
   const [tab, setTab] = useState("quotas");
   const [loading, setLoading] = useState(true);
@@ -23753,6 +23773,7 @@ function AssessmentStudentModal({ student, data, config, classAssessments, onClo
 function MultiAssessmentReachOutModal({ byStudent, onGenerateNote, onSend, onClose }) {
   const students = Object.values(byStudent); // [{ student, items: [{ assessment, subjectLabel }] }]
   const [activeStudentId, setActiveStudentId] = useState(students.length === 1 ? students[0].student.id : null);
+  const [noteOpen, setNoteOpen] = useState({});
   const [drafts, setDrafts] = useState({}); // studentId -> { text, generating, error, sent, sendError }
 
   const activeEntry = activeStudentId ? byStudent[activeStudentId] : null;
@@ -28812,6 +28833,7 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack, initialRoun
 
 function IncidentDetailView({ incident, roster, classId, config, plannerDays, loggedInTeacher, sendMessageToFamily, onBack, onLogSent, onUpdateParentEmail, onUpdateIncident, onRemoveIncident }) {
   const [activeStudentId, setActiveStudentId] = useState(null);
+  const [noteOpen, setNoteOpen] = useState({});
   const [drafts, setDrafts] = useState({}); // studentId -> { draft, email, loading, logged }
   const [recipientModes, setRecipientModes] = useState({}); // studentId -> "p1" | "p2" | "both"
   const [editing, setEditing] = useState(false);
