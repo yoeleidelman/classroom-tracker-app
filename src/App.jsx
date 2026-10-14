@@ -314,6 +314,18 @@ function skillKey(catId, itemId) { return `${catId}:${itemId}`; }
 // existing assessment already stores it) or, once a note is added, an object of
 // {grade, note} — these two helpers read either shape the same way so nothing needs migrating.
 function getResultGrade(r) { return r == null ? "" : (typeof r === "object" ? (r.grade || "") : String(r)); }
+// Finds this class's subject with that name (any capitalisation) or creates it, so a report grade always lands under a subject.
+async function ensureClassSubject(classId, label) {
+  const t = (label || "").trim();
+  if (!t) return { id: null, list: null };
+  const list = (await loadJSON(`class:${classId}:benchmarkSubjects`, [], true, 3, true)) || [];
+  const hit = list.find((x) => (x.label || "").trim().toLowerCase() === t.toLowerCase());
+  if (hit) return { id: hit.id, list };
+  const created = { id: uid(), label: t, segments: [] };
+  const next = [...list, created];
+  await saveJSON(`class:${classId}:benchmarkSubjects`, next, true, 2, true);
+  return { id: created.id, list: next };
+}
 // What a multi-part assessment cell shows in the class chart: the overall result (if there is one) and each part by name.
 function MultiPartCellContent({ assessment, result }) {
   const n = normalizeAssessmentResult(result);
@@ -15894,6 +15906,7 @@ function ClassApp({ classId, className, classType, onSwitchClass, switchLabel, o
               await saveJSON(`class:${classId}:classAssessments`, next, true, 2, true);
               setClassAssessments(next);
             }}
+            ensureSubject={async (label) => { const r = await ensureClassSubject(classId, label); if (r.list) setBenchmarkSubjects(r.list); return r.id; }}
             updateRound={async (rid, mutate) => { const next = await updateClassRoundEntry(classId, rid, mutate); setReportRounds(next); }}
             onBack={() => navigateView("home")} />
         );
@@ -27720,7 +27733,7 @@ function RoundGradeInput({ scale, value, onChange }) {
 
 // The teacher's guided walkthrough. Several teachers can share one class's report: each ticks the parts that are
 // theirs, fills them in, and submits only those parts. Extra subjects can be added with "+ Add another subject".
-function ReportRoundWalkthrough({ round, roster, studentData, config, classAssessments, benchmarkSubjects, loggedInTeacher, saveAssessment, updateRound, onBack }) {
+function ReportRoundWalkthrough({ round, roster, studentData, config, classAssessments, benchmarkSubjects, loggedInTeacher, saveAssessment, ensureSubject, updateRound, onBack }) {
   const myId = loggedInTeacher?.uid || loggedInTeacher?.id || loggedInTeacher?.name || "me";
   const myName = loggedInTeacher?.name || "A teacher";
   const entries = round.entries || {};
@@ -27786,8 +27799,8 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
         results[s.id] = { ...(g ? { grade: g } : {}), ...(Object.keys(pv).length > 0 ? { parts: pv } : {}), ...(note ? { note } : {}), published: prev ? prev.published : false };
       } else delete results[s.id];
     });
-    const matchedSubject = matchSubjectId(label);
-    const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO(), ...(matchedSubject ? { subjectId: matchedSubject } : {}) }), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, ...(partDefs.length > 0 ? { parts: partDefs } : {}) };
+    const subjectId = (await ensureSubject(label)) || matchSubjectId(label); // grades always go under the class's subject of that name (created if the class doesn't have it yet)
+    const assessment = { ...(existing || { id: assessmentId, date: round.endDate || todayISO() }), ...(subjectId ? { subjectId } : {}), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, ...(partDefs.length > 0 ? { parts: partDefs } : {}) };
     if (partDefs.length === 0) delete assessment.parts;
     await saveAssessment(assessment);
     await updateRound(round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { ...((r.entries || {})[key] || {}), label, scale: sub.scale, assessmentId, claimedBy: myName, claimedByUid: myId, doneAt: null, comprehensive: partDefs.length > 0, parts: partDefs, ...(info.extra ? { group: sub.group } : {}) } } }));
@@ -28171,7 +28184,8 @@ function AcadienceLoadModal({ round, registry, onClose, onDone }) {
             m.result.measures.forEach((ms) => { const pd = partDefs.find((x) => x.abbr === ms.abbr); if (pd) pv[pd.id] = ms.status; });
             results[m.student.id] = { ...(m.result.compositeStatus ? { grade: m.result.compositeStatus } : {}), ...(Object.keys(pv).length > 0 ? { parts: pv } : {}), published: false };
           });
-          const assessment = { id: assessmentId, date: round.endDate || todayISO(), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, parts: partDefs.map((p) => ({ id: p.id, label: p.label })) };
+          const acadSubject = (await ensureClassSubject(c.cid, label.replace(/ \(.*\)$/, ""))).id; // eslint-disable-line no-await-in-loop
+          const assessment = { id: assessmentId, date: round.endDate || todayISO(), ...(acadSubject ? { subjectId: acadSubject } : {}), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, parts: partDefs.map((p) => ({ id: p.id, label: p.label })) };
           const next = fresh.some((a) => a.id === assessmentId) ? fresh.map((a) => (a.id === assessmentId ? { ...a, ...assessment } : a)) : [...fresh, assessment];
           await saveJSON(aKey, next, true, 2, true); // eslint-disable-line no-await-in-loop
           await updateClassRoundEntry(c.cid, round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { label, scale: "words", assessmentId, claimedBy: ACAD_NAME, claimedByUid: ACAD_UID, doneAt: now, doneBy: ACAD_NAME, comprehensive: true, parts: partDefs.map((p) => ({ id: p.id, label: p.label })), source: "acadience", period: windowId } } })); // eslint-disable-line no-await-in-loop
