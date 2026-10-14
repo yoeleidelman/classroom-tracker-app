@@ -13,7 +13,7 @@ export const ACADIENCE_WINDOWS = [
 // Plain-language names for the measures, in the order a parent should read them.
 const MEASURE_NAMES = {
   reading: {
-    FSF: "First sounds in words",
+    FSF: "First sound fluency",
     PSF: "Sounds in words",
     "NWF-CLS": "Letter sounds",
     "NWF-WWR": "Reading whole words",
