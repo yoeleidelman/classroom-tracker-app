@@ -336,7 +336,7 @@ function MultiPartCellContent({ assessment, result }) {
   if (!overall && lines.length === 0) return null;
   return (
     <div className="text-left leading-tight inline-block">
-      {overall && <div className="font-semibold text-stone-800 text-xs">{overall}</div>}
+      {overall && <div className="text-xs text-stone-800"><span className="text-[10px] text-stone-500">Overall:</span> <span className="font-semibold">{overall}</span></div>}
       {lines.map((l) => (
         <div key={l.id} className="text-[10px] text-stone-500 whitespace-nowrap">{l.label}: <span className="font-semibold text-stone-700">{l.value}</span></div>
       ))}
@@ -11364,7 +11364,7 @@ function ParentAssessmentsDetailView({ link, onBack, onMessageTeacher, siblingLi
                           <div key={a.id}>
                             <div className="flex items-center justify-between">
                               <p className="text-sm font-semibold text-stone-800">{a.title || subject.label}</p>
-                              {grade && <p className="text-sm font-bold text-teal-700">{grade}</p>}
+                              {grade && <p className="text-sm font-bold text-teal-700">{a.parts ? `Overall: ${grade}` : grade}</p>}
                             </div>
                             <p className="text-[11px] text-stone-400">{new Date(a.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</p>
                             {/* Reported directly: a multi-part assessment shows every part with its
