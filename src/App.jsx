@@ -27636,7 +27636,10 @@ function buildRoundPdfExtra(roundMeta, cx, student) {
       const note = getResultNote(r);
       const partRows = e.comprehensive ? (e.parts || []).filter((pt) => r && r.parts && r.parts[pt.id]).map((pt) => [{ content: `     ${pt.label}`, styles: { fontStyle: "normal", textColor: [90, 90, 90] } }, (r && r.parts && r.parts[pt.id]) || "—"]) : [];
       const hasAny = grade || (r && r.parts && Object.keys(r.parts).length > 0);
-      const mainCell = grade ? (note ? `${grade}\n${note}` : grade) : (note || (partRows.length > 0 && hasAny ? "" : "—"));
+      // Acadience results: the title line stays plain, and the overall level sits on its own labeled "Overall" line above the skills.
+      const acadOverall = e.source === "acadience" && grade;
+      if (acadOverall) partRows.unshift([{ content: "     Overall", styles: { fontStyle: "normal", textColor: [90, 90, 90] } }, grade]);
+      const mainCell = acadOverall ? (note || "") : grade ? (note ? `${grade}\n${note}` : grade) : (note || (partRows.length > 0 && hasAny ? "" : "—"));
       byGroup[roundGroupOf(key, e)].push([e.label, mainCell]);
       if (hasAny) partRows.forEach((pr) => byGroup[roundGroupOf(key, e)].push(pr));
     }
