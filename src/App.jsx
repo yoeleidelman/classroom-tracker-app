@@ -23,6 +23,7 @@ import { createPortal } from "react-dom";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { HDate, HebrewCalendar, months } from "@hebcal/core";
 import * as XLSX from "xlsx";
+import { ACADIENCE_WINDOWS, parseAcadienceSheets, matchAcadienceToRoster, acadienceParts, acadienceReportLabel } from "./acadience";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { jsPDF } from "jspdf";
@@ -27633,7 +27634,7 @@ function buildRoundPdfExtra(roundMeta, cx, student) {
       const r = a?.results?.[student.id];
       const grade = getResultGrade(r);
       const note = getResultNote(r);
-      const partRows = e.comprehensive ? (e.parts || []).map((pt) => [{ content: `     ${pt.label}`, styles: { fontStyle: "normal", textColor: [90, 90, 90] } }, (r && r.parts && r.parts[pt.id]) || "—"]) : [];
+      const partRows = e.comprehensive ? (e.parts || []).filter((pt) => r && r.parts && r.parts[pt.id]).map((pt) => [{ content: `     ${pt.label}`, styles: { fontStyle: "normal", textColor: [90, 90, 90] } }, (r && r.parts && r.parts[pt.id]) || "—"]) : [];
       const hasAny = grade || (r && r.parts && Object.keys(r.parts).length > 0);
       const mainCell = grade ? (note ? `${grade}\n${note}` : grade) : (note || (partRows.length > 0 && hasAny ? "" : "—"));
       byGroup[roundGroupOf(key, e)].push([e.label, mainCell]);
@@ -28066,6 +28067,146 @@ function ReportRoundWalkthrough({ round, roster, studentData, config, classAsses
 }
 
 // Admin: set up a round, and see which classes have finished.
+// ---- Admin: one-time load of the Acadience Reading / Math results into a report round ----
+// Reads the two Excel files on this device, matches each class's students by name, shows what it found, and (only after
+// the admin confirms) saves English and Math for every class in the round as already-submitted parts. Teachers then see
+// those two parts as "Taken by Acadience results", so nobody has to enter or import them.
+const ACAD_UID = "acadience-results";
+const ACAD_NAME = "Acadience results";
+function AcadienceLoadModal({ round, registry, onClose, onDone }) {
+  const [windowId, setWindowId] = useState("BOY");
+  const [files, setFiles] = useState({ reading: null, math: null });
+  const [plan, setPlan] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [saved, setSaved] = useState(null);
+  const windowLabel = (ACADIENCE_WINDOWS.find((w) => w.id === windowId) || ACADIENCE_WINDOWS[0]).label;
+  const readFile = async (kind, file) => {
+    setErr(null); setPlan(null); setSaved(null);
+    if (!file) return;
+    try {
+      const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      const sheets = {};
+      wb.SheetNames.forEach((n) => { sheets[n] = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: true, defval: null }); });
+      setFiles((p) => ({ ...p, [kind]: { name: file.name, sheets } }));
+    } catch (e) { console.error("Acadience file read failed", e); setErr("Couldn't read that file. Make sure it's the Acadience Excel file (.xlsx)."); }
+  };
+  const SUBJECTS = [["english", "reading", "English"], ["math", "math", "Math"]];
+  const buildPlan = async () => {
+    setBusy(true); setErr(null); setSaved(null);
+    try {
+      const out = [];
+      for (const cid of round.classIds || []) {
+        const cls = (registry || []).find((c) => c.id === cid);
+        const [rawRoster, list] = await Promise.all([ // eslint-disable-line no-await-in-loop
+          loadJSON(`class:${cid}:roster`, [], true, 2, true),
+          loadJSON(`class:${cid}:reportRounds`, [], true, 2, true),
+        ]);
+        const roster = (rawRoster || []).filter((x) => !x.enrollmentScope || x.enrollmentScope === "full-time");
+        const entry = (list || []).find((r) => r.id === round.id) || null;
+        const subjects = {};
+        SUBJECTS.forEach(([key, kind]) => {
+          if (!files[kind]) return;
+          const m = matchAcadienceToRoster(parseAcadienceSheets(files[kind].sheets, kind, windowId), roster);
+          const ex = entry?.entries?.[key];
+          subjects[key] = { kind, matched: m.matched, missing: m.missing, blockedBy: ex && ex.claimedByUid && ex.claimedByUid !== ACAD_UID ? (ex.claimedBy || "a teacher") : null };
+        });
+        out.push({ cid, name: cls?.name || cid, hasEntry: Boolean(entry), subjects });
+      }
+      setPlan(out);
+    } catch (e) { console.error("Acadience plan failed", e); setErr("Couldn't load the classes. Check your connection and try again."); }
+    setBusy(false);
+  };
+  const willSave = (plan || []).reduce((n, c) => n + (c.hasEntry ? SUBJECTS.filter(([key]) => c.subjects[key] && !c.subjects[key].blockedBy && c.subjects[key].matched.length > 0).length : 0), 0);
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const now = new Date().toISOString();
+      let count = 0;
+      for (const c of plan) {
+        if (!c.hasEntry) continue; // eslint-disable-line no-continue
+        for (const [key, kind] of SUBJECTS) {
+          const sj = c.subjects[key];
+          if (!sj || sj.blockedBy || sj.matched.length === 0) continue; // eslint-disable-line no-continue
+          const label = acadienceReportLabel(kind, windowId);
+          const partDefs = acadienceParts(sj.matched, kind).map((p) => ({ id: `acad-${p.abbr}`, label: p.label, abbr: p.abbr }));
+          const aKey = `class:${c.cid}:classAssessments`;
+          const fresh = (await loadJSON(aKey, [], true, 3, true)) || []; // eslint-disable-line no-await-in-loop
+          const list = (await loadJSON(`class:${c.cid}:reportRounds`, [], true, 3, true)) || []; // eslint-disable-line no-await-in-loop
+          const prevEntry = (list.find((r) => r.id === round.id)?.entries || {})[key];
+          const assessmentId = prevEntry && prevEntry.claimedByUid === ACAD_UID && prevEntry.assessmentId ? prevEntry.assessmentId : uid();
+          const results = {};
+          sj.matched.forEach((m) => {
+            const pv = {};
+            m.result.measures.forEach((ms) => { const pd = partDefs.find((x) => x.abbr === ms.abbr); if (pd) pv[pd.id] = ms.status; });
+            results[m.student.id] = { grade: m.result.compositeStatus, ...(Object.keys(pv).length > 0 ? { parts: pv } : {}), published: false };
+          });
+          const assessment = { id: assessmentId, date: round.endDate || todayISO(), title: `${round.name}: ${label}`, results, reportRoundId: round.id, reportRoundKey: key, parts: partDefs.map((p) => ({ id: p.id, label: p.label })) };
+          const next = fresh.some((a) => a.id === assessmentId) ? fresh.map((a) => (a.id === assessmentId ? { ...a, ...assessment } : a)) : [...fresh, assessment];
+          await saveJSON(aKey, next, true, 2, true); // eslint-disable-line no-await-in-loop
+          await updateClassRoundEntry(c.cid, round.id, (r) => ({ ...r, entries: { ...(r.entries || {}), [key]: { label, scale: "words", assessmentId, claimedBy: ACAD_NAME, claimedByUid: ACAD_UID, doneAt: now, doneBy: ACAD_NAME, comprehensive: true, parts: partDefs.map((p) => ({ id: p.id, label: p.label })), source: "acadience", period: windowId } } })); // eslint-disable-line no-await-in-loop
+          count += 1;
+        }
+      }
+      setSaved(count);
+      setPlan(null);
+      if (onDone) onDone();
+    } catch (e) { console.error("Acadience save failed", e); setErr(`That didn't save everywhere. Nothing is half-done in a harmful way, you can run it again. (${e?.code || e?.message || "unknown"})`); }
+    setBusy(false);
+  };
+  const fileRow = (kind, title) => (
+    <div className="mb-2">
+      <p className="text-xs font-semibold text-stone-600 mb-0.5">{title}</p>
+      <input type="file" accept=".xlsx,.xls" onChange={(e) => { readFile(kind, e.target.files?.[0]); e.target.value = ""; }} className="text-xs" />
+      {files[kind] && <p className="text-[11px] text-emerald-700 mt-0.5">Loaded: {files[kind].name}</p>}
+    </div>
+  );
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/40 flex items-end md:items-center justify-center" onClick={onClose}>
+      <div className="bg-white rounded-t-2xl md:rounded-2xl w-full max-w-2xl max-h-[88vh] overflow-y-auto p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-2">
+          <p className="font-semibold text-stone-800">Load Acadience results: {round.name}</p>
+          <button onClick={onClose} className="text-stone-400 text-sm">Close</button>
+        </div>
+        <p className="text-xs text-stone-500 mb-3">This fills in English and Math for every class in this round from the Acadience Excel files, so teachers don't have to. Those two parts show to teachers as "Taken by {ACAD_NAME}" and the report labels them as a {windowLabel.toLowerCase()} assessment. The files are read on this device only. Nothing is saved until you press the final button, and nothing is sent to parents.</p>
+        <p className="text-xs font-semibold text-stone-600 mb-1">Which period are these results from?</p>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {ACADIENCE_WINDOWS.map((w) => (
+            <button key={w.id} onClick={() => { setWindowId(w.id); setPlan(null); }} className={`text-xs font-semibold px-3 py-1 rounded-full border ${windowId === w.id ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{w.label}</button>
+          ))}
+        </div>
+        {fileRow("reading", "Acadience Reading file (fills in English)")}
+        {fileRow("math", "Acadience Math file (fills in Math)")}
+        {err && <p className="text-xs text-rose-600 my-2">{err}</p>}
+        {saved != null && <p className="text-sm text-emerald-700 my-2">Done. Saved {saved} part{saved === 1 ? "" : "s"}. Open "Refresh" on the round to see English and Math as submitted.</p>}
+        <button onClick={buildPlan} disabled={busy || (!files.reading && !files.math)} className="mt-1 mb-3 text-sm font-semibold text-white bg-teal-700 rounded-lg px-4 py-2 hover:bg-teal-800 disabled:opacity-50">{busy && !plan ? "Checking…" : "Check the files against the classes"}</button>
+        {plan && (
+          <div className="space-y-3">
+            {plan.map((c) => (
+              <div key={c.cid} className="border border-stone-200 rounded-lg p-2">
+                <p className="text-sm font-semibold text-stone-800 mb-1">{c.name}</p>
+                {!c.hasEntry && <p className="text-xs text-amber-700">This class has no copy of the round, so nothing will be saved for it.</p>}
+                {c.hasEntry && SUBJECTS.map(([key, , title]) => {
+                  const sj = c.subjects[key];
+                  if (!sj) return null;
+                  return (
+                    <div key={key} className="mb-2">
+                      <p className="text-xs font-semibold text-stone-600">{title}: {sj.matched.length} student{sj.matched.length === 1 ? "" : "s"} found{sj.blockedBy ? ` (skipped, already taken by ${sj.blockedBy})` : ""}</p>
+                      {!sj.blockedBy && sj.matched.length > 0 && <p className="text-[11px] text-stone-500">{sj.matched.map((m) => `${m.student.name}${m.how !== "name" ? ` (file: ${m.result.name})` : ""} – ${m.result.compositeStatus}`).join(" · ")}</p>}
+                      {!sj.blockedBy && sj.missing.length > 0 && <p className="text-[11px] text-amber-700">Not in the file, will stay blank: {sj.missing.map((m) => m.name).join(", ")}</p>}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            <button onClick={save} disabled={busy || willSave === 0} className="w-full text-sm font-bold text-white bg-teal-700 rounded-lg py-2.5 hover:bg-teal-800 disabled:opacity-50">{busy ? "Saving…" : willSave === 0 ? "Nothing to save" : `Save English and Math to the report (${willSave} part${willSave === 1 ? "" : "s"})`}</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReports }) {
   const classes = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
   const [rounds, setRounds] = useState(null);
@@ -28074,6 +28215,7 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
   const [creating, setCreating] = useState(false);
   const [formErr, setFormErr] = useState(null);
   const [openId, setOpenId] = useState(null);
+  const [acadRound, setAcadRound] = useState(null);
   const [statusByRound, setStatusByRound] = useState({});
   const [review, setReview] = useState(null); // { cid, round, loading, error, entry, roster, assessments }
   const openReview = async (round, cid) => {
@@ -28200,6 +28342,7 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
                 )}
                 <div className="flex flex-wrap gap-3 mt-3 items-center">
                   <button onClick={() => onMakeReports && onMakeReports(r)} className="text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-1.5 hover:bg-teal-800">Make the PDFs and send</button>
+                  <button onClick={() => setAcadRound(r)} className="text-xs font-semibold text-teal-700">Load Acadience results</button>
                   <button onClick={() => loadStatus(r)} className="text-xs font-semibold text-teal-700">Refresh</button>
                   <button onClick={() => { setForm({ name: r.name, startDate: "", endDate: "", dueDate: nextWednesdayISO(), classIds: r.classIds || [] }); window.scrollTo({ top: 0, behavior: "smooth" }); }} className="text-xs font-semibold text-teal-700">Start another like this</button>
                 </div>
@@ -28209,6 +28352,7 @@ function AdminReportRoundsView({ registry, onBack, loggedInTeacher, onMakeReport
         ))}
       </div>
 
+      {acadRound && <AcadienceLoadModal round={acadRound} registry={registry} onClose={() => setAcadRound(null)} onDone={() => loadStatus(acadRound)} />}
       {review && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-end md:items-center justify-center" onClick={() => setReview(null)}>
           <div className="bg-white rounded-t-2xl md:rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-4" onClick={(e) => e.stopPropagation()}>
