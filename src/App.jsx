@@ -11339,7 +11339,7 @@ STRICT RULES:
           <div className="flex items-center gap-2 mb-3">
             <label className="text-xs font-medium text-stone-500">Day</label>
             <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
-            {[["Today", todayISO()], ["Yesterday", addDaysISO(todayISO(), -1)]].map(([lbl, d]) => (
+            {[["Today", todayISO()]].map(([lbl, d]) => (
               <button key={lbl} onClick={() => setDate(d)} className={`text-xs font-semibold rounded-full px-3 py-1.5 border ${date === d ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{lbl}</button>
             ))}
           </div>
