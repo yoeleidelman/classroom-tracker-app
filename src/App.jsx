@@ -7667,6 +7667,144 @@ function GeneralStudiesBrowseAllView({ registry, onOpenClass }) {
   );
 }
 
+// Admin front page: every elementary student in one list, split by class, so the office can mark someone late or absent
+// without opening each classroom. It reads and writes the very same attendance records the classrooms use
+// (class:{id}:kriya:{studentId}), so a mark made here shows up in that classroom right away, and the other way round.
+function AdminElementaryAttendance({ registry, adminUser }) {
+  const classes = (registry || []).filter((c) => !c.archived && c.classType !== "preschool");
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(todayISO());
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState({});
+  const [err, setErr] = useState(null);
+  const [lastSaved, setLastSaved] = useState(null);
+  const [expanded, setExpanded] = useState({}); // studentId -> true while the full set of buttons is showing for a student who already has a mark
+  const baseKeys = open ? classes.flatMap((c) => [`class:${c.id}:roster`, `class:${c.id}:config`]) : [];
+  const live = useLiveJSONMap(baseKeys);
+  const sections = classes.map((c) => ({
+    cls: c,
+    loaded: (`class:${c.id}:roster` in live) && (`class:${c.id}:config` in live),
+    roster: (live[`class:${c.id}:roster`] || []).filter((x) => !x.enrollmentScope || x.enrollmentScope === "full-time"),
+    statuses: live[`class:${c.id}:config`]?.attendance?.statuses || DEFAULT_CONFIG.attendance.statuses,
+  }));
+  const kriyaKeys = open ? sections.flatMap((sec) => sec.roster.map((st) => `class:${sec.cls.id}:kriya:${st.id}`)) : [];
+  const liveK = useLiveJSONMap(kriyaKeys);
+  const needle = q.trim().toLowerCase();
+
+  const mark = async (cid, student, statuses, statusId, timeOnly) => {
+    const key = `class:${cid}:kriya:${student.id}`;
+    setBusy((p) => ({ ...p, [student.id]: true })); setErr(null);
+    try {
+      // Always start from the stored record (never a stale screen copy), so nothing else about the student can be overwritten.
+      const fresh = (await loadJSON(key, null, true, 3, true)) || emptyStudentData();
+      const prev = (fresh.attendance || []).find((a) => a.date === date);
+      let entry;
+      if (timeOnly !== undefined) {
+        if (!prev) { setBusy((p) => ({ ...p, [student.id]: false })); return; }
+        entry = { ...prev, time: timeOnly };
+      } else {
+        const isLate = statuses.find((st) => st.id === statusId)?.flagType === "late";
+        const defaultTime = isLate && !prev?.time ? new Date().toTimeString().slice(0, 5) : (prev?.time || "");
+        entry = { date, status: statusId, time: defaultTime, loggedAt: new Date().toISOString(), ...(adminUser?.name ? { loggedBy: adminUser.name } : {}), ...(adminUser?.uid ? { loggedByUid: adminUser.uid } : {}) };
+      }
+      const next = { ...fresh, attendance: [...(fresh.attendance || []).filter((a) => a.date !== date), entry] };
+      await saveJSON(key, next, true, 2, true);
+      // Same "Needs attention" alert the classroom raises when a late/absent mark crosses a limit.
+      if (timeOnly === undefined) {
+        try {
+          const [config, incidents] = await Promise.all([loadJSON(`class:${cid}:config`, DEFAULT_CONFIG, true), loadJSON(`class:${cid}:incidents`, [], true)]);
+          const flag = getFlags(next, student.id, incidents || [], config || DEFAULT_CONFIG).find((f) => f.type === "late" || f.type === "absent");
+          if (flag) {
+            const aKey = `class:${cid}:alerts`;
+            const alerts = (await loadJSON(aKey, [], true, 3, true)) || [];
+            const type = flag.type === "late" ? "attendance-late" : "attendance-absent";
+            const message = `${student.name} — ${flag.label}`;
+            const existing = alerts.find((a) => a.studentId === student.id && a.type === type && !a.dismissed);
+            const out = existing ? alerts.map((a) => (a === existing ? { ...a, message, date: todayISO() } : a)) : [{ id: uid(), studentId: student.id, type, message, date: todayISO(), dismissed: false }, ...alerts];
+            await saveJSON(aKey, out, true, 2, true);
+          }
+        } catch (e) { console.error("Attendance alert update failed", e); }
+      }
+      setLastSaved(student.name);
+      if (timeOnly === undefined) setExpanded((p) => ({ ...p, [student.id]: false }));
+    } catch (e) {
+      console.error("Admin attendance save failed", e);
+      setErr(`That didn't save for ${student.name}. Check your connection and try again.`);
+    }
+    setBusy((p) => ({ ...p, [student.id]: false }));
+  };
+
+  const total = sections.reduce((n, sec) => n + sec.roster.length, 0);
+  return (
+    <div className="bg-white border border-teal-200 rounded-xl mb-6">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-4 py-3 text-left">
+        <span><span className="text-sm font-semibold text-stone-800">Elementary attendance</span><span className="block text-xs text-stone-400">Mark any elementary student late or absent, all in one place</span></span>
+        <ChevronRight size={16} className={`text-stone-400 transition-transform ${open ? "rotate-90" : ""}`} />
+      </button>
+      {open && (
+        <div className="px-4 pb-4 border-t border-stone-100 pt-3">
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm bg-white" />
+            <button onClick={() => setDate(todayISO())} className="text-xs font-semibold text-teal-700 border border-teal-300 rounded-full px-3 py-1">Today</button>
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find a student" className="flex-1 min-w-[140px] rounded-lg border border-stone-300 px-3 py-1.5 text-sm bg-white" />
+          </div>
+          <p className="text-[11px] text-stone-400 mb-3">Changes here appear in the student's classroom right away, and the teacher's changes appear here. {total > 0 ? `${total} students.` : ""}</p>
+          {err && <p className="text-xs text-rose-600 mb-2">{err}</p>}
+          {lastSaved && !err && <p className="text-[11px] text-emerald-700 mb-2">Saved for {lastSaved}.</p>}
+          {sections.map((sec) => {
+            const rows = sec.roster.filter((st) => !needle || (st.name || "").toLowerCase().includes(needle));
+            if (needle && rows.length === 0) return null;
+            return (
+              <div key={sec.cls.id} className="mb-4 last:mb-0">
+                <p className="text-xs font-bold uppercase tracking-wide text-teal-700 bg-teal-50 rounded-md px-2 py-1 mb-1.5">{sec.cls.name}<span className="font-normal text-stone-400 normal-case tracking-normal"> · {sec.roster.length} students</span></p>
+                {!sec.loaded && <p className="text-xs text-stone-400 flex items-center gap-2 px-1"><Loader2 size={12} className="animate-spin" /> Loading…</p>}
+                <ul className="divide-y divide-stone-100">
+                  {rows.map((st) => {
+                    const entry = (liveK[`class:${sec.cls.id}:kriya:${st.id}`]?.attendance || []).find((a) => a.date === date);
+                    const isLate = entry?.status && sec.statuses.find((x) => x.id === entry.status)?.flagType === "late";
+                    return (
+                      <li key={st.id} className="py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="text-sm font-medium text-stone-800 w-36 shrink-0 truncate">{st.name}</span>
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          {entry?.status && !expanded[st.id] ? (
+                            <button onClick={() => setExpanded((p) => ({ ...p, [st.id]: true }))} title="Tap to change"
+                              className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap bg-${sec.statuses.find((x) => x.id === entry.status)?.color || "stone"}-500 text-white`}>
+                              {sec.statuses.find((x) => x.id === entry.status)?.label || entry.status}{isLate && entry.time ? ` ${formatTime12h(entry.time)}` : ""}
+                            </button>
+                          ) : (
+                            <>
+                              {sec.statuses.map((x) => {
+                                const on = entry?.status === x.id;
+                                return (
+                                  <button key={x.id} disabled={busy[st.id]} onClick={() => mark(sec.cls.id, st, sec.statuses, x.id)}
+                                    className={`text-xs font-semibold px-2.5 py-1 rounded-full border whitespace-nowrap disabled:opacity-50 ${on ? `bg-${x.color}-500 text-white border-${x.color}-500` : "text-stone-500 border-stone-200"}`}>{x.label}</button>
+                                );
+                              })}
+                              {isLate && (
+                                <span className="flex items-center gap-1">
+                                  <label className="text-xs text-stone-500">at</label>
+                                  <input type="time" value={entry?.time || ""} onChange={(e) => mark(sec.cls.id, st, sec.statuses, entry.status, e.target.value)} className="rounded-lg border border-stone-300 px-2 py-0.5 text-xs" />
+                                </span>
+                              )}
+                              {entry?.status && <button onClick={() => setExpanded((p) => ({ ...p, [st.id]: false }))} className="text-[11px] text-stone-400 underline">Done</button>}
+                            </>
+                          )}
+                          {entry?.auto && <span className="text-[10px] text-stone-400">(auto)</span>}
+                        </span>
+                      </li>
+                    );
+                  })}
+                  {sec.loaded && sec.roster.length === 0 && <li className="py-1.5 text-xs text-stone-400">No students.</li>}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout, onRestore, onDeleteClass, onArchiveClassById, onChangePassword, currentTeacher, onChangeMyPassword, onChangeMyName, onChangeMySignOff, globalStudents, onRefreshStudents, onAddStudent, onUpdateStudent, onArchiveStudent, onRestoreStudent, onDeleteStudent, onBulkAddStudents, onFindDuplicateEnrollments, onFindDuplicateDailyLogs, onRemoveDailyLogDuplicate, onCheckStudentDataIntegrity, onBuildExportData, schoolEvents, onRefreshEvents, onAddEvent, onUpdateEvent, onRemoveEvent, schoolTools, onRefreshTools, onAddTool, onUpdateTool, onRemoveTool, teachers, onRefreshTeachers, onCreateTeacher, onUpdateTeacher, onToggleTeacherClass, onResetTeacherPassword, onCheckTeacherAccount, onDeactivateTeacher, onDeleteTeacher, families, onRefreshFamilies, onCreateFamily, onAddGuardianToFamily, onCreateStudentInClass, onUpdateFamily, onDeactivateFamily, onDeleteFamily, onFetchAllStudentsForLinking, onFetchDailyOverview, onFetchStudentHistory, onFetchStudentClassMap, onFetchStudentProfile, onFetchCheckInHistory, programs, onRefreshPrograms, onAddProgram, onUpdateProgram, onRemoveProgram, onFetchProgramDetail, onAddProgramPoints, onAddProgramLogEntry, onRemoveProgramLogEntry, onAddProgramCategory, canSwitchToParent, onSwitchToParent, canSwitchToCoordinator, onSwitchToCoordinator, onOpenGlobalMessages }) {
   const [adminTab, setAdminTab] = useState("overview");
   // Runs once, silently, in the background — see runMisroutedAdminMessagesCleanup's own comment
@@ -8049,6 +8187,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
         {adminTab === "overview" && (
         <>
+        <AdminElementaryAttendance registry={registry} adminUser={currentTeacher} />
         <TehillimAdminBanner onOpen={openProgramAdmin} programs={programs} />
         <OfficeContactSettings />
 
