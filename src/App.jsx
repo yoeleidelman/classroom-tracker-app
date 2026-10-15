@@ -16634,10 +16634,9 @@ function HomeView({ roster, studentData, incidents, config, removeStudent, setAt
       )}
 
       {scoringOn && (
-        <button onClick={onOpenScores} className="w-full flex items-center justify-between bg-teal-50 border border-teal-200 rounded-lg px-3 py-1.5 mb-3 text-left hover:bg-teal-100">
-          <span className="text-sm font-semibold text-teal-800">Class scores</span>
-          <span className="text-teal-700 text-sm">›</span>
-        </button>
+        <div className="mb-3">
+          <button onClick={onOpenScores} className="text-xs font-semibold text-teal-800 bg-teal-50 border border-teal-300 rounded-full px-3 py-1 hover:bg-teal-100">Class scores ›</button>
+        </div>
       )}
 
       {(openRounds || []).map((r) => (
