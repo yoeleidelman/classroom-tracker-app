@@ -26480,6 +26480,10 @@ function CombinedClassSection({ entry, config }) {
   );
 }
 
+// Reports work out minutes late from when class starts. Every class starts at 9:00 AM unless a class has set its own time in Settings;
+// this is only a fallback used when calculating, and is never saved anywhere.
+const DEFAULT_REPORT_START_TIME = "09:00";
+const reportStartTime = (config) => config?.attendance?.classStartTime || DEFAULT_REPORT_START_TIME;
 function morningAttendanceApplies(student, date, dayType, config, plannerDays) {
   const scope = student.enrollmentScope;
   if (!scope || scope === "full-time") return true;
@@ -26506,7 +26510,7 @@ function buildRangeFacts(student, data, incidents, classAssessments, config, sta
   const inRange = (d) => d >= startDate && d <= endDate;
   const statusMap = {};
   config.attendance.statuses.forEach((s) => (statusMap[s.id] = s));
-  const startMin = timeToMinutes(config.attendance.classStartTime);
+  const startMin = timeToMinutes(reportStartTime(config));
 
   let attendanceLines = null;
   if (opts.attendance) {
@@ -27401,7 +27405,7 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
     const entries = [...(data.attendance || [])].filter((a) => inRange(a.date)).sort((a, b) => (a.date < b.date ? -1 : 1));
     if (entries.length === 0) { addEmpty(); }
     else {
-      const startMin = timeToMinutes(config.attendance?.classStartTime);
+      const startMin = timeToMinutes(reportStartTime(config));
       // Summary line: a count for each status that has days
       const counts = statusList.map((st) => ({ label: st.label, n: entries.filter((a) => a.status === st.id).length })).filter((c) => c.n > 0);
       const unknown = entries.filter((a) => !attStatusMap[a.status]).length;
@@ -27416,7 +27420,7 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
         const fmt = (m) => (m >= 60 ? `${Math.floor(m / 60)} hr ${m % 60} min` : `${m} min`);
         doc.setFont("helvetica", "bold");
         if (startMin != null) {
-          doc.text(`Total time late: ${fmt(totalLate)}  (class starts ${formatTime12h(config.attendance.classStartTime)})`, 14, y);
+          doc.text(`Total time late: ${fmt(totalLate)}  (class starts ${formatTime12h(reportStartTime(config))})`, 14, y);
           y += 4;
           if (counted < lateEntries.length) {
             doc.setFont("helvetica", "italic"); doc.setFontSize(8); doc.setTextColor(120);
@@ -28213,7 +28217,7 @@ function summarizeAttendanceForRound(data, config, startDate, endDate) {
   const counts = {};
   statuses.forEach((st) => { counts[st.id] = 0; });
   entries.forEach((a) => { counts[a.status] = (counts[a.status] || 0) + 1; });
-  const startMin = timeToMinutes(config.attendance?.classStartTime);
+  const startMin = timeToMinutes(reportStartTime(config));
   let lateMin = 0;
   entries.forEach((a) => {
     if (statuses.find((s) => s.id === a.status)?.flagType === "late" && startMin != null) {
@@ -33635,7 +33639,7 @@ function SettingsView({ config, setConfig, onBack, roster, addStudent, removeStu
         {!isPreschool && (
         <>
         <Section title="Attendance statuses">
-          <label className="block text-xs font-medium text-stone-500 mb-1">Class start time (optional — used to calculate minutes late in monthly reports)</label>
+          <label className="block text-xs font-medium text-stone-500 mb-1">Class start time (used to calculate minutes late in reports; if left blank, reports use 9:00 AM)</label>
           <input type="time" value={config.attendance.classStartTime || ""} onChange={(e) => update((c) => { c.attendance.classStartTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-3" />
           <label className="block text-xs font-medium text-stone-500 mb-1">Automatically mark absent if not yet marked by (optional)</label>
           <input type="time" value={config.attendance.autoAbsentTime || ""} onChange={(e) => update((c) => { c.attendance.autoAbsentTime = e.target.value; return c; })} className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-1" />
