@@ -8896,7 +8896,7 @@ function AdminDashboard({ registry, onEnterClass, onCreate, onRefresh, onLogout,
 
       {showRoundsAdmin && (
         <div className="fixed inset-0 z-50 bg-stone-50 overflow-y-auto">
-          <AdminReportRoundsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowRoundsAdmin(false)} onMakeReports={(r, onlyClassId) => { setAdminReportsRound(onlyClassId ? { ...r, classIds: [onlyClassId] } : r); setShowRoundsAdmin(false); setShowAdminReports(true); }} />
+          <AdminReportRoundsView registry={registry} loggedInTeacher={currentTeacher} onBack={() => setShowRoundsAdmin(false)} onMakeReports={(r, onlyClassId) => { setAdminReportsRound(onlyClassId ? { ...r, classIds: [onlyClassId], pdfOnly: true } : r); setShowRoundsAdmin(false); setShowAdminReports(true); }} />
         </div>
       )}
       {showAdminReports && (
@@ -27160,7 +27160,7 @@ function buildStudentReportPdf(student, data, incidents, classAssessments, confi
 // reports, custom-date-range text reports, and the per-student PDF export). The same date choices
 // (a whole month, or a custom start/end) and the same section checkboxes apply to every format, and
 // it works for one student, a few, or the whole class.
-function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title, sharedMessage, rounds, initialRoundId }) {
+function CreateReportsView({ roster, studentData, incidents, classAssessments, config, loggedInTeacher, classType, classId, className, preselectedStudentId, onBack, onLogSent, onUpdateParentEmail, sendDirectMessageToFamily, contextFor, title, sharedMessage, rounds, initialRoundId, pdfOnly }) {
   // sharedMessage (admin only): { text, setText, save, saveState } — one message for every child, with {student} filled in.
   // contextFor (admin, several classes at once): student -> { incidents, classAssessments, config, classId, className }.
   // Without it, everything comes from the single class this screen was opened in, exactly as before.
@@ -27177,14 +27177,14 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const [startDate, setStartDate] = useState(addDaysISO(todayISO(), -13));
   const [endDate, setEndDate] = useState(todayISO());
   const [sections, setSections] = useState(() => sectionList.map((s) => s.id));
-  const [format, setFormat] = useState(sharedMessage ? "both" : "message"); // "message" | "pdf" | "both"
+  const [format, setFormat] = useState(pdfOnly ? "pdf" : sharedMessage ? "both" : "message"); // "message" | "pdf" | "both"
   const [emailBoth, setEmailBoth] = useState(true); // default: the email goes to both parents when two are on file
   const [roundId, setRoundId] = useState(""); // admin: a report round whose grades go into the PDF
   const activeRound = (rounds || []).find((r) => r.id === roundId) || null;
   const pickRound = (id) => {
     setRoundId(id);
     const r = (rounds || []).find((x) => x.id === id);
-    if (r) { setWhenMode("range"); setStartDate(r.startDate || ""); setEndDate(r.endDate || todayISO()); setSections(["attendance"]); setFormat("both"); }
+    if (r) { setWhenMode("range"); setStartDate(r.startDate || ""); setEndDate(r.endDate || todayISO()); setSections(["attendance"]); setFormat(pdfOnly ? "pdf" : "both"); }
   };
   useEffect(() => { if (initialRoundId && !roundId && rounds && rounds.length) pickRound(initialRoundId); }, [rounds]); // eslint-disable-line react-hooks/exhaustive-deps
   const [results, setResults] = useState({}); // studentId -> { loading, draft, dataUsed, pdfBlob, pdfName, label, error, sendState, logged, showData }
@@ -27405,9 +27405,41 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   const pdfCount = chosen.filter((s) => results[s.id]?.pdfBlob).length;
   const canGenerate = chosen.length > 0 && sections.length > 0 && rangeValid && !running && (!wantMessage || messageHasContent || Boolean(sharedMessage));
 
+  // "PDFs" for one finished class (admin review): no questions, no message, nothing sent. The PDFs just get made and are ready to download.
+  const autoRan = useRef(false);
+  useEffect(() => { if (pdfOnly && activeRound && !autoRan.current && canGenerate) { autoRan.current = true; generateAll(); } }, [pdfOnly, activeRound, canGenerate]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const stepCard = "bg-white border border-stone-200 rounded-xl p-3 mb-3";
   const stepTitle = "text-xs font-bold uppercase tracking-wide text-stone-400 mb-2";
   const chip = (on) => `text-xs font-semibold px-3 py-1.5 rounded-full border ${on ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`;
+
+  if (pdfOnly) {
+    return (
+      <div className={PAGE}>
+        <button onClick={onBack} className="flex items-center text-stone-500 text-sm mb-3 hover:text-stone-800"><ChevronLeft size={16} /> Back</button>
+        <h1 className="display-font text-2xl font-bold text-stone-900 mb-1">{[...new Set(chosen.map((st) => ctxOf(st).className).filter(Boolean))].join(", ") || "Class"} PDFs</h1>
+        <p className="text-xs text-stone-400 mb-4">{label}. For your review only. Nothing is sent to anyone, and you can come back and make them again after any changes.</p>
+        <div className="md:max-w-xl">
+          {(running || !activeRound) && <p className="flex items-center gap-2 text-sm text-stone-600 mb-3"><Loader2 className="animate-spin text-teal-700" size={16} /> Making the PDFs… {progress ? `${progress.done}/${progress.total}` : ""}</p>}
+          {!running && pdfCount > 0 && (
+            <div className="flex flex-wrap gap-2 mb-3">
+              <button onClick={downloadZip} className="flex items-center gap-1 text-xs font-semibold text-white bg-teal-700 rounded-lg px-3 py-2 hover:bg-teal-800"><Download size={13} /> Download all {pdfCount} PDFs (zip)</button>
+              <button onClick={generateAll} className="flex items-center gap-1 text-xs font-semibold text-stone-600 border border-stone-300 rounded-lg px-3 py-2 hover:bg-stone-50"><RefreshCw size={12} /> Make them again</button>
+            </div>
+          )}
+          <div className="space-y-1.5">
+            {chosen.map((st) => { const r = results[st.id]; if (!r) return null; return (
+              <div key={st.id} className="flex items-center justify-between gap-2 bg-white border border-stone-200 rounded-lg px-3 py-2">
+                <span className="text-sm text-stone-800">{st.name}</span>
+                {r.loading ? <Loader2 className="animate-spin text-teal-700" size={14} /> : r.pdfBlob ? (
+                  <button onClick={() => saveBlob(r.pdfBlob, r.pdfName)} className="flex items-center gap-1 text-xs font-semibold text-stone-700 border border-stone-300 rounded-lg px-2.5 py-1 hover:bg-stone-50"><Download size={12} /> PDF</button>
+                ) : <span className="text-xs text-rose-600">{r.error || "Couldn't make this one"}</span>}
+              </div>); })}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={PAGE}>
@@ -28646,7 +28678,7 @@ function AdminCreateReportsView({ registry, loggedInTeacher, onBack, initialRoun
 
   if (loaded) {
     return (
-      <CreateReportsView initialRoundId={initialRound?.id} rounds={roundsMeta} sharedMessage={{ text: sharedText, setText: setSharedText, save: saveSharedText, saveState: sharedSaveState }} roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
+      <CreateReportsView pdfOnly={Boolean(initialRound?.pdfOnly)} initialRoundId={initialRound?.id} rounds={roundsMeta} sharedMessage={{ text: sharedText, setText: setSharedText, save: saveSharedText, saveState: sharedSaveState }} roster={loaded.roster} studentData={loaded.studentData} loggedInTeacher={loggedInTeacher} classType="elementary"
         title="Create reports: school"
         contextFor={(st) => loaded.ctxByClass[st.__classId]} sendDirectMessageToFamily={sendAsOffice}
         onBack={() => setLoaded(null)} onLogSent={logSent} onUpdateParentEmail={updateEmail} />
