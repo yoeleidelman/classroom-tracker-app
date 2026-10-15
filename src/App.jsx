@@ -11262,6 +11262,9 @@ STRICT RULES:
           <div className="flex items-center gap-2 mb-3">
             <label className="text-xs font-medium text-stone-500">Day</label>
             <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="rounded-lg border border-stone-300 px-2 py-1.5 text-sm" />
+            {[["Today", todayISO()], ["Yesterday", addDaysISO(todayISO(), -1)]].map(([lbl, d]) => (
+              <button key={lbl} onClick={() => setDate(d)} className={`text-xs font-semibold rounded-full px-3 py-1.5 border ${date === d ? "bg-teal-50 border-teal-300 text-teal-800" : "border-stone-300 text-stone-500"}`}>{lbl}</button>
+            ))}
           </div>
           {due && <button onClick={() => setTab("updates")} className="w-full text-left bg-amber-50 border border-amber-300 rounded-xl px-4 py-3 mb-3 text-sm font-semibold text-amber-900">It's been two weeks. Time to send the parent updates →</button>}
           <div className="bg-white border border-stone-200 rounded-xl p-3 mb-3">
@@ -11313,7 +11316,7 @@ STRICT RULES:
                 </div>
                 {sm.scoredDays > 0 && (
                   <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-stone-700 mb-2">
-                    {AVG_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{sm.avgs[f.key] != null ? sm.avgs[f.key] : "—"}</span></div>)}
+                    {AVG_FIELDS.map((f) => <div key={f.key} className="flex justify-between"><span>{f.label}</span><span className="font-bold">{sm.avgs[f.key] != null ? `${sm.avgs[f.key]} / 5` : "—"}</span></div>)}
                   </div>
                 )}
                 {dr.sent && <p className="text-xs font-semibold text-emerald-700">Sent to {s.name}'s parent home page.</p>}
