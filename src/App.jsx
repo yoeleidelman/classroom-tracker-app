@@ -509,14 +509,44 @@ function LinkPreviewCard({ url }) {
   );
 }
 
-function applyMessageDisclaimer(draftText, config, schoolLabel, teacherSignOff) {
-  const style = config?.messageStyle || {};
-  if (style.showDisclaimer === false) return draftText;
-  const term = (style.schoolTerm || "school").trim() || "school";
-  const label = schoolLabel || `Sent via your child's ${term} classroom system`;
-  const noteText = (teacherSignOff || "").trim() || `— ${label}, an automated update. No reply needed unless you have a question. —`;
-  const note = toItalicUnicode(noteText);
-  return style.disclaimerPosition === "top" ? `${note}\n\n${draftText}` : `${draftText}\n\n${note}`;
+// The "sent via the classroom system" note used to be added to every outgoing email here. Families
+// now have the in-app system, so the note no longer makes sense and nothing is appended any more.
+// (Kept as a function so every existing caller keeps working unchanged.)
+function applyMessageDisclaimer(draftText) {
+  return draftText;
+}
+
+// Which Gmail account emails should open in. Gmail picks an account with the "authuser" setting in the
+// link; with no address saved it just uses whichever account the browser considers the default.
+// Saved per browser on this device (it is a convenience, not school data).
+const SEND_FROM_KEY = "mailSendFromAddress";
+const getSendFrom = () => { try { return (localStorage.getItem(SEND_FROM_KEY) || "").trim(); } catch { return ""; } };
+const setSendFrom = (v) => { try { if ((v || "").trim()) localStorage.setItem(SEND_FROM_KEY, v.trim()); else localStorage.removeItem(SEND_FROM_KEY); } catch { /* storage blocked — setting just won't stick */ } };
+const gmailComposeBase = () => {
+  const from = getSendFrom();
+  return `https://mail.google.com/mail/?${from ? `authuser=${encodeURIComponent(from)}&` : ""}view=cm&fs=1`;
+};
+
+function SendFromPicker() {
+  const [val, setVal] = useState(getSendFrom());
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(val);
+  const save = () => { setSendFrom(draft); setVal(draft.trim()); setEditing(false); };
+  return (
+    <div className="text-xs text-stone-600 mb-2">
+      {!editing ? (
+        <p>Emails open in Gmail as: <b>{val || "your browser's default Gmail account"}</b>{" "}
+          <button onClick={() => { setDraft(val); setEditing(true); }} className="text-teal-700 font-semibold underline">change</button></p>
+      ) : (
+        <div className="flex gap-1.5 items-center flex-wrap">
+          <input type="email" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="you@yourschool.org"
+            className="flex-1 min-w-[10rem] border border-stone-300 rounded-lg px-2 py-1 text-xs" />
+          <button onClick={save} className="bg-teal-700 text-white rounded-lg px-2.5 py-1 font-semibold">Save</button>
+          <button onClick={() => setEditing(false)} className="text-stone-400 px-1">Cancel</button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // The one central copy of this template — every place that sends a parent their account setup
@@ -27791,7 +27821,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     const r = results[s.id];
     const to = recipientList(s).join(", ");
     const body = applyMessageDisclaimer(r?.draft || "", ctxOf(s).config, null, loggedInTeacher?.messageSignOff);
-    return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(`Report — ${r?.label || ""}`)}&body=${encodeURIComponent(body)}`;
+    return `${gmailComposeBase()}&to=${encodeURIComponent(to)}&su=${encodeURIComponent(`Report — ${r?.label || ""}`)}&body=${encodeURIComponent(body)}`;
   };
   const emailWithPdf = (s) => {
     const r = results[s.id];
@@ -28031,6 +28061,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                 ) : (
                   <p className="text-xs text-stone-600 mb-2">To: {recipientList(walkStudent).join(", ")}</p>
                 )}
+                <SendFromPicker />
                 <button onClick={() => emailWithPdf(walkStudent)} disabled={!wEmail}
                   className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40 mb-2">
                   <Mail size={15} /> Save PDF &amp; open email
@@ -34568,7 +34599,7 @@ function SendParentSetupEmailButton({ parentName, studentName, email, tempPasswo
 function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
   const [copied, setCopied] = useState(false);
   const bccParam = bcc && bcc.length > 0 ? `&bcc=${encodeURIComponent(bcc.join(","))}` : "";
-  const gmailHref = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(email || "")}${bccParam}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const gmailHref = `${gmailComposeBase()}&to=${encodeURIComponent(email || "")}${bccParam}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   // Gmail's compose-link BCC field can occasionally drop a name partway through once a link gets
   // very long — a real limitation on Gmail's end. That's worth flagging, but the choice of how to
   // handle it belongs to the teacher, not this component — "Open in Gmail" always stays available,
@@ -34591,6 +34622,7 @@ function MailActionButtons({ email, bcc, subject, body, size = "normal" }) {
 
   return (
     <div>
+      <SendFromPicker />
       <div className="flex items-center gap-2 flex-wrap">
         <a href={gmailHref} target="_blank" rel="noopener noreferrer" className={`${btnClass} text-white bg-teal-700 hover:bg-teal-800`}>
           <Mail size={13} /> Open in Gmail
