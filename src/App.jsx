@@ -27905,6 +27905,13 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
           )}
         </div>
 
+        {activeRound && (
+          <div className={stepCard}>
+            <p className={stepTitle}>3 · What's included</p>
+            <p className="text-sm text-stone-700">Already decided by the teachers' walkthrough: attendance (unless a teacher left it out for their class) and the grades they entered. Nothing to choose here.</p>
+          </div>
+        )}
+        {!activeRound && (
         <div className={stepCard}>
           <div className="flex items-center justify-between mb-2">
             <p className={`${stepTitle} mb-0`}>3 · What to include</p>
@@ -27924,7 +27931,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
             ))}
           </div>
           <p className="text-[10px] text-stone-400 mt-2">A written message covers attendance, incidents and assessment activity. A PDF can include everything checked here.</p>
-        </div>
+        </div>        )}
 
         <div className={stepCard}>
           <p className={stepTitle}>4 · Format</p>
