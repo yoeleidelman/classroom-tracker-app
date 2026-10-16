@@ -27640,6 +27640,19 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
     let dataUsed = null;
     let pdfBlob = null;
     let error = null;
+    // Every parent account linked to this child already has an email, so use those (both parents when both have accounts).
+    let accountEmails = [];
+    try {
+      const fcid = cx.classId;
+      if (fcid) {
+        if (!familiesRef.current[fcid]) familiesRef.current[fcid] = await fetchClassFamilies(fcid);
+        const seen = new Set();
+        familiesRef.current[fcid].filter((f) => (f.studentLinks || []).some((l) => l.studentId === student.id && l.classId === fcid)).forEach((f) => {
+          const e = (f.email || "").trim();
+          if (e && !seen.has(e.toLowerCase())) { seen.add(e.toLowerCase()); accountEmails.push(e); }
+        });
+      }
+    } catch (err) { console.error("Parent account emails couldn't be loaded", err); accountEmails = []; }
     if (sharedMessage) {
       // Admin: the same message for every child, with the child's first name dropped in. No AI text.
       if ((sharedMessage.text || "").trim()) draft = sharedMessage.text.replace(/\{student\}/gi, firstName(student));
@@ -27667,7 +27680,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
       [student.id]: {
         loading: false, draft, dataUsed, pdfBlob, error, label,
         pdfName: `${safeName(student.name)} - Report ${safeName(label)}.pdf`,
-        logged: false, sendState: null, showData: false, email: student.parentEmail || "",
+        logged: false, sendState: null, showData: false, accountEmails, email: accountEmails.length ? accountEmails.join(", ") : (student.parentEmail || ""),
       },
     }));
   };
@@ -27767,9 +27780,16 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
   // A Gmail draft can't carry an attachment by itself, so this does the next best thing in one tap: saves the
   // PDF to the phone under the child's name, and opens the draft (parent's address, subject, message already
   // filled in) so the only step left is the paperclip, where the fresh file is the first one in Recent.
+  const splitEmails = (v) => (v || "").split(/[,;\s]+/).filter(Boolean);
+  // Who an email goes to: the parent accounts' emails when there are any (both parents), else the address typed on the student.
+  const recipientList = (s) => {
+    const r = results[s.id];
+    if (r?.accountEmails?.length) { const list = splitEmails(r.email); return emailBoth ? list : list.slice(0, 1); }
+    return [(r?.email || s.parentEmail || "").trim(), emailBoth && s.parent2Email].filter(Boolean);
+  };
   const gmailDraftUrl = (s) => {
     const r = results[s.id];
-    const to = [r?.email || s.parentEmail, emailBoth && s.parent2Email].filter(Boolean).join(", ");
+    const to = recipientList(s).join(", ");
     const body = applyMessageDisclaimer(r?.draft || "", ctxOf(s).config, null, loggedInTeacher?.messageSignOff);
     return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(`Report — ${r?.label || ""}`)}&body=${encodeURIComponent(body)}`;
   };
@@ -28001,7 +28021,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
 
           {walkStudent && (() => {
             const wr = results[walkStudent.id];
-            const wEmail = (wr.email || walkStudent.parentEmail || "").trim();
+            const wEmail = recipientList(walkStudent)[0] || "";
             return (
               <div className="bg-teal-50 border border-teal-300 rounded-xl p-3 mb-3">
                 <p className="text-xs font-bold uppercase tracking-wide text-teal-700 mb-1">Child {walkIdx + 1} of {readyStudents.length}</p>
@@ -28009,7 +28029,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                 {!wEmail ? (
                   <p className="text-xs text-amber-700 mb-2">No parent email on file. Type it in the box below this card, or skip to the next child.</p>
                 ) : (
-                  <p className="text-xs text-stone-600 mb-2">To: {[wEmail, emailBoth && walkStudent.parent2Email].filter(Boolean).join(", ")}</p>
+                  <p className="text-xs text-stone-600 mb-2">To: {recipientList(walkStudent).join(", ")}</p>
                 )}
                 <button onClick={() => emailWithPdf(walkStudent)} disabled={!wEmail}
                   className="w-full flex items-center justify-center gap-2 bg-teal-700 text-white rounded-lg py-3 text-sm font-bold hover:bg-teal-800 disabled:opacity-40 mb-2">
@@ -28034,7 +28054,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
             {chosen.map((s) => {
               const r = results[s.id];
               if (!r) return null;
-              const emails = [s.parentEmail, emailBoth && s.parent2Email].filter(Boolean).join(", ");
+              const emails = recipientList(s).join(", ");
               return (
                 <div key={s.id} className="bg-white border border-stone-200 rounded-xl p-3">
                   <div className="flex items-center justify-between mb-2">
@@ -28043,8 +28063,8 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
                   </div>
                   {!r.loading && (
                     <div>
-                      <label className="block text-[10px] text-stone-400 mb-0.5">Parent email</label>
-                      <input type="email" value={r.email} onChange={(e) => { const v = e.target.value; patch(s.id, { email: v }); onUpdateParentEmail(s.id, v, s); }}
+                      <label className="block text-[10px] text-stone-400 mb-0.5">{r.accountEmails?.length ? "Parent emails (from their accounts)" : "Parent email"}</label>
+                      <input type={r.accountEmails?.length ? "text" : "email"} value={r.email} onChange={(e) => { const v = e.target.value; patch(s.id, { email: v }); if (!r.accountEmails?.length) onUpdateParentEmail(s.id, v, s); }}
                         placeholder="parent@example.com" className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-sm mb-2" />
                       <label className="block text-[10px] text-stone-400 mb-0.5">{wantMessage ? "Message" : "Note to go with the PDF"}</label>
                       <div className="flex items-start gap-1.5 mb-2">
