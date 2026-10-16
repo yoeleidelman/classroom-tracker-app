@@ -28081,6 +28081,7 @@ function CreateReportsView({ roster, studentData, incidents, classAssessments, c
             );
           })()}
 
+          <div className="bg-stone-50 border border-stone-200 rounded-xl px-3 pt-2 mb-3"><SendFromPicker /></div>
           <div className="space-y-3">
             {chosen.map((s) => {
               const r = results[s.id];
